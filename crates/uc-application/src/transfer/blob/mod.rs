@@ -27,6 +27,7 @@ pub(crate) mod test_support;
 mod tests {
     mod preparation;
     use std::collections::HashMap;
+    use std::future::ready;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -125,26 +126,32 @@ mod tests {
         ));
         let first_cancel = CancellationToken::new();
         let second_cancel = CancellationToken::new();
-        let first = tokio::spawn(usecase.execute(FetchBlobInput {
-            settlement: Default::default(),
-            ticket: ticket.clone(),
-            entry_id: EntryId::new(),
-            cancel: first_cancel.clone(),
-            preparation: super::transport::BlobDownloadPreparation {
-                work: Box::pin(async { Ok(None) }),
-                stop: Default::default(),
+        let first = tokio::spawn(usecase.execute(
+            FetchBlobInput {
+                settlement: Default::default(),
+                ticket: ticket.clone(),
+                entry_id: EntryId::new(),
+                cancel: first_cancel.clone(),
+                preparation: super::transport::BlobDownloadPreparation {
+                    work: Box::pin(async { Ok(None) }),
+                    stop: Default::default(),
+                },
             },
-        }));
-        let second = tokio::spawn(usecase.execute(FetchBlobInput {
-            settlement: Default::default(),
-            ticket: ticket.clone(),
-            entry_id: EntryId::new(),
-            cancel: second_cancel.clone(),
-            preparation: super::transport::BlobDownloadPreparation {
-                work: Box::pin(async { Ok(None) }),
-                stop: Default::default(),
+            ready,
+        ));
+        let second = tokio::spawn(usecase.execute(
+            FetchBlobInput {
+                settlement: Default::default(),
+                ticket: ticket.clone(),
+                entry_id: EntryId::new(),
+                cancel: second_cancel.clone(),
+                preparation: super::transport::BlobDownloadPreparation {
+                    work: Box::pin(async { Ok(None) }),
+                    stop: Default::default(),
+                },
             },
-        }));
+            ready,
+        ));
         source
             .entered
             .acquire_many(2)
@@ -165,16 +172,19 @@ mod tests {
             !first.is_finished() && !second.is_finished(),
             "deadline cannot abandon started lookup"
         );
-        let third = tokio::spawn(usecase.execute(FetchBlobInput {
-            settlement: Default::default(),
-            ticket,
-            entry_id: EntryId::new(),
-            cancel: CancellationToken::new(),
-            preparation: super::transport::BlobDownloadPreparation {
-                work: Box::pin(async { Ok(None) }),
-                stop: Default::default(),
+        let third = tokio::spawn(usecase.execute(
+            FetchBlobInput {
+                settlement: Default::default(),
+                ticket,
+                entry_id: EntryId::new(),
+                cancel: CancellationToken::new(),
+                preparation: super::transport::BlobDownloadPreparation {
+                    work: Box::pin(async { Ok(None) }),
+                    stop: Default::default(),
+                },
             },
-        }));
+            ready,
+        ));
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
@@ -441,16 +451,19 @@ mod tests {
         assert!(!second.reused_existing);
 
         let outcome = fetch
-            .execute(FetchBlobInput {
-                settlement: Default::default(),
-                cancel: tokio_util::sync::CancellationToken::new(),
-                ticket: second.ticket,
-                entry_id: EntryId::from("entry-two"),
-                preparation: super::transport::BlobDownloadPreparation {
-                    work: Box::pin(async { Ok(None) }),
-                    stop: Default::default(),
+            .execute(
+                FetchBlobInput {
+                    settlement: Default::default(),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    ticket: second.ticket,
+                    entry_id: EntryId::from("entry-two"),
+                    preparation: super::transport::BlobDownloadPreparation {
+                        work: Box::pin(async { Ok(None) }),
+                        stop: Default::default(),
+                    },
                 },
-            })
+                ready,
+            )
             .await
             .expect("second digest should fetch for the new entry tag");
 
@@ -507,16 +520,19 @@ mod tests {
             .expect("seed ticket should succeed");
 
         let outcome = usecase
-            .execute(FetchBlobInput {
-                settlement: Default::default(),
-                cancel: tokio_util::sync::CancellationToken::new(),
-                ticket,
-                entry_id: entry_id.clone(),
-                preparation: super::transport::BlobDownloadPreparation {
-                    work: Box::pin(async { Ok(None) }),
-                    stop: Default::default(),
+            .execute(
+                FetchBlobInput {
+                    settlement: Default::default(),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    ticket,
+                    entry_id: entry_id.clone(),
+                    preparation: super::transport::BlobDownloadPreparation {
+                        work: Box::pin(async { Ok(None) }),
+                        stop: Default::default(),
+                    },
                 },
-            })
+                ready,
+            )
             .await
             .expect("fetch should succeed");
 

@@ -105,7 +105,6 @@ impl BlobTransferFacade {
         context: Option<&FetchTransferContext>,
         token: CancellationToken,
         prepared: &Arc<FetchPreparationState>,
-        outbound: Option<OutboundReportContext>,
         start: impl FnOnce() -> DownloadTask<T>,
     ) -> Result<DownloadTask<T>, BlobTransferError> {
         let Some(context) = context else {
@@ -115,18 +114,10 @@ impl BlobTransferFacade {
             .inflight_fetches
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        registry.retain(|_, previous| {
-            previous.completion.borrow().is_none()
-                || previous
-                    .cancelling
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .as_ref()
-                    .is_some_and(|completion| completion.borrow().is_none())
-        });
+        registry.retain(|_, previous| previous.is_running());
         if registry
             .get(&context.transfer_id)
-            .is_some_and(|previous| previous.completion.borrow().is_none())
+            .is_some_and(InflightFetch::is_running)
         {
             token.cancel();
             return Err(BlobTransferError::Fetch(
@@ -142,10 +133,21 @@ impl BlobTransferFacade {
                 token,
                 prepared: prepared.clone(),
                 attempt_id: context.attempt_id.clone(),
-                outbound,
             },
         );
         Ok(operation)
+    }
+}
+
+impl InflightFetch {
+    pub(super) fn is_running(&self) -> bool {
+        self.completion.borrow().is_none()
+            || self
+                .cancelling
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|completion| completion.borrow().is_none())
     }
 }
 

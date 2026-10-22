@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use self::finalization::{transfer_error, FetchFinalization};
 use self::preparation::FetchPreparationState;
+mod finalization;
 use crate::transfer::policy::CANCEL_WAIT_TIMEOUT;
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::sync::atomic::Ordering;
 use std::sync::PoisonError;
 mod preparation;
 use tokio::time::{timeout_at, Instant};
@@ -35,8 +36,7 @@ use crate::transfer::blob::transport::{
     BlobTransport, DownloadCompletion,
 };
 use crate::transfer::blob::{
-    fetch_failure_reason, FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput,
-    PublishBlobUseCase,
+    FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput, PublishBlobUseCase,
 };
 use crate::transfer::file::facade::{
     BeginReceiverTransfer, FileTransferFacade, ReceiverTransferRegistration,
@@ -280,7 +280,6 @@ struct InflightFetch {
     token: CancellationToken,
     prepared: Arc<FetchPreparationState>,
     attempt_id: Option<String>,
-    outbound: Option<OutboundReportContext>,
 }
 
 #[derive(Clone)]
@@ -332,15 +331,7 @@ impl BlobTransferFacade {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(transfer_id)
-            .is_some_and(|fetch| {
-                fetch.completion.borrow().is_none()
-                    || fetch
-                        .cancelling
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .as_ref()
-                        .is_some_and(|completion| completion.borrow().is_none())
-            })
+            .is_some_and(InflightFetch::is_running)
     }
     async fn begin_lifecycle(
         &self,
@@ -457,8 +448,6 @@ impl BlobTransferFacade {
                 Some(completion) => completion.clone(),
                 None => {
                     let mut pending = entry.completion.clone();
-                    let prepared = entry.prepared.clone();
-                    let outbound = entry.outbound.clone();
                     let job = self
                         .transport
                         .supervise(CancellationToken::new(), async move {
@@ -470,27 +459,6 @@ impl BlobTransferFacade {
                                 }
                                 Err(error) if error.settled_cancellation() => {}
                                 Err(error) => return Err(error),
-                            }
-                            let session = prepared
-                                .session
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner)
-                                .clone();
-                            if let Some(session) =
-                                session.filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
-                            {
-                                session.cancel(reason).await.map_err(|source| {
-                                    BlobExchangeError::new(BlobExchangeFailure::Settlement, source)
-                                })?;
-                            }
-                            if let Some(outbound) = outbound {
-                                outbound.report(
-                                    0,
-                                    None,
-                                    OutboundProgressStatus::Cancelled {
-                                        reason: flip_cancel_reason_perspective(reason),
-                                    },
-                                );
                             }
                             Ok(())
                         });
@@ -537,6 +505,12 @@ impl BlobTransferFacade {
             .iter()
             .filter(|(_, fetch)| fetch.attempt_id.as_deref() == Some(attempt_id))
             .map(|(transfer_id, fetch)| {
+                fetch
+                    .prepared
+                    .stop
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_or_insert(BlobPreparationStop::Cancelled(reason));
                 fetch.token.cancel();
                 transfer_id.clone()
             })
@@ -643,148 +617,37 @@ impl BlobTransferFacade {
             cancel: cancel_token.clone(),
             entry_id: iroh_tag_entry_id,
         };
+        let finalization = FetchFinalization {
+            owner: self.clone(),
+            context: command.transfer_context.clone(),
+            prepared: prepared.clone(),
+            cancel: cancel_token.clone(),
+            settlement,
+        };
         let operation = self.start_fetch(
             command.transfer_context.as_ref(),
             cancel_token,
             &prepared,
-            outbound_ctx.clone(),
-            || self.fetch_uc.execute(input),
-        )?;
-
-        let result = operation.await.map_err(|source| {
-            if source.settled_cancellation() {
-                BlobTransferError::Cancelled
-            } else {
-                BlobTransferError::Fetch(source.into())
-            }
-        });
-
-        let lifecycle_session = prepared
-            .session
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let progress_sink = prepared
-            .progress
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-
-        if let Some(ctx) = command.transfer_context.as_ref() {
-            self.inflight_fetches
-                .lock()
-                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
-                .map_err(|_| {
-                    BlobTransferError::Fetch(anyhow::anyhow!(
-                        "in-flight fetch registry is poisoned"
-                    ))
-                })?
-                .remove(&ctx.transfer_id);
-        }
-
-        match result {
-            Ok(outcome) => {
-                if let Some(ctx) = command.transfer_context.as_ref() {
-                    let final_size = outcome.plaintext.len() as u64;
-                    let total = ctx.total_bytes.or(Some(final_size));
-                    // 最终一帧 100% Progress 每次都推(进度条 UI 体验),
-                    // 但 complete lifecycle + outbound terminal Completed
-                    // 只在 batch 收尾时发,避免提前告诉 sender"完成了"。
-                    if let Some(sink) = progress_sink.as_ref() {
-                        sink.report(final_size, total).await;
-                    }
-                    if ctx.individual_lifecycle {
-                        if let Some(session) = lifecycle_session
-                            .as_ref()
-                            .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
-                        {
-                            session
-                                .complete()
-                                .await
-                                .map_err(|source| BlobTransferError::Persistence(source.into()))?;
-                        }
-                    }
-                    if ctx.batch_position.is_last() || ctx.batch.is_some() {
-                        if !ctx.individual_lifecycle && ctx.batch_position.is_last() {
-                            if let Some(session) = lifecycle_session
-                                .as_ref()
-                                .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
-                            {
-                                session.complete().await.map_err(|source| {
-                                    BlobTransferError::Persistence(source.into())
-                                })?;
-                            }
-                        }
-                        self.report_outbound_terminal(
-                            ctx,
-                            final_size,
-                            total,
-                            OutboundProgressStatus::Completed,
-                        )
-                        .await;
-                    }
-                }
-                Ok(FetchBlobResult {
-                    plaintext: outcome.plaintext,
-                    entry_id: outcome.entry_id,
-                    plaintext_hash: outcome.plaintext_hash,
-                    digest: outcome.digest,
+            || {
+                self.fetch_uc.execute(input, move |result| async move {
+                    finalization
+                        .finish(result.map(|outcome| {
+                            let bytes = outcome.plaintext.len() as u64;
+                            (
+                                FetchBlobResult {
+                                    plaintext: outcome.plaintext,
+                                    entry_id: outcome.entry_id,
+                                    plaintext_hash: outcome.plaintext_hash,
+                                    digest: outcome.digest,
+                                },
+                                bytes,
+                            )
+                        }))
+                        .await
                 })
-            }
-            Err(BlobTransferError::Cancelled) => {
-                if command.cancellation.is_cancelled() {
-                    if let Some(session) = lifecycle_session
-                        .as_ref()
-                        .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
-                    {
-                        session
-                            .cancel(FileTransferCancellationReason::LocalUser)
-                            .await
-                            .map_err(|source| BlobTransferError::Fetch(source.into()))?;
-                    }
-                    if let Some(context) = command.transfer_context.as_ref() {
-                        self.report_outbound_terminal(
-                            context,
-                            0,
-                            context.total_bytes,
-                            OutboundProgressStatus::Cancelled {
-                                reason: flip_cancel_reason_perspective(
-                                    FileTransferCancellationReason::LocalUser,
-                                ),
-                            },
-                        )
-                        .await;
-                    }
-                }
-                Err(BlobTransferError::Cancelled)
-            }
-            Err(BlobTransferError::Fetch(msg)) => {
-                if let Some(ctx) = command.transfer_context.as_ref() {
-                    if let Some(session) = lifecycle_session
-                        .as_ref()
-                        .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
-                    {
-                        if let Err(error) = session.fail(fetch_failure_reason(&msg), None).await {
-                            uc_warn!(
-                                transfer_id = log_id(&ctx.transfer_id),
-                                error_kind = "session_failure_settle",
-                                io_error_kind = io_error_kind(&error),
-                                "blob fetch: session failure settlement failed"
-                            );
-                        }
-                    }
-                    self.report_outbound_terminal(
-                        ctx,
-                        0,
-                        ctx.total_bytes,
-                        OutboundProgressStatus::Failed,
-                    )
-                    .await;
-                }
-                Err(BlobTransferError::Fetch(msg))
-            }
-            Err(other) => Err(other),
-        }
+            },
+        )?;
+        operation.await.map_err(transfer_error)
     }
 
     /// 流式 fetch:把 blob 从 iroh store 直接 export 到 `target_path`,
@@ -843,148 +706,38 @@ impl BlobTransferFacade {
             entry_id: iroh_tag_entry_id,
             target_path,
         };
+        let finalization = FetchFinalization {
+            owner: self.clone(),
+            context: command.transfer_context.clone(),
+            prepared: prepared.clone(),
+            cancel: cancel_token.clone(),
+            settlement,
+        };
         let operation = self.start_fetch(
             command.transfer_context.as_ref(),
             cancel_token,
             &prepared,
-            outbound_ctx.clone(),
-            || self.fetch_uc.execute_to_path(input),
-        )?;
-
-        let result = operation.await.map_err(|source| {
-            if source.settled_cancellation() {
-                BlobTransferError::Cancelled
-            } else {
-                BlobTransferError::Fetch(source.into())
-            }
-        });
-
-        // fetch 出口必移除 registry,否则 cancel_inbound_transfer 会找到
-        // 一个已经结束的 entry,无害但会污染 metric。
-        let lifecycle_session = prepared
-            .session
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let progress_sink = prepared
-            .progress
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-
-        if let Some(ctx) = command.transfer_context.as_ref() {
-            self.inflight_fetches
-                .lock()
-                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
-                .map_err(|_| {
-                    BlobTransferError::Fetch(anyhow::anyhow!(
-                        "in-flight fetch registry is poisoned"
-                    ))
-                })?
-                .remove(&ctx.transfer_id);
-        }
-
-        match result {
-            Ok(outcome) => {
-                if let Some(ctx) = command.transfer_context.as_ref() {
-                    let final_size = outcome.bytes_written;
-                    let total = ctx.total_bytes.or(Some(final_size));
-                    if let Some(sink) = progress_sink.as_ref() {
-                        sink.report(final_size, total).await;
-                    }
-                    if ctx.individual_lifecycle {
-                        if let Some(session) = lifecycle_session
-                            .as_ref()
-                            .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
-                        {
-                            session
-                                .complete()
-                                .await
-                                .map_err(|source| BlobTransferError::Persistence(source.into()))?;
-                        }
-                    }
-                    if ctx.batch_position.is_last() || ctx.batch.is_some() {
-                        if !ctx.individual_lifecycle && ctx.batch_position.is_last() {
-                            if let Some(session) = lifecycle_session
-                                .as_ref()
-                                .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
-                            {
-                                session.complete().await.map_err(|source| {
-                                    BlobTransferError::Persistence(source.into())
-                                })?;
-                            }
-                        }
-                        self.report_outbound_terminal(
-                            ctx,
-                            final_size,
-                            total,
-                            OutboundProgressStatus::Completed,
-                        )
-                        .await;
-                    }
-                }
-                Ok(FetchBlobToPathResult {
-                    entry_id: outcome.entry_id,
-                    plaintext_hash: outcome.plaintext_hash,
-                    digest: outcome.digest,
-                    bytes_written: outcome.bytes_written,
-                })
-            }
-            Err(BlobTransferError::Cancelled) => {
-                if command.cancellation.is_cancelled() {
-                    if let Some(session) = lifecycle_session
-                        .as_ref()
-                        .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
-                    {
-                        session
-                            .cancel(FileTransferCancellationReason::LocalUser)
+            || {
+                self.fetch_uc
+                    .execute_to_path(input, move |result| async move {
+                        finalization
+                            .finish(result.map(|outcome| {
+                                let bytes = outcome.bytes_written;
+                                (
+                                    FetchBlobToPathResult {
+                                        entry_id: outcome.entry_id,
+                                        plaintext_hash: outcome.plaintext_hash,
+                                        digest: outcome.digest,
+                                        bytes_written: outcome.bytes_written,
+                                    },
+                                    bytes,
+                                )
+                            }))
                             .await
-                            .map_err(|source| BlobTransferError::Fetch(source.into()))?;
-                    }
-                    if let Some(context) = command.transfer_context.as_ref() {
-                        self.report_outbound_terminal(
-                            context,
-                            0,
-                            context.total_bytes,
-                            OutboundProgressStatus::Cancelled {
-                                reason: flip_cancel_reason_perspective(
-                                    FileTransferCancellationReason::LocalUser,
-                                ),
-                            },
-                        )
-                        .await;
-                    }
-                }
-                Err(BlobTransferError::Cancelled)
-            }
-            Err(e) => {
-                let failure = anyhow::Error::from(e);
-                let reason = fetch_failure_reason(&failure);
-                if let Some(ctx) = command.transfer_context.as_ref() {
-                    if let Some(session) = lifecycle_session
-                        .as_ref()
-                        .filter(|_| !prepared.stop_attempted.load(Ordering::Acquire))
-                    {
-                        if let Err(error) = session.fail(reason, None).await {
-                            uc_warn!(
-                                transfer_id = log_id(&ctx.transfer_id),
-                                error_kind = "session_failure_settle",
-                                io_error_kind = io_error_kind(&error),
-                                "blob fetch: session failure settlement failed"
-                            );
-                        }
-                    }
-                    self.report_outbound_terminal(
-                        ctx,
-                        0,
-                        ctx.total_bytes,
-                        OutboundProgressStatus::Failed,
-                    )
-                    .await;
-                }
-                Err(BlobTransferError::Fetch(failure))
-            }
-        }
+                    })
+            },
+        )?;
+        operation.await.map_err(transfer_error)
     }
 
     /// 从 `FetchTransferContext` 构造 outbound report context。
@@ -1185,6 +938,7 @@ impl BlobProgressSink for FileTransferProgressSink {
 #[cfg(test)]
 mod tests {
     mod budget;
+    mod finalization;
     mod targets;
 
     use crate::transfer::blob::transport::{BlobExchangeError, BlobReadStorePort, BlobReceived};

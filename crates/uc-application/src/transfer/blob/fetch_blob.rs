@@ -1,4 +1,5 @@
 use super::output::PreparedBlobPath;
+use std::future::Future;
 use std::sync::Arc;
 
 use super::transport::DownloadTask;
@@ -89,10 +90,15 @@ impl FetchBlobUseCase {
     }
 
     #[tracing::instrument(name = "usecase.fetch_blob.execute", skip_all)]
-    pub(in super::super) fn execute(
+    pub(in super::super) fn execute<T, F>(
         self: &Arc<Self>,
         input: FetchBlobInput,
-    ) -> DownloadTask<FetchBlobOutcome> {
+        finish: impl FnOnce(Result<FetchBlobOutcome, BlobExchangeError>) -> F + Send + 'static,
+    ) -> DownloadTask<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, BlobExchangeError>> + Send + 'static,
+    {
         let prepared = match self.downloads.prepare(&input.ticket, &input.cancel) {
             Ok(prepared) => prepared,
             Err(error) => return DownloadTask::rejected(error, input.cancel),
@@ -101,10 +107,11 @@ impl FetchBlobUseCase {
         self.downloads
             .transport
             .supervise(input.cancel.clone(), async move {
-                owner
+                let result = owner
                     .execute_inner(input, prepared)
                     .await
-                    .map_err(fetch_error)
+                    .map_err(fetch_error);
+                finish(result).await
             })
     }
     async fn execute_inner(
@@ -172,10 +179,15 @@ impl FetchBlobUseCase {
 
     /// Raw 文件经 SDK 校验后流式导出；内容保护及下载许可继续覆盖引用和标签结算。
     #[tracing::instrument(name = "usecase.fetch_blob.execute_to_path", skip_all)]
-    pub(in super::super) fn execute_to_path(
+    pub(in super::super) fn execute_to_path<T, F>(
         self: &Arc<Self>,
         input: FetchBlobPathInput,
-    ) -> DownloadTask<FetchBlobPathOutcome> {
+        finish: impl FnOnce(Result<FetchBlobPathOutcome, BlobExchangeError>) -> F + Send + 'static,
+    ) -> DownloadTask<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, BlobExchangeError>> + Send + 'static,
+    {
         let prepared = match self.downloads.prepare(&input.ticket, &input.cancel) {
             Ok(prepared) => prepared,
             Err(error) => return DownloadTask::rejected(error, input.cancel),
@@ -184,10 +196,11 @@ impl FetchBlobUseCase {
         self.downloads
             .transport
             .supervise(input.cancel.clone(), async move {
-                owner
+                let result = owner
                     .execute_path_inner(input, prepared)
                     .await
-                    .map_err(fetch_error)
+                    .map_err(fetch_error);
+                finish(result).await
             })
     }
     async fn execute_path_inner(

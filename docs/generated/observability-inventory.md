@@ -37,7 +37,7 @@
 
 ## local debug
 
-共 1330 个调用点。
+共 1328 个调用点。
 
 | Target | 调用点 | 类型 | 风险标记 |
 | --- | --- | --- | --- |
@@ -668,15 +668,13 @@
 | `<module>` | `crates/uc-application/src/support/host_event_publisher.rs:91` | `warn` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/support/host_event_publisher.rs:127` | `debug` | sensitive-field, message-body |
 | `<module>` | `crates/uc-application/src/support/host_event_publisher.rs:181` | `debug` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:397` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:407` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:558` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:768` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:969` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:1101` | `record` | - |
-| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:1156` | `warn` | sensitive-field, message-body |
-| `<module>` | `crates/uc-application/src/transfer/blob/fetch_blob.rs:91` | `instrument` | - |
-| `<module>` | `crates/uc-application/src/transfer/blob/fetch_blob.rs:174` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:388` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:398` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:532` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:854` | `record` | - |
+| `<module>` | `crates/uc-application/src/transfer/blob/facade.rs:909` | `warn` | sensitive-field, message-body |
+| `<module>` | `crates/uc-application/src/transfer/blob/fetch_blob.rs:92` | `instrument` | - |
+| `<module>` | `crates/uc-application/src/transfer/blob/fetch_blob.rs:181` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/transfer/blob/notifications.rs:89` | `warn` | message-body |
 | `<module>` | `crates/uc-application/src/transfer/blob/publish_blob.rs:60` | `instrument` | - |
 | `<module>` | `crates/uc-application/src/transfer/blob/publish_blob.rs:154` | `info` | sensitive-field, message-body |

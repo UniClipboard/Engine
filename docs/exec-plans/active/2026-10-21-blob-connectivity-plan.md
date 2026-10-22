@@ -911,3 +911,14 @@ SQLite目标集测试覆盖保存条目、NoEntry、孤儿逐项记录、仅产�
 实际materializer全局4／每端2及五秒取消未完成屏障、真实取消清理、直接Facade虚拟钟59／60秒与StorageFull关闭来源、日志失败清理及IsADirectory／原StorageFull双来源均通过。首次扩大因测试适配层漏查取消而87通过／1失败，103项未运行；修复适配层后192相关通过（10.301秒），不放宽原取消断言。最终同一源快照Application／Engine1536通过／6跳过（193.552秒），metadata、workspace全目标check（1m32s）、fmt、Rust style、repository、1350站点隐私清单及diff全部通过。
 
 本片只证明独立文件目标准备；Facade worker后的最终进度／事件、父流程清理失败移交、目录准备／发布和最终保存的完整取消／预算仍需继续收口。其余生命周期、资源、业务记录与最终head网络／CI／平台硬验收保留，设备未运行仍记跳过。
+
+- 当前最终交接切片：transfer仍为唯一完整负责人，调用方只提交完整fetch及取消。最终进度、终态事件及错误结算须在原DownloadTask里完成，inflight直到完整交接结束才可复用；取消／等待方退出不能遗弃已开始的本地回调。保持同一许可、来源错误和五秒调用期限，不增加监督池或Engine阶段接口。先以实际Facade最终进度屏障验证重复Busy、取消未完成及调用者退出后重复取消，再统一内存／文件结果交接。父流程产物清理与最终保存仍沿完整接收owner继续验证。
+
+
+### 2026-10-22 最终 Facade 交接纳入原监督任务
+
+实际最终进度屏障证明：原inflight已随底层worker结束，完整Facade尚未交接，重复与取消提前失去原动作。内存／文件获取现在由原DownloadTask包含统一的最终进度、终态写入及通知，原许可／保护一直持有至真实交接结束；完成通知覆盖完整Facade，pending取消协调者保持排他，协调者只等同一结果，不再写第二次终态。取消首因先保存再停止，原opaque ObservationContext随完整worker继续，无新池、schema或Engine阶段查询。
+
+终态写入失败不再只记录warning；原获取原因与独立Settlement来源完整返回。纯最终落库StorageFull被分类Unknown的额外红测已修复，按既有交换类别和IO原因报告StorageUnavailable。真实ReceiverTransferHandle验证成功／失败／取消三个终态写入失败、已持久终态与迟到取消竞争，以及事件发布阻塞时原等待者退出仍需等真实交接；该竞争不替代完整条目保存CAS验收。旧缓存关闭测试明确要求shutdown取消仍在运行的最终交接，保留5秒未完成、保护保留和真正关闭屏障。
+
+最终相关195项通过（10.297秒）；同一源快照Application／Engine1539通过／6跳过（185.854秒），metadata、workspace全目标check（1m27s）、fmt、Rust style、repository、1348站点隐私清单及diff全部通过。父流程清理失败／日志交接／最终保存的许可与保护移交、目录准备／发布和其余硬验收仍继续，设备未运行记跳过。

@@ -10,6 +10,12 @@ use crate::connectivity::ConnectivityError;
 
 /// 沿错误链找到拉取用例的错误并给出原因类别；找不到或无法判断时为 `Unknown`。
 pub(crate) fn fetch_failure_reason(error: &anyhow::Error) -> FileTransferFailureReason {
+    if let Some(error) = error
+        .chain()
+        .find_map(|source| source.downcast_ref::<BlobExchangeError>())
+    {
+        return exchange_reason(error);
+    }
     match error
         .chain()
         .find_map(|source| source.downcast_ref::<FetchBlobError>())
@@ -23,46 +29,43 @@ pub(crate) fn fetch_failure_reason(error: &anyhow::Error) -> FileTransferFailure
     }
 }
 
-fn transfer_reason(source: &anyhow::Error) -> FileTransferFailureReason {
-    if let Some(error) = source
-        .chain()
-        .find_map(|source| source.downcast_ref::<BlobExchangeError>())
-    {
-        use FileTransferFailureReason as Reason;
-        return match error.kind {
-            BlobExchangeFailure::Integrity => Reason::IntegrityCheckFailed,
-            BlobExchangeFailure::RequestExpired => Reason::TimedOut,
-            BlobExchangeFailure::Store | BlobExchangeFailure::Settlement => {
-                io_reason(error).unwrap_or(Reason::StorageUnavailable)
-            }
-            BlobExchangeFailure::Connectivity => {
-                if error.source.chain().any(|source| {
-                    matches!(
-                        source.downcast_ref::<ConnectivityError>(),
-                        Some(ConnectivityError::Denied)
-                    )
-                }) {
-                    Reason::AccessDenied
-                } else {
-                    io_reason(error).unwrap_or(Reason::NetworkUnavailable)
-                }
-            }
-            BlobExchangeFailure::Network
-            | BlobExchangeFailure::TransientNetwork
-            | BlobExchangeFailure::IncompleteExport
-            | BlobExchangeFailure::SourceUnavailable => {
+fn exchange_reason(error: &BlobExchangeError) -> FileTransferFailureReason {
+    use FileTransferFailureReason as Reason;
+    match error.kind {
+        BlobExchangeFailure::Integrity => Reason::IntegrityCheckFailed,
+        BlobExchangeFailure::RequestExpired => Reason::TimedOut,
+        BlobExchangeFailure::Store | BlobExchangeFailure::Settlement => {
+            io_reason(error).unwrap_or(Reason::StorageUnavailable)
+        }
+        BlobExchangeFailure::Connectivity => {
+            if error.source.chain().any(|source| {
+                matches!(
+                    source.downcast_ref::<ConnectivityError>(),
+                    Some(ConnectivityError::Denied)
+                )
+            }) {
+                Reason::AccessDenied
+            } else {
                 io_reason(error).unwrap_or(Reason::NetworkUnavailable)
             }
-            BlobExchangeFailure::AlreadyCompleted
-            | BlobExchangeFailure::Busy
-            | BlobExchangeFailure::Closed
-            | BlobExchangeFailure::Task
-            | BlobExchangeFailure::ShutdownIncomplete
-            | BlobExchangeFailure::Cancelled
-            | BlobExchangeFailure::InvalidRequest => Reason::Unknown,
-        };
+        }
+        BlobExchangeFailure::Network
+        | BlobExchangeFailure::TransientNetwork
+        | BlobExchangeFailure::IncompleteExport
+        | BlobExchangeFailure::SourceUnavailable => {
+            io_reason(error).unwrap_or(Reason::NetworkUnavailable)
+        }
+        BlobExchangeFailure::AlreadyCompleted
+        | BlobExchangeFailure::Busy
+        | BlobExchangeFailure::Closed
+        | BlobExchangeFailure::Task
+        | BlobExchangeFailure::ShutdownIncomplete
+        | BlobExchangeFailure::Cancelled
+        | BlobExchangeFailure::InvalidRequest => Reason::Unknown,
     }
+}
 
+fn transfer_reason(source: &anyhow::Error) -> FileTransferFailureReason {
     match source
         .chain()
         .find_map(|source| source.downcast_ref::<BlobError>())

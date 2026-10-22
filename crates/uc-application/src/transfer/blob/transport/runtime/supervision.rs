@@ -9,6 +9,7 @@ use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument::WithSubscriber;
 use tracing::{Instrument, Span};
+use uc_observability_contract::diagnostics::ObservationContext;
 
 pub(in super::super::super::super) type DownloadCompletion =
     watch::Receiver<Option<Result<(), Arc<BlobExchangeError>>>>;
@@ -67,10 +68,15 @@ impl BlobTransport {
             let _ = send.send(Err(error));
         } else {
             let stopping = cancel.clone();
+            let observation = ObservationContext::capture();
             jobs.spawn(
                 async move {
-                    let mut worker =
-                        tokio::spawn(work.instrument(Span::none()).with_current_subscriber());
+                    let mut worker = tokio::spawn(
+                        observation
+                            .scope(work)
+                            .instrument(Span::none())
+                            .with_current_subscriber(),
+                    );
                     let result = tokio::select! {
                         biased;
                         result = &mut worker => result,

@@ -8,6 +8,7 @@ use crate::transfer::blob::transport::{
     BlobShutdownWait, BlobTransport,
 };
 use crate::transfer::blob::{FetchBlobInput, FetchBlobUseCase};
+use std::future::ready;
 use std::io::{Error, ErrorKind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -57,20 +58,23 @@ async fn preparation_uses_original_first_data_deadline_and_holds_capacity_until_
     let fetch = |cancel: CancellationToken| {
         let entered = entered.clone();
         let finish = finish.clone();
-        tokio::spawn(usecase.execute(FetchBlobInput {
-            settlement: Default::default(),
-            ticket: ticket.clone(),
-            entry_id: EntryId::new(),
-            cancel,
-            preparation: BlobDownloadPreparation {
-                work: Box::pin(async move {
-                    entered.add_permits(1);
-                    finish.acquire().await.unwrap().forget();
-                    Ok(None)
-                }),
-                stop: Default::default(),
+        tokio::spawn(usecase.execute(
+            FetchBlobInput {
+                settlement: Default::default(),
+                ticket: ticket.clone(),
+                entry_id: EntryId::new(),
+                cancel,
+                preparation: BlobDownloadPreparation {
+                    work: Box::pin(async move {
+                        entered.add_permits(1);
+                        finish.acquire().await.unwrap().forget();
+                        Ok(None)
+                    }),
+                    stop: Default::default(),
+                },
             },
-        }))
+            ready,
+        ))
     };
     let first_cancel = CancellationToken::new();
     let second_cancel = CancellationToken::new();
@@ -157,21 +161,24 @@ async fn preparation_uses_original_first_data_deadline_and_holds_capacity_until_
     );
     assert_eq!(source.calls.load(Ordering::SeqCst), 1);
     let failure = usecase
-        .execute(FetchBlobInput {
-            settlement: Default::default(),
-            ticket,
-            entry_id: EntryId::new(),
-            cancel: CancellationToken::new(),
-            preparation: BlobDownloadPreparation {
-                work: Box::pin(async {
-                    Err(BlobExchangeError::new(
-                        BlobExchangeFailure::Settlement,
-                        Error::from(ErrorKind::StorageFull),
-                    ))
-                }),
-                stop: Default::default(),
+        .execute(
+            FetchBlobInput {
+                settlement: Default::default(),
+                ticket,
+                entry_id: EntryId::new(),
+                cancel: CancellationToken::new(),
+                preparation: BlobDownloadPreparation {
+                    work: Box::pin(async {
+                        Err(BlobExchangeError::new(
+                            BlobExchangeFailure::Settlement,
+                            Error::from(ErrorKind::StorageFull),
+                        ))
+                    }),
+                    stop: Default::default(),
+                },
             },
-        })
+            ready,
+        )
         .await
         .unwrap_err();
     assert_eq!(failure.kind, BlobExchangeFailure::Settlement);

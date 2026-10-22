@@ -335,3 +335,11 @@
 - 首次扩大87通过／1失败、103未运行：旧取消回归发现模拟适配层在预留后漏查取消，错误调用第二次mock获取。补齐与生产负责人一致的前后取消检查，未放宽原断言。最终相关192项全部通过（10.301秒），覆盖实际materializer全局4／每端2、五秒取消未完成且仍占slot、未准备队列不创建文件及取消后的真实清理；直接Facade虚拟钟验证目标准备59／60秒、等待实际完成及StorageFull保留到shutdown。新增实际文件系统日志失败验证旧成功文件不变、目标清理或IsADirectory失败与StorageFull同时保留。
 - 最终同一源快照Application／Engine完整nextest 1536通过／6跳过（193.552秒），实际部分重试、导出取消、删除／清空、撤权与进程重启恢复均通过。metadata解析812包、workspace全目标check（1m32s）、fmt、Rust style、repository preflight、1350站点隐私清单及diff全部通过。Cargo串行共享target与原缓存。手工审查future／许可／路径回执所有权、取消后真实准备完成、错误链、准备失败清理、队列无产物及命名行为；code-review skill仍缺失，不冒称技能审查。设备未执行仍跳过。
 - 本片仅完成独立文件目标准备的准入／期限覆盖。Facade现仍在底层worker结果返回后移除inflight，再等待最终进度／事件；完整调用被丢弃、父流程清理失败或最终保存时的取消结算需要继续收口。下一步先用最终进度真实屏障证明取消／重复请求仍等待整个动作，再把完整Facade结算归同一原监督任务；目录准备／发布／最终保存、失败产物移交及其余spec硬验收继续，不能把本轮当完整spec或全生命周期通过。
+
+
+- 最终进度实际红测：Facade完整动作仍阻塞最终本地进度时，重复同项已不再Busy，取消无法接入原动作（download-final-handoff-red.log，0.136秒）。原代码在底层worker返回后移除inflight，再在调用方future内交接进度／终态，等待方退出会失去后续结算。
+- FetchBlobUseCase的原监督任务现在接受同一transfer负责人的最终交接，内存／文件统一由FetchFinalization完成；原许可与内容保护持有至交接实际结束，completion代表完整Facade，不新增池或重复许可。inflight保留实际完成状态，新请求统一回收结束项，pending取消协调者也保持排他；协调者只等同一完整结果，不再重复写session终态／通知。attempt取消先向全部子动作保存首因再发停止，既有不透明ObservationContext随原worker覆盖最终交接，无Engine内部查询。
+- 成功、失败及取消的终态写入失败均返回真实Settlement来源，原获取失败与独立结算失败完整保留；不再只写warning后吞掉。额外分类红测证明纯最终落库失败此前被公开结果标成Unknown（download-final-classification-red.log，0.029秒）；现先识别既有BlobExchangeError并沿原类别及IO原因分类，StorageFull成为StorageUnavailable，不新增错误字符串解释。
+- 首轮Facade10项中9通过／1失败：旧缓存shutdown屏障预期本地交接继续成功，现在完整worker也接受关闭取消，因此返回Cancelled；断言改为明确Cancelled，同时保留五秒ShutdownIncomplete、保护仍存在及实际关闭等待，不弱化停止证明。最终相关195项通过（10.297秒），含真实Facade最终进度下重复Busy／5秒未完成、原调用者退出后重复取消完成、真实ReceiverTransferHandle的Completed／Failed／Cancelled落库失败及原ConnectionReset／StorageFull链、已持久终态与迟到取消竞争、事件发布阻塞时调用方退出仍由原任务持有且shutdown等待实际结束。提交竞争只证明既有文件事件终态，不冒充完整条目保存CAS验收。
+- 最终同一源快照Application／Engine1539通过／6跳过（185.854秒），实际三文件部分重试、取消保留旧成功、撤权、删除／清空及进程崩溃恢复均通过。metadata解析812包、workspace全目标check（1m27s）、fmt、Rust style、repository preflight、1348站点隐私清单及diff全部通过。Cargo串行共享target与原缓存；手工审查同一任务／许可所有权、完整完成通知、原子登记及取消首因、终态竞争、source链与类别、关闭等待及opaque观测关联；code-review skill缺失，不冒称技能审查。设备未执行仍跳过。
+- 下一步从ReceiveWorkRegistry及ReceiveBatch.finish的实际父流程结算入手：DownloadTask完整Facade结束不等于materializer清理／日志交接或最终保存完成，batch.finish仍会清除剩余local_work。须用真实清理失败／最终保存屏障核对同一许可及内容保护的持有和恢复移交，不能让失败被当作已结算，也不能通过持有全批许可导致7／9文件死锁。目录准备／发布、其余生命周期、历史来源、受管1GiB资源、业务记录及最终head网络／CI／平台矩阵仍未完成。

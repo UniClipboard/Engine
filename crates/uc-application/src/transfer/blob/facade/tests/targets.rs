@@ -57,7 +57,7 @@ impl AtomicPublishPort for RejectDirectoryPublish {
     }
 }
 
-fn target_facade() -> (Arc<BlobTransferFacade>, Arc<BlobTransport>) {
+pub(super) fn target_facade() -> (Arc<BlobTransferFacade>, Arc<BlobTransport>) {
     let transfer = Arc::new(BlockingBlobTransfer::new());
     let local = Arc::new(FakeLocalStore(transfer.clone()));
     let transport = BlobTransport::new(

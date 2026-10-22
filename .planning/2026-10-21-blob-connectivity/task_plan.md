@@ -19,7 +19,7 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-独立文件reserve_target／reserve_managed_output及artifact journal已迁入原DownloadTask准备，复用同一4／2、64／16及首批60秒；实际materializer屏障与虚拟期限通过，原有失败清理及部分重试保持。最终Application／Engine1536通过／6跳过，相关192通过，根门禁全部通过。下一步首先用Facade最终进度／事件真实屏障检查cancel_inbound_transfer及重复获取：当前底层worker返回后inflight被移除，完整Facade尚未结算；把最终交接也归原受监督任务，避免调用方退出丢弃unsafe工作，不能新加池或重复许可。然后覆盖父流程清理失败移交、目录准备／发布及最终保存；再完成其余生命周期、历史来源、受管1GiB、业务记录及最终head CI／平台矩阵。不重复已通过的准备局部证明，不把局部通过当完整spec。
+Facade最终进度／终态与通知已归原DownloadTask，inflight完成通知覆盖完整Facade，重复请求保持Busy，五秒取消及等待方退出接入同一收尾；独立文件准备同样复用原许可与首批60秒。最终Application／Engine1539通过／6跳过，相关195通过，根门禁全部通过。下一步直接检查ReceiveWorkRegistry／ReceiveBatch.finish与materializer清理失败、日志交接和最终保存：完整Facade结束不等于父流程实际结算，batch.finish仍会释放剩余local_work。用实际清理失败和保存屏障证明原许可及内容保护何时释放／由谁接管恢复；失败不能按已结算处理，多文件7／9项不能因整批持有许可死锁。随后覆盖目录准备／发布、其余生命周期、历史来源、受管1GiB、业务记录及最终head网络／CI／平台矩阵。不重复已通过的Facade局部证明，不把局部通过当完整spec。
 
 ## 错误
 - 探针锁 guard 编译错误已修复，probe.log 保留。
@@ -65,3 +65,5 @@
 - 当前准备准入切片：transfer下载负责人先原子入队并取得原许可，再启动Facade lifecycle／初始进度；计时沿同一permit.started_at覆盖准备、身份解析及首批数据。调用方仍只提交完整fetch／receive；准备future必须归原DownloadTask监督，取消／超时先封口并等已开始的准备实际结束，失败保留source。inflight登记与启动同一临界区，不能让重复请求先碰到旧session。无第二池／预算、无新schema或Engine步骤查询；materializer更早目标预留、目录发布及最终交接仍需继续完整验证。
 
 - 当前目标准备切片：完整负责人仍为Application transfer；materializer只提交带owned目标准备的完整获取，原DownloadTask取得同一许可后才预留目标、记录产物并准备lifecycle。成功使用本次实际预留路径；准备失败保留source与已创建产物事实，沿原接收流程清理，清理失败不得当结算成功。取消／deadline等已开始准备实际结束，不启动后续网络；排队拒绝不得创建文件。不加第二池、schema或Engine阶段查询。先用完整materializer＋真实Facade屏障复现同端第三项目标提前预留，再迁移单一文件获取契约及测试模拟边界；重试／重启沿既有attempt与产物日志，不扩大持久格式。
+
+- 当前最终交接切片：transfer仍为唯一完整负责人，调用方只提交完整fetch及取消。最终进度、终态事件及错误结算须在原DownloadTask里完成，inflight直到完整交接结束才可复用；取消／等待方退出不能遗弃已开始的本地回调。保持同一许可、来源错误和五秒调用期限，不增加监督池或Engine阶段接口。先以实际Facade最终进度屏障验证重复Busy、取消未完成及调用者退出后重复取消，再统一内存／文件结果交接。父流程产物清理与最终保存仍沿完整接收owner继续验证。

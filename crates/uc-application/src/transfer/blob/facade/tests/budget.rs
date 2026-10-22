@@ -242,7 +242,10 @@ async fn local_final_progress_keeps_global_and_peer_download_capacity_until_sett
             let observed = timeout(Duration::from_millis(50), &mut closing).await;
             let closed_before_local_work = observed.is_ok();
             release.0.release();
-            cached.await.unwrap().unwrap();
+            assert!(
+                matches!(cached.await.unwrap(), Err(BlobTransferError::Cancelled)),
+                "shutdown must cancel the still-running final handoff"
+            );
             match observed {
                 Ok(result) => result.unwrap().unwrap(),
                 Err(_) => closing.await.unwrap().unwrap(),
@@ -551,4 +554,125 @@ async fn initial_local_preparation_obeys_global_peer_queue_and_cancellation_boun
             "local preparation began before download admission was returned"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn final_progress_remains_inflight_for_duplicate_cancel_and_abandoned_caller() {
+    let progress = Arc::new(BlockedFinalProgress {
+        at_bytes: 5,
+        entered: Semaphore::new(0),
+        released: Mutex::new(false),
+        changed: Condvar::new(),
+    });
+    let release = ReleaseFinalProgress(progress.clone());
+    let bus = Arc::new(HostEventBus::new());
+    bus.register("final-progress-cancellation", progress.clone());
+    let transfer = Arc::new(BlockingBlobTransfer::new());
+    transfer.release.add_permits(3);
+    let local = Arc::new(FakeLocalStore(transfer.clone()));
+    let facade = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
+        downloads: Arc::new(BlobDownloadResources {
+            transport: BlobTransport::new(
+                Arc::new(RejectUnexpectedNetwork),
+                Arc::new(RejectUnexpectedNetwork),
+                Arc::new(RejectUnexpectedNetwork),
+                Arc::new(RejectUnexpectedNetwork),
+            ),
+            source: local.clone(),
+            store: local,
+        }),
+        hash: Arc::new(TestHash),
+        blob_transfer: transfer.clone(),
+        blob_reference: Arc::new(TestReferences),
+        transfer_cipher: Arc::new(TestCipher),
+        host_event_emitter: Some(bus),
+        outbound_progress_reporter: None,
+        file_transfer: None,
+    }));
+    let command = FetchBlobCommand {
+        cancellation: CancellationToken::new(),
+        ticket: BlobTicket::from_bytes(vec![1; 32]),
+        entry_id: EntryId::from("source"),
+        transfer_context: Some(FetchTransferContext {
+            item_role: ReceiveItemRole::Representation,
+            batch: None,
+            transfer_id: "final-item".into(),
+            entry_id: "entry".into(),
+            attempt_id: None,
+            peer_id: "peer".into(),
+            total_bytes: Some(5),
+            filename: String::new(),
+            outbound_transfer_id: None,
+            outbound_target: None,
+            batch_position: BatchPosition::Only,
+            individual_lifecycle: true,
+        }),
+    };
+    let spawn = || {
+        let facade = facade.clone();
+        let command = command.clone();
+        tokio::spawn(async move { facade.fetch_blob(command).await })
+    };
+    let original = spawn();
+    timeout(Duration::from_secs(3), progress.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let mut duplicate = spawn();
+    let refused = match timeout(Duration::from_millis(100), &mut duplicate).await {
+        Ok(result) => result.unwrap().is_err_and(|error| match error {
+            BlobTransferError::Fetch(source) => source.chain().any(|source| {
+                source
+                    .downcast_ref::<BlobExchangeError>()
+                    .is_some_and(|error| error.kind == BlobExchangeFailure::Busy)
+            }),
+            _ => false,
+        }),
+        Err(_) => {
+            duplicate.abort();
+            false
+        }
+    };
+    let incomplete = facade
+        .cancel_inbound_transfer(
+            "final-item",
+            uc_core::file_transfer::FileTransferCancellationReason::LocalUser,
+            super::super::TransferCancellationWait::Bounded,
+        )
+        .await;
+    original.abort();
+    release.0.release();
+    let _ = original.await;
+    if !refused {
+        let _ = duplicate.await;
+    }
+    let completed = facade
+        .cancel_inbound_transfer(
+            "final-item",
+            uc_core::file_transfer::FileTransferCancellationReason::LocalUser,
+            super::super::TransferCancellationWait::Complete,
+        )
+        .await;
+    facade
+        .transport
+        .shutdown(BlobShutdownWait::Complete)
+        .await
+        .unwrap();
+    assert!(
+        refused,
+        "duplicate request must remain busy through final local progress"
+    );
+    assert!(
+        matches!(
+            incomplete,
+            Err(BlobTransferError::CancellationIncomplete(_))
+        ),
+        "cancel must wait for actual final progress completion"
+    );
+    assert!(
+        matches!(completed, Ok(super::super::InboundCancelOutcome::Cancelled)),
+        "abandoning caller must not abandon the same cancellation result"
+    );
+    assert_eq!(transfer.protected.load(Ordering::SeqCst), 0);
 }
