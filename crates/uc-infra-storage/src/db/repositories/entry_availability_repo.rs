@@ -5,27 +5,36 @@
 //! representation state is rewritten asynchronously by materialization and
 //! reconciliation.
 
+use anyhow::Error as SourceError;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use diesel::prelude::*;
 use tracing::instrument;
 use uc_core::clipboard::ClipboardRepositoryError;
-use uc_core::ids::EntryId;
+use uc_core::crypto::{
+    aad,
+    domain::{Aad, Ciphertext},
+};
+use uc_core::ids::{EntryId, EventId, RepresentationId};
 use uc_core::ports::clipboard::CheckEntryAvailabilityPort;
+use uc_core::ports::security::BlobCipherPort;
 
 use crate::db::ports::DbExecutor;
 use crate::db::schema::{clipboard_entry, clipboard_snapshot_representation};
 
 /// Representation columns availability depends on.
 type RepRow = (Option<String>, Option<Vec<u8>>, String);
+type StoredRepRow = (String, Option<String>, Option<Vec<u8>>, String);
 
 pub struct DieselEntryAvailabilityRepository<E> {
     executor: E,
+    cipher: Arc<dyn BlobCipherPort>,
 }
 
 impl<E> DieselEntryAvailabilityRepository<E> {
-    pub fn new(executor: E) -> Self {
-        Self { executor }
+    pub fn new(executor: E, cipher: Arc<dyn BlobCipherPort>) -> Self {
+        Self { executor, cipher }
     }
 }
 
@@ -48,7 +57,7 @@ where
         // Read the representation rows in the DB closure, then release the
         // connection before doing any filesystem checks — availability is not a
         // hot path and a pooled connection must not be held across file I/O.
-        let reps: Option<Vec<RepRow>> = self
+        let saved: Option<(String, Vec<StoredRepRow>)> = self
             .executor
             .run(move |conn| {
                 let event_id: Option<String> = clipboard_entry::table
@@ -62,21 +71,57 @@ where
                 let reps = clipboard_snapshot_representation::table
                     .filter(clipboard_snapshot_representation::event_id.eq(&event_id))
                     .select((
+                        clipboard_snapshot_representation::id,
                         clipboard_snapshot_representation::mime_type,
                         clipboard_snapshot_representation::inline_data,
                         clipboard_snapshot_representation::payload_state,
                     ))
-                    .load::<RepRow>(conn)?;
-                Ok(Some(reps))
+                    .load::<StoredRepRow>(conn)?;
+                Ok(Some((event_id, reps)))
             })
             .map_err(|e| {
                 ClipboardRepositoryError::Storage(e.context("check entry availability").into())
             })?;
 
         // An entry that does not exist is never "available".
-        let Some(reps) = reps else {
+        let Some((event_id, stored)) = saved else {
             return Ok(false);
         };
+        if stored
+            .iter()
+            .any(|(_, _, _, state)| state == "Failed" || state == "Lost")
+        {
+            return Ok(false);
+        }
+        let event_id = EventId::from(event_id);
+        let mut reps = Vec::with_capacity(stored.len());
+        for (id, mime, inline, state) in stored {
+            // 文件路径必须先通过原表示身份认证；密文不能当URI或不可用占位读取。
+            let inline = if is_uri_list(mime.as_deref()) {
+                match inline {
+                    Some(bytes) => {
+                        let context = aad::for_inline(&event_id, &RepresentationId::from(id));
+                        Some(
+                            self.cipher
+                                .decrypt(&Ciphertext::new(bytes), &Aad::from(context.as_slice()))
+                                .await
+                                .map_err(|source| {
+                                    ClipboardRepositoryError::Storage(
+                                        SourceError::new(source)
+                                            .context("authenticate entry file availability")
+                                            .into(),
+                                    )
+                                })?
+                                .into_bytes(),
+                        )
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            reps.push((mime, inline, state));
+        }
         Ok(reps_indicate_available(&reps))
     }
 }
@@ -93,11 +138,7 @@ fn reps_indicate_available(reps: &[RepRow]) -> bool {
         if payload_state == "Failed" || payload_state == "Lost" {
             return false;
         }
-        let is_uri_list = mime
-            .as_deref()
-            .map(|m| m.contains("uri-list"))
-            .unwrap_or(false);
-        if is_uri_list {
+        if is_uri_list(mime.as_deref()) {
             // A file-list rep with no inline body cannot be confirmed held.
             let Some(bytes) = inline.as_deref() else {
                 return false;
@@ -108,6 +149,10 @@ fn reps_indicate_available(reps: &[RepRow]) -> bool {
         }
     }
     true
+}
+
+fn is_uri_list(mime: Option<&str>) -> bool {
+    mime.is_some_and(|mime| mime.contains("uri-list"))
 }
 
 /// A file-list body is "fully present" when it carries no `uniclip-missing://`
@@ -231,8 +276,11 @@ mod tests {
     use crate::db::models::{NewClipboardEntryRow, NewClipboardEventRow};
     use crate::db::pool::init_db_pool;
     use std::sync::Arc;
+    use uc_core::crypto::domain::Plaintext;
     use uc_core::ids::EntryId as CoreEntryId;
     use uc_core::ports::clipboard::CheckEntryAvailabilityPort;
+    use uc_core::ports::security::BlobCipherError;
+    use uc_infra_security::{BlobCipherAdapter, InMemorySession, MasterKey};
 
     fn make_repo() -> (
         DieselEntryAvailabilityRepository<Arc<DieselSqliteExecutor>>,
@@ -243,12 +291,34 @@ mod tests {
         let path = dir.path().join("availability.sqlite");
         let pool = init_db_pool(path.to_str().unwrap()).unwrap();
         let executor = Arc::new(DieselSqliteExecutor::new(pool));
-        let repo = DieselEntryAvailabilityRepository::new(Arc::clone(&executor));
+        let session = Arc::new(InMemorySession::new());
+        session.set_master_key_for_space(
+            "availability".into(),
+            MasterKey::from_bytes(&[8; 32]).unwrap(),
+        );
+        let repo = DieselEntryAvailabilityRepository::new(
+            Arc::clone(&executor),
+            Arc::new(BlobCipherAdapter::new(session)),
+        );
         (repo, executor, dir)
     }
 
-    fn seed_uri_list_entry(executor: &Arc<DieselSqliteExecutor>, uri_list_body: &str) {
-        let body = uri_list_body.to_string();
+    async fn seed_uri_list_entry(
+        repo: &DieselEntryAvailabilityRepository<Arc<DieselSqliteExecutor>>,
+        executor: &Arc<DieselSqliteExecutor>,
+        uri_list_body: &str,
+    ) {
+        let body_size = uri_list_body.len() as i64;
+        let context = aad::for_inline(&EventId::from("ev"), &RepresentationId::from("rep"));
+        let body = repo
+            .cipher
+            .encrypt(
+                &Plaintext::new(uri_list_body.as_bytes().to_vec()),
+                &Aad::from(context.as_slice()),
+            )
+            .await
+            .unwrap()
+            .into_bytes();
         executor
             .run(move |conn| {
                 diesel::insert_into(crate::db::schema::clipboard_event::table)
@@ -278,8 +348,8 @@ mod tests {
                         event_id: "ev".into(),
                         format_id: "files".into(),
                         mime_type: Some("text/uri-list".into()),
-                        size_bytes: body.len() as i64,
-                        inline_data: Some(body.into_bytes()),
+                        size_bytes: body_size,
+                        inline_data: Some(body),
                         blob_id: None,
                         payload_state: "Inline".into(),
                         last_error: None,
@@ -296,7 +366,7 @@ mod tests {
         let file = dir.path().join("payload.bin");
         std::fs::write(&file, b"bytes").unwrap();
         let uri = url::Url::from_file_path(&file).unwrap();
-        seed_uri_list_entry(&executor, uri.as_str());
+        seed_uri_list_entry(&repo, &executor, uri.as_str()).await;
 
         assert!(
             repo.is_entry_available(&CoreEntryId::from("e1"))
@@ -319,9 +389,11 @@ mod tests {
     async fn partial_placeholder_entry_is_unavailable() {
         let (repo, executor, _dir) = make_repo();
         seed_uri_list_entry(
+            &repo,
             &executor,
             "uniclip-missing:///big.iso?size=950000000&reason=cancelled",
-        );
+        )
+        .await;
         assert!(
             !repo
                 .is_entry_available(&CoreEntryId::from("e1"))
@@ -338,5 +410,45 @@ mod tests {
             .is_entry_available(&CoreEntryId::from("nope"))
             .await
             .unwrap());
+    }
+    #[tokio::test]
+    async fn file_availability_rejects_corrupt_ciphertext_plaintext_and_wrong_aad_with_source() {
+        for damage in ["corrupt", "plaintext", "identity"] {
+            let (repo, executor, dir) = make_repo();
+            let file = dir.path().join("auth.bin");
+            std::fs::write(&file, b"content").unwrap();
+            let uri = url::Url::from_file_path(&file).unwrap();
+            seed_uri_list_entry(&repo, &executor, uri.as_str()).await;
+            assert!(repo
+                .is_entry_available(&CoreEntryId::from("e1"))
+                .await
+                .unwrap());
+            executor
+                .run(|conn| {
+                    use crate::db::schema::clipboard_snapshot_representation::dsl;
+                    match damage {
+                        "identity" => diesel::update(dsl::clipboard_snapshot_representation)
+                            .set(dsl::id.eq("different-representation"))
+                            .execute(conn)?,
+                        "plaintext" => diesel::update(dsl::clipboard_snapshot_representation)
+                            .set(dsl::inline_data.eq(Some(uri.as_str().as_bytes().to_vec())))
+                            .execute(conn)?,
+                        _ => diesel::update(dsl::clipboard_snapshot_representation)
+                            .set(dsl::inline_data.eq(Some(vec![0])))
+                            .execute(conn)?,
+                    };
+                    Ok(())
+                })
+                .unwrap();
+            let error = repo
+                .is_entry_available(&CoreEntryId::from("e1"))
+                .await
+                .unwrap_err();
+            let error = SourceError::new(error);
+            assert!(error
+                .chain()
+                .any(|cause| cause.downcast_ref::<BlobCipherError>().is_some()));
+            assert!(file.is_file());
+        }
     }
 }

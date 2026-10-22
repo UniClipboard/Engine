@@ -583,13 +583,14 @@ impl ApplyInboundClipboardUseCase {
     /// behavior). A transient availability-query error also degrades to "held"
     /// so a flaky query never turns a genuine duplicate into a spurious
     /// re-download / re-create.
-    async fn is_entry_available(&self, entry_id: &EntryId) -> bool {
+    // 可用性认证或读取失败不能当成FullyHeld，也不能替换原条目。
+    async fn is_entry_available(&self, entry_id: &EntryId) -> Result<bool, ApplyInboundError> {
         match &self.availability {
             Some(availability) => availability
                 .is_entry_available(entry_id)
                 .await
-                .unwrap_or(true),
-            None => true,
+                .map_err(|source| ApplyInboundError::DedupQuery(source.into())),
+            None => Ok(true),
         }
     }
 
@@ -1120,7 +1121,7 @@ impl ApplyInboundClipboardUseCase {
             .await
             .map_err(|error| ApplyInboundError::DedupQuery(error.into()))?;
         if let Some(existing_id) = existing.as_ref() {
-            if retry.is_none() && self.is_entry_available(existing_id).await {
+            if retry.is_none() && self.is_entry_available(existing_id).await? {
                 self.report_reused_outbound_transfers(&input.from_device, &blob_refs)
                     .await;
                 if let Some((transfer_id, _)) = provisional.as_ref() {

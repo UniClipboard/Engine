@@ -35,6 +35,7 @@ use uc_core::clipboard::SelectRepresentationPolicyV1;
 use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
+use uc_core::ports::security::BlobCipherPort;
 use uc_core::ports::*;
 use uc_infra_content::clipboard::{
     new_in_memory_change_origin, ClipboardPayloadResolver, DurableSpoolQueue,
@@ -103,7 +104,7 @@ use uc_observability_contract::uc_info;
 /// Infrastructure layer implementations
 struct InfraLayer {
     // Clipboard repositories
-    clipboard_entry_ports: ClipboardEntryPorts,
+    clipboard_entry_factory: Box<dyn FnOnce(Arc<dyn BlobCipherPort>) -> ClipboardEntryPorts + Send>,
     clipboard_event_repo: Arc<dyn ClipboardEventWriterPort>,
     /// 与 `clipboard_event_repo` 共享底层 `DieselClipboardEventRepository`,
     /// 但暴露的是读端口(`ClipboardEventRepositoryPort`),用于视图层反查
@@ -833,6 +834,7 @@ pub async fn wire_dependencies_from_inputs(
         &infra.clipboard_event_repo,
         &infra.representation_repo,
     );
+    let clipboard_entry_ports = (infra.clipboard_entry_factory)(blob_cipher.clone());
     directory_receive.commit_inbound = Arc::new(EncryptingInboundReceiveCommit::new(
         directory_receive.commit_inbound.clone(),
         blob_cipher.clone(),
@@ -951,7 +953,7 @@ pub async fn wire_dependencies_from_inputs(
             ),
             clipboard: platform.clipboard,
             system_clipboard: platform.system_clipboard,
-            entry_ports: infra.clipboard_entry_ports,
+            entry_ports: clipboard_entry_ports,
             clipboard_event_repo: encrypting_event_writer,
             clipboard_event_reader_repo: infra.clipboard_event_reader_repo.clone(),
             representation_store: decrypting_rep_repo,

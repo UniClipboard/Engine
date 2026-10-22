@@ -314,14 +314,14 @@ pub(super) fn create_infra_layer(
     // Availability (DB reps + filesystem) and transactional entry-replace are
     // separate adapters over the same executor; the inbound upgrade path uses
     // them to turn a partial entry into a complete one in place.
-    let entry_availability_repo: Arc<dyn uc_core::ports::clipboard::CheckEntryAvailabilityPort> =
-        Arc::new(DieselEntryAvailabilityRepository::new(Arc::clone(
-            &db_executor,
-        )));
     let entry_replace_repo: Arc<dyn uc_core::ports::clipboard::ReplaceEntryContentPort> = Arc::new(
         DieselClipboardEntryReplaceRepository::new(Arc::clone(&db_executor)),
     );
-    let clipboard_entry_ports = ClipboardEntryPorts {
+    let availability_executor = db_executor.clone();
+    // 只后置实际port构造，不安装缺密钥或明文占位实现。
+    let clipboard_entry_factory: Box<
+        dyn FnOnce(Arc<dyn BlobCipherPort>) -> ClipboardEntryPorts + Send,
+    > = Box::new(move |cipher| ClipboardEntryPorts {
         get: entry_repo_arc.clone(),
         list: entry_repo_arc.clone(),
         list_for_deletion: entry_repo_arc.clone(),
@@ -332,9 +332,12 @@ pub(super) fn create_infra_layer(
         delete_with_receive_state: entry_repo_arc.clone(),
         find_by_snapshot_hash: entry_repo_arc.clone(),
         get_snapshot_hash: entry_repo_arc,
-        availability: entry_availability_repo,
+        availability: Arc::new(DieselEntryAvailabilityRepository::new(
+            availability_executor,
+            cipher,
+        )),
         replace_content: entry_replace_repo,
-    };
+    });
 
     let event_row_mapper = ClipboardEventRowMapper;
     let clipboard_event_repo_impl = Arc::new(DieselClipboardEventRepository::new(
@@ -450,7 +453,7 @@ pub(super) fn create_infra_layer(
         Arc::new(uc_mobile_lan::mobile_sync::InMemoryMobileSyncEndpointInfoAdapter::new());
 
     let infra = InfraLayer {
-        clipboard_entry_ports,
+        clipboard_entry_factory,
         clipboard_event_repo,
         clipboard_event_reader_repo,
         entry_delivery_repo,

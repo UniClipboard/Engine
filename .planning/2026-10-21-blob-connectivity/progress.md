@@ -480,3 +480,10 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 - inline补充测试第二轮：恢复行为已Applied，但新增断言误把正常begin_redelivery登记也要求为0（实际1）；这是测试度量选错，不改生产行为。改为严格要求正常登记1次且BeginReceiveRetryInput集合为空。保留redelivery-delivery-final-application.log失败；当前redelivery-verified-application.log完整136项通过44.706s，Native两项与根门禁继续有界串行执行。
 
 - 普通partial重投最终源快照验证：redelivery-verified-* 全阶段exit0；Application完整apply_inbound及取消相关136项通过44.706s；真实Native普通与顺序变化重投2项通过18.941s；metadata812包；workspace all-targets check3m16s；fmt／Rust style／repository含隐私与负例／diff全部通过。scope已inactive；活动期证据保存redelivery-verified-scope.log，观测MemoryPeak 3,223,322,624 bytes、MemoryHigh3GiB／Max5GiB／SwapMax4GiB，Cargo jobs1。手工代码复查完成，保持原材料／原身份、完整ledger、原action及实际取消屏障；纯inline正常修复覆盖。完整Native16项先于inline边界修正的源快照通过，不冒充最终头16项；本片没有完成整个spec。
+
+- 普通partial复用已提交bbf86498。继续完整成果第三次投递，真实Native红测9.400s：total_accepted0／total_errored1，full-redelivery-red-exit100。现修复唯一Storage可用性能力，按原event／representation AAD用既有BlobCipherPort认证文件URI，再检查真实文件；Engine仅一次性私有工厂延迟构造完整port到cipher可用时，Application可用性错误保留source而不当FullyHeld。没有新schema、依赖、明文例外或Engine业务阶段接口。
+- availability-final：Engine dev-tools lib编译检查通过1m01s；Application入站／Storage availability相关合同149项通过46.195s，包括实际AEAD已存在／消失、密文损坏、明文冒充与AAD变更，以及Application失败不重显／不覆盖且保留IO source。真实Native3项与根门禁尚在执行，不提前记通过。
+
+- availability-final Native首项9.520s未通过新增过严断言：修复后已从total_errored1变为total_duplicate1，既有resurface_held_entry含快速重复窗口，即时第三次投递合法命中DuplicateSkipped。修正测试为完整成果须得到一个Accepted或Duplicate且errored／pending均0，并继续严格要求原attempt、路径／字节、导出数与保护数全部不变；不改变生产行为、窗口、等待期限或增加sleep。先前149项及Engine编译适用相同生产代码；仅重跑改正后的3项Native与根门禁，首失败保留availability-final-native.log。
+
+- 完整成果可用性最终验证全部通过：同一生产源快照Engine dev-tools lib check1m01s、App／Storage合同149项46.195s；修正新增测试对快速重复的错误预期后Native3项27.185s全通过。availability-verified metadata812、workspace all-targets3m14s、fmt／style／repository含隐私与负例／diff各exit0。scope已inactive，无重叠Cargo；活动期资源记录availability-verified-scope.log。手工复查：原event／representation AAD、认证失败不冒充FullyHeld、正常物理存在性规则保留、私有一次性工厂只负责完整port装配，无新依赖／schema／明文例外。准备提交；网络终态store失败原任务修复、目录／表示完整预算与生命周期、来源C、1GiB及最终head完整矩阵等继续，整个spec未完成。

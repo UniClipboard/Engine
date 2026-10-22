@@ -3,15 +3,20 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_partial_redelivery_reuses_saved_outputs_and_only_fetches_missing_file() {
-    verify_redelivery(vec![0, 1, 2]).await;
+    verify_redelivery(vec![0, 1, 2], false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_reordered_partial_redelivery_keeps_original_success_positions() {
-    verify_redelivery(vec![1, 2, 0]).await;
+    verify_redelivery(vec![1, 2, 0], false).await;
 }
 
-async fn verify_redelivery(order: Vec<usize>) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_completed_redelivery_keeps_held_files_without_new_attempt() {
+    verify_redelivery(vec![0, 1, 2], true).await;
+}
+
+async fn verify_redelivery(order: Vec<usize>, repeat_complete: bool) {
     let _lock = ENGINE_TEST_LOCK.lock().await;
     let mut case = receive_case(false).await;
     let _release = ReleaseOnDrop(case.exports.clone());
@@ -75,5 +80,39 @@ async fn verify_redelivery(order: Vec<usize>) {
         |event| matches!(event, EngineEvent::InboundNotice(notice) if notice.from_device == source),
     )
     .await;
+    if repeat_complete {
+        let receiver = member_id(&case.receiver).await;
+        let OperationResult::EntrySent(report) = case
+            .source
+            .execute(Operation::SendFiles(SendFilesInput {
+                files: (0..3)
+                    .map(|index| HostFileHandle::new(index.to_string()))
+                    .collect(),
+                target_devices: vec![receiver],
+            }))
+            .await
+            .unwrap()
+        else {
+            panic!("file send expected")
+        };
+        next_engine_event_matching(&mut case.events,
+            |event| matches!(event, EngineEvent::InboundNotice(notice) if notice.from_device == source),
+        ).await;
+        assert_eq!(
+            report.total_accepted + report.total_duplicate,
+            1,
+            "完整成果须被接收或认作快速重复：{report:?}"
+        );
+        assert_eq!(report.total_errored, 0);
+        assert_eq!(report.total_pending, 0);
+        let repeated = progress(&case.receiver, &entry, "completed").await;
+        assert_eq!(repeated.attempt_id, complete.attempt_id);
+        assert_eq!(
+            saved_files(&case.receiver, &entry, case.receiver_root.path()).await,
+            files
+        );
+        assert_eq!(case.exports.exports.lock().unwrap().len(), 4);
+        assert_eq!(case.exports.protects.lock().unwrap().len(), 4);
+    }
     case.shutdown().await;
 }

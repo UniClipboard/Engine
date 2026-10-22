@@ -90,3 +90,7 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - 当前未保存计数切片：完整查询负责人仍为Application ReceiveProgressQuery，调用方仅提交原接收查询。Core已有group_receive_items提供业务状态，Infra聚合应使用其结果，不能把raw网络Completed当已保存。无新schema／状态词表／Engine查询步骤；失败保留原来源，重启／重试继续读取现有事实。首先在真实Engine双SQL故障和原资源屏障中核对一项已保存、另一项raw Completed且failure_code为空时的项数／字节，再覆盖实际SQLite重开与目录完整单元，普通partial来源映射仍须独立完成。
 
 - 普通已有partial同进程重投复用：本切片已通过真实Native正常／顺序变化重投、136项相关Application和根门禁，准备提交。继续核对完整接收后的普通重复投递；原非终态网络记录的终态交接修复、目录／表示完整预算、来源C／生命周期／1GiB与最终head矩阵等仍未完成，完整goal active。
+
+- 当前完整成果重复投递核对：完整负责人仍Application接收流程，调用方仅SendFiles；完整可用条目应直接重显，无新attempt／下载／清理责任。先在真实Native补齐partial完成后第三次SendFiles，用接收结果、原attempt及文件身份／导出数证明，不以普通partial绿测替代。若availability误读密文，修复唯一实际能力并保留认证错误来源，不引入明文例外或新schema；重试／重启沿既有契约。
+
+- 完整成果可用性切片：真实错误重复投递已修复并通过3项Native、149项相关合同和根门禁。后续先以真实SQLite trigger复现网络终态store写入失败后的资源／清理修复；实际publisher返回Ok，不把其测试替身行为误认为SQLite根因。完整goal继续active。

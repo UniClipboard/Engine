@@ -327,3 +327,7 @@
 - 普通 partial 重投实测绿：正常顺序与 `[1,2,0]` 顺序变化均只导出原失败摘要；既有两项成功路径不变。42项 Application 相关回归通过（42.432s）。准备器使用原票据、原表示ID与完整旧blob数组，不做新信封到旧索引的猜测映射。
 - 手工代码审查发现并修复：normal prepare 仅用于带blob／manifest的再次接收，纯inline继续原地升级。现通过现有CommonDeps装配验证Applied、正常重投attempt一次、blob retry集合为空，不新增测试setter或扩大接口。
 - 后续网络终态交接风险（代码观察，尚未实际红测）：ReceiverTransferHandle::finish 在 publisher 成功前设置 terminal_event，并在 publisher 失败后仍移除 registry；相同终态再次调用会直接返回旧 event，可能无法修复实际 projection。因此不能只给 Facade terminal 调用加循环；需以真实SQLite终态拒绝复现，并验证重复事件的投影修复、原下载监督和完整来源。FileCleaned继续禁止活动／未知／冲突事实，不能放宽它掩盖上层缺口。
+
+- 完整成果重复投递实际红测：full-redelivery-red.log，9.400s，total_accepted0／total_errored1，exit100。Storage availability直接按URI解析inline_data，而实际写入经EncryptingInboundReceiveCommit／BlobCipherPort AEAD；原接收成功后source已正确释放，错误的unavailable导致普通重投准备失败。须让唯一Storage能力按原event／representation AAD认证文件清单，且Application不再unwrap_or(true)吞可用性读取错误。Engine现有blobCipher在primitive infra之后构造，可通过一次性私有port工厂后置装配，不能装一个明文／缺cipher占位实现。
+
+- 后续终态交接定位校正：实际FileTransferHostEventPublisher只发宿主事件并返回Ok；SQLite网络事实由SqliteReceiverFileTransferStore::append将事件与projection同事务提交。该store失败时ReceiverTransferHandle::finish尚未设置terminal_event，重复相同终态可重试真实事务。因此不要把publisher失败假设当实际SQLite根因或先改其幂等语义；原DownloadTask的终态store错误早返回后未持续修复才是待用真实trigger证明的缺口。FetchPreparationState.stop_attempted失败后仍跳过也须实际验证；Completed投影失败与Failed／Cancelled投影失败要保留原网络完成／失败分类，不能放宽FileCleaned接受活动记录。
