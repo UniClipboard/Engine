@@ -31,9 +31,9 @@ Core／App29项通过28.178秒；Profile编译发现状态枚举无FromStr，已
 
 合法准备状态的实际SQLite红测0.072秒被原规则错误拒绝。Core现明确Missing／Tracked／Unusable：只有清理允许尚未登记而不补造网络记录，本地保存失败仍须Completed，未知／重复／活动／已交付记录继续拒绝。Native新增定向SQL登记拒绝并验证第三项正常交付、失败项可通过原稳定重试补取且保留原成功文件，尚待实际执行。
 
-FileCleaned最终同源Core／App30通过27.159秒、Profile42通过1.721秒、完整Native14通过99.672秒（新增网络登记故障9.318秒，包含原失败项稳定重试、旧成功路径／字节保留）。metadata812包、workspace全目标check3m52s、fmt／style／repository／1350隐私／diff通过。正在手工审查后提交本片。
+FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁通过，完整日志fetch-ack-final-*）。当前新增普通partial重投Native红测：初次原第二项失败且首／三项成功，再发原SendFiles，第四次真实导出必须属于原失败摘要，最终只多一次导出且原成功路径／字节保持。使用既有IncomingPending和完整结果事件，避免消费旧结果；不以新数组位置冒充旧成果。
 
-下一步推进普通已有partial正常重投：当前明确禁用增量FileProgress，仍可能整批累积许可；须基于原始内容身份和成功输出验证做来源／位置映射，不能直接打开progress或把新数组下标当旧成果。先检查现有完整负责人、可用票据摘要能力、原始来源与既有成功绑定规则，再在实际Flow／Native取得失败证据。准备／最终网络交接写入失败的已存在非终态记录仍须原负责人恢复；表示／目录、全生命周期、受管1GiB和最终head网络／CI／设备矩阵及业务记录验收继续，完整spec未完成。
+唯一活动scope uni-blob-redelivery-reuse-red、PID1998918；日志redelivery-reuse-red.log／.exit.log。先检查实际进程与终结，不重启活动构建、不修改Rust。之后读取现有来源加载、票据摘要能力、保存绑定和原始位置规则，再实现完整来源映射及普通逐项保存，不能简单删除progress禁用条件。红测已实际失败100（8.300秒，Summary8.322秒）：第四次导出是已成功内容。该scope已终结，生产映射尚未修改。RetrySnapshotReader和PreparedReceiveRetry／accept_retry／BeginReceiveRetryPort已有完整原正文读取、成员／身份／CAS及新项继承，可共享准备能力，普通投递仍用原出生ReceiveAction，不能递归另建owned任务或只开progress。准备／最终交接的非终态写入失败、表示／目录、全生命周期、受管1GiB和最终head矩阵仍继续。
 后续保持完整spec：普通partial重投映射与重启材料完整性、保存失败后的物理清理失败责任、准备拒绝交接、目录／表示完整预算、来源C、完整生命周期、受管1GiB及最终head网络／CI／设备矩阵。未运行设备仍记跳过。
 
 资源约束持续有效：用户设置16 GiB swap并明确resume；Cargo串行、CARGO_BUILD_JOBS=1，临时scope MemoryHigh=3 GiB／MemoryMax=5 GiB／MemorySwapMax=4 GiB及CPU／IO权重20，保持共享缓存和仓库target。先核对真实活动scope／PID与退出状态，不得重启仍在运行的验证。
@@ -88,3 +88,5 @@ FileCleaned最终同源Core／App30通过27.159秒、Profile42通过1.721秒、�
 - 当前父保存切片：ReceiveAction为整个接收负责人，调用方仍提交完整接收／重试；下载返回后单项交接须保留原持有者至父保存或清理真正结束，多文件下一项不能因积累许可死锁。先以实际ApplyInbound重试＋真实下载调度／文件写入替身＋保存屏障复现提前释放，再验证调用者退出、关闭五秒未完成和7／9项顺序处理。失败清理恢复移交及下一项排队取消时的资源连续性单独保留为未完成，不用普通保存屏障代替全边界证明；无新持久格式、池或Engine步骤查询。
 
 - 当前未保存计数切片：完整查询负责人仍为Application ReceiveProgressQuery，调用方仅提交原接收查询。Core已有group_receive_items提供业务状态，Infra聚合应使用其结果，不能把raw网络Completed当已保存。无新schema／状态词表／Engine查询步骤；失败保留原来源，重启／重试继续读取现有事实。首先在真实Engine双SQL故障和原资源屏障中核对一项已保存、另一项raw Completed且failure_code为空时的项数／字节，再覆盖实际SQLite重开与目录完整单元，普通partial来源映射仍须独立完成。
+
+- 普通已有partial同进程重投复用：本切片已通过真实Native正常／顺序变化重投、136项相关Application和根门禁，准备提交。继续核对完整接收后的普通重复投递；原非终态网络记录的终态交接修复、目录／表示完整预算、来源C／生命周期／1GiB与最终head矩阵等仍未完成，完整goal active。

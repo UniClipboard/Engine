@@ -29,6 +29,7 @@ async fn shutdown_releases_a_receive_waiting_for_initial_readiness() {
     let readiness = Arc::new(ReceiveReadinessCoordinator::new());
     let receiver = ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
         common: InboundApplyCommonDeps {
+            receive_retry: None,
             receive_work: Arc::new(ReceiveWorkRegistry::default()),
             entry_repo: Arc::new(MockEntryRepo::new()),
             capture: Arc::new(MockCapture::new()),
@@ -249,6 +250,7 @@ async fn history_clear_stops_preparing_receive_without_opening_initial_readiness
     let receive_work = Arc::new(ReceiveWorkRegistry::default());
     let receiver = ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
         common: InboundApplyCommonDeps {
+            receive_retry: None,
             receive_work: receive_work.clone(),
             entry_repo: Arc::new(MockEntryRepo::new()),
             capture: Arc::new(MockCapture::new()),

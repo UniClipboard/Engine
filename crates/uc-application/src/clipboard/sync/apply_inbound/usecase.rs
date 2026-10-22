@@ -38,7 +38,7 @@ use crate::runtime_lifecycle::LifecycleError;
 use crate::transfer::receive::receive_item_ids;
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 use crate::transfer::receive::retry::{
-    accept_retry, PreparedReceiveRetry, RetryEntryReceiveOutcome,
+    accept_retry, PreparedReceiveRetry, ReceiveRetryPreparation, RetryEntryReceiveOutcome,
 };
 use crate::transfer::receive::work::{
     ReceiveAction, ReceiveRegistrationError, ReceiveRepresentation, ReceiveSource,
@@ -77,6 +77,7 @@ use progress::FileProgress;
 
 #[derive(Clone)]
 pub struct ApplyInboundClipboardUseCase {
+    receive_retry: Option<Arc<ReceiveRetryPreparation>>,
     work: WorkOwner,
     receive_work: Arc<ReceiveWorkRegistry>,
     entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
@@ -151,6 +152,7 @@ pub(crate) struct InboundReceiveAttemptDeps {
 }
 
 pub(crate) struct InboundApplyCommonDeps {
+    pub receive_retry: Option<Arc<ReceiveRetryPreparation>>,
     pub receive_work: Arc<ReceiveWorkRegistry>,
     pub entry_repo: Arc<dyn FindEntryIdBySnapshotHashPort>,
     pub capture: Arc<dyn InboundCapture>,
@@ -281,6 +283,7 @@ impl ApplyInboundClipboardUseCase {
         outbound_progress_reporter: Option<Arc<dyn OutboundProgressReporterPort>>,
     ) -> Self {
         let InboundApplyCommonDeps {
+            receive_retry,
             receive_work,
             entry_repo,
             capture,
@@ -294,6 +297,7 @@ impl ApplyInboundClipboardUseCase {
             entry_identity_coordinator,
         } = deps;
         Self {
+            receive_retry,
             work: WorkOwner::default(),
             receive_work,
             entry_repo,
@@ -331,6 +335,7 @@ impl ApplyInboundClipboardUseCase {
         write: Arc<dyn InboundWrite>,
     ) -> Self {
         Self {
+            receive_retry: None,
             work: WorkOwner::default(),
             receive_work: Arc::new(ReceiveWorkRegistry::default()),
             entry_repo,
@@ -1064,7 +1069,7 @@ impl ApplyInboundClipboardUseCase {
         }
         // 1. Decode V3 envelope. Decode failure is non-fatal — drop the
         // frame, keep the loop alive (peer may be on a newer wire).
-        let (snapshot, blob_refs, file_set_manifest) = if let Some(retry) = &retry {
+        let (mut snapshot, mut blob_refs, mut file_set_manifest) = if let Some(retry) = &retry {
             (
                 retry.snapshot.clone(),
                 retry.source.blob_refs.clone(),
@@ -1172,6 +1177,25 @@ impl ApplyInboundClipboardUseCase {
                     snapshot_hash: input.snapshot_hash,
                     existing_entry_id,
                 });
+            }
+        }
+
+        if retry.is_none() && (!blob_refs.is_empty() || file_set_manifest.is_some()) {
+            if let (Some(entry), Some(preparation)) = (&existing, &self.receive_retry) {
+                let prepared = preparation
+                    .prepare_redelivery(
+                        entry,
+                        &input.snapshot_hash,
+                        input.from_device,
+                        receive_action.clone(),
+                    )
+                    .await
+                    .map_err(|source| ApplyInboundError::Internal(SourceError::new(source)))?;
+                // 继续使用最初表示ID和blob顺序；只有旧失败项进入本次下载。
+                snapshot = prepared.snapshot.clone();
+                blob_refs = prepared.source.blob_refs.clone();
+                file_set_manifest = prepared.source.manifest.clone();
+                retry = Some(prepared);
             }
         }
 
@@ -1332,7 +1356,7 @@ impl ApplyInboundClipboardUseCase {
                         .iter()
                         .any(|blob| blob.representation_index.is_none())
             })
-            // 旧partial的普通重投仍需先完成原成功项映射，保持原升级策略。
+            // 未装配原材料读取的测试实例保持原整体升级路径。
             .filter(|_| retry.is_some() || existing.is_none())
             .map(|attempt| {
                 Arc::new(FileProgress {

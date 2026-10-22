@@ -298,6 +298,9 @@ impl ClipboardAssembly {
             .file_transfer
             .interactive_receive(InteractiveReceiveIntentDeps {
                 common: InboundReceiveIntentDeps {
+                    snapshot: self.snapshot_deps(),
+                    identity: self.deps.clipboard.entry_ports.get_snapshot_hash.clone(),
+                    scope: session.member_scope.clone(),
                     entry_repo: Arc::clone(&self.deps.clipboard.entry_ports.find_by_snapshot_hash),
                     capture: Arc::clone(&self.capture_use_case) as Arc<dyn InboundCapture>,
                     materializer: InboundMaterializerDeps {
@@ -390,7 +393,7 @@ impl ClipboardAssembly {
             return Err(ActiveClipboardStartError::BackgroundNotReady);
         }
 
-        let pull_apply = self.store_only_pull(session.pull_adapters);
+        let pull_apply = self.store_only_pull(session.pull_adapters, session.member_scope.clone());
         let facade = Arc::new(ActiveClipboardFacade::new(ActiveClipboardDeps {
             receiver: session.receiver,
             dispatch: session.dispatch,
@@ -423,9 +426,13 @@ impl ClipboardAssembly {
     fn store_only_pull(
         &self,
         adapters: ClipboardInboundAdapters,
+        scope: Arc<dyn CurrentSpaceMemberScopePort>,
     ) -> Arc<dyn InboundClipboardApplyPort> {
         self.file_transfer.store_only_pull(StoreOnlyPullIntentDeps {
             common: InboundReceiveIntentDeps {
+                snapshot: self.snapshot_deps(),
+                identity: self.deps.clipboard.entry_ports.get_snapshot_hash.clone(),
+                scope,
                 entry_repo: Arc::clone(&self.deps.clipboard.entry_ports.find_by_snapshot_hash),
                 capture: Arc::clone(&self.capture_use_case) as Arc<dyn InboundCapture>,
                 materializer: InboundMaterializerDeps {
@@ -515,6 +522,9 @@ impl ClipboardAssembly {
     ) -> ReceiveRetryIntentDeps {
         ReceiveRetryIntentDeps {
             common: InboundReceiveIntentDeps {
+                snapshot: self.snapshot_deps(),
+                identity: self.deps.clipboard.entry_ports.get_snapshot_hash.clone(),
+                scope,
                 entry_repo: Arc::clone(&self.deps.clipboard.entry_ports.find_by_snapshot_hash),
                 capture: self.capture_use_case.clone(),
                 materializer,
@@ -523,9 +533,6 @@ impl ClipboardAssembly {
                 availability: self.deps.clipboard.entry_ports.availability.clone(),
                 entry_identity_coordinator: self.entry_identity.clone(),
             },
-            snapshot: self.snapshot_deps(),
-            identity: self.deps.clipboard.entry_ports.get_snapshot_hash.clone(),
-            scope,
         }
     }
 

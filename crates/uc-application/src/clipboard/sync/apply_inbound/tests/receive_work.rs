@@ -229,6 +229,7 @@ async fn commit_race_keeps_partial_settlement_owned_and_preserves_capture_failur
         let receiver = Arc::new(ApplyInboundClipboardUseCase::store_only_pull(
             StoreOnlyPullDeps {
                 common: InboundApplyCommonDeps {
+                    receive_retry: None,
                     receive_work: work,
                     entry_repo: Arc::new(repo),
                     capture: capture.clone(),

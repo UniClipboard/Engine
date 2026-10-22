@@ -209,6 +209,7 @@ fn use_case(
             Arc::new(NoNetwork),
         ),
         Arc::new(ReceiveWorkRegistry::default()),
+        Arc::default(),
     )
 }
 
@@ -292,6 +293,7 @@ async fn active_file_receive_is_terminally_cancelled() {
             Arc::new(NoNetwork),
         ),
         Arc::new(ReceiveWorkRegistry::default()),
+        Arc::default(),
     );
 
     let result = use_case.execute(&EntryId::new(), "attempt-1").await;
@@ -434,6 +436,7 @@ async fn dropped_and_repeated_waiters_do_not_abandon_cleanup_or_restart_the_canc
         Arc::new(HostEventBus::new()),
         transport.clone(),
         Arc::new(ReceiveWorkRegistry::default()),
+        Arc::default(),
     );
     let entry = EntryId::new();
     drop(usecase.execute(&entry, "attempt-1"));
@@ -550,6 +553,7 @@ async fn caller_deadline_covers_initial_authority_read_and_final_commit_without_
             Arc::new(HostEventBus::new()),
             transport.clone(),
             Arc::new(ReceiveWorkRegistry::default()),
+            Arc::default(),
         );
         let entry = EntryId::new();
         let start = tokio::time::Instant::now();
@@ -629,6 +633,7 @@ async fn cancelled_entry_requests_have_a_bounded_registry_without_hidden_read_wa
         Arc::new(HostEventBus::new()),
         transport.clone(),
         Arc::new(ReceiveWorkRegistry::default()),
+        Arc::default(),
     );
     for _ in 0..68 {
         drop(usecase.execute(&EntryId::new(), "attempt-1"));
@@ -694,6 +699,7 @@ async fn panicking_cancel_worker_keeps_the_join_source_and_never_runs_cleanup() 
         Arc::new(HostEventBus::new()),
         transport.clone(),
         Arc::new(ReceiveWorkRegistry::default()),
+        Arc::default(),
     );
     let error = usecase
         .execute(&EntryId::new(), "attempt-1")
@@ -759,6 +765,7 @@ async fn failed_transfer_stop_keeps_its_source_and_prevents_following_side_effec
             Arc::new(NoNetwork),
         ),
         Arc::new(ReceiveWorkRegistry::default()),
+        Arc::default(),
     );
 
     let error = use_case
@@ -971,6 +978,7 @@ async fn plan_settled_partial_cancellation_is_never_overwritten_by_no_entry_clea
                 Arc::new(NoNetwork),
             ),
             work.clone(),
+            Arc::default(),
         );
         let entry = EntryId::new();
         let action = work.action();

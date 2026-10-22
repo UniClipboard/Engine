@@ -751,6 +751,7 @@ async fn store_only_pull_persists_without_a_clipboard_write_dependency() {
 
     let use_case = ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
         common: InboundApplyCommonDeps {
+            receive_retry: None,
             receive_work: Arc::new(ReceiveWorkRegistry::default()),
             entry_repo: Arc::new(repo),
             capture: Arc::new(capture),

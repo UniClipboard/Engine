@@ -320,3 +320,10 @@
 - fetch-ack-red已实际复现：输出删除成功后，原保护与原获取source的组合为(0,false)，期望(1,true)，0.008秒失败。现拟新增FileCleaned到原完整提交port，Core从当前attempt、唯一文件网络事实与已交付标记决定是否允许；Infra认证原AEAD产物并在同一事务内验证和移除本项，只为FileFailed写本地失败码。原网络Failed／Cancelled不重写；准备失败用独立PreparationFailure意图，避免对尚未登记的文件补写网络结算。原任务修复失败交接，不重删已清理路径或重试内容。
 
 - 新合法准备状态的实际SQLite红测fetch-ack-missing-red：认证产物存在、物理输出已删除但尚无网络登记，原规则错误返回Backend/FileMismatch，0.072秒失败。Core现用Missing／Tracked／Unusable明确区分：清理允许缺失而不补造网络状态，本地保存失败仍必须有Completed；未知、重复、已交付及活动网络记录继续拒绝。新增Native SQL拒绝第二项网络登记，要求原临时输出清理、第一／三项正常落地且原任务不能永久Receiving。该Native尚待执行，不记通过。
+
+- 普通partial重投真实Native redelivery-reuse-red在8.300秒失败：第四次实际导出是原已成功项的摘要，而非原第二项失败摘要。旧普通路径确实重新获取成功项。此测试已用新IncomingPending消费旧通知，第四次导出沿原fixture暂停并释放，不靠sleep或新订阅者。
+- 现有显式重试有可复用的完整机制：RetrySnapshotReader从原wire或已保存密文快照按原表示ID加载正文，PreparedReceiveRetry＋accept_retry核对当前成员、身份与旧attempt，再由BeginReceiveRetryPort在同一事务建立全部新项及成功继承事实。原CommitInboundReceive严格要求delivered_item_ids属于当前attempt，普通begin_redelivery只换parent无法直接复用旧成功；不能只移除FileProgress禁用条件。下一步考虑抽取共享准备能力而非复制整套流程，普通投递仍使用原出生ReceiveAction，不递归另建owned任务。来源票据身份需通过既有能力验证，禁止直接新数组index套用旧landed。
+
+- 普通 partial 重投实测绿：正常顺序与 `[1,2,0]` 顺序变化均只导出原失败摘要；既有两项成功路径不变。42项 Application 相关回归通过（42.432s）。准备器使用原票据、原表示ID与完整旧blob数组，不做新信封到旧索引的猜测映射。
+- 手工代码审查发现并修复：normal prepare 仅用于带blob／manifest的再次接收，纯inline继续原地升级。现通过现有CommonDeps装配验证Applied、正常重投attempt一次、blob retry集合为空，不新增测试setter或扩大接口。
+- 后续网络终态交接风险（代码观察，尚未实际红测）：ReceiverTransferHandle::finish 在 publisher 成功前设置 terminal_event，并在 publisher 失败后仍移除 registry；相同终态再次调用会直接返回旧 event，可能无法修复实际 projection。因此不能只给 Facade terminal 调用加循环；需以真实SQLite终态拒绝复现，并验证重复事件的投影修复、原下载监督和完整来源。FileCleaned继续禁止活动／未知／冲突事实，不能放宽它掩盖上层缺口。

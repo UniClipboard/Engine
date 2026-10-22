@@ -390,6 +390,7 @@ fn receiver(
     Arc::new(ApplyInboundClipboardUseCase::store_only_pull(
         StoreOnlyPullDeps {
             common: InboundApplyCommonDeps {
+                receive_retry: None,
                 receive_work: readiness.work_registry(),
                 entry_repo: Arc::new(repo),
                 capture: capture.clone(),

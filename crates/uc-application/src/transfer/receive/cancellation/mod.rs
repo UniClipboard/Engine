@@ -6,7 +6,7 @@ mod ports;
 mod workflow;
 pub use error::CancelEntryReceiveError;
 pub use model::CancelEntryReceiveOutcome;
-pub(crate) use owner::CancelEntryReceiveUseCase;
+pub(crate) use owner::{CancelEntryReceiveUseCase, ReceiveCancellationJobs};
 pub(crate) use ports::AttemptTransferCancellation;
 #[cfg(test)]
 mod tests;

@@ -1,31 +1,16 @@
-use super::{
-    BeginReceiveRetryPort, PreparedReceiveRetry, ReceiveCancellationBarrier,
-    RetryEntryReceiveError, RetryEntryReceiveOutcome, RetrySnapshotReader,
-};
+use super::{ReceiveRetryPreparation, RetryEntryReceiveError, RetryEntryReceiveOutcome};
 use crate::clipboard::sync::apply_inbound::ApplyInboundClipboardUseCase;
-use crate::space::{CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort};
 use crate::transfer::policy::{ACTIVE_DOWNLOADS, QUEUED_DOWNLOADS};
-use crate::transfer::receive::materialization::{validate_selection, ReceiveSelection};
-use crate::transfer::receive::query::ReceiveProgressQuery;
-use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::oneshot;
 use uc_core::ids::EntryId;
-use uc_core::ports::{AttemptState, TrackedFileTransferStatus};
 use uc_observability_contract::diagnostics::ObservationContext;
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 pub(crate) struct RetryEntryReceiveUseCase {
-    pub(crate) begin: Arc<dyn BeginReceiveRetryPort>,
-    pub(crate) cache_dir: PathBuf,
+    pub(crate) preparation: Arc<ReceiveRetryPreparation>,
     pub(crate) apply: Arc<ApplyInboundClipboardUseCase>,
-    pub(crate) query: Arc<ReceiveProgressQuery>,
-    pub(crate) work: Arc<ReceiveWorkRegistry>,
-    pub(crate) cancellation: Arc<dyn ReceiveCancellationBarrier>,
-    pub(crate) snapshots: RetrySnapshotReader,
-    pub(crate) scope: Arc<dyn CurrentSpaceMemberScopePort>,
     pub(crate) requests: Arc<Mutex<HashSet<EntryId>>>,
 }
 
@@ -60,7 +45,11 @@ impl RetryEntryReceiveUseCase {
             let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
             if requests.contains(&entry) {
                 return Ok(
-                    if self.cancellation.is_settling(&entry, &expected_attempt) {
+                    if self
+                        .preparation
+                        .cancellation
+                        .is_settling(&entry, &expected_attempt)
+                    {
                         RetryEntryReceiveOutcome::CancellationIncomplete
                     } else {
                         RetryEntryReceiveOutcome::AlreadyReceiving
@@ -77,126 +66,17 @@ impl RetryEntryReceiveUseCase {
             }
         };
         // 出生世代先于所有异步读取；删除或关闭后旧请求不得重新登记。
-        let action = self.work.action();
-        let Some(progress) =
-            self.query.get(&entry).await.map_err(|source| {
-                preflight_failure(RetryEntryReceiveError::Source(source.into()))
-            })?
-        else {
-            return Ok(RetryEntryReceiveOutcome::Unavailable);
-        };
-        if progress.attempt_id != expected_attempt {
-            return Ok(RetryEntryReceiveOutcome::Superseded);
-        }
-        if self.cancellation.is_settling(&entry, &expected_attempt)
-            || (progress.state.is_terminal() && self.work.owns_entry(entry.as_ref()))
-            || matches!(
-                progress.state,
-                AttemptState::Cancelling | AttemptState::Failing
-            )
+        let action = self.preparation.work.action();
+        let mut prepared = match self
+            .preparation
+            .prepare(entry, expected_attempt, item_ids, action, None)
+            .await?
         {
-            return Ok(RetryEntryReceiveOutcome::CancellationIncomplete);
-        }
-        if !progress.state.is_terminal() {
-            return Ok(RetryEntryReceiveOutcome::AlreadyReceiving);
-        }
-        if requested.iter().any(|id| {
-            !progress.items.iter().any(|item| {
-                &item.item_id == *id
-                    && matches!(
-                        item.status,
-                        TrackedFileTransferStatus::Failed | TrackedFileTransferStatus::Cancelled
-                    )
-            })
-        }) {
-            return Err(RetryEntryReceiveError::InvalidInput);
-        }
-        let Some((source, landed)) = self.work.retry_material(&entry, &expected_attempt) else {
-            return Ok(RetryEntryReceiveOutcome::Unavailable);
+            Ok(prepared) => prepared,
+            Err(outcome) => return Ok(outcome),
         };
-        let scope = match self.scope.snapshot().await {
-            Ok(scope) => scope,
-            Err(
-                CurrentSpaceMemberScopeError::Locked | CurrentSpaceMemberScopeError::NoCurrentSpace,
-            ) => return Ok(RetryEntryReceiveOutcome::AccessDenied),
-            Err(source) => {
-                return Err(preflight_failure(RetryEntryReceiveError::Source(
-                    source.into(),
-                )))
-            }
-        };
-        if !scope.local_member_active || !scope.usable_peer_device_ids.contains(&source.from_device)
-        {
-            return Ok(RetryEntryReceiveOutcome::AccessDenied);
-        }
-        let planned = source.planned(&entry, &expected_attempt);
-        let selected = if source.manifest.is_some() {
-            if requested.len() != 1 || !requested.iter().any(|id| id.as_str() == "directory_unit") {
-                return Err(RetryEntryReceiveError::InvalidInput);
-            }
-            (0..source.blob_refs.len()).collect()
-        } else {
-            planned
-                .iter()
-                .filter(|item| requested.contains(&item.id))
-                .map(|item| item.blob_index)
-                .collect::<HashSet<_>>()
-        };
-        if (source.manifest.is_none() && (selected.is_empty() || selected.len() != requested.len()))
-            || selected.iter().any(|index| landed.contains_key(index))
-        {
-            return Err(RetryEntryReceiveError::InvalidInput);
-        }
-        let unselected = planned
-            .iter()
-            .filter(|item| {
-                !selected.contains(&item.blob_index) && !landed.contains_key(&item.blob_index)
-            })
-            .filter_map(|item| {
-                progress
-                    .items
-                    .iter()
-                    .find(|previous| previous.item_id == item.id)
-                    .map(|previous| (item.blob_index, previous.clone()))
-            })
-            .collect();
-        let Some(snapshot) = self
-            .snapshots
-            .read(&entry, &source)
-            .await
-            .map_err(preflight_failure)?
-        else {
-            return Ok(RetryEntryReceiveOutcome::Unavailable);
-        };
-        let selection = ReceiveSelection {
-            selected,
-            landed,
-            unselected,
-        };
-        validate_selection(
-            &selection,
-            &source.blob_refs,
-            source.manifest.is_some(),
-            &snapshot,
-            &self.cache_dir,
-            &action.cancellation(),
-        )
-        .await
-        .map_err(|source| preflight_failure(RetryEntryReceiveError::Unavailable(source)))?;
         let (accepted, reply) = oneshot::channel();
-        let prepared = PreparedReceiveRetry {
-            begin: self.begin.clone(),
-            cancellation: self.cancellation.clone(),
-            identity: self.snapshots.identity.clone(),
-            scope: self.scope.clone(),
-            entry,
-            expected_attempt,
-            source,
-            snapshot,
-            selection: Some(selection),
-            action,
-            accepted: Some(accepted),
-        };
+        prepared.accepted = Some(accepted);
         let apply = self.apply.clone();
         let observation = ObservationContext::capture();
         let task = tokio::spawn(observation.scope(async move {
@@ -221,13 +101,4 @@ impl RetryEntryReceiveUseCase {
             },
         }
     }
-}
-
-fn preflight_failure(source: RetryEntryReceiveError) -> RetryEntryReceiveError {
-    uc_warn!(
-        error_kind = "receive_retry_preflight",
-        io_error_kind = io_error_kind(&source),
-        "receive retry could not validate its original source"
-    );
-    source
 }

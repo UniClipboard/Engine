@@ -68,6 +68,7 @@ async fn closing_and_reopening_gate_during_authority_reads_rejects_late_attempt_
         let receiver = Arc::new(ApplyInboundClipboardUseCase::store_only_pull(
             StoreOnlyPullDeps {
                 common: InboundApplyCommonDeps {
+                    receive_retry: None,
                     receive_work: readiness.work_registry(),
                     entry_repo: lookup.clone(),
                     capture: Arc::new(capture),

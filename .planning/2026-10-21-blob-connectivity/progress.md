@@ -468,3 +468,15 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 - FileCleaned最终同源验证启动：scope uni-blob-fetch-ack-final、PID1932962，Core／App、真实Profile、完整Native receive_retry及根门禁顺序运行。新记录类型消除“缺失等于损坏”的混淆，SQL拒绝保留具体Diesel来源。不得沿用旧29／41结果作为新接口快照绿灯，先看fetch-ack-final-stage／-gates.exit及真实scope。
 
 - FileCleaned原子交接最终同源Core／App30通过27.159秒、Profile42通过1.721秒、完整Native receive_retry14通过99.672秒（新登记故障9.318秒）。metadata812包、workspace全目标check3m52s、fmt／style／repository／1350隐私／diff通过。手工审查原资源、当前attempt、AEAD／唯一记录、未登记与损坏区分、已交付保护及原网络事实；无可用code-review skill。现在整理提交，完整spec仍继续。
+
+- 原子交接已提交da77bea0。普通partial再次SendFiles的真实Native红测已启动，scope uni-blob-redelivery-reuse-red、PID1998918；只新增测试，生产未开始映射修改。先读redelivery-reuse-red.log／exit及真实scope，未结束不得重启或改Rust。
+
+- 普通partial重投Native红测已实际终结100（8.300秒，Summary8.322秒）：重新获取了原成功内容而非唯一失败内容，证据redelivery-reuse-red.log。当前无活动该scope。生产映射尚未修改，先审查共享原来源加载／CAS新项继承机制，保持原成功路径和原许可预算。
+
+- 普通 partial 重投：已把手动重试的原资料读取、成功输出校验与选择准备提取到同一 ReceiveRetryPreparation；正常接收沿原 action 使用既有 accept_retry 和完整 ledger CAS。取消任务完成屏障由装配预先创建并与取消负责人共享，不引入 Apply 反向依赖。Application all-targets check 通过（36.77s），Rust style 通过；真实 Native 红转绿及相关取消／重试测试正在有界串行执行，尚未报告通过。普通重投使用原 tickets／原顺序，新信封仅作为同身份重投触发，原材料不可恢复则失败，不能拿新数组补旧事实。
+
+- 普通重投首轮最终验证：Application相关42项全通过42.432s；完整Native receive_retry16项全通过129.249s，包含普通／顺序变化两种真实重投；metadata812包、workspace all-targets check3m17s、fmt／style／repository／隐私／diff全部通过。手工复查补回纯inline原有升级边界，随后扩大到完整apply_inbound相关测试。该inline测试首编译因直接访问private字段失败E0616，已改为现有StoreOnlyPullDeps/CommonDeps真实装配（没有新增setter或扩大接口）；首失败日志保留redelivery-inline-final-application.log，现运行redelivery-delivery-final-*。
+
+- inline补充测试第二轮：恢复行为已Applied，但新增断言误把正常begin_redelivery登记也要求为0（实际1）；这是测试度量选错，不改生产行为。改为严格要求正常登记1次且BeginReceiveRetryInput集合为空。保留redelivery-delivery-final-application.log失败；当前redelivery-verified-application.log完整136项通过44.706s，Native两项与根门禁继续有界串行执行。
+
+- 普通partial重投最终源快照验证：redelivery-verified-* 全阶段exit0；Application完整apply_inbound及取消相关136项通过44.706s；真实Native普通与顺序变化重投2项通过18.941s；metadata812包；workspace all-targets check3m16s；fmt／Rust style／repository含隐私与负例／diff全部通过。scope已inactive；活动期证据保存redelivery-verified-scope.log，观测MemoryPeak 3,223,322,624 bytes、MemoryHigh3GiB／Max5GiB／SwapMax4GiB，Cargo jobs1。手工代码复查完成，保持原材料／原身份、完整ledger、原action及实际取消屏障；纯inline正常修复覆盖。完整Native16项先于inline边界修正的源快照通过，不冒充最终头16项；本片没有完成整个spec。

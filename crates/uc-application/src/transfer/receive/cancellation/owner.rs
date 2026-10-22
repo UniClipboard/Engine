@@ -30,7 +30,7 @@ struct Job {
 pub(crate) struct CancelEntryReceiveUseCase {
     transport: Arc<BlobTransport>,
     pub(super) receive_work: Arc<ReceiveWorkRegistry>,
-    jobs: Mutex<HashMap<(EntryId, String), Job>>,
+    jobs: Arc<ReceiveCancellationJobs>,
     pub(super) get_attempt: Arc<dyn GetEntryAttemptPort>,
     pub(super) request_cancel: Arc<dyn RequestReceiveCancellationPort>,
     pub(super) commit_inbound: Arc<dyn CommitInboundReceivePort>,
@@ -42,7 +42,13 @@ pub(crate) struct CancelEntryReceiveUseCase {
     pub(super) host_event_bus: Arc<HostEventBus>,
 }
 
-impl ReceiveCancellationBarrier for CancelEntryReceiveUseCase {
+/// 所有接收入口共用实际取消任务的完成屏障，不持有接收或网络负责人。
+#[derive(Default)]
+pub(crate) struct ReceiveCancellationJobs {
+    jobs: Mutex<HashMap<(EntryId, String), Job>>,
+}
+
+impl ReceiveCancellationBarrier for ReceiveCancellationJobs {
     fn is_settling(&self, entry: &EntryId, attempt: &str) -> bool {
         self.jobs
             .lock()
@@ -65,11 +71,12 @@ impl CancelEntryReceiveUseCase {
         host_event_bus: Arc<HostEventBus>,
         transport: Arc<BlobTransport>,
         receive_work: Arc<ReceiveWorkRegistry>,
+        jobs: Arc<ReceiveCancellationJobs>,
     ) -> Arc<Self> {
         Arc::new(Self {
             transport,
             receive_work,
-            jobs: Mutex::new(HashMap::new()),
+            jobs,
             get_attempt,
             request_cancel,
             commit_inbound,
@@ -93,7 +100,11 @@ impl CancelEntryReceiveUseCase {
         let deadline = Instant::now() + CANCEL_WAIT_TIMEOUT;
         let key = (entry_id.clone(), expected_attempt_id.to_owned());
         let job = {
-            let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut jobs = self
+                .jobs
+                .jobs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             if let Some(existing) = jobs.get(&key) {
                 Ok(existing.clone())
             } else {

@@ -1068,3 +1068,9 @@ Core／App首轮29项通过（28.178秒），真实Profile阶段编译E0599发�
 metadata812包、workspace全目标check（3m52s）、fmt、Rust style、repository／1350隐私站点及diff全部通过。没有放宽原超时、并发或断言，没有新增观测订阅者。手工审查原始资源连续性、原attempt／AEAD／唯一记录、已交付保护和网络终态不回退，无可用code-review skill；未运行设备仍跳过。所有Cargo继续在单任务、3 GiB MemoryHigh／5 GiB MemoryMax／4 GiB MemorySwapMax和低CPU／IO权重中执行，保留原共享target与MBX。
 
 本轮不代表准备／最终交接的全部写入失败已经恢复：已经形成非终态网络记录而终态写入失败仍须由原网络负责人修复，不能按缺失规则绕过。普通已有partial重投映射、表示／目录完整预算与清理、全生命周期、受管1GiB、最终head网络／CI／设备矩阵及业务记录验收继续，完整spec未完成。
+
+- 当前普通partial重投切片：仍由完整接收负责人处理，调用方只发原SendFiles／接收动作，不增加重试编排接口。普通同内容投递应保留既有成功输出及其身份，只获取缺失项，并在原许可内逐项保存；必须先校验原始内容、来源材料和输出所有权，不以新数组位置冒充旧成果。先通过真实Engine第二次普通SendFiles、真实导出屏障和旧成功路径／字节取得红测，再检查现有源材料加载和内容摘要能力后实现完整映射。不可恢复的旧材料按原固定结果处理，不新增schema、持久recipe、SDK直拨或第二预算。取消／关闭继续归原owner，重启沿既有reconciliation。
+
+普通重投实现选择：新信封只触发同身份原接收单元的再次接收，不猜测其blob数组与旧成果的映射。共享原材料准备器按原表示ID／blob顺序核对已保存输出，只选择原失败／取消项，再沿既有accept_retry和完整ledger CAS建立新尝试；原材料不可恢复则明确失败并保留旧成果。实际取消任务完成屏障在Application装配时创建，供正常重投和手动重试共同读取；不反向持有Apply或引入新监督池。原纯inline升级不进入blob选择。首轮真实Native普通／顺序变化重投及16项接收重试组通过；inline修正后的最终门禁仍在执行，完整spec保持未完成。
+
+本切片最终源快照：136项Application入站／取消相关回归通过（44.706s）；真实Native普通与顺序变化重投两项通过（18.941s）；metadata812包、workspace all-targets check（3m16s）、fmt、Rust style、repository含隐私与负例、diff门禁全部通过。保留首轮重投获取成功项的红测，以及inline测试的编译与计数错误现场；未扩张接口或修改生产断言规避失败。此前完整16项Native receive_retry通过属于inline边界修正前快照，不等同最终头完整矩阵。手工复查确认原action／原许可、旧成功只读继承、完整新项ledger CAS、实际取消任务屏障及纯inline原路径；完整接收后的普通重复投递与其余spec继续验证，不归档本计划。

@@ -1,4 +1,5 @@
 //! 稳定Engine操作驱动真实网络、SQLite与文件成果；测试控制本地导出或保存故障。
+mod redelivery;
 mod save_failure;
 use super::{
     empty_engine_host, mount_engine_rendezvous, next_engine_event_matching,

@@ -160,6 +160,7 @@ async fn real_partial_materialization_query_only_completes_files_that_were_actua
             .returning(|_| Ok(None));
         let receiver = ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
             common: InboundApplyCommonDeps {
+                receive_retry: None,
                 receive_work: readiness.work_registry(),
                 entry_repo: Arc::new(repo),
                 capture: capture.clone(),
