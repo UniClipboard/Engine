@@ -390,3 +390,14 @@
 首轮五crate库2232通过／1失败／9跳过（200.781秒）：abandoned deletion在数据消失后立即重复删除，与原删除仍持有的封口竞争。原样单测4.510秒通过。测试改为等待该例唯一被丢弃等待的OperationFinished(Cancelled)完成事件后保留原NotFound断言；生产路径、超时与并发均未放宽。定向屏障4.622秒通过；最终同一源快照Core／Application／Engine／Storage／Content库2233通过／9跳过（197.177秒），metadata812包、workspace全目标check（1m43s）、repository、fmt、Rust style、1349站点观测隐私及diff通过。手工审查原子性、原许可和日志责任、已交付优先、底层终态不回退、source链及删除完成边界；code-review skill缺失，未冒称技能审查。设备未执行仍跳过。
 
 后续优先验证Root在FileFailureSettlementError之后begin_receive_failure也失败的路径：目前先尝试状态写入再检查原错误，可能覆盖已有双来源，尚无故障注入证据；需先证明并修复，再在真实Engine保存边界注入SQLite故障。结算存储失败后的资源持有／恢复移交尚未完成，本轮finish仍会释放资源，不能把它当完整预算验收。计数本轮只排除已持久本地失败，未保存但无failure_code的网络完成项仍沿既有统计；整个保存期间的计数语义须继续核对。普通已有partial重投映射、目录／表示完整预算、清理恢复、来源授权、全部生命周期、受管1GiB与最终head网络／CI／设备矩阵仍继续，完整spec未完成。
+
+
+### 2026-10-22 连续写入失败保留与真实保存故障验收
+
+Application实际故障注入证实：文件保存StorageFull、失败事实结算PermissionDenied后，Root再次写begin_receive_failure的ReadOnlyFilesystem覆盖了原双来源。Root现先识别未完成的文件失败结算，直接返回完整来源并保留原尝试／日志，不再尝试第三次批次状态写入；实际回归确认两个原IO种类均保留、失败转换调用为0及Receiving不伪报终态。完整手动重试23项通过（5.096秒）。本轮没有改变原许可、格式、schema、状态字符串或Engine接口。
+
+真实Engine经生产网络、实际V3／SQLite及稳定历史／重试操作，新增独立首／中／末保存故障：先在首个实际导出结束屏障安装按原item_id定向的SQL触发器，指定文件只有网络Completed后才拒绝保存；失败事实提交后不再拒绝最终部分汇总。三项网络／导出都成功，指定保存失败项被清理，其余两个均实际交付；重新打开数据库核对网络终态仍为Completed、失败项storage_unavailable及不同交付绑定。随后仅重试原失败摘要，三个文件最终成功，原两个成功文件路径与字节不变，protect／export累计仅四次。最终三个Native场景27.248秒通过，不使用存储替身、不新增测试schema。这里只重开数据库连接，不冒称该场景跨进程重启、来源C授权、Relay或1GiB资源验收。
+
+首轮完整五crate库2235通过／1超时／9跳过（253.933秒），既有engine_start_builds_a_resumable_real_session超过原20秒；原样单测13.463秒通过。没有改超时、并发4、断言或生产启动逻辑，准确超时触发点未证实。最终同一源快照Core／Application／Engine／Storage／Content库2236通过／9跳过（215.351秒），该启动测试11.695秒通过；metadata812包、workspace全目标check（1m34s）、repository、fmt、Rust style、1349站点隐私及diff全部通过。手工审查负责人顺序、来源保留、定向故障的事务边界、实际保存结果和仅失败项重试；code-review skill缺失，未冒称技能审查。设备未执行仍跳过。
+
+下一片优先未完成结算的资源责任：ReceiveAction.finish仍通过ReceiveBatch.finish清除local_work／commit_handoff，文件失败事实本身尚未写成时原许可和保护仍会释放。须用实际失败结算／关闭屏障先取得证据，明确原监督动作或既有reconciliation的完整移交，直到真实结算才能归还4／2许可，不能以错误对象持资源、第二预算或仅内存持有者替代活跃负责人。普通已有partial重投映射、准备拒绝交接、目录／表示完整预算、未保存阶段计数、来源授权、生命周期、受管1GiB及最终head网络／CI／设备矩阵仍继续，完整spec未完成。

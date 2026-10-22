@@ -1,4 +1,5 @@
-//! 稳定Engine操作驱动真实网络、SQLite与文件成果；测试仅控制本地导出边界。
+//! 稳定Engine操作驱动真实网络、SQLite与文件成果；测试控制本地导出或保存故障。
+mod save_failure;
 use super::{
     empty_engine_host, mount_engine_rendezvous, next_engine_event_matching,
     MemoryHostSecureStorage, StaticHostClipboard, ENGINE_TEST_LOCK,
@@ -185,17 +186,21 @@ impl ReceiveCase {
 }
 
 async fn receive_case(pause_first: bool) -> ReceiveCase {
-    receive_case_with_progress(pause_first, false).await
+    receive_case_with_progress(pause_first, false, 1).await
 }
 
-async fn receive_case_with_progress(pause_first: bool, prove_progress: bool) -> ReceiveCase {
+async fn receive_case_with_progress(
+    pause_first: bool,
+    prove_progress: bool,
+    fail_export_at: usize,
+) -> ReceiveCase {
     let server = MockServer::start().await;
     mount_engine_rendezvous(&server).await;
     let source_root = tempfile::tempdir().unwrap();
     let receiver_root = tempfile::tempdir().unwrap();
     let exports = ReceiveExports::install(
         receiver_root.path(),
-        1,
+        fail_export_at,
         if prove_progress {
             2
         } else if pause_first {
@@ -379,7 +384,7 @@ async fn receive_case_with_progress(pause_first: bool, prove_progress: bool) -> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_file_is_durably_saved_while_batch_and_later_file_are_still_receiving() {
     let _lock = ENGINE_TEST_LOCK.lock().await;
-    let case = receive_case_with_progress(false, true).await;
+    let case = receive_case_with_progress(false, true, 1).await;
     assert_eq!(case.saved.len(), 2);
     case.shutdown().await;
 }

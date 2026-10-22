@@ -245,6 +245,10 @@ async fn failure_settlement_error_preserves_both_sources_and_keeps_attempt_nonte
         .attempts
         .fail_file_settlement
         .store(true, Ordering::SeqCst);
+    fixture
+        .attempts
+        .fail_begin_failure
+        .store(true, Ordering::SeqCst);
     let (facade, transport, protected) = local_file_probe();
     let apply = fixture
         .apply
@@ -277,7 +281,12 @@ async fn failure_settlement_error_preserves_both_sources_and_keeps_attempt_nonte
         .is_some_and(|source| source.kind() == io::ErrorKind::PermissionDenied)));
     assert_eq!(
         *fixture.attempts.state.lock().unwrap(),
-        AttemptState::Failing
+        AttemptState::Receiving
+    );
+    assert_eq!(
+        fixture.attempts.failure_begin_calls.load(Ordering::SeqCst),
+        0,
+        "未完成的文件结算直接移交恢复，不再写批次失败"
     );
     assert_eq!(fixture.capture.progress_calls.load(Ordering::SeqCst), 1);
     assert!(fixture.attempts.file_failures.lock().unwrap().is_empty());

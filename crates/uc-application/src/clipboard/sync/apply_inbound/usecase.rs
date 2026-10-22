@@ -1372,6 +1372,17 @@ impl ApplyInboundClipboardUseCase {
                     let mut result = match materializer.materialize_plan(plan).await {
                         Ok(result) => result,
                         Err(error) => {
+                            // 本地失败尚未完成持久结算；再写批次失败可能覆盖原双来源。
+                            if let Some(failure) =
+                                error.downcast_ref::<FileFailureSettlementError>()
+                            {
+                                uc_warn!(
+                                    error_kind = "receive_file_failure_settlement",
+                                    io_error_kind = io_error_kind(failure.settlement.as_ref()),
+                                    "receive file failure settlement remains incomplete"
+                                );
+                                return Err(ApplyInboundError::Internal(error));
+                            }
                             let cancelled = is_directory_cancel_error(&error);
                             let terminal = if cancelled {
                                 self.request_receive_cancellation(
@@ -1398,16 +1409,6 @@ impl ApplyInboundClipboardUseCase {
                                 return Err(ApplyInboundError::Internal(
                                     error.context("cleanup inbound file output"),
                                 ));
-                            }
-                            if let Some(failure) =
-                                error.downcast_ref::<FileFailureSettlementError>()
-                            {
-                                uc_warn!(
-                                    error_kind = "receive_file_failure_settlement",
-                                    io_error_kind = io_error_kind(failure.settlement.as_ref()),
-                                    "receive file failure settlement remains incomplete"
-                                );
-                                return Err(ApplyInboundError::Internal(error));
                             }
                             self.settle_receive_without_entry(
                                 &receiver_entry_id,

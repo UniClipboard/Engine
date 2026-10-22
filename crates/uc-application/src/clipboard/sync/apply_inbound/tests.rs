@@ -212,6 +212,8 @@ struct AttemptGate {
     commit_calls: AtomicUsize,
     file_failures: Mutex<Vec<(String, uc_core::ports::ReceiveFileFailure)>>,
     fail_file_settlement: AtomicBool,
+    fail_begin_failure: AtomicBool,
+    failure_begin_calls: AtomicUsize,
     phases: Mutex<Vec<PublishPhase>>,
     root_maps: Mutex<Vec<Vec<(PathBuf, PathBuf)>>>,
 }
@@ -230,6 +232,8 @@ impl AttemptGate {
             commit_calls: AtomicUsize::new(0),
             file_failures: Mutex::new(Vec::new()),
             fail_file_settlement: AtomicBool::new(false),
+            fail_begin_failure: AtomicBool::new(false),
+            failure_begin_calls: AtomicUsize::new(0),
             phases: Mutex::new(Vec::new()),
             root_maps: Mutex::new(Vec::new()),
         })
@@ -385,6 +389,12 @@ impl BeginReceiveFailurePort for AttemptGate {
         attempt_id: &str,
         _now_ms: i64,
     ) -> std::result::Result<BeginReceiveFailureOutcome, AttemptError> {
+        self.failure_begin_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_begin_failure.load(Ordering::SeqCst) {
+            return Err(AttemptError::Backend(Box::new(std::io::Error::from(
+                std::io::ErrorKind::ReadOnlyFilesystem,
+            ))));
+        }
         let is_current = self.attempt_id.lock().unwrap().as_str() == attempt_id;
         let mut state = self.state.lock().unwrap();
         if is_current && matches!(*state, AttemptState::Receiving | AttemptState::Committing) {
