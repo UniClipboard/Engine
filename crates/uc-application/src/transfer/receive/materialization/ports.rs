@@ -3,7 +3,7 @@ use crate::facade::blob_transfer::{
     BlobTransferFacade, FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand,
     FetchBlobToPathResult, FetchTransferContext,
 };
-use anyhow::Result;
+use anyhow::{Error as SourceError, Result};
 use async_trait::async_trait;
 use uc_core::file_transfer::FileTransferFailureReason;
 use uc_core::{
@@ -68,15 +68,33 @@ impl InboundBlobFetcher for BlobTransferFacade {
     }
 }
 
+/// 输出清理前的实际结果；只有业务保存失败需要补记网络完成后的FileFailed。
+#[derive(Clone, Copy)]
+pub(crate) enum ReceiveOutputFailure {
+    FileCommit(ReceiveFileFailure),
+    FetchFailure,
+    FetchCancellation,
+}
+impl ReceiveOutputFailure {
+    pub(crate) fn is_cancelled(self) -> bool {
+        matches!(
+            self,
+            Self::FetchCancellation | Self::FileCommit(ReceiveFileFailure::Cancelled)
+        )
+    }
+}
+
 /// 接收负责人在原许可内保存一个文件及当前完整的交付事实。
 #[async_trait]
 pub(crate) trait ReceiveFileProgress: Send + Sync {
-    /// 保存和物理清理均失败，把本项剩余责任交给仍持原资源的接收动作。
-    fn defer_file_cleanup(
+    /// 获取或保存失败且输出仍未清理，把剩余责任交给仍持原资源的接收动作。
+    fn defer_output_cleanup(
         &self,
         artifact: &ReceiveArtifact,
-        failure: ReceiveFileFailure,
+        failure: ReceiveOutputFailure,
         artifacts: &[ReceiveArtifact],
+        has_artifact_journal: bool,
+        cause: &SourceError,
     );
 
     /// 本项输出已清理，记录实际失败并解除其日志责任；失败不能宣称结算完成。

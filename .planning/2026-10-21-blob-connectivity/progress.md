@@ -448,3 +448,13 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 - 初轮真实Engine保存故障5项通过（47.601秒），新增物理输出清理故障9.248秒通过。审查发现只等网络Completed仍有关闭先取消保存的时序缺口；测试现等待原EventStream的InboundNotice完整入口结果通知，证明原保存失败已经返回后再执行100ms关闭，不新增订阅者或sleep，不放宽断言。需验证此最后测试快照及根门禁。
 
 - 保存后物理清理切片最终相关App25项通过（25.148秒）；带完整入口事件屏障的真实Native5项通过（47.537秒），新增场景9.450秒。metadata812包、workspace全目标check（3m17s）、fmt、Rust style、repository／1350隐私站点、diff全部通过。手工审查资源连续性、单次清理、原错误与事务、无重传和关闭边界，无可用code-review skill。不把前一提交的2244全量测试当本次结果；未运行设备仍跳过。
+
+- 获取失败恢复编辑时将use插入模块内文档之前，fmt首次E0753；已将导入移回模块入口文档之后，不更改文档类型或绕过fmt。
+
+- 获取失败恢复首轮扩大25通过／2失败（26.169秒）：旧mock清理错误测试仍假定责任返回后结束、期望旧OutputCleanupFailure；已由实际Facade、原许可和实际IsADirectory的强用例替代，源和取消断言移入该完整流程。新增用例已证实资源保留，但错误地要求已结算后的transport关闭忽略原Store错误。依据原supervision.rs把完成错误保留至关闭及shutdown_failure固定分类，现明确断言原Store／StorageFull不丢失，取消才关闭成功；生产关闭分类不改。
+
+- 获取清理最终验证已启动：scope uni-blob-fetch-cleanup-final，PID1803067；App相关、Native六项、metadata、workspace、fmt／style／repository／diff严格顺序。日志fetch-cleanup-final-*.log，先看stage和exit，禁止因静默重启。当前未声明新快照通过或提交；原5 GiB内存硬上限／4 GiB swap、单构建任务持续。
+
+- 分类修复后的App26项通过（26.187秒），包含清理阻塞时StorageUnavailable／Cancelled查询、原保护仍持有，以及关闭保留原Store／StorageFull。Native同源重跑仍在编译，scope uni-blob-fetch-cleanup-reason-final、PID1818283，当前无最终通过结论。
+
+- 获取失败清理与查询分类最终同源：App26通过（26.187秒），Native6通过（58.593秒；新增导出故障10.257秒）。metadata812包、workspace全目标check3m18s、fmt／style／repository／1350隐私／diff均通过。保留原失败日志，不更改超时、并发或生产关闭分类。当前手工审查后提交；后续先证明物理清理成功但原日志重写失败时的来源与资源，完整spec继续。

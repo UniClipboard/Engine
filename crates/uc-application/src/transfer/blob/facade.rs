@@ -913,14 +913,24 @@ pub(super) mod tests {
             Ok(DeviceId::new("peer"))
         }
     }
-    /// 实际下载调度与文件输出；本地存储替身显式持有可计数保护，不模拟网络验收。
-    pub(crate) fn local_file_probe() -> (
+    /// 导出失败后留下实际不可remove_file的目标，观察完整清理责任。
+    pub(crate) struct FailedFileExport {
+        pub(crate) output: std::sync::Mutex<Option<std::path::PathBuf>>,
+        pub(crate) cancelled: bool,
+    }
+    /// 实际下载调度与文件输出；本地替身持有可计数保护，不模拟网络验收。
+    pub(crate) fn local_file_probe(
+        failed_export: Option<Arc<FailedFileExport>>,
+    ) -> (
         Arc<BlobTransferFacade>,
         Arc<BlobTransport>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
         use crate::transfer::blob::test_support::{FakeLocalStore, RejectUnexpectedNetwork};
-        let transfer = Arc::new(BlockingBlobTransfer::new());
+        let transfer = Arc::new(BlockingBlobTransfer {
+            failed_export,
+            ..BlockingBlobTransfer::new()
+        });
         transfer.release.add_permits(1024);
         let protected = transfer.protected.clone();
         let transport = BlobTransport::new(
@@ -947,6 +957,7 @@ pub(super) mod tests {
     }
 
     struct BlockingBlobTransfer {
+        failed_export: Option<Arc<FailedFileExport>>,
         started: Semaphore,
         release: Semaphore,
         fail_reads: std::sync::atomic::AtomicBool,
@@ -956,6 +967,7 @@ pub(super) mod tests {
     impl BlockingBlobTransfer {
         fn new() -> Self {
             Self {
+                failed_export: None,
                 started: Semaphore::new(0),
                 release: Semaphore::new(0),
                 fail_reads: std::sync::atomic::AtomicBool::new(false),
@@ -996,6 +1008,19 @@ pub(super) mod tests {
         async fn export(&self, _: BlobDigest, target: &Path) -> Result<u64, BlobExchangeError> {
             self.started.add_permits(1);
             self.release.acquire().await.unwrap().forget();
+            if let Some(failure) = &self.failed_export {
+                tokio::fs::remove_file(target).await.unwrap();
+                tokio::fs::create_dir(target).await.unwrap();
+                *failure.output.lock().unwrap() = Some(target.to_owned());
+                return Err(if failure.cancelled {
+                    BlobExchangeError::refused(BlobExchangeFailure::Cancelled)
+                } else {
+                    BlobExchangeError::new(
+                        BlobExchangeFailure::Store,
+                        std::io::Error::from(std::io::ErrorKind::StorageFull),
+                    )
+                });
+            }
             tokio::fs::write(target, b"retried")
                 .await
                 .map_err(|source| BlobExchangeError::new(BlobExchangeFailure::Store, source))?;

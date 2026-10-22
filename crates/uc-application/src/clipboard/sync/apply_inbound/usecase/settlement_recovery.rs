@@ -1,6 +1,6 @@
 //! 原处理任务负责失败事实与清理的本地修复；不重新获取或保存业务内容。
 use super::{ApplyInboundClipboardUseCase, ApplyInboundError};
-use crate::transfer::receive::materialization::remove_uncommitted_output;
+use crate::transfer::receive::materialization::{remove_uncommitted_output, ReceiveOutputFailure};
 use crate::transfer::receive::work::{ReceiveAction, ReceiveWorkError, UnsettledFile};
 use anyhow::{anyhow, Error as SourceError};
 use std::{sync::Arc, time::Duration};
@@ -11,7 +11,6 @@ use uc_core::file_transfer::{
 };
 use uc_core::ports::{
     AttemptState, BeginReceiveFailureOutcome, InboundReceiveSettlement, PartialReceiveTerminal,
-    ReceiveFileFailure,
 };
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
@@ -31,11 +30,12 @@ impl ApplyInboundClipboardUseCase {
                 .await
             {
                 Ok(terminal) => {
-                    let status = match pending.failure {
-                        ReceiveFileFailure::Failed(_) => OutboundProgressStatus::Failed,
-                        ReceiveFileFailure::Cancelled => OutboundProgressStatus::Cancelled {
+                    let status = if pending.failure.is_cancelled() {
+                        OutboundProgressStatus::Cancelled {
                             reason: FileTransferCancellationReason::LocalUser,
-                        },
+                        }
+                    } else {
+                        OutboundProgressStatus::Failed
                     };
                     action.batch.settled(match terminal {
                         PartialReceiveTerminal::Failed => AttemptState::Failed,
@@ -80,19 +80,21 @@ impl ApplyInboundClipboardUseCase {
             // 清理成功后不再触碰相同路径；存储重试期间该路径可能已被重新使用。
             *output_cleaned = true;
         }
-        if !*file_recorded {
-            ports
-                .commit
-                .commit_inbound_receive(&InboundReceiveSettlement::FileFailed {
-                    entry_id: pending.entry.clone(),
-                    attempt_id: pending.attempt.clone(),
-                    artifact: pending.artifact.clone(),
-                    failure: pending.failure,
-                    now_ms: ports.clock.now_ms(),
-                })
-                .await
-                .map_err(|error| ApplyInboundError::Internal(SourceError::new(error)))?;
-            *file_recorded = true;
+        if let ReceiveOutputFailure::FileCommit(failure) = pending.failure {
+            if !*file_recorded {
+                ports
+                    .commit
+                    .commit_inbound_receive(&InboundReceiveSettlement::FileFailed {
+                        entry_id: pending.entry.clone(),
+                        attempt_id: pending.attempt.clone(),
+                        artifact: pending.artifact.clone(),
+                        failure,
+                        now_ms: ports.clock.now_ms(),
+                    })
+                    .await
+                    .map_err(|error| ApplyInboundError::Internal(SourceError::new(error)))?;
+                *file_recorded = true;
+            }
         }
         // CAS 后重新读取权威；取消可赢得父尝试，但不得覆盖已交付成功项。
         loop {
@@ -109,6 +111,11 @@ impl ApplyInboundClipboardUseCase {
             .map_err(|error| ApplyInboundError::Internal(SourceError::new(error)))?
             {
                 ReceiveFailureRecoveryAction::ClaimFailure => {
+                    if pending.failure.is_cancelled() {
+                        self.request_receive_cancellation(&pending.entry, Some(&pending.attempt))
+                            .await?;
+                        continue;
+                    }
                     match ports
                         .begin_failure
                         .begin_receive_failure(
@@ -135,7 +142,7 @@ impl ApplyInboundClipboardUseCase {
                         Some(&pending.attempt),
                         terminal,
                         &pending.remaining,
-                        true,
+                        pending.has_artifact_journal,
                     )
                     .await?;
                     return Ok(terminal);

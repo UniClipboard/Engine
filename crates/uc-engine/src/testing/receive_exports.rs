@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::bytes::Bytes;
@@ -17,6 +18,7 @@ pub(crate) struct ReceiveExports {
     pub protects: Mutex<Vec<BlobDigest>>,
     pub exports: Mutex<Vec<BlobDigest>>,
     pub paths: Mutex<Vec<PathBuf>>,
+    pub obstruct_failure: AtomicBool,
     fail_at: usize,
     pause_at: usize,
     pub paused: Notify,
@@ -29,6 +31,7 @@ impl ReceiveExports {
             protects: Mutex::new(Vec::new()),
             exports: Mutex::new(Vec::new()),
             paths: Mutex::new(Vec::new()),
+            obstruct_failure: AtomicBool::new(false),
             fail_at,
             pause_at,
             paused: Notify::new(),
@@ -92,6 +95,10 @@ impl BlobReadStorePort for ObservedExports {
             index
         };
         if index == self.fixture.fail_at {
+            if self.fixture.obstruct_failure.load(Ordering::SeqCst) {
+                tokio::fs::remove_file(target).await.unwrap();
+                tokio::fs::create_dir(target).await.unwrap();
+            }
             return Err(BlobExchangeError::new(
                 BlobExchangeFailure::Store,
                 io::Error::from(io::ErrorKind::StorageFull),

@@ -14,7 +14,7 @@ use uc_core::ports::ReceiveItemRole;
 async fn single_file_cancel_during_owned_save_waits_for_actual_settlement() {
     let fixture = Fixture::new(0).await;
     fixture.capture.slow.store(true, Ordering::SeqCst);
-    let (facade, transport, protected) = local_file_probe();
+    let (facade, transport, protected) = local_file_probe(None);
     let apply = Arc::new(
         fixture
             .apply
@@ -141,7 +141,7 @@ async fn single_file_cancel_during_owned_save_waits_for_actual_settlement() {
 async fn save_failure_remains_the_same_failure_for_repeated_single_file_cancellation() {
     let fixture = Fixture::new(0).await;
     fixture.capture.slow.store(true, Ordering::SeqCst);
-    let (facade, transport, protected) = local_file_probe();
+    let (facade, transport, protected) = local_file_probe(None);
     let apply = Arc::new(
         fixture
             .apply
@@ -207,7 +207,7 @@ async fn save_failure_remains_the_same_failure_for_repeated_single_file_cancella
 async fn observing_already_settled_file_failure_does_not_create_a_failed_stop_job() {
     let fixture = Fixture::new(0).await;
     *fixture.capture.fail_progress_at.lock().unwrap() = Some(0);
-    let (facade, transport, protected) = local_file_probe();
+    let (facade, transport, protected) = local_file_probe(None);
     let apply = fixture
         .apply
         .as_ref()

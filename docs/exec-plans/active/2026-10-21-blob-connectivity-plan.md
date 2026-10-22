@@ -1040,3 +1040,17 @@ Application 实际 Facade／调度／文件输出屏障覆盖两个阶段：失�
 Application完整重试／实际Facade／实际文件系统拒绝与明确capture替身25项通过（25.148秒），新增回归保持旧成功文件，并证明清理完成后父CAS仍失败时原资源保持且后来出现的用户文件不被删除。最终真实Engine／网络／V3／SQLite五项保存故障通过（47.537秒），新增物理清理场景9.450秒通过：实际导出后把本次输出变为不能remove_file的目录，原SQL保存被拒绝；等待既有EventStream的完整入口结果通知后，100ms关闭明确期限到期，待结算日志保留；解除故障后原任务结算，重开数据库保持网络Completed、storage_unavailable及settled／rolled_back，导出仍仅一次。没有新增观测订阅者或sleep、放宽超时或改变测试并发。
 
 最终metadata812包、workspace全目标check（3m17s）、fmt、Rust style、repository／1350站点隐私及diff均通过。App25项和最终Native5项为本次相关验证，未重复宣称前一提交的2244库测试为当前源快照的全量结果。手工审查原任务／许可、单次清理、源错误、原事务及关闭边界，无可用code-review skill。路径复用保护的证明限定同进程后续存储／父CAS重试；物理清理与持久交接间崩溃窗口、网络失败／准备失败／目录清理责任及其余完整spec仍须继续，不把本轮当全部清理恢复完成。
+
+- 当前获取失败清理切片：ReceiveAction仍完整负责，调用方只提交原接收／重试。下载或准备失败／取消后，若已创建输出不能物理清理，原动作须继续持原许可，先完成输出清理，再沿原attempt和NoEntry原子结算日志；网络终态已有Failed／Cancelled时禁止借用只接受Completed的FileFailed。准备日志写入失败时按实际journaled事实结算，不伪造持久日志。取消仍由原CAS取得权威；恢复不重新获取／保存，不加池、预算、schema或Engine阶段接口。先用原Facade、受控本地导出失败和实际IsADirectory取得资源红测，再验证真实Engine第二项导出失败及关闭／数据库重开；目录和旧partial普通重投保持未完成。
+
+### 2026-10-22 获取失败与取消后的物理清理
+
+真实Facade／原下载调度与受控导出在Store失败后留下实际不能remove_file的目录，红测证明清理未完成但原保护为0而非1。现同一ReceiveAction接收该项原始责任，保留原许可及保护直到物理清理与父尝试、产物日志实际结算；恢复意图区分FileCommit、FetchFailure和FetchCancellation。只有FileCommit补写已有FileFailed，获取已经失败／取消则保留原网络事实；按实际journaled标记结算NoEntry，取消仍由原CAS争取权威。没有新池、预算、schema或Engine内部接口。
+
+原只检查错误的mock用例由完整Facade／资源／文件系统用例替代，原始IO、取消与清理来源断言保留并扩展。首轮25通过／2失败：旧类型断言不再匹配，以及新用例错误地要求关闭忽略原Store。依据原supervision和shutdown_failure合同，测试现明确断言资源已结算时原Store／StorageFull仍返回，取消才关闭成功；未修改生产关闭分类。
+
+真实Engine第二项导出失败／物理清理拒绝又复现等待期分类Unknown而非StorageUnavailable（8.228秒失败，其余5项通过）。原批次现仅补记已经发生的获取结果与具体来源分类，不调用item_result、不结束LocalSettlement、不移动资源；业务保存失败仍等FileFailed持久事实。新增实际应用查询在清理阻塞时同时检查Failed／Cancelled、具体原因及原保护1。
+
+最终相关App26项通过（26.187秒）；默认无新增订阅者Native六项通过（58.593秒），新增导出失败场景10.257秒。Native使用原EventStream完整结果通知，实际网络／V3／SQLite证明旧成功文件不变、100ms关闭等待、解除故障后原网络Failed及storage_unavailable保持、重开日志settled／rolled_back且未启动后项。metadata812包、workspace全目标check（3m18s）、fmt、Rust style、repository／1350隐私站点及diff全部通过。手工审查同一任务／许可、来源、实际journaled与原CAS、网络终态不回退，无可用code-review skill；未重复宣称旧快照全量结果为本次结果。未运行设备仍跳过。
+
+本轮只证明获取／取消及准备失败分支的物理清理拒绝交接。准备路径目前只有共用分支与既有直接物化测试，尚未完成实际Engine准备失败矩阵；物理清理成功后重写产物日志失败、目录／表示、普通已有partial重投、交接本身失败的网络分类及其余完整spec继续，不把该片当全部恢复完成。

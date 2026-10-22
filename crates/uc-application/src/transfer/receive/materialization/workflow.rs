@@ -1,11 +1,11 @@
 //! 接收计划的文件物化、目录发布及本地产物结算。
 
 use super::super::identity::{directory_member_transfer_id, directory_representation_transfer_id};
-use super::cleanup::{remove_uncommitted_output, OutputCleanupFailure};
+use super::cleanup::{output_cleanup_failure, remove_uncommitted_output};
 use super::output::{FileOutputJournal, FileOutputPreparation, PreparedReceiveOutput};
 use super::progress::FileProgressSnapshot;
 use super::reuse::validate_selection;
-use super::{receive_member_totals, ReceivedItem, ReceivedOutput};
+use super::{receive_member_totals, ReceiveOutputFailure, ReceivedItem, ReceivedOutput};
 use super::{FileFailureSettlementError, FileProgressCommitError};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -1076,11 +1076,15 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 {
                     if let Some(path) = &path {
                         if let Err(cleanup) = remove_uncommitted_output(path).await {
-                            return Err(OutputCleanupFailure {
+                            return Err(output_cleanup_failure(
+                                progress.as_deref(),
+                                artifact.as_ref(),
+                                ReceiveOutputFailure::FetchFailure,
+                                &receive_artifacts,
+                                artifact_journaled,
                                 cleanup,
-                                cause: error,
-                            }
-                            .into());
+                                error,
+                            ));
                         }
                     }
                     return Err(error);
@@ -1089,7 +1093,15 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     // 只移除本项预留；单项取消继续其余文件，整计划停止才终止循环。
                     if let Some(path) = &path {
                         if let Err(cleanup) = remove_uncommitted_output(path).await {
-                            return Err(OutputCleanupFailure { cleanup, cause: e }.into());
+                            return Err(output_cleanup_failure(
+                                progress.as_deref(),
+                                artifact.as_ref(),
+                                ReceiveOutputFailure::FetchCancellation,
+                                &receive_artifacts,
+                                artifact_journaled,
+                                cleanup,
+                                e,
+                            ));
                         }
                         receive_artifacts.pop();
                         artifact_journaled |= self
@@ -1146,7 +1158,15 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     // deletion never touch) or block the name for a retry.
                     if let Some(path) = &path {
                         if let Err(cleanup) = remove_uncommitted_output(path).await {
-                            return Err(OutputCleanupFailure { cleanup, cause: e }.into());
+                            return Err(output_cleanup_failure(
+                                progress.as_deref(),
+                                artifact.as_ref(),
+                                ReceiveOutputFailure::FetchFailure,
+                                &receive_artifacts,
+                                artifact_journaled,
+                                cleanup,
+                                e,
+                            ));
                         }
                         receive_artifacts.pop();
                         artifact_journaled |= self
@@ -1228,7 +1248,13 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         ReceiveFileFailure::Failed(ReceiveItemFailureReason::StorageUnavailable)
                     };
                     if let Err(cleanup) = remove_uncommitted_output(&path).await {
-                        progress.defer_file_cleanup(&artifact, failure, &receive_artifacts);
+                        progress.defer_output_cleanup(
+                            &artifact,
+                            ReceiveOutputFailure::FileCommit(failure),
+                            &receive_artifacts,
+                            artifact_journaled,
+                            &error,
+                        );
                         return Err(FileFailureSettlementError {
                             cause: error,
                             settlement: cleanup.into(),

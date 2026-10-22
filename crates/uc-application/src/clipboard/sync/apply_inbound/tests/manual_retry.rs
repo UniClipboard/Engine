@@ -19,9 +19,7 @@ use crate::facade::HostEventBus;
 use crate::space::{
     CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
 };
-use crate::transfer::receive::materialization::{
-    OutputCleanupFailure, ReceiveSelection, ReceivedItem, ReceivedOutput,
-};
+use crate::transfer::receive::materialization::{ReceiveSelection, ReceivedItem, ReceivedOutput};
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 use crate::transfer::receive::retry::{
     BeginReceiveRetryInput, BeginReceiveRetryPort, PreparedReceiveRetry,
@@ -48,74 +46,6 @@ use uc_core::ports::{
     ReceiveItemProgress, TrackedFileTransferStatus,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SnapshotHash, SystemClipboardSnapshot};
-
-#[tokio::test]
-async fn manual_retry_cleanup_failure_preserves_sources_and_keeps_attempt_nonterminal() {
-    for cancelled in [false, true] {
-        let fixture = Fixture::new(0).await;
-        let mut fetcher = MockBlobFetcher::new();
-        fetcher
-            .expect_fetch_blob_to_path()
-            .times(1)
-            .returning(move |command| {
-                // 目录不能由remove_file清理，模拟实际文件系统拒绝而非fake清理结果。
-                std::fs::remove_file(&command.target_path).unwrap();
-                std::fs::create_dir(&command.target_path).unwrap();
-                Err(if cancelled {
-                    BlobTransferError::Cancelled.into()
-                } else {
-                    io::Error::from(io::ErrorKind::StorageFull).into()
-                })
-            });
-        let receiver = fixture
-            .apply
-            .as_ref()
-            .clone()
-            .with_blob_materializer(Arc::new(test_materializer(
-                Arc::new(fetcher),
-                fixture._cache.path().to_owned(),
-            )));
-        let (prepared, reply) = fixture.prepared();
-        let error = receiver.execute_retry(prepared).await.unwrap_err();
-        assert!(matches!(
-            reply.await.unwrap(),
-            RetryEntryReceiveOutcome::Accepted { .. }
-        ));
-        let ApplyInboundError::Internal(source) = error else {
-            panic!("cleanup failure must retain its source")
-        };
-        let cleanup = source
-            .chain()
-            .find_map(|error| error.downcast_ref::<OutputCleanupFailure>())
-            .unwrap();
-        assert_eq!(cleanup.cleanup.kind(), io::ErrorKind::IsADirectory);
-        if cancelled {
-            assert!(source.chain().any(|error| matches!(
-                error.downcast_ref::<BlobTransferError>(),
-                Some(BlobTransferError::Cancelled)
-            )));
-        } else {
-            assert_eq!(
-                source
-                    .chain()
-                    .find_map(|error| error.downcast_ref::<io::Error>())
-                    .unwrap()
-                    .kind(),
-                io::ErrorKind::StorageFull
-            );
-        }
-        assert_eq!(
-            *fixture.attempts.state.lock().unwrap(),
-            if cancelled {
-                AttemptState::Cancelling
-            } else {
-                AttemptState::Failing
-            }
-        );
-        assert!(fixture.capture.snapshots.lock().unwrap().is_empty());
-        assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
-    }
-}
 
 #[tokio::test]
 async fn discarded_partial_redelivery_preserves_original_saved_recipe_for_manual_retry() {
@@ -992,7 +922,7 @@ async fn actual_download_retains_original_protection_and_capacity_through_owned_
     use crate::transfer::blob::transport::{BlobExchangeFailure, BlobShutdownWait};
     let fixture = Fixture::new(0).await;
     fixture.capture.slow.store(true, Ordering::SeqCst);
-    let (facade, transport, protected) = local_file_probe();
+    let (facade, transport, protected) = local_file_probe(None);
     let apply = Arc::new(
         fixture
             .apply

@@ -38,7 +38,7 @@ impl InboundBlobFetcher for BeforeCommit {
 #[tokio::test]
 async fn single_file_cancel_before_commit_refuses_save_and_preserves_sibling_delivery() {
     let fixture = Fixture::new(0).await;
-    let (facade, transport, protected) = local_file_probe();
+    let (facade, transport, protected) = local_file_probe(None);
     let bridge = Arc::new(BeforeCommit {
         inner: facade.clone(),
         entered: Notify::new(),

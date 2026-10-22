@@ -16,8 +16,8 @@ pub use model::{
     InboundFileSetManifest, InboundFileSetMember, MaterializeOutcome, MaterializeResult,
     MissingFileRef, ReceiveWorkPlan,
 };
-pub(crate) use ports::ReceiveFileProgress;
 pub use ports::{InboundBlobFetcher, InboundBlobMaterializer};
+pub(crate) use ports::{ReceiveFileProgress, ReceiveOutputFailure};
 pub(crate) use workflow::{
     compute_file_set_component, is_directory_cancel_error, verify_file_set_identity,
 };

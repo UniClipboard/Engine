@@ -31,7 +31,7 @@ impl RecordReceiveArtifactsPort for FailedCleanupJournal {
 #[tokio::test]
 async fn nine_file_retry_commits_each_file_under_original_permit_without_accumulating_capacity() {
     let fixture = Fixture::with_items(0, 10).await;
-    let (facade, transport, protected) = local_file_probe();
+    let (facade, transport, protected) = local_file_probe(None);
     *fixture.capture.guards.lock().unwrap() = Some(protected.clone());
     let apply = fixture
         .apply
@@ -89,7 +89,7 @@ async fn nine_file_retry_commits_each_file_under_original_permit_without_accumul
 async fn failed_file_commit_cleans_only_its_output_and_next_file_can_commit() {
     let fixture = Fixture::new(0).await;
     *fixture.capture.fail_progress_at.lock().unwrap() = Some(0);
-    let (facade, transport, protected) = local_file_probe();
+    let (facade, transport, protected) = local_file_probe(None);
     *fixture.capture.guards.lock().unwrap() = Some(protected.clone());
     let journal = Arc::new(FailedCleanupJournal::default());
     let materializer = test_materializer(facade, fixture._cache.path().to_owned())
@@ -190,7 +190,7 @@ async fn failed_file_commit_cleans_only_its_output_and_next_file_can_commit() {
 async fn cancellation_cas_before_stop_notification_prevents_next_file_and_keeps_saved_success() {
     let fixture = Fixture::new(0).await;
     *fixture.capture.cancel_progress_at.lock().unwrap() = Some(0);
-    let (facade, transport, protected) = local_file_probe();
+    let (facade, transport, protected) = local_file_probe(None);
     let apply = fixture
         .apply
         .as_ref()
@@ -250,7 +250,7 @@ async fn failure_settlement_error_preserves_both_sources_and_keeps_attempt_nonte
         .attempts
         .fail_begin_failure
         .store(true, Ordering::SeqCst);
-    let (facade, transport, protected) = local_file_probe();
+    let (facade, transport, protected) = local_file_probe(None);
     let apply = fixture
         .apply
         .as_ref()

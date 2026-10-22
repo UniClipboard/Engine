@@ -19,7 +19,11 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。最终App25项／Native5项通过，metadata812包、workspace全目标check3m17s、fmt／style／repository／1350隐私／diff通过，正在提交保存后物理清理切片。下一步先证明网络失败／取消或准备失败后的物理清理拒绝是否同样释放资源，并检查现有FileFailed只接受raw Completed，不能把网络失败硬写成该事实；沿同一负责人、原产物日志与NoEntry结算设计，不加池或schema。
+业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。保存后物理清理已提交01783244（App25／Native5及根门禁）。当前未提交获取失败／取消清理恢复：fetch-cleanup-red实际Facade保护0／期望1（0.007秒）；恢复意图区分FileCommit、FetchFailure、FetchCancellation，只有FileCommit写FileFailed，其余按原网络事实和实际journaled完成NoEntry；取消通过原CAS争取权威。原本只检查错误的mock测试由实际Facade／资源／文件系统／取消源检查替代。首轮25通过／2失败：一为旧错误类型断言，一为新测试错要求关闭吞掉Store；依据原supervision的错误保留合同，测试现明确断言Store和StorageFull仍存在，不改生产关闭。新增Native第二项实际导出失败＋目录清理拒绝，用原结果事件确认失败已返回，再验证100ms关闭、旧成功文件、原Failed网络事实及重开日志。
+
+前一最终Native真实复现Unknown／StorageUnavailable（新增8.228秒失败，其他5项通过，53.704秒；原App26通过27.189秒）。现仅补充获取失败／取消的批次业务事实及来源，不结束LocalSettlement、不移动资源；保存失败仍等FileFailed持久事实。App增加实际清理等待中的查询分类，原失败断言不删。
+
+最终同源App26通过26.187秒、Native6通过58.593秒（新增10.257秒），metadata812包、workspace全目标check3m18s、fmt／style／repository／1350隐私／diff通过。手工审查后正在提交当前获取清理／分类片。下一步实际证明网络失败后物理清理已成功但重写产物日志失败的来源与资源责任，不应把FileFailed用于raw Failed／Cancelled；准备阶段／目录／表示、交接失败的原网络分类，以及完整spec继续。
 后续保持完整spec：普通partial重投映射与重启材料完整性、保存失败后的物理清理失败责任、准备拒绝交接、目录／表示完整预算、来源C、完整生命周期、受管1GiB及最终head网络／CI／设备矩阵。未运行设备仍记跳过。
 
 资源约束持续有效：用户设置16 GiB swap并明确resume；Cargo串行、CARGO_BUILD_JOBS=1，临时scope MemoryHigh=3 GiB／MemoryMax=5 GiB／MemorySwapMax=4 GiB及CPU／IO权重20，保持共享缓存和仓库target。先核对真实活动scope／PID与退出状态，不得重启仍在运行的验证。

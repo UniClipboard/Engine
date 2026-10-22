@@ -1,16 +1,18 @@
 //! 未完成文件结算的原始责任；不放入错误对象，也不另建资源池。
 use super::ReceiveAction;
+use crate::transfer::receive::materialization::ReceiveOutputFailure;
 use std::sync::PoisonError;
 use uc_core::ids::EntryId;
-use uc_core::ports::{ReceiveArtifact, ReceiveFileFailure};
+use uc_core::ports::ReceiveArtifact;
 
 pub(crate) struct UnsettledFile {
     pub(crate) entry: EntryId,
     pub(crate) attempt: String,
     pub(crate) artifact: ReceiveArtifact,
-    pub(crate) failure: ReceiveFileFailure,
+    pub(crate) failure: ReceiveOutputFailure,
     pub(crate) remaining: Vec<ReceiveArtifact>,
     pub(crate) output_cleanup_pending: bool,
+    pub(crate) has_artifact_journal: bool,
 }
 
 impl ReceiveAction {

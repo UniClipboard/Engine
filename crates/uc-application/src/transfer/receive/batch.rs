@@ -184,6 +184,37 @@ impl ReceiveBatch {
             );
         }
     }
+    /// 获取结果已知但输出仍在清理；只记录失败事实，不完成本地交接或释放资源。
+    pub(crate) fn unsettled_fetch_failure(
+        &self,
+        item: &str,
+        cancelled: bool,
+        source: &SourceError,
+    ) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.finished {
+            return;
+        }
+        let item = state.items.entry(item.to_owned()).or_insert(Item {
+            bytes: 0,
+            status: OutboundProgressStatus::InProgress,
+            source: None,
+            failure_reason: None,
+        });
+        item.status = if cancelled {
+            OutboundProgressStatus::Cancelled {
+                reason: FileTransferCancellationReason::LocalUser,
+            }
+        } else {
+            OutboundProgressStatus::Failed
+        };
+        item.failure_reason = if cancelled {
+            None
+        } else {
+            Some(failure_reason(source))
+        };
+    }
+
     pub(crate) fn item_materialized(&self, item: &str, bytes: u64) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.finished {

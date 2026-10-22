@@ -2,9 +2,11 @@
 use super::ApplyInboundClipboardUseCase;
 use crate::clipboard::capture::InboundCaptureCommitContext;
 use crate::facade::blob_transfer::BlobTransferError;
-use crate::transfer::receive::materialization::{ReceiveFileProgress, ReceivedItem};
+use crate::transfer::receive::materialization::{
+    ReceiveFileProgress, ReceiveOutputFailure, ReceivedItem,
+};
 use crate::transfer::receive::work::{ReceiveAction, UnsettledFile};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error as SourceError, Result};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,12 +34,21 @@ impl FileProgress {
 }
 #[async_trait]
 impl ReceiveFileProgress for FileProgress {
-    fn defer_file_cleanup(
+    fn defer_output_cleanup(
         &self,
         artifact: &ReceiveArtifact,
-        failure: ReceiveFileFailure,
+        failure: ReceiveOutputFailure,
         artifacts: &[ReceiveArtifact],
+        has_artifact_journal: bool,
+        cause: &SourceError,
     ) {
+        if !matches!(failure, ReceiveOutputFailure::FileCommit(_)) {
+            self.action.batch.unsettled_fetch_failure(
+                &artifact.item_id,
+                failure.is_cancelled(),
+                cause,
+            );
+        }
         self.action.defer_file_settlement(UnsettledFile {
             entry: self.entry.clone(),
             attempt: self.attempt.clone(),
@@ -49,6 +60,7 @@ impl ReceiveFileProgress for FileProgress {
                 .cloned()
                 .collect(),
             output_cleanup_pending: true,
+            has_artifact_journal,
         });
     }
 
@@ -78,8 +90,9 @@ impl ReceiveFileProgress for FileProgress {
                     entry: self.entry.clone(),
                     attempt: self.attempt.clone(),
                     artifact: artifact.clone(),
-                    failure,
+                    failure: ReceiveOutputFailure::FileCommit(failure),
                     output_cleanup_pending: false,
+                    has_artifact_journal: true,
                     remaining: artifacts
                         .iter()
                         .filter(|item| item.item_id != artifact.item_id)
