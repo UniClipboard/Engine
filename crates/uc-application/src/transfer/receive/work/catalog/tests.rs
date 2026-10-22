@@ -1,8 +1,12 @@
 use super::{ReceiveSource, ReceiveWorkRegistry};
 use crate::clipboard::sync::payload_codec::V3BlobRef;
-use crate::transfer::receive::materialization::{ReceivedItem, ReceivedOutput};
+use crate::transfer::receive::materialization::{
+    InboundFileSetManifest, InboundFileSetMember, ReceivedItem, ReceivedOutput,
+};
 use bytes::Bytes;
+use std::num::TryFromIntError;
 use std::sync::Arc;
+use uc_core::clipboard::FileSetMemberKind;
 use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::blob::BlobTicket;
@@ -79,8 +83,12 @@ fn query_includes_unstarted_items_and_requires_real_persistence_for_completed_do
         action.finish(Ok(()));
         drop(action);
         let mut current = progress(AttemptState::Failed);
-        registry.merge_progress(&mut current);
+        registry.merge_progress(&mut current).unwrap();
         assert_eq!(current.items.len(), 3);
+        assert_eq!(current.items_total, 3);
+        assert_eq!(current.total_bytes, 21);
+        assert_eq!(current.items_completed, if saved { 1 } else { 0 });
+        assert_eq!(current.completed_bytes, if saved { 7 } else { 0 });
         assert_eq!(
             current.items[0].status,
             if saved {
@@ -201,7 +209,7 @@ fn only_the_explicitly_committed_item_proof_can_turn_download_completion_into_su
     );
     action.finish(Ok(()));
     let mut current = progress(AttemptState::Failed);
-    registry.merge_progress(&mut current);
+    registry.merge_progress(&mut current).unwrap();
     assert_eq!(
         current.items[0].status,
         TrackedFileTransferStatus::Completed
@@ -266,7 +274,7 @@ fn successive_uncommitted_sources_keep_original_item_identity_and_saved_results(
         assert!(landed.contains_key(&0));
         let mut current = progress(AttemptState::Failed);
         current.attempt_id = attempt.into();
-        registry.merge_progress(&mut current);
+        registry.merge_progress(&mut current).unwrap();
         assert_eq!(
             current
                 .items
@@ -348,4 +356,100 @@ async fn close_and_delete_discard_saved_backup_before_late_completion() {
         assert!(registry.state.lock().unwrap().receipts.is_empty());
         assert!(incoming.previous_receipt.lock().unwrap().is_none());
     }
+}
+
+#[test]
+fn query_uses_original_plan_totals_before_any_download_rows_exist() {
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let action = registry.action();
+    action
+        .register(&EntryId::from("receiver"), "attempt")
+        .unwrap();
+    action.retain_source(source());
+    let mut current = progress(AttemptState::Receiving);
+    current.items_total = 0;
+    current.total_bytes = 0;
+    registry.merge_progress(&mut current).unwrap();
+    assert_eq!(current.items_total, 3);
+    assert_eq!(current.total_bytes, 21);
+    assert_eq!(current.items_completed, 0);
+    assert_eq!(current.completed_bytes, 0);
+    assert!(current
+        .items
+        .iter()
+        .all(|item| item.status == TrackedFileTransferStatus::Pending));
+    action.finish(Ok(()));
+}
+
+#[test]
+fn directory_query_keeps_member_totals_but_completes_only_the_whole_unit() {
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let action = registry.action();
+    action
+        .register(&EntryId::from("receiver"), "attempt")
+        .unwrap();
+    let mut original = source();
+    original.manifest = Some(InboundFileSetManifest {
+        members: (0..3)
+            .map(|index| InboundFileSetMember {
+                root_index: 0,
+                root_name: "PRIVATE_ROOT".into(),
+                root_is_file: false,
+                relative_path: format!("PRIVATE_MEMBER_{index}"),
+                kind: FileSetMemberKind::File,
+                blob_ref_index: Some(index),
+            })
+            .collect(),
+    });
+    action.retain_source(original);
+    for state in [
+        AttemptState::Receiving,
+        AttemptState::Committing,
+        AttemptState::Failing,
+        AttemptState::Failed,
+        AttemptState::Cancelled,
+        AttemptState::Completed,
+    ] {
+        let mut current = progress(state);
+        registry.merge_progress(&mut current).unwrap();
+        assert_eq!(current.items.len(), 1);
+        assert_eq!(current.items[0].kind, ReceiveItemKind::DirectoryUnit);
+        assert_eq!(current.items_total, 3);
+        assert_eq!(current.total_bytes, 21);
+        assert_eq!(
+            current.items_completed,
+            if state == AttemptState::Completed {
+                3
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            current.completed_bytes,
+            if state == AttemptState::Completed {
+                21
+            } else {
+                0
+            }
+        );
+        assert!(!format!("{current:?}").contains("PRIVATE"));
+    }
+    action.finish(Ok(()));
+}
+
+#[test]
+fn out_of_range_plan_bytes_are_reported_with_source_instead_of_clamping() {
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let action = registry.action();
+    action
+        .register(&EntryId::from("receiver"), "attempt")
+        .unwrap();
+    let mut original = source();
+    original.blob_refs[0].size_bytes = u64::MAX;
+    action.retain_source(original);
+    let mut current = progress(AttemptState::Receiving);
+    let error = registry.merge_progress(&mut current).unwrap_err();
+    assert!(error.chain().any(|source| source.is::<TryFromIntError>()));
+    assert!(!format!("{error:?}").contains("PRIVATE"));
+    action.finish(Ok(()));
 }

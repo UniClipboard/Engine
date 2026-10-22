@@ -1020,3 +1020,13 @@ Application 实际 Facade／调度／文件输出屏障覆盖两个阶段：失�
 最终定向十五项通过（38.170秒）；默认无订阅者 Native 关闭又连续两轮通过（10.331／10.691秒）。最终同一源快照 Core／Application／Engine／Storage／Content 库2241通过／9跳过（263.366秒）；metadata解析812包，workspace全目标check（3m45s）、fmt、Rust style、repository、观测隐私及diff全部通过。用户设置 swap 后验证在临时资源限制中串行执行：单个构建任务、MemoryHigh 3 GiB、MemoryMax 5 GiB、MemorySwapMax 4 GiB、CPU／IO 权重20，保持共享缓存和仓库 target。
 
 本切片不代表其余预算与生命周期全部完成：普通已有 partial 重投映射、清理失败责任、准备拒绝交接、未保存阶段计数、目录／表示预算、来源 C、完整生命周期、受管1GiB及交付head网络／CI／设备矩阵仍须继续。完整 spec 保持未完成，设备未运行记为跳过。
+
+- 当前未保存计数切片：ReceiveProgressQuery继续完整负责查询，Core已有业务分组结果为聚合依据，Infra不以raw Completed直接宣称保存成功。调用方仍仅接收原业务查询；无新schema、失败代码或Engine阶段接口。先用真实Engine／SQLite中保存及失败事实都被拒绝的屏障证明计数是否提前完成，再验证修复及重开查询；旧partial来源映射与其余完整spec继续。
+
+### 2026-10-22 业务保存计数与原始计划总量
+
+真实Engine保存及失败事实双SQL故障首先证明：列表只有一项业务完成，第二项仍transferring，已完成数却返回2。Infra现先复用Core未分组成员的业务投影再求完成数和字节，保持目录的成员计数粒度与整个目录单元集合，不改变raw网络终态、原格式或schema。更新原合约中“业务项尚未完成但计数已完成”的矛盾断言，同时保留当前attempt隔离及目录粒度验证；实际SQLite／AEAD在Progress提交前、提交后及重新打开数据库均检查保存事实。
+
+随后Native又证明未启动的第三项不在原聚合总量中（2而非3）；未删除该断言。原始计划仅增加同进程的成员／字节权重元数据，目录共用物化已有的规模计算，查询从原业务项结果投影完整总量，包含尚未建立下载行的成员。没有新增持久recipe、完成状态权威或Engine内部步骤查询。整数越界保留TryFromIntError并返回查询失败，不截断、不clamp。
+
+原始计划／手动重试定向34项通过（25.177秒）；默认无订阅者Native四项通过（38.690秒），真实存储合约33项通过（1.308秒）。最终同一源快照五crate库2244通过／9跳过（282.213秒）；metadata812包、workspace全目标check（3m41s）、fmt、Rust style、repository／1350站点隐私及diff全部通过。手工审查业务状态复用、目录成员粒度、原始计划权重、已保存事实和范围错误来源，无可用code-review skill，未冒称技能审查。普通partial来源映射、清理失败责任、完整生命周期／预算／资源和最终矩阵继续，完整spec未完成。

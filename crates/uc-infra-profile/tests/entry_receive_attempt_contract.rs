@@ -511,9 +511,9 @@ async fn receive_progress_uses_only_the_current_attempt() {
     assert_eq!(progress.attempt_id, "a2");
     assert_eq!(progress.state, AttemptState::Receiving);
     assert_eq!(progress.total_bytes, 50);
-    assert_eq!(progress.completed_bytes, 30);
+    assert_eq!(progress.completed_bytes, 0);
     assert_eq!(progress.items_total, 2);
-    assert_eq!(progress.items_completed, 1);
+    assert_eq!(progress.items_completed, 0);
     assert!(progress
         .items
         .iter()
@@ -736,8 +736,15 @@ async fn directory_receive_query_exposes_one_unit_until_atomic_settlement_finish
             _ => TrackedFileTransferStatus::Transferring,
         };
         assert_eq!(progress.items[0].status, expected);
-        // 既有聚合计数继续表示成员，新集合表达可选择的整个目录单元。
+        // 聚合计数仍表示成员；下载完成不能替代整个目录的业务提交。
         assert_eq!(progress.items_total, 2);
-        assert_eq!(progress.items_completed, 2);
+        assert_eq!(
+            progress.items_completed,
+            if state == "completed" { 2 } else { 0 }
+        );
+        assert_eq!(
+            progress.completed_bytes,
+            if state == "completed" { 30 } else { 0 }
+        );
     }
 }

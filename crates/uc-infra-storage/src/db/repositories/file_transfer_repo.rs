@@ -646,18 +646,6 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
         let items_total = u32::try_from(rows.len()).map_err(|_| {
             FileTransferProjectionError::Backend("receive item count exceeds u32".into())
         })?;
-        let items_completed = u32::try_from(
-            rows.iter()
-                .filter(|row| {
-                    row.status == TrackedFileTransferStatus::Completed.as_str()
-                        && row.failure_code.is_none()
-                })
-                .count(),
-        )
-        // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
-        .map_err(|_| {
-            FileTransferProjectionError::Backend("completed receive item count exceeds u32".into())
-        })?;
         let total_bytes = rows
             .iter()
             .try_fold(0_i64, |sum, row| match row.file_size {
@@ -669,24 +657,6 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                 }),
                 None => Ok(sum),
             })?;
-        let completed_bytes = rows.iter().try_fold(0_i64, |sum, row| {
-            if row.status != TrackedFileTransferStatus::Completed.as_str()
-                || row.failure_code.is_some()
-            {
-                return Ok(sum);
-            }
-            match row.file_size {
-                Some(size) if size < 0 => Err(FileTransferProjectionError::Backend(
-                    "negative receive item size".into(),
-                )),
-                Some(size) => sum.checked_add(size).ok_or_else(|| {
-                    FileTransferProjectionError::Backend(
-                        "completed receive byte total overflow".into(),
-                    )
-                }),
-                None => Ok(sum),
-            }
-        })?;
 
         let mut items = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -739,6 +709,41 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                     .unwrap_or_else(|| row.transfer_id.clone())
             })
             .collect::<HashSet<_>>();
+        // 完成判定复用Core业务规则；目录聚合沿用成员粒度，集合仍表达整个目录单元。
+        let member_items = group_receive_items(state, false, items.clone(), &delivered);
+        let completed_item_ids = member_items
+            .iter()
+            .filter(|item| item.status == TrackedFileTransferStatus::Completed)
+            .map(|item| item.item_id.as_str())
+            .collect::<HashSet<_>>();
+        let items_completed = u32::try_from(
+            member_items
+                .iter()
+                .filter(|item| item.status == TrackedFileTransferStatus::Completed)
+                .count(),
+        )
+        // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
+        .map_err(|_| {
+            FileTransferProjectionError::Backend("completed receive item count exceeds u32".into())
+        })?;
+        let completed_bytes = rows.iter().try_fold(0_i64, |sum, row| {
+            let item_id = row.receive_item_id.as_deref().unwrap_or(&row.transfer_id);
+            if !completed_item_ids.contains(item_id) {
+                return Ok(sum);
+            }
+            match row.file_size {
+                Some(size) if size < 0 => Err(FileTransferProjectionError::Backend(
+                    "negative receive item size".into(),
+                )),
+                Some(size) => sum.checked_add(size).ok_or_else(|| {
+                    FileTransferProjectionError::Backend(
+                        "completed receive byte total overflow".into(),
+                    )
+                }),
+                None => Ok(sum),
+            }
+        })?;
+
         let items = group_receive_items(state, directory, items, &delivered);
         Ok(Some(EntryReceiveProgress {
             entry_id: attempt.entry_id,

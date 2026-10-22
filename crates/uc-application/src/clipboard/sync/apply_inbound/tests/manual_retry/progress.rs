@@ -153,7 +153,7 @@ async fn failed_file_commit_cleans_only_its_output_and_next_file_can_commit() {
         items_completed: 0,
         items: Vec::new(),
     };
-    fixture.work.merge_progress(&mut result);
+    fixture.work.merge_progress(&mut result).unwrap();
     assert_eq!(
         result
             .items

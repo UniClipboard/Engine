@@ -34,6 +34,44 @@ pub struct InboundFileSetMember {
     pub blob_ref_index: Option<u32>,
 }
 
+/// 原始计划的成员数和字节预算；目录仍按文件成员及表示统计。
+pub(crate) fn receive_member_totals(
+    blob_refs: &[V3BlobRef],
+    manifest: Option<&InboundFileSetManifest>,
+) -> (usize, u64) {
+    if let Some(manifest) = manifest {
+        let members = manifest
+            .members
+            .iter()
+            .filter(|member| member.kind != FileSetMemberKind::EmptyDirectory);
+        let mut count = blob_refs
+            .iter()
+            .filter(|blob| blob.representation_index.is_some())
+            .count();
+        let mut total = blob_refs
+            .iter()
+            .filter(|blob| blob.representation_index.is_some())
+            .fold(0u64, |sum, blob| sum.saturating_add(blob.size_bytes));
+        for member in members {
+            count += 1;
+            total = total.saturating_add(
+                member
+                    .blob_ref_index
+                    .and_then(|i| blob_refs.get(i as usize))
+                    .map_or(0, |blob| blob.size_bytes),
+            );
+        }
+        (count, total)
+    } else {
+        (
+            blob_refs.len(),
+            blob_refs
+                .iter()
+                .fold(0u64, |sum, blob| sum.saturating_add(blob.size_bytes)),
+        )
+    }
+}
+
 /// 保存成功后可用于下一次接收的验证事实；不改变持久产物格式。
 #[derive(Debug, Clone)]
 pub(crate) struct ReceivedItem {

@@ -221,7 +221,7 @@ async fn discarded_partial_redelivery_preserves_original_saved_recipe_for_manual
             items_completed: 0,
             items: Vec::new(),
         };
-        fixture.work.merge_progress(&mut progress);
+        fixture.work.merge_progress(&mut progress).unwrap();
         assert_eq!(
             progress
                 .items
@@ -731,7 +731,7 @@ async fn manual_retry_saves_new_partial_success_without_fetching_or_deleting_pre
         items_completed: 0,
         items: Vec::new(),
     };
-    fixture.work.merge_progress(&mut progress);
+    fixture.work.merge_progress(&mut progress).unwrap();
     assert_eq!(
         progress
             .items
@@ -827,7 +827,7 @@ async fn manual_retry_caller_drop_keeps_full_capture_supervised_until_actual_com
         items_completed: 0,
         items: Vec::new(),
     };
-    fixture.work.merge_progress(&mut pending);
+    fixture.work.merge_progress(&mut pending).unwrap();
     assert_eq!(
         pending
             .items
@@ -911,7 +911,7 @@ async fn manual_retry_full_completion_keeps_inherited_item_results_and_releases_
         items_completed: 0,
         items: Vec::new(),
     };
-    fixture.work.merge_progress(&mut current);
+    fixture.work.merge_progress(&mut current).unwrap();
     assert_eq!(current.items.len(), 3);
     assert!(current
         .items

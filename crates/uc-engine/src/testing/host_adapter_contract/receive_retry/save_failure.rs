@@ -211,6 +211,31 @@ async fn real_engine_shutdown_waits_for_failed_file_settlement_repair() {
     let first = saved_files(&case.receiver, entry, case.receiver_root.path()).await;
     assert_eq!(first.len(), 1);
     let original = first.get(CONTENTS[0]).unwrap().clone();
+    let pending = progress(&case.receiver, entry, "receiving").await;
+    assert_eq!(
+        pending
+            .items
+            .iter()
+            .map(|item| item.state.as_str())
+            .collect::<Vec<_>>(),
+        ["completed", "transferring", "pending"]
+    );
+    assert_eq!(
+        pending.items_completed, 1,
+        "网络已完成但保存与失败结算仍未完成的项不能计入已完成"
+    );
+    assert_eq!(
+        pending.completed_bytes,
+        i64::try_from(CONTENTS[0].len()).unwrap()
+    );
+    assert_eq!(pending.items_total, 3);
+    assert_eq!(
+        pending.total_bytes,
+        CONTENTS
+            .iter()
+            .map(|bytes| i64::try_from(bytes.len()).unwrap())
+            .sum::<i64>()
+    );
     let error = case
         .receiver
         .shutdown(Duration::from_millis(100))

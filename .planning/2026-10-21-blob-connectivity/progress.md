@@ -430,3 +430,15 @@ Application实际故障注入证实：文件保存StorageFull、失败事实结�
 最终定向验证15项全部通过（38.170秒），包括默认无订阅者Native关闭场景10.069秒、原资源双阶段失败屏障15.011秒、真实TaskRegistry超时及混合panic／StorageFull分类；日志 unsettled-aggregate-and-native-final.log。当前已启动唯一scope uni-blob-settlement-final-gates：先重复无订阅者Native两轮，再显式dev-tools运行五crate库、metadata、workspace全目标check、fmt、style、repository及diff；阶段见 unsettled-final-stage.log，结果尚待检查。所有Cargo保持串行与原资源限制。
 
 最终交付验证：无订阅者 Native 再次连续两轮10.331／10.691秒通过；同一源快照显式 uc-engine/dev-tools 的 Core／Application／Engine／Storage／Content 库2241通过／9跳过（263.366秒），既有startup测试12.017秒通过。metadata812包、workspace全目标check（3m45s）、fmt、Rust style、repository与观测隐私、diff全通过，unsettled-final-stage.log=complete、unsettled-final-gates.exit.log=0。资源scope已自动回收，最终峰值计数不可读，不能把执行期间约2–3 GiB样本冒称最终峰值；配置上限始终5 GiB内存／4 GiB swap，未清缓存或更换target。手工审查原许可／内容所有权、调用者退出与真实完成分离、逐阶段修复、已交付结果优先、终态不可回退、source链、超时混合真实失败以及临时诊断删除；code-review skill缺失，不冒称技能审查。完整spec及设备矩阵仍未完成，未执行设备仍跳过。
+
+### d83bc4cc之后：未保存成员的聚合计数
+
+真实Native默认无订阅者场景已红测：仅首项保存、第二项仍transferring且失败事实未写入、第三项pending，items_completed却返回2（预期1）；business-progress-count-red.log保留0通过／1失败（9.319秒）。完成判定现复用Core对未分组成员的业务投影，再聚合成员数与字节；目录既有成员粒度不改，也不改变目录单元集合／失败原因、raw网络状态、schema或持久格式。实际SQLite／AEAD的Progress提交前后及重开计数、当前attempt隔离与目录各状态断言已补齐；显式profile test-util的两组合约及Engine dev-tools的4个Native场景正在uni-blob-count-green中串行验证。尚未宣称通过，普通partial来源映射及完整spec其他范围仍未完成。
+
+计数切片首轮结果：真实存储／AEAD合约33项通过（1.288秒），Native原3项通过，但新增断言又证明未启动第三项没有计入total（实际2、预期3）；business-progress-count-native.log保留3通过／1失败（35.477秒）。已完成数及字节的新断言此前均通过，不以删除总量断言缩小目标。现原始计划保留成员权重／字节元数据，查询统一按既有业务项结果投影全部原始量，包含未启动项；目录仍是一项可选单元但按成员权重汇总。物化及查询共用原有规模计算，未新增持久字段或状态权威；整数范围失败保留TryFromIntError并向查询调用者返回，禁止clamp或吞错。实际旧计划恢复、目录阶段及查询前无下载记录的测试正在补齐，结果未确认。
+
+原始计划投影定向34项已通过（25.177秒，含原手动重试和目录／无下载记录／范围错误）：计划仅保留成员与字节权重元数据，业务状态仍由原Core／实际保存事实决定，没有第二状态权威。物化与查询共用receive_member_totals；内部查询以Result传播真实整数转换source，所有调用者已迁移。当前uni-blob-plan-real先跑Engine dev-tools 4场景，再跑Profile test-util的实际存储／AEAD合约；结果待定。
+
+完整计划投影后的实际验证：原始计划／手动重试34项通过（25.177秒），默认无订阅者Engine dev-tools 4项通过（38.690秒），Profile test-util两个真实合约33项通过（1.308秒）。Native新断言已覆盖完成数1、原始总量3、完成字节仅首项、总字节包含全部3项，同时保留原关闭与持久失败断言。当前唯一scope uni-blob-progress-final-gates运行同一源快照五crate库、metadata、workspace全目标check、fmt、style、repository／隐私及diff；结果尚待检查，不复用d83bc4cc的绿灯。
+
+- 业务计数最终同一源快照五crate库2244通过／9跳过（282.213秒）；metadata812包、workspace全目标check（3m41s）、fmt、Rust style、repository／1350站点隐私及diff通过。手工审查原Core业务结果复用、目录仍成员计数和整个单元、原始计划补全未启动项、整数范围及source，无可用code-review skill。没有更改超时／测试并发、schema或原下载预算。下一步实际保存失败＋输出清理拒绝，确认原资源是否提前释放，完整spec仍继续。

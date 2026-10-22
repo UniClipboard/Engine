@@ -39,7 +39,9 @@ impl ReceiveProgressQuery {
                 )
             })?;
         if let Some(progress) = &mut progress {
-            self.work.merge_progress(progress);
+            self.work.merge_progress(progress).map_err(|source| {
+                CancelEntryReceiveError::Attempt(source.context("project receive progress totals"))
+            })?;
         }
         Ok(progress)
     }

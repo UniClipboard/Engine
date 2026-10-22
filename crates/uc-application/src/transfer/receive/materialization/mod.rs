@@ -11,11 +11,11 @@ mod workflow;
 pub(crate) use cleanup::OutputCleanupFailure;
 pub(crate) use reuse::{validate_selection, ReceiveReuseRefusal};
 
+pub(crate) use model::{receive_member_totals, ReceiveSelection, ReceivedItem, ReceivedOutput};
 pub use model::{
     InboundFileSetManifest, InboundFileSetMember, MaterializeOutcome, MaterializeResult,
     MissingFileRef, ReceiveWorkPlan,
 };
-pub(crate) use model::{ReceiveSelection, ReceivedItem, ReceivedOutput};
 pub(crate) use ports::ReceiveFileProgress;
 pub use ports::{InboundBlobFetcher, InboundBlobMaterializer};
 pub(crate) use workflow::{

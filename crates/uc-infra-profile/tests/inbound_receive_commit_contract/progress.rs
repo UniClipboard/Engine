@@ -6,8 +6,8 @@ mod v3;
 use super::*;
 use std::path::PathBuf;
 use uc_core::ports::{
-    CleanupReceiveArtifactsPort, ListUnsettledReceiveArtifactsPort, PendingInboundTransfer,
-    ReceiveItemRole, RecordReceiverTransferPort,
+    CleanupReceiveArtifactsPort, GetEntryReceiveProgressPort, ListUnsettledReceiveArtifactsPort,
+    PendingInboundTransfer, ReceiveItemRole, RecordReceiverTransferPort,
 };
 use uc_infra_local::fs::receive_artifact_cleanup::FsReceiveArtifactCleaner;
 use uc_infra_storage::db::repositories::DieselFileTransferRepository;
@@ -129,6 +129,19 @@ impl Fixture {
 #[tokio::test]
 async fn progress_commit_keeps_receiving_and_recovery_preserves_delivered_file_after_reopen() {
     let fixture = Fixture::new().await;
+    let reader = DieselFileTransferRepository::new(
+        fixture.executor.clone(),
+        Arc::new(FixedSubkey),
+        Arc::new(FixedProfile),
+    );
+    let before = reader
+        .get_entry_receive_progress("entry")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.items_total, 2);
+    assert_eq!(before.items_completed, 0, "两个raw Completed均尚未保存");
+    assert_eq!(before.completed_bytes, 0);
     fixture
         .commit
         .commit_inbound_receive(&fixture.progress(0))
@@ -141,7 +154,27 @@ async fn progress_commit_keeps_receiving_and_recovery_preserves_delivered_file_a
     assert!(!ciphertext
         .windows(b"private-output".len())
         .any(|part| part == b"private-output"));
+    let saved = reader
+        .get_entry_receive_progress("entry")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.items_completed, 1);
+    assert_eq!(saved.completed_bytes, 13);
     let path = fixture.directory.path().join("progress.sqlite");
+    let reopened_reader = DieselFileTransferRepository::new(
+        DieselSqliteExecutor::new(init_db_pool(path.to_str().unwrap()).unwrap()),
+        Arc::new(FixedSubkey),
+        Arc::new(FixedProfile),
+    );
+    let saved = reopened_reader
+        .get_entry_receive_progress("entry")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.state, uc_core::ports::AttemptState::Receiving);
+    assert_eq!(saved.items_completed, 1);
+    assert_eq!(saved.completed_bytes, 13);
     let reopened = DieselReceiveArtifactLogRepository::new(
         DieselSqliteExecutor::new(init_db_pool(path.to_str().unwrap()).unwrap()),
         Arc::new(FixedSubkey),

@@ -296,15 +296,18 @@ pub fn group_receive_items(
     }]
 }
 
-/// Current aggregate progress for any remote inbound receive attempt.
+/// 当前接收尝试的成员聚合；目录成员计数与可选择的整个目录单元分开。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryReceiveProgress {
     pub entry_id: String,
     pub attempt_id: String,
     pub state: crate::ports::entry_receive_attempt::AttemptState,
     pub total_bytes: i64,
+    /// 已经交付的成员字节；网络完成但尚未保存的成员不计入。
     pub completed_bytes: i64,
+    /// 当前尝试的成员数；目录仍按成员统计。
     pub items_total: u32,
+    /// Core业务判定已经完成的成员数，保持与保存事实一致。
     pub items_completed: u32,
     pub items: Vec<ReceiveItemProgress>,
 }

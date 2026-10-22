@@ -5,8 +5,8 @@ use super::cleanup::{remove_uncommitted_output, OutputCleanupFailure};
 use super::output::{FileOutputJournal, FileOutputPreparation, PreparedReceiveOutput};
 use super::progress::FileProgressSnapshot;
 use super::reuse::validate_selection;
+use super::{receive_member_totals, ReceivedItem, ReceivedOutput};
 use super::{FileFailureSettlementError, FileProgressCommitError};
-use super::{ReceivedItem, ReceivedOutput};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -601,38 +601,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             .map(|(index, _)| original_blob_indices[index])
             .collect::<Vec<_>>();
         let mut completed = Vec::new();
-        let representation_count = blob_refs
-            .iter()
-            .filter(|blob| blob.representation_index.is_some())
-            .count();
-        let (count, total) = if let Some(manifest) = &file_set_manifest {
-            let members = manifest
-                .members
-                .iter()
-                .filter(|member| member.kind != FileSetMemberKind::EmptyDirectory);
-            let mut count = representation_count;
-            let mut total = blob_refs
-                .iter()
-                .filter(|blob| blob.representation_index.is_some())
-                .fold(0u64, |sum, blob| sum.saturating_add(blob.size_bytes));
-            for member in members {
-                count += 1;
-                total = total.saturating_add(
-                    member
-                        .blob_ref_index
-                        .and_then(|i| blob_refs.get(i as usize))
-                        .map_or(0, |blob| blob.size_bytes),
-                );
-            }
-            (count, total)
-        } else {
-            (
-                blob_refs.len(),
-                blob_refs
-                    .iter()
-                    .fold(0u64, |sum, blob| sum.saturating_add(blob.size_bytes)),
-            )
-        };
+        let (count, total) = receive_member_totals(&blob_refs, file_set_manifest.as_ref());
         batch.plan(count, total);
         if blob_refs.is_empty() && file_set_manifest.is_none() {
             return Ok(MaterializeResult::complete(snapshot));

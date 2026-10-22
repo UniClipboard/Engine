@@ -4,8 +4,9 @@ use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::transfer::receive::batch::ReceiveFacts;
 use crate::transfer::receive::identity::receive_item_ids;
 use crate::transfer::receive::materialization::{
-    InboundFileSetManifest, ReceiveSelection, ReceivedItem,
+    receive_member_totals, InboundFileSetManifest, ReceiveSelection, ReceivedItem,
 };
+use anyhow::Error as SourceError;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -13,6 +14,8 @@ use std::sync::{Arc, PoisonError, Weak};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::{EntryReceiveProgress, ReceiveItemKind};
 use uc_core::MimeType;
+
+mod projection;
 
 /// 原包只在尚未保存条目时需要；保存后从既有密文快照重建正文。
 #[derive(Clone)]
@@ -41,6 +44,8 @@ pub(crate) struct PlannedReceiveItem {
     pub(crate) id: String,
     pub(crate) kind: ReceiveItemKind,
     pub(crate) blob_index: usize,
+    pub(super) members: usize,
+    pub(super) bytes: u64,
 }
 
 pub(super) struct ReceiveReceipt {
@@ -55,10 +60,13 @@ pub(super) struct ReceiveReceipt {
 impl ReceiveSource {
     pub(crate) fn planned(&self, entry: &EntryId, attempt: &str) -> Vec<PlannedReceiveItem> {
         if self.manifest.is_some() {
+            let (members, bytes) = receive_member_totals(&self.blob_refs, self.manifest.as_ref());
             return vec![PlannedReceiveItem {
                 id: "directory_unit".into(),
                 kind: ReceiveItemKind::DirectoryUnit,
                 blob_index: 0,
+                members,
+                bytes,
             }];
         }
         self.blob_refs
@@ -75,6 +83,8 @@ impl ReceiveSource {
                     id,
                     kind,
                     blob_index,
+                    members: 1,
+                    bytes: blob.size_bytes,
                 }
             })
             .collect()
@@ -283,14 +293,17 @@ impl ReceiveWorkRegistry {
         Some((receipt.source.as_ref()?.clone(), receipt.landed.clone()))
     }
 
-    pub(crate) fn merge_progress(&self, progress: &mut EntryReceiveProgress) {
+    pub(crate) fn merge_progress(
+        &self,
+        progress: &mut EntryReceiveProgress,
+    ) -> Result<(), SourceError> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(receipt) = state
             .receipts
             .get(&EntryId::from(progress.entry_id.clone()))
             .filter(|receipt| receipt.attempt == progress.attempt_id)
         else {
-            return;
+            return Ok(());
         };
         let committed = receipt.landed.keys().copied().collect::<HashSet<_>>();
         if let Some(batch) = receipt.batch.upgrade() {
@@ -298,6 +311,7 @@ impl ReceiveWorkRegistry {
         } else if let Some(facts) = &receipt.final_facts {
             progress.items = facts.items(&receipt.planned, &committed, progress.state);
         }
+        projection::project_totals(&receipt.planned, progress)
     }
 }
 
