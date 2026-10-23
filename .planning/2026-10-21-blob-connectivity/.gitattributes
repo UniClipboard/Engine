@@ -1,3 +1,0 @@
-# 原始补丁与页面文本按字节保留空白；规则只作用于本任务的证据，不作用于源码。
-*.patch -whitespace
-*.txt -whitespace

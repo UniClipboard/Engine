@@ -1,6 +1,0 @@
-scenario: clipboard-startup-recovery
-outcome: passed
-elapsed: 16346 ms
-artifact: clipboard-startup-recovery-seed-000000000000075e
-artifact directory: clipboard-startup-recovery-seed-000000000000075e-run-3941194-0001
-reproduce: just cargo test -p uc-engine --test host_contract clipboard_startup_recovery_process --locked -- --nocapture

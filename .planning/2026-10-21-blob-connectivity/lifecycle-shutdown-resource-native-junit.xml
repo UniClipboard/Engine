@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="nextest-run" tests="1" skipped="0" failures="0" errors="0" uuid="c56798aa-9261-49b3-9d61-5c1a07fb1b66" timestamp="2026-10-23T15:20:47.999+08:00" time="32.983">
-    <testsuite name="uc-engine" tests="1" skipped="0" errors="0" failures="0">
-        <testcase name="testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair" classname="uc-engine" timestamp="2026-10-23T15:20:48.029+08:00" time="32.953"/>
-    </testsuite>
-</testsuites>

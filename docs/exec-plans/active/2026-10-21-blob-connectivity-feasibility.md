@@ -1,219 +1,105 @@
-# 第七片阶段 0：SDK 停止可行性证据
+# 第七切片：实现方案与关键取舍
 
-状态：**阶段 0 前置证明完成；生产迁移与完整验收待实施**（2026-10-21）。对应[规格 §11](2026-10-21-blob-connectivity-spec.md#11-未决问题open-questions)和[执行计划阶段 0](2026-10-21-blob-connectivity-plan.md#阶段-0冻结基线与证明可行性)。
+状态：**方案已采用，最终交付验收仍由执行计划跟踪**。
+需求、参数与完整验收标准见[实现规格](2026-10-21-blob-connectivity-spec.md)，
+工作范围与验证入口见[执行计划](2026-10-21-blob-connectivity-plan.md)。
+本文保留难以从源码恢复的原因和取舍，不保存逐轮排障记录。
 
-## 冻结来源
+## 冻结来源与兼容边界
 
-| 来源 | 精确修订 | 本轮用途 |
+| 来源 | 精确修订 | 用途 |
 | --- | --- | --- |
-| 开工 origin/main | `a461b89444efd60081c7ef63f927946f9dfc072d` | 新分支 `feat/blob-connectivity` 的父提交 |
-| 设计盘点锚点 | `2154b959fa16ccbdb165f8a92a295a039833bf47` | 用户提供规格的原盘点，不冒充最新 main |
-| 历史 rc.15／a07 | `f6f305d9689e4e79e7ab6d0e4921061f9416e4a6` | 固定旧端资料重开、升级双角色矩阵及其 SDK 0.102.0 协议向量 |
-| iroh-blobs 0.103.0 | `124780fb69768b8506565b2760c435182f9e2d20` | 工作区固定 fork，未修改 |
-| Iroh 1.3.0 | `43e232fbcbf11aa9cf03a78ac83f52296f01d6b3` | 工作区固定来源，未修改 |
+| 开工 main | `a461b89444efd60081c7ef63f927946f9dfc072d` | 本片冻结的旧端，不随 main 后续推进变化 |
+| 历史 rc.15／a07 | `f6f305d9689e4e79e7ab6d0e4921061f9416e4a6` | 历史资料、双角色互通和协议向量 |
+| 开工 iroh-blobs 0.103.0 | `124780fb69768b8506565b2760c435182f9e2d20` | 高层获取与 store 关闭缺口的来源 |
+| 采用的 iroh-blobs 0.103.0 | `152c42a9217f1377a998b271e0052311e8ada789` | 同一 fork 的兼容 store 生命周期修复 |
+| Iroh 1.3.0 | `43e232fbcbf11aa9cf03a78ac83f52296f01d6b3` | 底层连接来源 |
 
-只使用正常创建的合成资料，不复制真实用户资料。冻结旧端以临时源码和宿主运行，验证覆盖本机 QUIC 与隔离网络强制 Relay；进程、资料与临时源码均在对应运行结束后检查回收。下文保留首轮失败及替代方案的验证历史，最终阶段状态以末尾退出证据为准。
+SDK 修订限于已批准的同 fork 生命周期修复，保持版本系列、ALPN、ticket、BAO 与磁盘格式。
+旧库不打补丁；测试宿主只通过对应版本已有的公开操作生成和重开合成资料。
+协议向量由冻结旧 SDK 生成，不能从当前实现自行生成再比较当前实现。
 
-## 当前调用图盘点
+## 同连接双流与完成权
 
-- Core [`BlobTransferPort`](../../../crates/uc-core/src/ports/blob/transfer.rs) 包含发布、ticket、获取、导出、tag／untag、取消。现有取消合同明确允许共享传输连带失败，尚未收紧。
-- Application [`transfer/blob`](../../../crates/uc-application/src/transfer/blob/) 的 publish／fetch use case 持有该 port；facade 注册在途任务，取消先等待反向 reporter，再 cancel token、关闭对端下载连接及结算。
-- 清理消费者位于 [`clipboard/history`](../../../crates/uc-application/src/clipboard/history/) 的 cleanup、clear、delete、reconcile_missing_files；outbound、clipboard assembly 和 Application 根组装也持有 port。Engine testing 的 GatedPublication 是测试替身。
-- Infra [`blobs.rs`](../../../crates/uc-infra-p2p/src/network/iroh/blobs.rs) 缓存 SDK Downloader；warmup 与 Downloader 自拨共存，`shutdown_inflight_fetch` 调用 `shutdown_endpoint`。文件获取使用 SDK 流式 export，现有引用／tag 仍归原 owner。
-- [`IrohNode::install_blobs`](../../../crates/uc-infra-p2p/src/network/iroh/node.rs) 装配 FsStore、GC 与 `BlobsProtocol`；SDK provider 自行处理连接。Engine [`assembly/sync_engine.rs`](../../../crates/uc-engine/src/assembly/sync_engine.rs) 负责安装。
-- 现有 [`Uni StreamLease`](../../../crates/uc-application/src/connectivity/stream.rs) 提供通用 AsyncRead／AsyncWrite、finish／settled 和实际工作许可；原生 bridge 在 drop 时 reset／stop 当前半流。已补充显式流 ID、reset／stop 与独立工作租约，并用真实双流证明取消隔离；生产 blob 尚未迁移。
-- 原始来源候选为 [`ReceiveWorkPlan`](../../../crates/uc-application/src/transfer/receive/materialization/model.rs) 的 snapshot、V3BlobRef、manifest、original_blob_indices。物化会改写成功路径与失败占位，现有文件会话持有文件名／大小／来源和路径，但没有完整 ticket。已用真实物化测试证明从原始 V3 保留材料重建新 attempt 可恢复正确来源与内容；稳定手动重试与 CAS 仍待实施。
+旧路径的 warmup 与 SDK Downloader 分别建立连接，按对端取消还会关闭兄弟任务使用的连接。
+因此下载和提供都迁入 Application 的独立 blob Uni manager，SDK 只消费已经准入的通用流；
+删除生产自拨池、对端级取消和旧 provider handler，不能保留并行旧路径。
 
-## 首轮最小复现
+固定 SDK 的高层获取以 `try_join!` 等待网络与 import。网络分支失败时，import 完成 receiver
+随另一个 future 丢弃，但 store 私有运行时中的本地工作可能仍在执行。丢弃网络 future、
+reset 半流或观察主 runtime 任务数，都不能证明同次 import 已结束。
+整个 store 的 `wait_idle` 又会等待无关工作，不能用作单项 join。
 
-入口：[`blob_connectivity_feasibility.rs`](../../../crates/uc-infra-p2p/tests/blob_connectivity_feasibility.rs)。
+采用同一 SDK 的公开 `get::fsm` 和 `ImportBaoHandle`，由 Infra 分别持有网络与 import 完成权；
+错误或取消后关闭输入，仍等待同次 import。提供端使用 SDK 原请求解析及 export 字节流，
+停止自身网络后继续排空本次 export 到通道关闭。协议解析、校验与编码继续归 SDK。
 
-```bash
-just cargo test -p uc-infra-p2p --test blob_connectivity_feasibility --locked -- --nocapture
-```
+Uni 将半流 I/O 与 `StreamWorkLease` 分开交接。本地完成权持有原连接、活动与许可，
+网络结束不提前归还额度；每个逻辑项独立结算，SDK 同内容共享不转移兄弟项的清理权。
+真实双流测试暂停 A、B，取消 A 后恢复 B，并检查同连接、实际尝试次数及精确内容。
 
-探针先由真实 provider 发出合法 BAO 数据，receiver 使用固定 SDK 的通用 `get::StreamPair` 和 `Remote::execute_get`。测试专属 subscriber 在 SDK `importing bao:` 调用点暂时阻塞 import worker；只识别固定调用点，不输出第三方消息或摘要。首个 SDK 进度后，在接收流注入 `io::ErrorKind::ConnectionReset`，由 SDK 自己返回错误，而非 abort 外层 future。
+实现入口：Application [transport](../../../crates/uc-application/src/transfer/blob/transport/)、
+Infra [blob_exchange](../../../crates/uc-infra-p2p/src/network/iroh/blob_exchange/)。
+停止探针见 [blob_connectivity_feasibility.rs](../../../crates/uc-infra-p2p/tests/blob_connectivity_feasibility.rs)，
+同连接与来源授权测试位于 [Iroh connectivity](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/)。
 
-检查点为：获取 future 已返回错误，但同次 import 仍被门阻塞；全 store 的 `wait_idle` 仍不能完成。释放门后等待同一个 idle future，确认本地工作确实退出，再关闭端点和 store。测试门有十秒故障兜底及 RAII 释放，正常路径不等待兜底。探针通过表示**复现了停止前置失败**，不表示受管传输验收通过。
+## 响应结束与错误来源
 
-首轮追加 sibling 获取曾返回 stream reset error 3，撤回扩展并保留失败日志。后续定位为探针把 Raw 误用为 HashSeq，修正 GetRequest::blob 后真实双流通过，见续接证明；不将该测试错误登记为 SDK 缺陷。
+SDK export 的 `into_byte_stream` 可能把通道异常呈现为 EOF，不能仅凭流结束报告成功。
+Infra 使用 SDK 同源 BAO 遍历器计算期望响应长度，核对实际输出与 store 状态；
+继续使用原 SDK 编码，不新增线上帧。空内容、完整／稀疏范围和越过末尾范围都由真实 SDK 对照。
 
-## 原因与边界
+网络错误、停止错误与本地结算错误保留各自来源；自动网络恢复只接受具体来源白名单。
+存储、认证、校验、未知错误不能因宽泛的 `Unavailable` 分类而自动重试。
+本地事件、输出或提交失败由原负责人修复同一事实，不重新下载或伪造网络终态。
 
-固定 SDK 的 `src/api/remote.rs::get_blob_ranges_impl` 将 `ImportBaoHandle` 的 tx 和 rx 分别移入 write／complete future，并执行 `tokio::try_join!(complete, write)`。write 因网络／校验错误退出时，try_join 丢弃 complete 和私有 rx；调用方没有拿回这次 import 的完成等待权。
+## Store 完整关闭
 
-`src/store/fs.rs::HashSpecificCommand::spawn` 将 import 交给独立运行时；`EntityApi::import_bao` 会继续消费已接收的数据并执行最后的 `write_batch`，然后才回报完成。丢弃网络 future 或 reset 当前流不能证明这段本地工作已经退出。
+流级完成权解决单次交换，但不能代替 store 的后台生命周期。旧修订的 GC 持有 store 并睡眠到
+下一轮，metadata 关闭确认也不等于外层 actor 和私有 runtime 退出。临时禁用 GC 的实验
+没有解决完整关闭责任，因此未作为交付方案。
 
-SDK 公开 `Store::wait_idle` 明确是整个 store 的瞬时空闲屏障，并说明并行交互时可能永不完成。将其放入每项取消结算会把 A 的等待耦合到其他下载、提供服务和 store 工作；不满足本片单项停止监督。关闭 endpoint 或整个 store 也不满足共用连接与独立任务隔离。
+同 fork 修订由 SDK 生命周期监督器承担完整关闭。调用方仍只调用既有 `Store::shutdown`：
+先停止 GC 排队，等待已接受的 GC／import／export，关闭 metadata 与 actor，再回收私有 runtime；
+成功或失败回应都在实际退出后交付。加载失败及全部引用自然释放也由同一监督器回收。
+确认不能依赖创建 store 的调用方 runtime 继续存活，否则跨 runtime 使用仍会留下退出缺口。
+Engine 只消费原 `BlobStoreLifecyclePort`，不编排 SDK 内部步骤。
 
-这个复现证明候选 `Remote::execute_get` 直接桥接方案的失败路径没有完整完成等待权，**不宣称所有低层 SDK 组合都不可行**。提供端 handle_stream 的 export 失败退出同样需要检查后台工作完成权，首轮尚未证明；后续公开 export 排空方案已通过独立暂停与取消测试。
+资源验收分别观察主 runtime 与 SDK 私有工作。进程级 Rayon 共享池只初始化一次后取稳定基线，
+同时保留冷计数；不能把共享池初始化误记为每轮泄漏，也不能用丢弃 runtime 伪造任务回收。
+SDK 临时 tag 必须在 actor 仍打开时计数，实际连接以弱句柄观察，避免探针本身延长寿命。
+资源回归入口为 [blob_store_lifecycle.rs](../../../crates/uc-infra-p2p/tests/blob_store_lifecycle.rs)
+和 [默认生命周期资源脚本](../../../scripts/testing/run-blob-lifecycle-resources.sh)。
 
-## 首轮候选方案（最终采用第二条）
+## 重试材料、身份与交付所有权
 
-1. 优先在固定 SDK fork 提供每次交换完整的停止／完成 handle，确保网络失败、取消、store 错误均等待该次 import／export 的实际结算并保留原始错误；新增固定修订后重新跑阶段 0。不得将全局 wait_idle 当作单项 join。
-2. 或先验证 Infra 通过公开 `get::fsm` 和 `ImportBaoHandle` 持有网络与 store 两份完成权，并为 provider export 构造可排空、可等待的完整实现。需要先写清该方案相对原高层 SDK 桥接的责任变化，再用同一失败探针验证；不能复制第二套生产协议或跳过提供端证明。
+物化后的失败占位和本机成功路径都不能重建原始来源。接收负责人保留原始 V3 清单、来源、ticket
+及原始位置，使用原项身份创建新 attempt；相同名称或内容的行仍保持独立身份。
+材料继续复用已有密文快照及认证产物日志，不新增持久 recipe 或跨重启网络队列。
 
-首轮未修改 SDK 来源、blob 协议、持久格式或生产路径，阶段 0 当时阻塞。后续在同一固定 SDK 证明第二条替代方案并补齐其他前置，现进入阶段 1；高层 API 缺口及首轮失败证据保留。
+手动重试以预期旧 attempt 的 CAS 接受新尝试，成功项先复核内容和路径归属再复用，
+新尝试不能取得旧成功文件的删除权。来源材料不可用时明确返回失败，不能用当前另一份内容替代。
+目录保持完整接收单元和整体发布；暂存区责任在实际创建前通过既有密文日志交接。
+完整失败与恢复规则以规格 §5.5–5.7 为准。
 
-## 首轮验证状态（历史）
+消息作者可能与 ticket 中实际提供端不同。当前授权和下载额度都按真实 provider 核对，
+缓存命中也不能绕过授权；撤销、旧会话代次与旧 ticket 都不能恢复原工作。
+真实三端验收覆盖作者 B、提供端 C、C 的每端上限与 B 的剩余全局额度。
 
-- 停止探针：已复现候选高层 SDK 的错误返回早于 import 退出；最终验证命令及检查结果随执行计划记录。
-- 本机两流的 Uni 真实双向接入、完整取消结算、原始单项重试材料、旧旧／旧新授权与协议向量、1GiB／资源基线：**未执行**。
-- Direct／Relay 旧端矩阵、平台 CI、物理设备：**跳过**，不能沿用前片结果作为本片通过证据。
+实现入口：[receive](../../../crates/uc-application/src/transfer/receive/)、
+[原子接收提交](../../../crates/uc-infra-storage/src/db/repositories/inbound_receive_commit_repo.rs)、
+[真实来源授权测试](../../../crates/uc-engine/src/runtime/blob_source_authorization.rs)。
+SQLite 读比较后写事务提前取得写权的原因见[Infra 原则](../../design-docs/layers/infrastructure.md)。
 
-## 首轮检查点（09d06ea5）验证
+## 真实互通与可重复验证
 
-| 检查 | 实际结果 |
-| --- | --- |
-| 最小停止探针 | 1 passed；完整 workspace 分组中也通过（0.145 秒） |
-| metadata／workspace all-targets check／fmt | 通过；保留既有未使用代码警告 |
-| Rust style／Engine repository preflight／差异空白／相对文档链接 | 通过 |
-| 完整 workspace 分组 | 555.896 秒，4305 passed、1 failed、27 skipped，退出码 100 |
-| 失败诊断项独立复核 | 已有二进制仍失败，退出码 101 |
+- [协议向量](../../../crates/uc-infra-p2p/tests/blob_protocol_vectors.rs)对照冻结 rc.15 的 ticket、请求及原始／合法空响应。
+- [blob 网络矩阵](../../../scripts/testing/run-blob-connectivity.sh)覆盖新新、冻结 main 和 rc.15 的 Direct／强制 Relay 及新版获取／提供双角色。
+- 旧旧正常配对后重开，再沿独立资料副本升级一侧；检查身份、成员、历史、原接收文件及新旧双向精确读回。
+- 强制 Relay 格配对前隔离双方 IPv4／IPv6 UDP，并核对实际路径、blob 协商和阻断计数。
+  完整恢复场景先建立未隔离内容基线，在对应隔离阶段执行严格路径断言，不能用尚未隔离的基线证明 Relay。
+- [资源脚本](../../../scripts/testing/run-blob-lifecycle-resources.sh)覆盖六类真实生命周期、实际 provider 配额及连续两份 1GiB 文件，检查 FD、线程、任务、SDK tag 与连接回收。
+- 实际命令和最终门禁状态由执行计划及 PR Checks 跟踪。历史探针或局部通过不能替代当前交付候选的完整回归。
 
-完整回归命令为 `just mbx-exec bash scripts/testing/run-test-group.sh workspace`。唯一失败是
-`uc-infra-profile::peer_address_read_diagnostics::peer_address_failures_export_stable_categories_and_real_stack_symbols`，
-断言要求 stack_status 为 `captured`，实际为 `unresolved`（测试第 270 行）。新增 blob 探针已通过。
-
-直接运行现有 `peer_address_read_diagnostics` 测试二进制同样复现该断言。相关 profile、观测源码及锁文件与开工 main 无差异，本次没有修改任何生产源码；具体符号解析原因未证明，不扩大本次修改或放宽断言，完整回归不登记通过。
-
-手工审查已检查测试工作隔离、停止门故障释放、资源关闭、状态文档与范围；没有新增生产接口、依赖或格式。当前环境未安装 `code-review` skill，执行的是手工审查，不冒称技能审查通过。
-
-本轮日志保存在 `.planning/2026-10-21-blob-connectivity/` 的忽略文件中：`probe.log`、`probe-fixed.log` 保留探针首轮错误，`probe-sibling*.log` 保留撤回扩展的失败，`probe-final.log`、`workspace.log` 和 `diagnostic-existing-binary.log` 保存最终与回归证据。Git 中保留本报告和可重复探针，不提交原始编译日志。workspace 分组按既有脚本排除独立成员全集和升级矩阵；本轮这些项目、平台 CI 与设备检查均跳过。
-
-## 续接：同一 SDK 底层组合与 Uni 证明
-
-采用 spec §5.4 已补充的公开底层 API：下载持有独立 import 完成 receiver，在网络分支退出并关闭输入后等待它；提供端使用 SDK 读取原请求和输出原 BAO 字节，取消时 reset 当前流，继续排空本次 export 直至通道关闭。没有改变 SDK 修订或自定义线上编码，没有接入原生 Downloader 自拨。
-
-`blob_connectivity_feasibility` 的复合原型现在同时验证原高层缺口与替代实现：暂停 import 后取消接收，替代 future 保持等待，另一 Raw blob 精确读回；释放后才结束。暂停 export 后取消提供，同样先停止自身网络并继续监督本次 export，另一流仍能成功读回。
-
-此前 sibling error 3 的具体原因为测试误用 GetRequest::all（HashSeq）获取 Raw blob；修正为 blob 后同连接读回通过。这个错误属于探针自身，不再作为未解释的 SDK 缺陷；首次失败日志保留。
-
-真实 Uni 证明位于 `network::iroh::connectivity::stream::blob_probe::uni_blob_stream_cancel_preserves_sibling_and_local_work_capacity`：使用实际 Iroh 半流 bridge、真实 ConnectivityManager 与 StreamLease；A、B 在同一真实 blob ALPN 连接上分别读至 64KiB 后暂停，取消 A，确认 B 未结束且连接仍可用，再恢复 B，精确读回 4MiB，backend 获取计数为 1。首次采用固定认证 key fixture；后续升级为真实生产准入组件和可变当前成员权威 fixture，见后文，不冒充完整 Engine 授权验收。
-
-新增 `StreamLease::into_parts` 返回 I/O 与 `StreamWorkLease`；工作租约持有连接、活动与原许可，SDK 导入／导出和本地结算完成后才释放。App 的原额度测试现同时覆盖原 hold_for_work 和拆分 I/O 路径。SDK 事件追踪沿用原生产 None 配置，避免把高层 SDK &self 方法的 Sync 要求加给通用半流。
-
-本轮命令：
-
-```bash
-just cargo test -p uc-infra-p2p --test blob_connectivity_feasibility --locked
-just cargo test -p uc-infra-p2p --lib network::iroh::connectivity --locked
-just cargo test -p uc-application --lib connectivity::tests --locked
-just cargo test -p uc-infra-p2p --lib receiver_lifecycle --locked
-just cargo test -p uc-application --lib transport::tests --locked
-```
-
-上述分组分别为 1／3／29／6／20 项通过。工作区编译及本轮最终补充检查结果记录于执行日志。原始材料、旧端授权、完整 Engine 收发、1GiB／资源和平台矩阵仍未执行；阶段 0 整体及后续阶段均不宣称完成。
-
-本轮最终补充：固定 SDK 接收普通与合法空 blob 的反向角色探针通过（0.40 秒）；真实 Uni 测试同时验证无效 reset／stop code 保留稳定分类与 source，且不关闭原连接（0.09 秒）。metadata、全工作区全目标 check、fmt、Rust style、repository preflight、文档相对链接与差异检查通过。完整 workspace／旧端矩阵／平台 CI 本轮未重跑，首轮回归失败仍保留，不能将本轮局部通过视为整个 spec 完成。
-
-## 续接：原始材料、当前准入与迁移前资源
-
-`clipboard::sync::apply_inbound::tests::retry_material` 两项通过：第一次真实物化失败生成缺失占位后，
-从保留的原始 V3 接收材料创建新 attempt，准确恢复来源、ticket 和原始预期内容，写回精确文件。
-重复名称和重复内容通过原清单位置区分，不把失败占位当成获取材料。此为材料可行性证明；
-尚未实现稳定 RetryEntryReceive、持久 CAS 或成功项与重试结果合并。
-
-真实 Uni 原型改为生产 `IrohConnectionAdmission` 与 SHA256 身份指纹实现，成员目录与准入账本为
-可变测试 fixture。撤权后请求、重新加入后的旧 epoch 和关闭后的旧会话均被拒绝，原 ticket
-仍合法且原 blob 尚在，证明能力票据不能替代当前授权。同内容 A／B 各自开流；SDK 同 hash
-导入可能串行，取消 A 并等待其导入结束后 B 可继续并精确读回。没有增加应用层内容去重或
-共享 waiter 注册表；采用一个逻辑项一份下载许可，SDK 内部共享不移交其他项的完成权。
-本轮原生 connectivity 四项通过（0.23 秒），不是实际 SQLite 成员和完整新 Engine 流程验收。
-
-迁移前 `blob_resource_baseline` 通过（16.50 秒）：实际旧生产适配器发布并逐块精确验证 1GiB，
-不创建整文件内存缓冲。RSS 峰值 47024 KiB；FD 为 10／20／21／12（初始／准备／传输结束／关闭），
-本地 Tokio runtime 任务为 0／28／1（初始／传输结束／关闭），不声称统计全局 SDK runtime。
-显式引用时两端各一 tag，释放后均为零；SDK 临时文件为零。提供端连接总数和峰值均为 2，
-反映旧 warmup 与 Downloader 双路径；关闭后为零。不能将此迁移前基线视为新 owner 的
-连续运行、完整 Engine staging 或所有资源归零验收。
-
-开工 main 冻结宿主已构建，原库和锁文件未经修改；临时源码由冻结脚本回收。rc.15 Direct
-单边升级首组已通过旧旧文件、原文件升级后读回与旧新双向文件精确校验，原身份、传输身份、
-成员和历史均保留。当前路径仍为迁移前生产路径，完整 Direct／Relay 双边矩阵与协议向量
-正在补齐，阶段 0 整体尚未退出；正式迁移后须重新执行完整硬验收。
-
-可重复入口：
-
-```bash
-just cargo test -p uc-application --lib retry_material --locked
-just cargo test -p uc-infra-p2p --lib network::iroh::connectivity --locked
-UC_BLOB_RESOURCE_EVIDENCE="$PWD/target/blob-connectivity-evidence/resource-baseline.json" \
-  just cargo test -p uc-infra-p2p --test blob_resource_baseline --locked -- --nocapture
-```
-
-资源首轮因为工件路径相对 Cargo 测试 cwd 导致写入失败；保留原日志，改由驱动传入绝对工件路径后重跑通过，
-没有放宽传输或资源断言。日志与私有原始计数位于 `.planning/2026-10-21-blob-connectivity/` 和
-`target/blob-connectivity-evidence/`，不提交原始文件、资料或实际身份。
-
-## 阶段 0 退出证据
-
-完整迁移前资料矩阵 8／8 通过：开工 main／rc.15 × Direct／强制 Relay × 升级第 0／1 侧。
-每组的旧旧配对与旧资料重开、旧旧文件精确读回、单边升级后原接收文件可读、旧新双向文件精确读回、
-原设备与传输身份／成员／历史保留均有证明；独立原始资料副本在升级前创建，结束后按规则清理。
-每组 plaintext_clean／cleaned 均为 true，failed 均为 false。固定旧库不打补丁。
-
-| 锚点 | Direct 两侧升级 | 强制 Relay 两侧升级 | 文件角色 |
-| --- | --- | --- | --- |
-| 开工 main a461b894 | 2／2 | 2／2 | 新侧获取与提供均通过 |
-| rc.15 f6f305d9 | 2／2 | 2／2 | 新侧获取与提供均通过 |
-
-每组沿既有 harness 运行，例如：
-
-```bash
-UC_CONNECTIVITY_BASELINE_REV=a461b89444efd60081c7ef63f927946f9dfc072d \
-UC_CONNECTIVITY_BASELINE_ROOT="$PWD/target/blob-connectivity-evidence/frozen-main" \
-UC_CONNECTIVITY_BASELINE_LABEL=blob-baseline bash scripts/testing/build-peer-reachability-main.sh
-UC_NETWORK_UNPRIVILEGED=1 just mbx-exec bash scripts/testing/run-connection-recovery-e2e.sh \
-  --suite network --repeat 1 --mode direct --case P00-prepaired-upgrade --prebuilt \
-  --blob-baseline --prepaired-host "$PWD/target/blob-connectivity-evidence/frozen-main/uc-connectivity-host" \
-  --upgrade-side 0
-bash scripts/testing/freeze-blob-wire-vectors.sh
-just cargo test -p uc-infra-p2p --test blob_protocol_vectors --locked
-```
-
-固定历史 SDK 0.102.0 的独立 example 导出向量，当前 SDK 对照 Raw 与空负载全部字节相同。
-向量使用合成固定 key 和内容，没有真实票据或身份。旧临时源码均已检查回收；私有矩阵摘要
-位于 target 下 baseline-matrix-summary.json，记录运行二进制摘要、HEAD 与工作差异摘要。
-驱动保留每组原始工件和日志；最终汇总首次误按固定 presence 后缀寻找第 1 侧文件，
-按实际工件后缀核对后 8 组完整通过，未重跑或覆盖网络失败。
-
-旧新配对身份沿用相同 SHA256 指纹算法和普通成员目录；生产准入组件的可变权威 fixture
-证明撤权与会话代次失效，正常旧资料互通证明原身份可持续解析。两个证据共同解除阶段 0
-身份前置，不宣称迁移后 SDK 请求已经经过新准入负责人。实际 blob ALPN 的协议字节由
-向量证明，矩阵的传输路径由隔离网络约束；迁移后实际协商与流级资源计数仍须阶段 5 验证。
-
-阶段 0 技术前置完成。生产 owner、容量与期限、自动恢复、取消通知背压、部分失败、稳定重试与绑定、
-最终矩阵／完整回归／平台 CI 仍未实现或未执行，不能据此宣称完整 spec 完成。
-
-## 阶段 1：原型采用为唯一 SDK 交换能力
-
-原 `tests/support/blob_exchange.rs` 已删除。Application 的专属 port 位于
-[`transfer/blob/transport`](../../../crates/uc-application/src/transfer/blob/transport/)，
-Infra 实现位于 [`blob_exchange`](../../../crates/uc-infra-p2p/src/network/iroh/blob_exchange/)。
-原 Uni 与 SDK 工作探针改用这一份实现；integration 预连接 fixture 仅用于 SDK 工作证明，
-真实原生 bridge／当前成员准入仍由既有 Uni 单元探针验证，不能混同为完整 Engine 组装。
-
-固定 SDK 的 into_byte_stream 会把通道异常映射为 EOF，不能只据流结束报告成功。
-采用其同源 BAO 遍历器核对期望响应长度与实际输出，再核对同一 store 状态；仍由原
-SDK export 编码，不新增线上帧。尾部范围归一化首轮失败（16KiB 用例的长度不一致）已保留，
-修复后空／完整／稀疏／越过末尾范围与真实 SDK 字节数量一致。锁文件只增加当前 Infra crate
-到既有 bao-tree 的依赖边，没有更新任何包、SDK 来源或版本。
-
-SDK export worker 的真实故障注入、未完整请求头的取消／恰好到期、来源不存在的原协议空 FIN、
-本地已有内容、合法空内容无新增永久标签均已验证。流析构的停止失败会被收集到交换结算结果，
-实际请求已送出且响应头未到达时注入 stop 权限失败，证明没有伪报取消成功，并可追溯原始 IO 来源。
-下载网络错误或取消仍等待独立 import receiver，提供端停止自身网络后仍排空同次 export。
-
-最终命令及结果：
-
-```bash
-just cargo nextest run --locked -p uc-infra-p2p --lib \
-  --test blob_connectivity_feasibility --test blob_protocol_vectors \
-  -E '(kind(lib) & (test(network::iroh::blob_exchange) | test(network::iroh::connectivity))) | binary(blob_connectivity_feasibility) | binary(blob_protocol_vectors)'
-```
-
-11 passed、312 项按过滤跳过，0.527 秒；本轮根门禁通过。原 SDK 高层失败、首轮编译错误、
-响应长度失败与最终结果均保留在忽略日志中。新 port 的成功结果持有内容与工作保护，
-但当前生产 facade／Router 尚未使用它；完整 owner、预算接线、独立资源池与生命周期仍待实施。
-完整 workspace、最终新路径旧端矩阵、资源连续运行、平台 CI 与设备未重跑，不能视为 spec 完成。
+原始命令输出、JUnit、计数流、截图、临时源码与失败现场保留本地或 CI Artifacts。
+仓库只保存上述原因、实现入口和可重复测试；物理设备未执行时明确记为跳过。

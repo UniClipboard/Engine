@@ -1,6 +1,6 @@
 # Issue #34 第七切片：文件／blob 受管传输实现规格
 
-状态：**设计定稿；阶段 0 前置证明完成，阶段 1 实施中**（2026-10-21）。见[可行性证据](2026-10-21-blob-connectivity-feasibility.md)。
+状态：**设计定稿；功能已接线，完整交付验收中**（2026-10-23）。见[可行性证据](2026-10-21-blob-connectivity-feasibility.md)。
 配套[执行计划](2026-10-21-blob-connectivity-plan.md)记录实施状态，本文是本片设计与验收的唯一正文来源。
 源码盘点锚点为 `2154b959fa16ccbdb165f8a92a295a039833bf47`；开工时重新冻结 main、旧版与 SDK 来源。
 前置为[第六片](../completed/2026-10-14-peer-reachability-connectivity-spec.md)。第八片反向进度完整迁移另行定稿。
@@ -323,7 +323,7 @@ Engine 只装饰完整能力，不新增阶段读取。错误保留 source，日
 ## 9. 验收标准（Acceptance Criteria）
 
 * [ ] 阶段 0 的双向 SDK／Uni 与任务停止证明通过，原始项手动重试无需新增持久格式可运行。
-* [x] 共用连接取消 A 不影响 B，B 无被迫重试且内容正确；实际完整 Application／Uni／SDK 的 Direct 重复验收见[执行计划](2026-10-21-blob-connectivity-plan.md#2026-10-22-同连接双流取消硬验收)。
+* [x] 共用连接取消 A 不影响 B，B 无被迫重试且内容正确；实际完整 Application／Uni／SDK 的验证接缝见[实现方案](2026-10-21-blob-connectivity-feasibility.md#同连接双流与完成权)。
 * [ ] 反向通知失败或永久阻塞不阻止离线本地取消；此项为硬验收。
 * [ ] 取消成功仅在实际结算后返回，5 秒超时明确未完成，重复调用及调用方取消不遗弃清理。
 * [ ] 共享等待者、提交竞争、各生命周期和重启清理符合 §5.5，无旧任务迟到发布。

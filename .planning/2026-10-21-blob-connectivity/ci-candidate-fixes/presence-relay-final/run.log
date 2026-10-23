@@ -1,1 +1,0 @@
-connection recovery validation failed: actual selected path did not match the isolated topology; expected=direct/relay, observed=A->B:unavailable,B->A:unavailable

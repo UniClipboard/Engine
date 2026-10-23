@@ -1,8 +1,0 @@
-scenario: text-transfer-dispatch
-outcome: passed
-elapsed: 0 ms
-artifact: text-transfer-dispatch-seed-0000000000403404
-artifact directory: text-transfer-dispatch-seed-0000000000403404-run-4145137-0001
-reproduce: cargo nextest run --profile ci --locked -p uc-application -E 'test(text_transfer_scenario_encodes_and_dispatches_snapshot)'
-last event: text-dispatch-accepted
-stage encode-and-dispatch-text: 0 ms
