@@ -79,11 +79,25 @@ async fn real_engine_lock_waits_for_active_retry_export_and_preserves_saved_file
     )
     .await;
     let kept_output_while_blocked = pending_output.is_file();
-    case.exports.release.add_permits(1);
     assert!(
         lock_wait.is_err(),
         "未归还真实导出完成权之前不能报告已锁定或结束锁定动作"
     );
+    // 等待既有业务门禁证明原锁定已封住接收；100ms调用超时本身不能证明该动作已经推进到封口。
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if matches!(case.receiver.execute(Operation::QueryReceiveReadiness).await.unwrap(),
+                OperationResult::ReceiveReadiness(readiness) if !readiness.ready)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("放行导出前原锁定必须实际封住接收准入");
+    assert!(pending_output.is_file(), "导出尚未归还时不能提前清理输出");
+    case.exports.release.add_permits(1);
     timeout(Duration::from_secs(20), async {
         loop {
             if matches!(case.receiver.execute(Operation::QueryEncryptionState).await.unwrap(),

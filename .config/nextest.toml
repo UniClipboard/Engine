@@ -400,14 +400,14 @@ filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract:
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 2 }
 
-# 两个schema逐轮导入、重启与验证原资料，实测完整fixture超过20秒；保留每次关闭原15秒期限。
+# 配置导入测试逐轮启停多个Engine并核验原资料；完整fixture独占且有界，内部每次关闭仍为15秒。
 [[profile.default.overrides]]
-filter = "package(uc-engine) & binary(host_configuration_files_e2e) & test(=rejected_pending_import_keeps_target_usable_across_restarts)"
+filter = "package(uc-engine) & binary(host_configuration_files_e2e)"
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.ci.overrides]]
-filter = "package(uc-engine) & binary(host_configuration_files_e2e) & test(=rejected_pending_import_keeps_target_usable_across_restarts)"
+filter = "package(uc-engine) & binary(host_configuration_files_e2e)"
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 4 }
 

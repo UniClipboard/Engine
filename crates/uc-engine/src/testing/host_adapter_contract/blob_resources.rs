@@ -255,9 +255,10 @@ async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins
     // 关闭断点的真实堆栈已确认：未命名 Rayon worker 会继承创建线程的名称。
     // 只预热进程级共享池，保留冷计数；不得预先创建 Engine 或 SDK Store。
     let shared_cpu_pool_threads = current_num_threads();
-    let server = MockServer::start().await;
-    mount_engine_rendezvous(&server).await;
     let initial = Resources::read()?;
+    // 把fixture服务也纳入创建前基线与关闭验收，不保留进程池的后台runtime。
+    let server = MockServer::builder().start().await;
+    mount_engine_rendezvous(&server).await;
     let native_handles_initial = blob_native_handle_counts();
     let mut native_handles_per_round = Vec::new();
     let (stop, mut stopped) = oneshot::channel();
@@ -384,26 +385,21 @@ async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins
     })
     .await
     .unwrap_or_else(|source| Err(SourceError::new(source).context("large file scenario deadline")));
-    // 只在显式诊断中观察连续两轮之后的自然变化；不插入两轮之间，不改原瞬时资源断言。
-    let mut live_idle_observations = Vec::new();
-    if let Some(origins) = &origins {
-        let started = Instant::now();
-        for second in 0..=45 {
-            live_idle_observations.push(serde_json::json!({
-                "elapsed_ms": started.elapsed().as_millis(),
-                "resources": Resources::read()?,
-                "native_handles": blob_native_handle_counts(),
-                "task_origins": origins.snapshot(),
-            }));
-            if second < 45 {
-                sleep(Duration::from_secs(1)).await;
-            }
-        }
-    }
+    // 来源探针只取快照；不在关闭前增加观察等待，保证CI仍验收正常关闭时序。
+    let live_idle_observations = if let Some(origins) = &origins {
+        vec![serde_json::json!({
+            "elapsed_ms": 0,
+            "resources": Resources::read()?,
+            "native_handles": blob_native_handle_counts(),
+            "task_origins": origins.snapshot(),
+        })]
+    } else {
+        Vec::new()
+    };
     let native_handles_before_shutdown = blob_native_handle_counts();
     receiver.shutdown_until_complete().await?;
     source.shutdown_until_complete().await?;
-    drop((receiver, source));
+    drop((receiver, source, server));
     // 关闭后的框架驱动允许一次短交接；不把长期泄漏当作基线增长放宽。
     let settled = timeout(Duration::from_secs(20), async {
         loop {

@@ -226,6 +226,7 @@ jobs:
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/workspace.xml || true
 
       - name: Run mandatory blob lifecycle resources
+        if: success() || failure()
         id: blob_lifecycle_resources
         run: bash scripts/testing/run-blob-lifecycle-resources.sh
         env:

@@ -17,7 +17,7 @@ async fn real_engine_shutdown_waits_for_failed_save_output_cleanup() {
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
     let database = generation.path().join("v3-payloads/profile.sqlite");
-    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut connection = open_control_connection(&database);
     let failed_id = case.first.items[0].item_id.replace('\'', "''");
     diesel::sql_query(format!("CREATE TRIGGER reject_cleanup_pending_save BEFORE INSERT ON clipboard_event WHEN EXISTS (SELECT 1 FROM file_transfer WHERE receive_item_id = '{failed_id}' AND status = 'completed' AND failure_code IS NULL) BEGIN SELECT RAISE(ABORT, 'injected cleanup pending save'); END"))
         .execute(&mut connection).unwrap();
@@ -72,7 +72,7 @@ async fn real_engine_shutdown_waits_for_failed_save_output_cleanup() {
     .await
     .unwrap()
     .unwrap();
-    let mut reopened = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut reopened = open_control_connection(&database);
     let rows = diesel::sql_query("SELECT status, failure_code, binding_state FROM file_transfer WHERE entry_id = ? AND receive_item_id = ?")
         .bind::<Text,_>(entry).bind::<Text,_>(&case.first.items[0].item_id)
         .load::<Transfer>(&mut reopened).unwrap();
@@ -144,7 +144,7 @@ async fn real_engine_failed_export_cleanup_keeps_network_failure_and_prior_deliv
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
     let database = generation.path().join("v3-payloads/profile.sqlite");
-    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut connection = open_control_connection(&database);
     let pending = attempt_settlement(&mut connection, entry);
     assert_eq!(pending.phase, "preparing");
     assert_eq!(pending.resolution, "pending");
@@ -168,7 +168,7 @@ async fn real_engine_failed_export_cleanup_keeps_network_failure_and_prior_deliv
     .await
     .unwrap()
     .unwrap();
-    let mut reopened = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut reopened = open_control_connection(&database);
     let rows = diesel::sql_query("SELECT status, failure_code, binding_state FROM file_transfer WHERE entry_id = ? AND receive_item_id = ?")
         .bind::<Text,_>(entry).bind::<Text,_>(&case.first.items[1].item_id)
         .load::<Transfer>(&mut reopened).unwrap();
@@ -207,7 +207,7 @@ async fn real_engine_failed_file_registration_cleans_prepared_output_and_deliver
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
     let database = generation.path().join("v3-payloads/profile.sqlite");
-    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut connection = open_control_connection(&database);
     let failed_id = case.first.items[1].item_id.replace('\'', "''");
     // 首项实际导出仍暂停，第二项目标准备和网络登记均尚未开始。
     diesel::sql_query(format!("CREATE TRIGGER reject_file_registration BEFORE INSERT ON file_transfer WHEN NEW.receive_item_id = '{failed_id}' OR NEW.transfer_id = '{failed_id}' BEGIN SELECT RAISE(ABORT, 'injected file registration failure'); END"))

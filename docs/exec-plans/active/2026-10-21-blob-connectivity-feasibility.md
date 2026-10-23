@@ -69,6 +69,9 @@ Engine 只消费原 `BlobStoreLifecyclePort`，不编排 SDK 内部步骤。
 资源验收分别观察主 runtime 与 SDK 私有工作。进程级 Rayon 共享池只初始化一次后取稳定基线，
 同时保留冷计数；不能把共享池初始化误记为每轮泄漏，也不能用丢弃 runtime 伪造任务回收。
 SDK 临时 tag 必须在 actor 仍打开时计数，实际连接以弱句柄观察，避免探针本身延长寿命。
+测试自建 rendezvous 服务同样由 fixture 独占：创建前取基线，销毁后验收，不把后台初始化中的
+进程池服务计入不稳定基线。任务来源探针只采集快照，不在关闭前插入额外等待。
+锁定竞态通过既有接收 readiness 证明封口后再放行受控导出；调用等待到期本身不能证明已封口。
 资源回归入口为 [blob_store_lifecycle.rs](../../../crates/uc-infra-p2p/tests/blob_store_lifecycle.rs)
 和 [默认生命周期资源脚本](../../../scripts/testing/run-blob-lifecycle-resources.sh)。
 

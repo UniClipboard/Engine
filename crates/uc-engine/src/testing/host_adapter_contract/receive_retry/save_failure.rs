@@ -47,14 +47,8 @@ async fn assert_save_failure_at(index: usize) {
     .map(|entry| entry.unwrap())
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
-    let mut connection = SqliteConnection::establish(
-        generation
-            .path()
-            .join("v3-payloads/profile.sqlite")
-            .to_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let mut connection =
+        open_control_connection(&generation.path().join("v3-payloads/profile.sqlite"));
     // 首项仍暂停在实际导出结束处；后两项尚未开始，故障先安装再释放。
     // 触发器不支持绑定参数；标识来自本例的稳定查询并按SQLite字面量规则转义。
     let failed_id = case.first.items[index].item_id.replace('\'', "''");
@@ -90,14 +84,8 @@ async fn assert_save_failure_at(index: usize) {
     assert!(!paths[index].exists(), "保存失败只清理本项刚导出的输出");
 
     // 重新打开同一真实数据库，核对完整流程写出的事实，避免内存receipt遮住持久结果。
-    let mut reopened = SqliteConnection::establish(
-        generation
-            .path()
-            .join("v3-payloads/profile.sqlite")
-            .to_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let mut reopened =
+        open_control_connection(&generation.path().join("v3-payloads/profile.sqlite"));
     let rows = diesel::sql_query("SELECT status, failure_code, binding_state FROM file_transfer WHERE entry_id = ? ORDER BY receive_item_id")
         .bind::<Text,_>(entry).load::<Transfer>(&mut reopened).unwrap();
     assert_eq!(rows.len(), 3);
@@ -196,11 +184,7 @@ async fn real_engine_shutdown_waits_for_failed_file_settlement_repair() {
     let database = generation.path().join("v3-payloads/profile.sqlite");
     // Unix DirEntry持有目录FD；仅保留路径，避免把测试自身句柄计为Engine泄漏。
     drop(generation);
-    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
-    // 控制连接同样等待生产修复事务结束，不能把移除故障注入时的瞬时写锁误当业务失败。
-    diesel::sql_query("PRAGMA busy_timeout = 5000")
-        .execute(&mut connection)
-        .unwrap();
+    let mut connection = open_control_connection(&database);
     let failed_id = case.first.items[1].item_id.replace('\'', "''");
     // 首项可正常保存；第二项原始保存与失败事实均被真实SQLite拒绝。
     diesel::sql_query(format!("CREATE TRIGGER reject_pending_save BEFORE INSERT ON clipboard_event WHEN EXISTS (SELECT 1 FROM file_transfer WHERE receive_item_id = '{failed_id}' AND status = 'completed' AND failure_code IS NULL) BEGIN SELECT RAISE(ABORT, 'injected pending save'); END"))
@@ -279,7 +263,7 @@ async fn real_engine_shutdown_waits_for_failed_file_settlement_repair() {
     .await
     .unwrap()
     .unwrap();
-    let mut reopened = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut reopened = open_control_connection(&database);
     let rows = diesel::sql_query("SELECT status, failure_code, binding_state FROM file_transfer WHERE entry_id = ? AND receive_item_id = ?")
         .bind::<Text,_>(entry).bind::<Text,_>(&case.first.items[1].item_id)
         .load::<Transfer>(&mut reopened).unwrap();

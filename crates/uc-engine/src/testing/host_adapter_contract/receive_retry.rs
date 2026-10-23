@@ -1,4 +1,5 @@
 //! 稳定Engine操作驱动真实网络、SQLite与文件成果；测试控制本地导出或保存故障。
+mod database;
 mod lifecycle;
 mod observation;
 mod redelivery;
@@ -21,8 +22,9 @@ use crate::{
     RemoveMemberInput, RetryEntryReceiveInput, SecretString, SendFilesInput, SendTextInput,
     SettingsPatch, SyncSettingsPatch,
 };
+use database::open_control_connection;
 use diesel::sql_types::{Binary, Text};
-use diesel::{Connection, QueryableByName, RunQueryDsl, SqliteConnection};
+use diesel::{QueryableByName, RunQueryDsl, SqliteConnection};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -222,10 +224,11 @@ async fn receive_case_with_progress(
     prove_progress: bool,
     fail_export_at: usize,
 ) -> ReceiveCase {
-    let server = MockServer::start().await;
-    mount_engine_rendezvous(&server).await;
     #[cfg(target_os = "linux")]
     let resource_baseline = ReceiveResourceBaseline::capture();
+    // 服务由本次fixture独占，基线先于创建；关闭验收也覆盖其线程和FD，避免进程池冷启动竞态。
+    let server = MockServer::builder().start().await;
+    mount_engine_rendezvous(&server).await;
     let source_root = tempfile::tempdir().unwrap();
     let receiver_root = tempfile::tempdir().unwrap();
     let exports = ReceiveExports::install(
@@ -796,14 +799,8 @@ async fn real_engine_delete_refuses_unauthenticated_file_references_and_preserve
     .map(|entry| entry.unwrap())
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
-    let mut connection = SqliteConnection::establish(
-        generation
-            .path()
-            .join("v3-payloads/profile.sqlite")
-            .to_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let mut connection =
+        open_control_connection(&generation.path().join("v3-payloads/profile.sqlite"));
     #[derive(QueryableByName)]
     struct Inline {
         #[diesel(sql_type = Text)]

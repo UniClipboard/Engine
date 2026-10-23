@@ -22,7 +22,7 @@ async fn real_engine_representation_terminal_repair_keeps_parent_receiving_until
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
     let database = generation.path().join("v3-payloads/profile.sqlite");
-    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut connection = open_control_connection(&database);
     diesel::sql_query("CREATE TRIGGER reject_representation_terminal BEFORE UPDATE ON file_transfer WHEN NEW.item_role = 'representation' AND NEW.status = 'completed' BEGIN SELECT RAISE(ABORT, 'injected representation terminal write'); END")
         .execute(&mut connection).unwrap();
     let receiver_id = member_id(&case.receiver).await;
@@ -131,14 +131,8 @@ async fn real_engine_representation_no_entry_failure_is_repaired_without_fetchin
     .map(|entry| entry.unwrap())
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
-    let mut connection = SqliteConnection::establish(
-        generation
-            .path()
-            .join("v3-payloads/profile.sqlite")
-            .to_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let mut connection =
+        open_control_connection(&generation.path().join("v3-payloads/profile.sqlite"));
     diesel::sql_query("CREATE TRIGGER reject_representation_capture BEFORE INSERT ON clipboard_event WHEN EXISTS (SELECT 1 FROM file_transfer WHERE item_role = 'representation' AND status = 'completed') BEGIN SELECT RAISE(ABORT, 'injected representation capture'); END")
         .execute(&mut connection).unwrap();
     diesel::sql_query("CREATE TRIGGER reject_representation_no_entry BEFORE UPDATE ON entry_receive_attempt WHEN NEW.attempt_state = 'failed' AND EXISTS (SELECT 1 FROM file_transfer WHERE entry_id = NEW.entry_id AND item_role = 'representation') BEGIN SELECT RAISE(ABORT, 'injected representation no entry'); END")

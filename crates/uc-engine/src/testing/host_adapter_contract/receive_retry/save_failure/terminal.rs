@@ -28,7 +28,7 @@ async fn assert_terminal_repair(completed: bool) {
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
     let database = generation.path().join("v3-payloads/profile.sqlite");
-    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut connection = open_control_connection(&database);
     let failed_id = case.first.items[1].item_id.replace('\'', "''");
     let expected_status = if completed { "completed" } else { "failed" };
     diesel::sql_query(format!("CREATE TRIGGER reject_network_terminal BEFORE UPDATE ON file_transfer WHEN NEW.receive_item_id = '{failed_id}' AND NEW.status = '{expected_status}' BEGIN SELECT RAISE(ABORT, 'injected network terminal write'); END"))
@@ -114,7 +114,7 @@ async fn real_engine_cancelled_network_terminal_write_stays_cancelled_until_actu
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
     let database = generation.path().join("v3-payloads/profile.sqlite");
-    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut connection = open_control_connection(&database);
     let item = &case.first.items[0].item_id;
     let escaped = item.replace('\'', "''");
     diesel::sql_query(format!("CREATE TRIGGER reject_cancel_terminal BEFORE UPDATE ON file_transfer WHEN NEW.receive_item_id = '{escaped}' AND NEW.status = 'cancelled' BEGIN SELECT RAISE(ABORT, 'injected cancelled terminal write'); END"))

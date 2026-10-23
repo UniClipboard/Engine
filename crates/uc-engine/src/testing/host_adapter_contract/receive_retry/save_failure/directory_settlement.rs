@@ -21,14 +21,8 @@ async fn real_engine_directory_member_terminal_repair_keeps_parent_receiving_unt
     .map(|entry| entry.unwrap())
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
-    let mut connection = SqliteConnection::establish(
-        generation
-            .path()
-            .join("v3-payloads/profile.sqlite")
-            .to_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let mut connection =
+        open_control_connection(&generation.path().join("v3-payloads/profile.sqlite"));
     // 触发器不支持参数，原条目标识按SQLite字面量规则转义；不阻塞旧接收的完成记录。
     let old_entry = case.first.entry_id.replace('\'', "''");
     diesel::sql_query(format!("CREATE TRIGGER reject_directory_terminal BEFORE UPDATE ON file_transfer WHEN NEW.entry_id != '{old_entry}' AND NEW.item_role = 'file' AND NEW.status = 'completed' BEGIN SELECT RAISE(ABORT, 'injected directory terminal write'); END")).execute(&mut connection).unwrap();

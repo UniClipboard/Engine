@@ -17,7 +17,7 @@ async fn real_engine_started_write_failure_repairs_pending_item_without_starting
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
     let database = generation.path().join("v3-payloads/profile.sqlite");
-    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let mut connection = open_control_connection(&database);
     let item = &case.first.items[1].item_id;
     let escaped = item.replace('\'', "''");
     diesel::sql_query(format!("CREATE TRIGGER reject_started_write BEFORE UPDATE ON file_transfer WHEN NEW.receive_item_id = '{escaped}' AND NEW.status = 'transferring' BEGIN SELECT RAISE(ABORT, 'injected started write'); END"))

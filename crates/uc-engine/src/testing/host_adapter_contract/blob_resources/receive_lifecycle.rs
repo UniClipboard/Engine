@@ -1,5 +1,6 @@
 //! 复用同一/proc采样，在真实生命周期验收中检查原进程资源回到基线。
-use super::{current_num_threads, Resources};
+use super::{current_num_threads, thread_groups, Resources};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -12,6 +13,8 @@ static REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub(in super::super) struct ReceiveResourceBaseline {
     before_shared_cpu_pool: Resources,
     initial: Resources,
+    initial_fd_kinds: BTreeMap<&'static str, usize>,
+    initial_thread_groups: BTreeMap<&'static str, usize>,
     closed_before_case_drop: Option<Resources>,
     directory: PathBuf,
     case: String,
@@ -28,6 +31,8 @@ impl ReceiveResourceBaseline {
         Some(Self {
             before_shared_cpu_pool,
             initial: Resources::read().expect("读取原生资源基线"),
+            initial_fd_kinds: fd_kinds(),
+            initial_thread_groups: thread_groups().expect("读取原生线程类别基线"),
             closed_before_case_drop: None,
             native_handles_initial: blob_native_handle_counts(),
             native_handles_before_case_drop: None,
@@ -65,6 +70,10 @@ impl ReceiveResourceBaseline {
             "case": self.case,
             "before_shared_cpu_pool": self.before_shared_cpu_pool,
             "initial": self.initial,
+            "initial_fd_kinds": self.initial_fd_kinds,
+            "initial_thread_groups": self.initial_thread_groups,
+            "fd_kinds_after_idle": fd_kinds(),
+            "thread_groups_after_idle": thread_groups().expect("读取原生线程收尾类别"),
             "closed_before_case_drop": self.closed_before_case_drop.expect("必须已完成原Engine关闭"),
             "closed": closed,
             "closed_after_idle": after_idle,
@@ -103,4 +112,34 @@ impl ReceiveResourceBaseline {
             "实际生命周期结束后FD、线程与任务必须回到基线；原始计数已保留"
         );
     }
+}
+
+// 仅输出固定技术类别；/proc链接中的真实文件名、路径和地址不会进入证据。
+fn fd_kinds() -> BTreeMap<&'static str, usize> {
+    let mut groups = BTreeMap::new();
+    for entry in std::fs::read_dir("/proc/self/fd").expect("读取原生FD类别") {
+        let entry = entry.expect("读取原生FD记录");
+        let kind = match std::fs::read_link(entry.path()) {
+            Ok(target) => {
+                let target = target.to_string_lossy();
+                if target == "anon_inode:[eventpoll]" {
+                    "eventpoll"
+                } else if target == "anon_inode:[eventfd]" {
+                    "eventfd"
+                } else if target.starts_with("socket:[") {
+                    "socket"
+                } else if target.starts_with("pipe:[") {
+                    "pipe"
+                } else if target.starts_with("anon_inode:") {
+                    "other_anonymous"
+                } else {
+                    "file_or_directory"
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "closed_during_sample",
+            Err(error) => panic!("读取原生FD类别失败：{:?}", error.kind()),
+        };
+        *groups.entry(kind).or_default() += 1;
+    }
+    groups
 }
