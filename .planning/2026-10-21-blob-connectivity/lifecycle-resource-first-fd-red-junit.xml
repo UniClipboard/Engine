@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="6" skipped="0" failures="1" errors="0" uuid="4dbaaefc-f6b0-4395-b53e-6183c2142b9a" timestamp="2026-10-23T15:11:19.156+08:00" time="225.791">
+    <testsuite name="uc-engine" tests="6" skipped="0" errors="0" failures="1">
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_lock_waits_for_active_retry_export_and_preserves_saved_files" classname="uc-engine" timestamp="2026-10-23T15:11:19.171+08:00" time="34.149"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_revocation_during_retry_prevents_old_output_from_being_committed" classname="uc-engine" timestamp="2026-10-23T15:11:53.320+08:00" time="33.175"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_confirmed_local_removal_prevents_active_retry_from_publishing" classname="uc-engine" timestamp="2026-10-23T15:12:26.495+08:00" time="33.227"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity" classname="uc-engine" timestamp="2026-10-23T15:12:59.722+08:00" time="35.079"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state" classname="uc-engine" timestamp="2026-10-23T15:13:34.802+08:00" time="33.767"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair" classname="uc-engine" timestamp="2026-10-23T15:14:08.570+08:00" time="56.376">
+            <failure message="thread &apos;testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair&apos; (22536) panicked at crates/uc-engine/src/testing/host_adapter_contract/blob_resources/receive_lifecycle.rs:85:9" type="test failure with exit code 101">thread &apos;testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair&apos; (22536) panicked at crates/uc-engine/src/testing/host_adapter_contract/blob_resources/receive_lifecycle.rs:85:9:
+实际生命周期结束后FD、线程与任务必须回到基线；原始计数已保留
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair ... FAILED
+
+failures:
+
+failures:
+    testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 335 filtered out; finished in 56.36s
+
+</system-out>
+            <system-err>
+thread &apos;testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair&apos; (22536) panicked at crates/uc-engine/src/testing/host_adapter_contract/blob_resources/receive_lifecycle.rs:85:9:
+实际生命周期结束后FD、线程与任务必须回到基线；原始计数已保留
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+    </testsuite>
+</testsuites>

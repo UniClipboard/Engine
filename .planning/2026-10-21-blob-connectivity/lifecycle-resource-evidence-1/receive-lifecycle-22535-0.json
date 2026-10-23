@@ -1,0 +1,47 @@
+{
+  "before_shared_cpu_pool": {
+    "fds": 16,
+    "peak_rss_kib": 21168,
+    "rss_kib": 21168,
+    "runtime_tasks": 0,
+    "threads": 7
+  },
+  "case": "testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair",
+  "closed": {
+    "fds": 16,
+    "peak_rss_kib": 450320,
+    "rss_kib": 340672,
+    "runtime_tasks": 8,
+    "threads": 52
+  },
+  "closed_after_idle": {
+    "fds": 16,
+    "peak_rss_kib": 450320,
+    "rss_kib": 336832,
+    "runtime_tasks": 0,
+    "threads": 17
+  },
+  "closed_before_case_drop": {
+    "fds": 42,
+    "peak_rss_kib": 450320,
+    "rss_kib": 340800,
+    "runtime_tasks": 8,
+    "threads": 52
+  },
+  "fd_return_to_initial_verified": false,
+  "idle_settlement_ms": 45052,
+  "initial": {
+    "fds": 15,
+    "peak_rss_kib": 25680,
+    "rss_kib": 25680,
+    "runtime_tasks": 0,
+    "threads": 17
+  },
+  "native_blob_connection_counts_observed": false,
+  "no_sampler_task": true,
+  "quota_counts_observed": false,
+  "resource_settlement_verified": false,
+  "runtime_tasks_return_to_initial_verified": true,
+  "tag_counts_observed": false,
+  "thread_return_to_initial_verified": true
+}

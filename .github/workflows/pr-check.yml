@@ -225,6 +225,16 @@ jobs:
         if: always()
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/workspace.xml || true
 
+      - name: Run mandatory blob lifecycle resources
+        id: blob_lifecycle_resources
+        run: bash scripts/testing/run-blob-lifecycle-resources.sh
+        env:
+          UC_EXPECT_DIAGNOSTIC_STACK: available
+
+      - name: Keep blob lifecycle resource report
+        if: always() && steps.blob_lifecycle_resources.outcome != 'skipped'
+        run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/blob-lifecycle-resources.xml || true
+
       - name: Run testkit evidence suites
         if: success() || failure()
         run: bash scripts/testing/run-test-group.sh evidence

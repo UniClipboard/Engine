@@ -194,6 +194,8 @@ async fn real_engine_shutdown_waits_for_failed_file_settlement_repair() {
     .find(|entry| entry.file_type().unwrap().is_dir())
     .unwrap();
     let database = generation.path().join("v3-payloads/profile.sqlite");
+    // Unix DirEntry持有目录FD；仅保留路径，避免把测试自身句柄计为Engine泄漏。
+    drop(generation);
     let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
     let failed_id = case.first.items[1].item_id.replace('\'', "''");
     // 首项可正常保存；第二项原始保存与失败事实均被真实SQLite拒绝。

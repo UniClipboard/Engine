@@ -1,5 +1,6 @@
 //! 受管Engine的真实大文件流；工件仅含计数，不含内容、身份或路径。
 #![cfg(target_os = "linux")]
+mod receive_lifecycle;
 use super::receive_retry::member_id;
 use super::{
     empty_engine_host, mount_engine_rendezvous, MemoryHostSecureStorage, StaticHostClipboard,
@@ -14,6 +15,7 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Error as SourceError, Result};
 use rayon::current_num_threads;
+pub(super) use receive_lifecycle::ReceiveResourceBaseline;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs::File;

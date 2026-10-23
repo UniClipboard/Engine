@@ -841,3 +841,9 @@ Space生命周期首轮：本机离组确认6.505秒真实通过；ResetSpace用
 Reset第二轮已通过未归还前不完成、真实Space身份改变、原attempt中断、旧两份成果保留与未保存输出清理全部关键断言，6.323秒时仅末尾QueryDeviceGroupChoices在re_pairing_required新Space返回1213／InvalidState。原既有reset验收使用ListDevices验证仅本机，不要求此时成员选择能力可用；新测试改用同一既有稳定设备列表合同，仍要求新Space一台本机设备。未改生产实现或放宽生命周期／输出断言，第二轮日志和JUnit独立保存；再精确运行Reset。
 
 真实切Space最终5.411秒通过，Summary5.426秒；本机离组此前6.505秒通过，两项完整场景仅新增测试，未改生产行为。最终仍严格验证旧接收不能迟到成功、旧成功文件／路径保留、新输出清理和实际新Space身份，query错误合同现场及JUnit均保留。原space-reset scope已inactive。
+
+开始真实生命周期外部资源切片：复用blob_resources的同一/proc读取，仅在显式UC_RECEIVE_RESOURCE_EVIDENCE_DIR时由现有ReceiveCase记录冷／共享CPU池基线、SDK关闭前后对象释放及空闲收尾。原两Engine实际shutdown成功、原fixture对象Drop后才验FD／OS线程／当前runtime任务回初值，最多45秒沿原SDK资源验收空闲窗口，不加任务或业务接口；报告明确tag／quota／native连接未直接采到，不能冒充完成。六场景选择锁定、源撤销、实际切Space、本机离组、活动删除、真实失败结算后shutdown，默认PR复用已构建的workspace执行此有限组；默认行为回归不启用额外观测等待。工具入口为run-blob-lifecycle-resources.sh，每轮独立目录，保留前一JUnit并清空目标以防编译失败误归属旧报告，各操作内原期限与零重试保留，外层含资源等待的90秒专门窗口。待实测再判定，不提前记通过。
+
+资源首轮六项225.791秒：锁定／源撤销／本机离组／切Space／活动删除五项通过，均FD15／线程17／任务0回原值；失败结算shutdown56.376秒只剩FD16（基线15），线程17和任务0已回值。发现该原测试长期持有read_dir.find得到的generation:DirEntry；Rust本机标准库fs文档明确Unix DirEntry保留原目录FD，路径已经独立后仍持有该测试句柄。现于取得database PathBuf后立即drop(generation)，不放宽资源门槛、不改生产；先保留原资源目录全部数字和首轮日志／JUnit，只精确重跑失败用例证明因果。
+
+失败结算shutdown资源修复因果验证32.953秒通过：只提前释放测试DirEntry，严格FD由16回到基线15，线程17／任务0保持原基线。现六类生命周期均有真实内核资源绿证据；lifecycle-resource-summary.json明确5项首轮＋1项fixture修复后精确重跑，single_six_case_green_run=false，不伪称重跑了全组。首轮失败目录／日志／JUnit原样保留。原生连接／tag／quota直接计数仍单独列未完成，不用内核计数代替。

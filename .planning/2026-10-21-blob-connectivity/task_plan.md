@@ -19,7 +19,9 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。生产获取、提供端、完整条目结算、独立文件部分失败、稳定单项重试与薄绑定已接线；当前补全生命周期、失败恢复及阶段5最终交付证据，未据此标记完整spec完成。
 
 ## Next Step
-main已整合提交0c0cfb03（前一提交3de9f9c0），UniFFI全目标check1分32秒、fmt／整分支style／diff通过。本机离组真实6.505秒通过。Reset用例已通过实际切Space、原attempt中断、旧成果保留与新输出清理，先后两次失败均为新增测试末尾查询合同假设（会话封口时readiness为1103／Unavailable；重新配对态device-group choices为1213／InvalidState），原日志与JUnit保留。当前唯一Cargo `uni-blob-space-reset.scope`（exec71911），驱动space-reset-checks.sh，最终设备断言沿既有ListDevices合同，精确运行Reset；不再把静态App内层Rebuild当完整Engine流程，未改生产实现。源码保持不变等待实际结果，不重复启动Cargo。当前4个用户无关planning目录仍未跟踪且未加入任何提交。
+最新提交119a1f6e（真实活动接收切Space与本机离组），前两提交0c0cfb03整合main、3de9f9c0完整关闭／观测及门禁。当前无Cargo活动：六类生命周期资源验证已结束；首轮5通过／1因测试DirEntry持有FD失败，提前释放该测试句柄后失败项32.953秒通过。六份绿计数均回到FD15／线程17／任务0，原失败保持FD16的现场不覆盖；lifecycle-resource-summary.json明确分两次验证，未冒称单批六项全绿。
+
+下一步保存这个测试私有资源切片，再补SDK连接／tag及Application实际额度的完整资源映射（报告目前明确未直接采到），随后统一最终根门禁、workspace、成员全集、升级smoke、交付head十组网络及线上平台CI。原/proc采样仅显式env启用，不新增生产query／port；默认PR复用workspace构建运行run-blob-lifecycle-resources.sh，各业务内部期限与零重试不变，外层90秒包含真实共享库空闲回收。四个无关用户planning目录保持未跟踪且未加入提交。
 
 合并前最后证据：App1281通过／1跳过69.067秒，Native receive_retry28/28通过265.831秒；观测137合同＋Native15.991秒及严格Collector／Jaeger／列表／展开Tags全通过，绿工件observability-green/、红测保留。观测service已停止、无浏览器／Collector／Jaeger残留。工具暂保留供整合源码观测复验，任务结束前清理。最终资源／生命周期映射、完整workspace／成员全集／升级smoke、当前交付head十组网络及线上平台CI仍待完成，不归档spec／plan。
 

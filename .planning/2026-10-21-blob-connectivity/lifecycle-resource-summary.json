@@ -1,0 +1,136 @@
+{
+  "completed_cases": 6,
+  "validation_runs": [
+    {
+      "directory": "lifecycle-resource-evidence-1",
+      "passed_reports": 5,
+      "failed_reports": 1
+    },
+    {
+      "directory": "lifecycle-resource-evidence-2",
+      "passed_reports": 1,
+      "failed_reports": 0
+    }
+  ],
+  "single_six_case_green_run": false,
+  "fixture_only_fd_release_fix": true,
+  "same_production_sources": true,
+  "kernel_resource_settlement_verified": true,
+  "tag_and_quota_counts_directly_observed": false,
+  "cases": {
+    "testing::host_adapter_contract::receive_retry::lifecycle::real_engine_lock_waits_for_active_retry_export_and_preserves_saved_files": {
+      "evidence": "lifecycle-resource-evidence-1/receive-lifecycle-17643-0.json",
+      "sha256": "5a0e58a686c53f3752c4d2ff757ed610819c935e3b00dd1669ac3995f1ce4757",
+      "initial": {
+        "fds": 15,
+        "peak_rss_kib": 25808,
+        "rss_kib": 25808,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "closed_after_idle": {
+        "fds": 15,
+        "peak_rss_kib": 468112,
+        "rss_kib": 337248,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "idle_settlement_ms": 26230
+    },
+    "testing::host_adapter_contract::receive_retry::lifecycle::real_engine_revocation_during_retry_prevents_old_output_from_being_committed": {
+      "evidence": "lifecycle-resource-evidence-1/receive-lifecycle-18882-0.json",
+      "sha256": "0bff61e298f84f81697b0c6997109bca136b8aaac0743554c96ec3268e8804e8",
+      "initial": {
+        "fds": 15,
+        "peak_rss_kib": 25776,
+        "rss_kib": 25776,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "closed_after_idle": {
+        "fds": 15,
+        "peak_rss_kib": 452752,
+        "rss_kib": 339408,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "idle_settlement_ms": 28083
+    },
+    "testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_confirmed_local_removal_prevents_active_retry_from_publishing": {
+      "evidence": "lifecycle-resource-evidence-1/receive-lifecycle-19738-0.json",
+      "sha256": "92633e0cad12a1334f08e83c2cb5ddc82d627385cf5fcfd2e2f953537baeab71",
+      "initial": {
+        "fds": 15,
+        "peak_rss_kib": 25808,
+        "rss_kib": 25808,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "closed_after_idle": {
+        "fds": 15,
+        "peak_rss_kib": 453136,
+        "rss_kib": 336800,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "idle_settlement_ms": 27493
+    },
+    "testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity": {
+      "evidence": "lifecycle-resource-evidence-1/receive-lifecycle-20640-0.json",
+      "sha256": "ef0b0b6d7b4dfef6d2d7427dda8b25a473d750e2e973c104c80c3f62c0767b3b",
+      "initial": {
+        "fds": 15,
+        "peak_rss_kib": 25760,
+        "rss_kib": 25760,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "closed_after_idle": {
+        "fds": 15,
+        "peak_rss_kib": 450976,
+        "rss_kib": 341248,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "idle_settlement_ms": 29928
+    },
+    "testing::host_adapter_contract::receive_retry::real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state": {
+      "evidence": "lifecycle-resource-evidence-1/receive-lifecycle-21575-0.json",
+      "sha256": "4d5a1b9e6c99fbc3d8dca346001f864193cd63a491f50d50fc4e7a3a684c4090",
+      "initial": {
+        "fds": 15,
+        "peak_rss_kib": 25760,
+        "rss_kib": 25760,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "closed_after_idle": {
+        "fds": 15,
+        "peak_rss_kib": 452384,
+        "rss_kib": 333696,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "idle_settlement_ms": 28388
+    },
+    "testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair": {
+      "evidence": "lifecycle-resource-evidence-2/receive-lifecycle-32586-0.json",
+      "sha256": "5d36367359286c23a25adaed81dd134486dbf3fd736654dc1b1be9983184b786",
+      "initial": {
+        "fds": 15,
+        "peak_rss_kib": 25744,
+        "rss_kib": 25744,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "closed_after_idle": {
+        "fds": 15,
+        "peak_rss_kib": 449968,
+        "rss_kib": 335312,
+        "runtime_tasks": 0,
+        "threads": 17
+      },
+      "idle_settlement_ms": 22456
+    }
+  }
+}

@@ -3,6 +3,8 @@ mod lifecycle;
 mod observation;
 mod redelivery;
 mod save_failure;
+#[cfg(target_os = "linux")]
+use super::blob_resources::ReceiveResourceBaseline;
 use super::{
     empty_engine_host, mount_engine_rendezvous, next_engine_event_matching,
     MemoryHostSecureStorage, ENGINE_TEST_LOCK,
@@ -173,6 +175,8 @@ impl HostClipboard for ReceiveClipboard {
 }
 
 struct ReceiveCase {
+    #[cfg(target_os = "linux")]
+    resource_baseline: Option<ReceiveResourceBaseline>,
     source: Engine,
     receiver: Engine,
     source_id: String,
@@ -196,6 +200,12 @@ impl ReceiveCase {
     async fn shutdown(self) {
         self.receiver.shutdown_until_complete().await.unwrap();
         self.source.shutdown_until_complete().await.unwrap();
+        #[cfg(target_os = "linux")]
+        if let Some(mut baseline) = self.resource_baseline.clone() {
+            baseline.record_before_case_drop();
+            drop(self);
+            baseline.verify_after_shutdown().await;
+        }
     }
 }
 
@@ -210,6 +220,8 @@ async fn receive_case_with_progress(
 ) -> ReceiveCase {
     let server = MockServer::start().await;
     mount_engine_rendezvous(&server).await;
+    #[cfg(target_os = "linux")]
+    let resource_baseline = ReceiveResourceBaseline::capture();
     let source_root = tempfile::tempdir().unwrap();
     let receiver_root = tempfile::tempdir().unwrap();
     let exports = ReceiveExports::install(
@@ -381,6 +393,8 @@ async fn receive_case_with_progress(
         (first, saved)
     };
     ReceiveCase {
+        #[cfg(target_os = "linux")]
+        resource_baseline,
         source,
         receiver,
         source_id,

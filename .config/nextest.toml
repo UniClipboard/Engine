@@ -412,3 +412,12 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & test(/receive_retry::lifecycle::/)"
 slow-timeout = { period = "30s", terminate-after = 3 }
+
+# 显式资源验收还观察原阻塞池的真实空闲退出，保留各操作原有内部期限与零重试。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/)"
+slow-timeout = { period = "30s", terminate-after = 3 }
