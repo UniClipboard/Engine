@@ -1,0 +1,60 @@
+Jaeger
+Search
+Compare
+System Architecture
+About Jaeger
+uc-engine: clipboard.retry_receive b8716cb
+Trace Timeline
+Trace StartOctober 23 2026, 14:19:06.909Duration64.8msServices1Depth2Total Spans4
+0μs
+16.2ms
+32.4ms
+48.6ms
+64.8ms
+Service & Operation
+0μs
+16.2ms
+32.4ms
+48.6ms
+64.8ms
+3
+uc-engine clipboard.retry_receive
+64.8ms
+clipboard.retry_receive
+Service:uc-engineDuration:64.8msStart Time:0μs
+Tags
+otel.scope.name	
+uc-observability-runtime
+
+otel.status_code	
+OK
+
+span.kind	
+internal
+
+target	
+uc.telemetry
+
+uc.domain	
+clipboard
+
+uc.operation	
+clipboard.retry_receive
+
+uc.outcome	
+ok
+
+uc.record.kind	
+business
+
+uc.role	
+local
+Process:deployment.environment.name=testhost.arch=arm64os.type=linuxservice.instance.id=fe65ca38-6b1d-4859-9e5c-109bc2f80befservice.namespace=uniclipboardservice.version=1.1.0-rc.23uc.app.channel=testuc.telemetry.schema.version=1
+ c69da68fa2df8b01
+Copy
+uc-engine clipboard.export_file
+4.2ms
+uc-engine clipboard.persist
+4.0ms
+uc-engine clipboard.persist
+2.5ms

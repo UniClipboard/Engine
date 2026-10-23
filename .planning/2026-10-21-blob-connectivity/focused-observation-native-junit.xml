@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="1" skipped="0" failures="0" errors="0" uuid="db8dc370-d3a0-4b2f-a700-99be6b23c396" timestamp="2026-10-23T13:27:31.375+08:00" time="15.091">
+    <testsuite name="uc-engine" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="testing::host_adapter_contract::receive_retry::observation::real_engine_file_partial_retry_and_cancellation_export_actual_business_results" classname="uc-engine" timestamp="2026-10-23T13:27:31.386+08:00" time="15.080"/>
+    </testsuite>
+</testsuites>

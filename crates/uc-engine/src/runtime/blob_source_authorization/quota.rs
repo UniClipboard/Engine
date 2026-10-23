@@ -3,7 +3,10 @@ use super::{dispatch, join, membership, pending, settled, start, PASSPHRASE};
 use crate::engine::EngineRuntime;
 use crate::testing::mount_engine_rendezvous;
 use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
-use crate::{CreateSpaceInput, Operation, SecretString, SettingsPatch, SyncSettingsPatch};
+use crate::{
+    flush_test_tracing, init_test_tracing, CreateSpaceInput, Operation, SecretString,
+    SettingsPatch, SyncSettingsPatch,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -12,8 +15,24 @@ use tokio_util::sync::CancellationToken;
 use uc_application::facade::{FetchBlobToPathCommand, PublishBlobPathCommand};
 use wiremock::MockServer;
 
+struct FlushQuotaObservability;
+impl Drop for FlushQuotaObservability {
+    fn drop(&mut self) {
+        flush_test_tracing();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ticket_provider_budget_is_shared_with_a_different_message_author() {
+    // 只有显式诊断执行才安装进程观测，正常CI仍使用原运行环境。
+    let _flush = if std::env::var_os("UC_TEST_OTLP_TRACE_ENDPOINT").is_some()
+        && std::env::var_os("UC_TEST_OTLP_LOG_ENDPOINT").is_some()
+    {
+        init_test_tracing();
+        Some(FlushQuotaObservability)
+    } else {
+        None
+    };
     let server = MockServer::start().await;
     mount_engine_rendezvous(&server).await;
     let roots = [tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap()];
@@ -231,16 +250,16 @@ async fn ticket_provider_budget_is_shared_with_a_different_message_author() {
         .unwrap()
         .unwrap()
         .unwrap();
-    timeout(Duration::from_secs(20), send)
-        .await
-        .unwrap()
-        .unwrap();
     assert_eq!(
         settled(&receiver, &first_entry, "completed")
             .await
             .items_completed,
         1
     );
+    timeout(Duration::from_secs(20), send)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         std::fs::read(second_path).unwrap() == contents[1],
         "second C file must finish unchanged"

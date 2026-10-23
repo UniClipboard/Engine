@@ -1,5 +1,6 @@
 //! Shared inbound receive progress and cancellation operations.
 
+use crate::assembly::observability::observe_receive_retry;
 use crate::error_codes::*;
 
 use uc_application::facade::{
@@ -61,14 +62,14 @@ pub async fn execute_retry_entry_receive(
     for item in &input.item_ids {
         validate_id(item)?;
     }
-    let outcome = facade
-        .retry_entry_receive(
-            EntryId::from_string(input.entry_id),
-            input.expected_attempt_id,
-            input.item_ids,
-        )
-        .await
-        .map_err(map_retry_error)?;
+    // 在完整能力边界装箱，避免重试future扩大所有Engine操作共用的dispatch状态机。
+    let outcome = observe_receive_retry(Box::pin(facade.retry_entry_receive(
+        EntryId::from_string(input.entry_id),
+        input.expected_attempt_id,
+        input.item_ids,
+    )))
+    .await
+    .map_err(map_retry_error)?;
     let outcome = match outcome {
         AppReceiveRetryOutcome::Accepted { attempt_id } => {
             EntryReceiveRetryOutcome::Accepted { attempt_id }

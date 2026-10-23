@@ -1316,3 +1316,8 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 最终同源验证全部通过：Application库1279项／1跳过（124.31秒），CI nextest真实进程／SDK三项40.744秒；locked metadata、workspace all-targets（3分23秒）、fmt、Rust style、repository preflight（1346隐私站点、隐私自测、Collector、6项OpenMLS可执行验证及架构负例）、diff均退出0。人工审阅核对完整密文映射先于任何创建／探测、首次日志失败无产物／无下载并保留StorageFull源、000／500保存目录回退、原候选实际清理后替换日志、Staging不认领用户复用的final、原attempt中断失败及不恢复旧网络下载；未新增持久版本、字段、队列、预算或公开接口。
 
 最终scope已inactive，核对无活动Cargo／rustc／Engine进程及专用TMPDIR的活动FD，目录仅余本轮验证脚本并已移除；共享target／编译缓存保持。仅此恢复边界完成：完整资源总量、全生命周期、最终head兼容与既有六片／全工作区回归、平台CI／设备及观测验收继续未完成，不用本次三项替代它们。
+
+
+### 锁定前接收排空的责任修复
+
+真实Engine红测5.476秒确认：第四次真实本地导出仍保留完成权时，LockEncryption已结束；随后解锁可陷入等待旧接收结算。完整锁定仍归Space lock／session activity，接收停止与本地结算归原transfer。调用方只发LockEncryption／UnlockSpace，不拼内部步骤。原接收门禁关闭能力改为异步完整关闭：封住旧世代、同时通知所有原出生动作停止，再沿现有唯一排空租约等待其实际完成；之后才允许锁密钥。清空历史复用同一排空实现，不新建任务或持久队列；失败保留原source及未完成责任，成功才交还锁定完成。重启继续原reconciliation，无新格式或Engine步骤查询。以原生锁定红测和已通过的暂停／重开、原生删除／清空及App排空／恢复测试验证。

@@ -119,6 +119,17 @@ pub enum InboundCaptureCommitContext {
     },
 }
 
+impl From<DirectoryCaptureCommitContext> for InboundCaptureCommitContext {
+    fn from(directory: DirectoryCaptureCommitContext) -> Self {
+        Self::Complete {
+            attempt_id: directory.attempt_id,
+            delivered_item_ids: Vec::new(),
+            file_set: Some(directory.file_set),
+            artifacts: CompletedReceiveArtifacts::DirectoryPublished,
+        }
+    }
+}
+
 enum CaptureCommitContext {
     Inbound(InboundCaptureCommitContext),
 }
@@ -280,37 +291,6 @@ impl CaptureClipboardUseCase {
             authoritative_hash,
             commit_mode,
             None,
-        )
-        .await
-    }
-
-    #[tracing::instrument(
-        name = "usecase.capture_clipboard.execute_directory_with_origin",
-        skip_all
-    )]
-    pub(crate) async fn execute_directory_with_origin(
-        &self,
-        snapshot: SystemClipboardSnapshot,
-        origin: ClipboardChangeOrigin,
-        preset_entry_id: EntryId,
-        authoritative_hash: Option<SnapshotHash>,
-        commit_mode: CommitMode,
-        directory_commit: DirectoryCaptureCommitContext,
-    ) -> Result<Option<CaptureOutcome>> {
-        self.execute_with_origin_internal(
-            snapshot,
-            origin,
-            Some(preset_entry_id),
-            authoritative_hash,
-            commit_mode,
-            Some(CaptureCommitContext::Inbound(
-                InboundCaptureCommitContext::Complete {
-                    attempt_id: directory_commit.attempt_id,
-                    delivered_item_ids: Vec::new(),
-                    file_set: Some(directory_commit.file_set),
-                    artifacts: CompletedReceiveArtifacts::DirectoryPublished,
-                },
-            )),
         )
         .await
     }

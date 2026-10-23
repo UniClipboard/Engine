@@ -1,4 +1,4 @@
-//! 清空先停止全部出生动作，再等待实际结束；不改变外部会话的打开状态。
+//! 完整维护动作共用原出生动作的排空；先通知全部停止，再等待实际结束。
 use super::{Completion, ReceiveRegistrationError, ReceiveWorkError, ReceiveWorkRegistry};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use tokio::sync::{watch, OwnedMutexGuard};
 
-pub(crate) struct ReceiveClearScope {
+pub(crate) struct ReceiveDrainScope {
     registry: Arc<ReceiveWorkRegistry>,
     waiting: Vec<(watch::Receiver<Completion>, bool)>,
     complete: bool,
@@ -14,9 +14,9 @@ pub(crate) struct ReceiveClearScope {
 }
 
 impl ReceiveWorkRegistry {
-    pub(crate) async fn clear_scope(
+    pub(crate) async fn drain_scope(
         self: &Arc<Self>,
-    ) -> Result<ReceiveClearScope, ReceiveRegistrationError> {
+    ) -> Result<ReceiveDrainScope, ReceiveRegistrationError> {
         let mut scope = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.clearing {
@@ -35,7 +35,7 @@ impl ReceiveWorkRegistry {
                     )
                 })
                 .collect();
-            ReceiveClearScope {
+            ReceiveDrainScope {
                 registry: self.clone(),
                 waiting,
                 complete: false,
@@ -65,8 +65,8 @@ impl ReceiveWorkRegistry {
     }
 }
 
-impl ReceiveClearScope {
-    pub(crate) async fn stop(&mut self) -> Result<(), ReceiveClearFailure> {
+impl ReceiveDrainScope {
+    pub(crate) async fn stop(&mut self) -> Result<(), ReceiveDrainFailure> {
         let mut failures = Vec::new();
         for (mut result, registered) in self.waiting.drain(..) {
             loop {
@@ -90,7 +90,7 @@ impl ReceiveClearScope {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(ReceiveClearFailure(failures))
+            Err(ReceiveDrainFailure(failures))
         }
     }
 
@@ -99,7 +99,7 @@ impl ReceiveClearScope {
     }
 }
 
-impl Drop for ReceiveClearScope {
+impl Drop for ReceiveDrainScope {
     fn drop(&mut self) {
         let mut state = self
             .registry
@@ -116,13 +116,13 @@ impl Drop for ReceiveClearScope {
 }
 
 #[derive(Debug)]
-pub(crate) struct ReceiveClearFailure(pub(crate) Vec<Arc<ReceiveWorkError>>);
-impl Display for ReceiveClearFailure {
+pub(crate) struct ReceiveDrainFailure(pub(crate) Vec<Arc<ReceiveWorkError>>);
+impl Display for ReceiveDrainFailure {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str("receive actions did not settle before history clear")
+        formatter.write_str("receive actions did not settle before maintenance")
     }
 }
-impl Error for ReceiveClearFailure {
+impl Error for ReceiveDrainFailure {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         self.0
             .first()
@@ -146,7 +146,7 @@ mod tests {
         let preparing = registry.action();
         a.register(&EntryId::from("a"), "a").unwrap();
         b.register(&EntryId::from("b"), "b").unwrap();
-        let mut scope = registry.clear_scope().await.unwrap();
+        let mut scope = registry.drain_scope().await.unwrap();
         assert!(a.cancellation().is_cancelled() && b.cancellation().is_cancelled());
         assert!(preparing.cancellation().is_cancelled());
         let during = registry.action();
@@ -174,7 +174,7 @@ mod tests {
     #[tokio::test]
     async fn clear_completion_does_not_open_an_externally_closed_session() {
         let registry = Arc::new(ReceiveWorkRegistry::default());
-        let mut scope = registry.clear_scope().await.unwrap();
+        let mut scope = registry.drain_scope().await.unwrap();
         scope.stop().await.unwrap();
         registry.close();
         scope.complete();
@@ -189,17 +189,17 @@ mod tests {
         let b = registry.action();
         a.register(&EntryId::from("a"), "a").unwrap();
         b.register(&EntryId::from("b"), "b").unwrap();
-        let mut scope = registry.clear_scope().await.unwrap();
+        let mut scope = registry.drain_scope().await.unwrap();
         let mut waiting = Box::pin(scope.stop());
-        a.finish(Err(ReceiveWorkError::Action(
+        a.finish(Err(Arc::new(ReceiveWorkError::Action(
             io::Error::from(io::ErrorKind::PermissionDenied).into(),
-        )));
+        ))));
         assert!(timeout(Duration::from_millis(10), waiting.as_mut())
             .await
             .is_err());
-        b.finish(Err(ReceiveWorkError::Action(
+        b.finish(Err(Arc::new(ReceiveWorkError::Action(
             io::Error::from(io::ErrorKind::StorageFull).into(),
-        )));
+        ))));
         let failure = waiting.await.unwrap_err();
         assert_eq!(failure.0.len(), 2);
         let kinds = failure
@@ -222,7 +222,7 @@ mod tests {
             .is_err());
         drop(a);
         drop(b);
-        let mut retry = registry.clear_scope().await.unwrap();
+        let mut retry = registry.drain_scope().await.unwrap();
         retry.stop().await.unwrap();
         retry.complete();
         drop(retry);
@@ -234,7 +234,7 @@ mod tests {
         let registry = Arc::new(ReceiveWorkRegistry::default());
         let action = registry.action();
         action.register(&EntryId::from("entry"), "attempt").unwrap();
-        let mut scope = registry.clear_scope().await.unwrap();
+        let mut scope = registry.drain_scope().await.unwrap();
         drop(action);
         let failure = scope.stop().await.unwrap_err();
         assert!(matches!(

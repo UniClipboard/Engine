@@ -896,9 +896,9 @@ async fn failed_receive_settlement_prevents_cancellation_cleanup_and_preserves_s
         owner.execute(&entry, "attempt-1").await.unwrap(),
         CancelEntryReceiveOutcome::CancellationIncomplete
     );
-    action.finish(Err(ReceiveWorkError::Action(
+    action.finish(Err(Arc::new(ReceiveWorkError::Action(
         std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
-    )));
+    ))));
     let error = owner.execute(&entry, "attempt-1").await.unwrap_err();
     let source = std::iter::successors(Some(&error as &dyn std::error::Error), |source| {
         source.source()

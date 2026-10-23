@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="8" skipped="0" failures="0" errors="0" uuid="7d5ad17f-c3ab-4314-baad-7f481d00ff9c" timestamp="2026-10-23T13:26:26.142+08:00" time="56.042">
+    <testsuite name="uc-engine" tests="8" skipped="0" errors="0" failures="0">
+        <testcase name="runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author" classname="uc-engine" timestamp="2026-10-23T13:26:26.154+08:00" time="10.210"/>
+        <testcase name="testing::host_adapter_contract::engine_start_builds_a_resumable_real_session" classname="uc-engine" timestamp="2026-10-23T13:26:36.365+08:00" time="9.139"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_lock_waits_for_active_retry_export_and_preserves_saved_files" classname="uc-engine" timestamp="2026-10-23T13:26:45.504+08:00" time="8.721"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_offline_cancellation_ignores_permanently_blocked_progress" classname="uc-engine" timestamp="2026-10-23T13:26:54.225+08:00" time="5.081"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_revocation_during_retry_prevents_old_output_from_being_committed" classname="uc-engine" timestamp="2026-10-23T13:26:59.307+08:00" time="5.419"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_suspend_deadline_keeps_export_supervised_until_resume" classname="uc-engine" timestamp="2026-10-23T13:27:04.726+08:00" time="3.721"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state" classname="uc-engine" timestamp="2026-10-23T13:27:08.448+08:00" time="4.031"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::real_engine_clear_without_saved_entry_waits_for_export_and_removes_receive_state" classname="uc-engine" timestamp="2026-10-23T13:27:12.479+08:00" time="9.705"/>
+    </testsuite>
+</testsuites>

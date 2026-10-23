@@ -412,11 +412,11 @@ function lineNumberAt(source, offset) {
   return source.slice(0, offset).split('\n').length
 }
 
-function closingBraceAt(source, openingBrace) {
+function closingDelimiterAt(source, openingBrace, open = '{', close = '}') {
   let depth = 0
   for (let index = openingBrace; index < source.length; index += 1) {
-    if (source[index] === '{') depth += 1
-    if (source[index] === '}') depth -= 1
+    if (source[index] === open) depth += 1
+    if (source[index] === close) depth -= 1
     if (depth === 0) return index
   }
   return null
@@ -425,13 +425,18 @@ function closingBraceAt(source, openingBrace) {
 function functionsIn(codeLines) {
   const source = codeLines.join('\n')
   const functions = []
+  // ErrorClass必须适配固定wire词表；该trait方法不是新增的内部别名。
+  const errorClassBlocks = [...source.matchAll(/^\s*impl\s+ErrorClass\s+for\s+[^{};]+\{/gm)].map(match => {
+    const start = match.index + match[0].lastIndexOf('{')
+    return [start, closingDelimiterAt(source, start)]
+  })
   for (const match of source.matchAll(FUNCTION_START)) {
     const visibility = match[2]?.trim() ?? ''
     const name = match[3]
     const openingBrace = source.indexOf('{', match.index + match[0].length)
     const declarationEnd = source.indexOf(';', match.index + match[0].length)
     if (openingBrace === -1 || (declarationEnd !== -1 && declarationEnd < openingBrace)) continue
-    const closingBrace = closingBraceAt(source, openingBrace)
+    const closingBrace = closingDelimiterAt(source, openingBrace)
     if (closingBrace === null) continue
     functions.push({
       body: source.slice(openingBrace + 1, closingBrace),
@@ -439,6 +444,7 @@ function functionsIn(codeLines) {
       name,
       startLine: lineNumberAt(source, match.index + match[1].length),
       visibility,
+      errorClass: errorClassBlocks.some(([start, end]) => start < match.index && match.index < end),
     })
   }
   return functions
@@ -448,10 +454,12 @@ function forwardingMethod(functionInfo) {
   if (functionInfo.visibility === 'pub') return null
   const body = functionInfo.body.trim().replace(/^return\s+/, '').replace(/;\s*$/, '').trim()
   if (body.includes(';')) return null
-  const forwarding = body.match(
-    /^self\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\([\s\S]*\)(?:\s*\.\s*await)?(?:\s*\?)?$/
-  )
+  const forwarding = body.match(/^self\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/)
   if (!forwarding || forwarding[1] === functionInfo.name) return null
+  const opening = forwarding[0].length - 1
+  const closing = closingDelimiterAt(body, opening, '(', ')')
+  if (closing === null || !/^(?:\s*\.\s*await)?(?:\s*\?)?\s*$/.test(body.slice(closing + 1))) return null
+  if (functionInfo.errorClass && functionInfo.name === 'class' && forwarding[1] === 'wire') return null
   return forwarding[1]
 }
 

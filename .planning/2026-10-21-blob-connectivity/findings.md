@@ -395,3 +395,32 @@
 - 首轮目录相关App63项通过12.19秒；最终源的全量App、真实kill／restart及既有SDK目录／离线恢复、根门禁正在串行验证，未取得结果之前不标完成。
 
 最终实证：首次Staging前强杀恢复11.070秒通过，连同原文件进程恢复和SDK目录终态三项40.744秒全通过；App1279通过／1跳过及全部根门禁通过。最终scope已结束，专用临时目录无活动FD并回收，完整spec剩余矩阵未关闭。
+
+
+### 2026-10-23：真实SDK tag与原生连接的资源计数
+
+- 原真实AppFacade／Uni／SDK双流用例新增SDK152c42a公开list_temp_tags计数：活动下载须真实持有tag，各轮取消A且成功B结算后源／目标均回初值0。已有source/provide调用、stream ID、唯一连接及B不重试断言保留；使用原native weak handle确认原关闭后实际释放，不新增Engine／Application查询接口。
+- 初版三项8.47秒通过，27轮。最终改为64KiB源文件生成和独立逐块读回，移除fixture中与size成比例的Vec及整份输出读取；增加连续两轮1GiB。CI nextest最终四项90.320秒全通过，29轮；大文件85.427秒，两轮活动tag均2、结算均0，原生连接均1、关闭后0。源端临时tag也回0。
+- 只读/proc采样实际大文件测试进程160次，读取其全生命周期VmHWM：52416KiB（约51.2MiB），观测RSS45184KiB、线程峰值29、FD22。工件resource-stream-evidence/blob-resources/large-process-sample.json及managed-isolation-false-1073741824-2.json；不含内容、摘要、身份或路径。它是实际完整获取路径，不等同于双Engine全对象图资源／所有生命周期和配额已证明；工件full_engine_resources_verified、quota_counters_verified仍false。
+- 已建立completion-audit.md逐条保留13个spec验收项和48个阶段项目，未以历史勾选替代当前证据；当前提交GitHub工具仅查询PR-triggered runs为空，未把其推论为所有事件无CI，也未登记通过。
+
+
+### 完整验收及观测环境接续
+
+- 最新完整关闭实现收口ReceiveReadinessCoordinator.close，2项真实registry合同0.04秒通过；原生锁定／暂停／在途成员撤销／删除／清空5项34.846秒通过。根metadata、workspace all-targets（3分26秒）、fmt、style、repository、diff均退出0，源码在当前完整回归scope内保持不变。
+- 当前仍在uni-blob-complete-validation scope构建／执行workspace组，随后成员全集、升级smoke。不可同时启动Cargo或改变Rust／HEAD；状态completion-status.log，活动exec session53955。
+- Docker只读访问permission denied，sudo -n也需要密码；尚未请求提权，采用官方同版本独立二进制准备本地验收。GitHub已连接个人账户与本仓Git作者一致；API核实Jaeger2.20.0、Collector-contrib0.160.0，官方下载分别53590436／100171851字节，SHA256为582261d2d8e46721246f5f8072dca7f6762355b248e0dc493bb85990e6226952／bff414e6a287309dfd0c51350c1e13c96c4ab807127b4320bd684f605e781326。工具不支持binary，使用urllib流式下载并验证后解包于target/blob-resource-tmp/observability-tools；session74333仍在下载Collector，Jaeger已验证并可运行--help，尚未启动任何服务。结束前须检查进程／FD并清理。
+- 下一观测证据缺口：真实Engine file retry fixture目前不安装OTLP；既有clipboard_trace测试走真实Engine→MockServer OTLP，并验证text／多目标部分完成，不能冒充文件／单项重试／取消的Collector可视化验收。静态看到receiver的Applied ack一律succeeded，ClipboardReceiveObservation只保留failure；RetryEntryReceive dispatch未见专属业务装饰。须先以真实文件流程导出并验证，不能仅据源码改产品或为观测扩Engine阶段API。可复用既有init_test_tracing_with_otlp和flush_test_tracing（显式test环境）及ReceiveCase真实能力，SDK／业务协议不变。
+
+
+完整验收定位补齐：spec5.3全部默认常量与唯一policy.rs逐项一致；scheduler／timing／budget／cancellation／provider runtime已有恰好到期、累计预算、队列和许可结算覆盖，具体路径已写入completion-audit。当前仅是静态覆盖核对，等正在运行workspace动态结果后才可登记通过。根repository架构负例实际通过，拒绝旧SDK自拨池、对端级取消和原生handler回流。
+
+### 真实文件观测闭环已实际验证
+
+同一真实Engine／SDK／SQLite用例15.991秒通过；严格生产processors逐字匹配。实际Jaeger列表与展开Tags截图逐一查看：初始接收partial，输出故障error.type=storage，独立手动重试ok／cancelled（64.8ms／5.1s），各含export及持久化子节点；旧send仅106／154ms，没有被后续重试延长。92 spans／103完成logs无缺父节点或结果不一致，环境test且无fixture内容／名字／口令；观测绿工件在observability-green/，原失败与中间部分绿仍保留。collector文件出口晚于HTTP flush，验收先等待原批次到齐再判语义，不能通过重跑业务覆盖失败。
+
+### 完整验收剩余生命周期与资源边界
+
+重新核对spec §8原文，集成验收明确要求成员撤销、锁定、切Space、删除及shutdown后检查任务／流／连接／FD／许可／未完成产物。现有新Native明确覆盖锁定／暂停／源成员撤销／删除／清空／离线通知取消，但尚无活动导出中的本机离组或切Space事实；不能只据共用close推论这些已通过。稳定API没有SwitchSpace／LeaveSpace操作，真实本机离组沿远端RemoveMember→QueryDeviceGroupChoices→ChooseDeviceGroup(apply,confirm_local_removal=true)；现有成员E2E harness/membership_topology.rs:814及removal_convergence.rs:R2可复用行为步骤。切Space应进一步核对原ResetSpace／JoinSpace与成员分支切换的实际生命周期，不新增观测阶段API。
+
+资源证据目前分层：Engine2×1GiB的RSS／FD／线程／任务；真实AppFacade-Uni-SDK的tag2→0及native连接1→0；原生三端C额度用例的4全局／2提供端占用与释放行为。它们不能冒称每种Engine生命周期的全部数字已直接采到；后续先定位既有测试装配与资源采样能力，在原合法测试边界补证据，避免为观测扩大业务facade／port／结果。当前完整candidate串行Cargo运行中，未修改Rust来补这些缺口。

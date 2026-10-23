@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "scenario": "file-transfer-completion",
+  "artifact_id": "file-transfer-completion-seed-0000000000403403",
+  "artifact_directory": "file-transfer-completion-seed-0000000000403403-run-3915962-0001",
+  "seed": 4207619,
+  "outcome": "passed",
+  "failure": null,
+  "last_event": {
+    "sequence": 3,
+    "kind": "receiver-transfer-completed"
+  },
+  "stages": [
+    {
+      "name": "begin-receiver-transfer",
+      "elapsed_ms": 0
+    },
+    {
+      "name": "report-progress",
+      "elapsed_ms": 0
+    },
+    {
+      "name": "complete-transfer",
+      "elapsed_ms": 0
+    }
+  ],
+  "resources": [],
+  "cleanup": "completed",
+  "total_elapsed_ms": 0,
+  "reproduce": "cargo nextest run --profile ci --locked -p uc-application -E 'test(file_transfer_completion_scenario_reports_final_state)'"
+}

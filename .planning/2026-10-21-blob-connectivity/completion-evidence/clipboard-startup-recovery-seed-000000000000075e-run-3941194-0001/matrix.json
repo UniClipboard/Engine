@@ -1,0 +1,72 @@
+{
+  "boundary": "real Engine process and SQLite with isolated injected host; no Finder/TCC or Desktop daemon proof",
+  "cases": [
+    {
+      "fault": "Open",
+      "import_cleanup": "passed",
+      "register": "cleared",
+      "startup": "ready",
+      "subsequent_capture": "passed"
+    },
+    {
+      "fault": "Missing",
+      "import_cleanup": "passed",
+      "register": "cleared",
+      "startup": "ready",
+      "subsequent_capture": "passed"
+    },
+    {
+      "fault": "Middle",
+      "import_cleanup": "passed",
+      "register": "cleared",
+      "startup": "ready",
+      "subsequent_capture": "passed"
+    },
+    {
+      "fault": "Clipboard",
+      "import_cleanup": "passed",
+      "register": "cleared",
+      "startup": "ready",
+      "subsequent_capture": "passed"
+    },
+    {
+      "fault": "Metadata",
+      "import_cleanup": "passed",
+      "register": "cleared",
+      "startup": "ready",
+      "subsequent_capture": "passed"
+    },
+    {
+      "fault": "EmptyChunk",
+      "import_cleanup": "passed",
+      "register": "cleared",
+      "startup": "ready",
+      "subsequent_capture": "passed"
+    },
+    {
+      "fault": "SecondRep",
+      "import_cleanup": "passed",
+      "register": "cleared",
+      "startup": "ready",
+      "subsequent_capture": "passed"
+    },
+    {
+      "fault": "Destination",
+      "import_cleanup": "passed",
+      "register": "cleared",
+      "startup": "ready",
+      "subsequent_capture": "passed"
+    },
+    {
+      "fault": "Directory",
+      "import_cleanup": "passed",
+      "register": "cleared",
+      "startup": "ready",
+      "subsequent_capture": "passed"
+    }
+  ],
+  "empty_register_skips_read": true,
+  "normal_file_and_text": true,
+  "pid": 3941196,
+  "reset_failure_code": 1101
+}

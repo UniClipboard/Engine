@@ -9,14 +9,14 @@ use crate::network::iroh::connectivity::{
     ConnectivityProfile, IrohConnectionAdmission, IrohPeerConnection,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures_util::task::AtomicWaker;
+use futures_util::StreamExt;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::{protocol::Router, Endpoint, RelayMode};
 use iroh_blobs::store::fs::FsStore;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io;
-use std::path::PathBuf;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,15 +24,15 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::Notify;
-use tokio::time::{timeout, Instant};
+use tokio::time::{sleep, timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobDownloadResources, BlobExchangeError, BlobExchangePort, BlobReceived, BlobShutdownWait,
-    BlobStoreLifecyclePort, BlobTransport, BlobValidatedProgress, ConnectivityError,
-    KnownPeerIdentity, PeerReceiveStream, StreamLease,
+    BlobStoreLifecyclePort, BlobTransferDeps, BlobTransport, BlobValidatedProgress,
+    ConnectivityError, KnownPeerIdentity, PeerReceiveStream, StreamLease,
 };
 use uc_application::facade::blob_transfer::{
-    BlobTransferDeps, BlobTransferError, BlobTransferFacade, FetchBlobToPathCommand,
+    BlobTransferError, BlobTransferFacade, FetchBlobToPathCommand,
 };
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::blob::{
@@ -243,6 +243,41 @@ async fn managed_download_same_content_cancel_preserves_other_request_without_re
     prove(true, 4 * 1024 * 1024, 8).await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn managed_download_large_stream_settles_sdk_tags_and_connection() -> anyhow::Result<()> {
+    prove(false, 1024 * 1024 * 1024, 2).await
+}
+
+fn write_fixture(path: &Path, byte: u8, size: usize) -> anyhow::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    let chunk = [byte; 64 * 1024];
+    let mut remaining = size;
+    while remaining > 0 {
+        let written = remaining.min(chunk.len());
+        file.write_all(&chunk[..written])?;
+        remaining -= written;
+    }
+    Ok(())
+}
+
+fn verify_fixture(path: &Path, byte: u8, size: usize) -> anyhow::Result<()> {
+    let mut file = std::fs::File::open(path)?;
+    assert_eq!(file.metadata()?.len(), size as u64);
+    let mut chunk = [0; 64 * 1024];
+    let mut remaining = size;
+    while remaining > 0 {
+        let read = remaining.min(chunk.len());
+        file.read_exact(&mut chunk[..read])?;
+        assert!(
+            chunk[..read].iter().all(|actual| *actual == byte),
+            "实际文件内容不匹配"
+        );
+        remaining -= read;
+    }
+    assert_eq!(file.read(&mut chunk)?, 0);
+    Ok(())
+}
+
 async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result<()> {
     let server = Endpoint::builder(presets::N0)
         .relay_mode(RelayMode::Disabled)
@@ -284,8 +319,12 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
     let router = Router::builder(server.clone())
         .accept(BLOBS_ALPN, IrohBlobHandler::new(serving.clone()))
         .spawn();
-    let publishing = IrohBlobTransferAdapter::new(Arc::new(server.clone()), source);
+    let source_tags_before = source.tags().list_temp_tags().await?.count().await;
+    let destination_tags_before = destination.tags().list_temp_tags().await?.count().await;
+    assert_eq!((source_tags_before, destination_tags_before), (0, 0));
+    let publishing = IrohBlobTransferAdapter::new(Arc::new(server.clone()), source.clone());
     let native = client.connect(server.addr(), BLOBS_ALPN).await?;
+    let native_lifetime = native.weak_handle();
     let backend = Arc::new(ExistingConnection {
         connection: IrohPeerConnection::wrap(native.clone()),
         calls: AtomicUsize::new(0),
@@ -333,6 +372,7 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
         outbound_progress_reporter: None,
         file_transfer: None,
     }));
+    let mut resource_rounds = Vec::new();
     for round in 0..rounds {
         let offset = round * 2;
         let gates = [Arc::new(Gate::default()), Arc::new(Gate::default())];
@@ -342,16 +382,22 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
             assert!(planned.is_empty());
             planned.extend(gates.clone());
         }
-        let a_bytes = Bytes::from(vec![41 + round as u8; size]);
-        let b_bytes = Bytes::from(vec![
-            (if same_content { 41 } else { 71 }) + round as u8;
-            size
-        ]);
+        let a_input = root.path().join(format!("a-input-{round}"));
+        let b_input = root.path().join(format!("b-input-{round}"));
+        let a_byte = 41 + round as u8;
+        let b_byte = (if same_content { 41 } else { 71 }) + round as u8;
+        let generated_a = a_input.clone();
+        let generated_b = b_input.clone();
+        tokio::task::spawn_blocking(move || {
+            write_fixture(&generated_a, a_byte, size)?;
+            write_fixture(&generated_b, b_byte, size)
+        })
+        .await??;
         let first = publishing
-            .publish(a_bytes, TagReason::ClipboardEntry(EntryId::new()))
+            .publish_path(&a_input, TagReason::ClipboardEntry(EntryId::new()))
             .await?;
         let second = publishing
-            .publish(b_bytes.clone(), TagReason::ClipboardEntry(EntryId::new()))
+            .publish_path(&b_input, TagReason::ClipboardEntry(EntryId::new()))
             .await?;
         let a_ticket = publishing.issue_ticket(&first).await?;
         let b_ticket = publishing.issue_ticket(&second).await?;
@@ -408,6 +454,13 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
             );
         }
         assert!(!b.is_finished());
+        let source_tags_active = source.tags().list_temp_tags().await?.count().await;
+        let destination_tags_active = destination.tags().list_temp_tags().await?.count().await;
+        assert!(
+            destination_tags_active > destination_tags_before,
+            "真实暂停的下载必须持有SDK临时保护，不能只在关闭后观察空列表"
+        );
+        assert!(native_lifetime.upgrade().is_some());
         a_cancel.cancel();
         let cancelled = timeout(WAIT, a).await??;
         assert!(
@@ -423,9 +476,14 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
             timeout(WAIT, gates[1].entered.notified()).await?;
         }
         gates[1].release();
-        let completed = timeout(WAIT, b).await???;
+        let completion_wait = if size >= 1024 * 1024 * 1024 {
+            Duration::from_secs(300)
+        } else {
+            WAIT
+        };
+        let completed = timeout(completion_wait, b).await???;
         assert_eq!(completed.bytes_written, size as u64);
-        assert_eq!(tokio::fs::read(&b_path).await?, b_bytes.as_ref());
+        tokio::task::spawn_blocking(move || verify_fixture(&b_path, b_byte, size)).await??;
         assert!(!a_path.exists(), "cancelled A must not export output");
         let calls = receiving.receives.lock().unwrap().clone();
         assert_eq!(
@@ -472,10 +530,74 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
             }
         })
         .await?;
+        // SDK保护释放经原actor交接；反复读取实际列表，不用包装层调用数冒充tag计数。
+        let (source_tags_settled, destination_tags_settled) = timeout(WAIT, async {
+            loop {
+                let source_count = source.tags().list_temp_tags().await?.count().await;
+                let destination_count = destination.tags().list_temp_tags().await?.count().await;
+                if source_count == source_tags_before
+                    && destination_count == destination_tags_before
+                {
+                    break Ok::<_, anyhow::Error>((source_count, destination_count));
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        resource_rounds.push(serde_json::json!({
+            "source_temp_tags_active": source_tags_active,
+            "destination_temp_tags_active": destination_tags_active,
+            "source_temp_tags_settled": source_tags_settled,
+            "destination_temp_tags_settled": destination_tags_settled,
+            "native_connections": usize::from(native_lifetime.upgrade().is_some()),
+            "dial_calls": backend.calls.load(Ordering::SeqCst),
+            "receive_calls": receiving.receives.lock().unwrap().len(),
+            "provide_calls": provider.provides.load(Ordering::SeqCst),
+        }));
     }
     timeout(WAIT, downloading.shutdown(BlobShutdownWait::Complete)).await??;
     timeout(WAIT, serving.shutdown(BlobShutdownWait::Complete)).await??;
+    assert!(
+        native.close_reason().is_some(),
+        "完整关闭必须实际关闭原生连接"
+    );
     router.shutdown().await?;
     client.close().await;
+    drop((
+        facade,
+        downloading,
+        serving,
+        backend,
+        native,
+        router,
+        client,
+        server,
+    ));
+    timeout(WAIT, async {
+        while native_lifetime.upgrade().is_some() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    if let Some(root) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
+        let directory = PathBuf::from(root).join("blob-resources");
+        assert!(directory.is_absolute(), "资源工件须由驱动提供绝对目录");
+        std::fs::create_dir_all(&directory)?;
+        let evidence = serde_json::json!({
+            "same_content": same_content, "bytes_per_file": size,
+            "completed_rounds": rounds, "rounds": resource_rounds,
+            "source_temp_tags_initial": source_tags_before,
+            "destination_temp_tags_initial": destination_tags_before,
+            "native_connections_after_shutdown": usize::from(native_lifetime.upgrade().is_some()),
+            "tags_verified": true, "native_connection_release_verified": true,
+            "full_engine_resources_verified": false, "quota_counters_verified": false,
+        });
+        std::fs::write(
+            directory.join(format!(
+                "managed-isolation-{same_content}-{size}-{rounds}.json"
+            )),
+            serde_json::to_vec_pretty(&evidence)?,
+        )?;
+    }
     Ok(())
 }

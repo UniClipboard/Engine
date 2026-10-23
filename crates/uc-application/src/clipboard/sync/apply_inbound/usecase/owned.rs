@@ -10,8 +10,12 @@ use std::{
 use tokio::sync::oneshot;
 use tracing::Instrument;
 use uc_core::ports::ReceiveItemRole;
-use uc_observability_contract::diagnostics::ObservationContext;
+use uc_observability_contract::diagnostics::{
+    connectivity::{ClipboardReceiveFailure, ClipboardReceiveObservation, ClipboardRetryOutcome},
+    ObservationContext,
+};
 
+use super::super::classify_apply_failure;
 use super::{ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome};
 
 impl ApplyInboundClipboardUseCase {
@@ -32,51 +36,75 @@ impl ApplyInboundClipboardUseCase {
         let processing_reply = reply.clone();
         let owner = self.clone();
         let observation = ObservationContext::capture();
-        let task = tokio::spawn(
-            observation.scope(
-                async move {
-                    let outcome = owner
-                        .execute_internal(
-                            input,
-                            provisional,
-                            &action,
-                            &processing_receive,
-                            retry,
-                            &processing_reply,
-                        )
-                        .await;
-                    match (outcome, processing_receive.take_settlement()) {
-                        (Err(error), Some(pending)) => {
-                            let (caller, failure) = share_failure(error);
-                            let failure = Arc::new(failure);
-                            processing_reply.respond(Err(caller));
-                            // 原任务继续持有原许可，只修复失败结算，不重试下载或保存。
-                            owner
-                                .recover_settlement(pending, &processing_receive, failure.clone())
-                                .await;
-                            Processed::Recovered(failure)
-                        }
-                        (outcome, None) => Processed::Original(outcome),
-                        // 成功路径不应留下失败责任；保留责任并完成结算，不能静默释放。
-                        (Ok(_), Some(pending)) => {
-                            let (caller, failure) = share_failure(ApplyInboundError::Internal(
-                                SourceError::msg("successful receive retained unsettled failure"),
-                            ));
-                            let failure = Arc::new(failure);
-                            processing_reply.respond(Err(caller));
-                            owner
-                                .recover_settlement(pending, &processing_receive, failure.clone())
-                                .await;
-                            Processed::Recovered(failure)
-                        }
+        let receive_observation = ClipboardReceiveObservation::capture();
+        let settlement_observation = receive_observation.clone();
+        // 完整物化future在原spawn边界装箱，观测scope只移动指针，不在worker栈反复搬运整份future。
+        let processing = Box::pin(
+            async move {
+                let outcome = owner
+                    .execute_internal(
+                        input,
+                        provisional,
+                        &action,
+                        &processing_receive,
+                        retry,
+                        &processing_reply,
+                    )
+                    .await;
+                match (outcome, processing_receive.take_settlement()) {
+                    (Err(error), Some(pending)) => {
+                        let (caller, failure) = share_failure(error);
+                        let failure = Arc::new(failure);
+                        processing_reply.respond(Err(caller));
+                        // 原任务继续持有原许可，只修复失败结算，不重试下载或保存。
+                        owner
+                            .recover_settlement(pending, &processing_receive, failure.clone())
+                            .await;
+                        Processed::Recovered(failure)
+                    }
+                    (outcome, None) => Processed::Original(outcome),
+                    // 成功路径不应留下失败责任；保留责任并完成结算，不能静默释放。
+                    (Ok(_), Some(pending)) => {
+                        let (caller, failure) = share_failure(ApplyInboundError::Internal(
+                            SourceError::msg("successful receive retained unsettled failure"),
+                        ));
+                        let failure = Arc::new(failure);
+                        processing_reply.respond(Err(caller));
+                        owner
+                            .recover_settlement(pending, &processing_receive, failure.clone())
+                            .await;
+                        Processed::Recovered(failure)
                     }
                 }
-                .in_current_span(),
-            ),
+            }
+            .in_current_span(),
+        );
+        let task = tokio::spawn(
+            observation.scope(async move { receive_observation.scope(processing).await }),
         );
         // 同一许可由处理与监督共同持有，异常登记完成前关闭不能返回成功。
         tokio::spawn(async move {
-            let outcome = match task.await {
+            let processed = task.await;
+            let retry_outcome = match &processed {
+                Ok(Processed::Original(Ok(ApplyOutcome::DecodeFailed { .. }))) => {
+                    ClipboardRetryOutcome::Rejected
+                }
+                Ok(Processed::Original(Ok(ApplyOutcome::DuplicateSkipped { .. }))) => {
+                    ClipboardRetryOutcome::Skipped
+                }
+                Ok(Processed::Original(Ok(_))) => ClipboardRetryOutcome::Succeeded,
+                Ok(Processed::Original(Err(ApplyInboundError::Stopped))) => {
+                    ClipboardRetryOutcome::Cancelled
+                }
+                Ok(Processed::Original(Err(source))) => {
+                    ClipboardRetryOutcome::Failed(classify_apply_failure(source))
+                }
+                Ok(Processed::Recovered(source)) => {
+                    ClipboardRetryOutcome::Failed(classify_apply_failure(source.as_ref()))
+                }
+                Err(_) => ClipboardRetryOutcome::Failed(ClipboardReceiveFailure::ApplyFailed),
+            };
+            let outcome = match processed {
                 Ok(Processed::Original(Ok(outcome))) => {
                     receive_action.finish(Ok(()));
                     Some(Ok(outcome))
@@ -87,20 +115,21 @@ impl ApplyInboundClipboardUseCase {
                 }
                 Ok(Processed::Original(Err(error))) => {
                     let (caller_error, shared) = share_failure(error);
-                    receive_action.finish(Err(shared));
+                    receive_action.finish(Err(Arc::new(shared)));
                     Some(Err(caller_error))
                 }
                 Ok(Processed::Recovered(source)) => {
-                    receive_action.finish_shared(Err(source));
+                    receive_action.finish(Err(source));
                     None
                 }
                 Err(source) => {
                     let source = work.failed(source);
-                    receive_action.finish(Err(ReceiveWorkError::Task(source.clone())));
+                    receive_action.finish(Err(Arc::new(ReceiveWorkError::Task(source.clone()))));
                     Some(Err(ApplyInboundError::WorkFailed(source.into())))
                 }
             };
             drop(work);
+            settlement_observation.finish_retry(retry_outcome);
             if let Some(outcome) = outcome {
                 reply.respond(outcome);
             }

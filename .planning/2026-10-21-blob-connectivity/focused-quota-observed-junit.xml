@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="1" skipped="0" failures="0" errors="0" uuid="598f19cc-d85b-483d-b98a-7233039c98c1" timestamp="2026-10-23T13:27:23.167+08:00" time="7.553">
+    <testsuite name="uc-engine" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author" classname="uc-engine" timestamp="2026-10-23T13:27:23.174+08:00" time="7.546"/>
+    </testsuite>
+</testsuites>

@@ -170,9 +170,9 @@ async fn deletion_preserves_actual_stop_failure_and_does_not_delete_after_it() {
     let deletion = deletion(store.clone(), work);
     let deleting = tokio::spawn(async move { deletion.execute(&entry).await });
     action.cancellation().cancelled().await;
-    action.finish(Err(ReceiveWorkError::Action(
+    action.finish(Err(Arc::new(ReceiveWorkError::Action(
         io::Error::from(io::ErrorKind::PermissionDenied).into(),
-    )));
+    ))));
     let error = deleting.await.unwrap().unwrap_err();
     let mut next: Option<&(dyn std::error::Error + 'static)> = Some(error.as_ref());
     let mut found = false;

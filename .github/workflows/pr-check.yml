@@ -324,6 +324,47 @@ jobs:
             target/upgrade-anchors/*/host.json
           if-no-files-found: error
 
+  blob-connectivity:
+    name: Blob transfer required network and upgrade matrix
+    if: github.event.action != 'labeled'
+    runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      deployment: false
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Install mandatory network and build tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake ripgrep
+      - name: Prepare Rust build
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: blob-connectivity-linux
+          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+      - name: Install just
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+      - name: Run complete mandatory blob matrix
+        run: bash scripts/testing/run-blob-connectivity.sh
+      - name: Retain sanitized blob evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: blob-connectivity-evidence
+          path: |
+            target/blob-connectivity-evidence/runs/**/*.json
+            target/blob-connectivity-evidence/runs/**/*.txt
+            target/blob-connectivity-evidence/runs/**/*.log
+            target/blob-connectivity-evidence/frozen-main/*.txt
+            target/upgrade-anchors/*/host.json
+          if-no-files-found: error
+
   mobile-bindings:
     name: Mobile binding compile ${{ matrix.platform }}
     if: github.event.action != 'labeled'

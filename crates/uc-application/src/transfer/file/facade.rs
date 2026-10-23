@@ -226,12 +226,6 @@ impl FileTransferFacade {
         self.lifecycle.ensure_receive_ready().await
     }
 
-    /// Lifecycle action: close the receive gate so inbound transfers are
-    /// rejected until the next `ensure_receive_ready`.
-    pub fn close_receive_gate(&self) {
-        self.lifecycle.close_receive_gate();
-    }
-
     /// Read the current receive-gate status.
     pub fn receive_readiness_status(&self) -> ReceiveReadinessStatus {
         self.lifecycle.receive_readiness_status()
@@ -260,8 +254,8 @@ impl EnsureReceiveReadyPort for FileTransferFacade {
         self.lifecycle.ensure_receive_ready().await
     }
 
-    fn close_receive_gate(&self) {
-        self.lifecycle.close_receive_gate();
+    async fn close_receive_gate(&self) -> Result<(), ReceiveReadinessError> {
+        self.lifecycle.close_receive_gate().await
     }
 
     fn receive_readiness_status(&self) -> ReceiveReadinessStatus {

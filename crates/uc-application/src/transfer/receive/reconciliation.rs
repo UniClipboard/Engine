@@ -35,12 +35,15 @@ pub struct ReceiveReadinessStatus {
 pub enum ReceiveReadinessError {
     #[error("receive recovery failed")]
     Recovery(#[source] anyhow::Error),
+    #[error("receive shutdown failed")]
+    Stop(#[source] anyhow::Error),
 }
 
 #[async_trait]
 pub trait EnsureReceiveReadyPort: Send + Sync {
     async fn ensure_receive_ready(&self) -> Result<(), ReceiveReadinessError>;
-    fn close_receive_gate(&self);
+    /// 封住旧世代并等待已接受的接收实际结算；成功后才允许撤下所需密钥。
+    async fn close_receive_gate(&self) -> Result<(), ReceiveReadinessError>;
     fn receive_readiness_status(&self) -> ReceiveReadinessStatus;
 }
 
@@ -71,6 +74,22 @@ impl ReceiveReadinessCoordinator {
 
     pub fn mark_not_ready(&self) {
         self.work.close();
+    }
+
+    /// 锁定等维护动作关闭原世代，等所有已开始工作结算后再交还能力。
+    pub(crate) async fn close(&self) -> Result<(), ReceiveReadinessError> {
+        self.mark_not_ready();
+        let mut scope = self
+            .work
+            .drain_scope()
+            .await
+            .map_err(|source| ReceiveReadinessError::Stop(source.into()))?;
+        scope
+            .stop()
+            .await
+            .map_err(|source| ReceiveReadinessError::Stop(source.into()))?;
+        scope.complete();
+        Ok(())
     }
 
     pub fn is_ready(&self) -> bool {
@@ -422,9 +441,14 @@ impl ReconcileReceiveAttemptsUseCase {
 
 #[cfg(test)]
 mod tests {
+    use super::super::work::ReceiveWorkError;
+    use std::error::Error;
+    use std::io::{self, ErrorKind};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::time::Duration;
+    use tokio::time::timeout;
 
     use async_trait::async_trait;
     use uc_core::ports::{
@@ -437,11 +461,79 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn complete_close_waits_for_all_receives_and_never_opens_or_revives_the_old_generation() {
+        let readiness = ReceiveReadinessCoordinator::new();
+        readiness.mark_ready();
+        let registry = readiness.work_registry();
+        let a = registry.action();
+        let b = registry.action();
+        let preparing = registry.action();
+        a.register(&EntryId::from("a"), "a").unwrap();
+        b.register(&EntryId::from("b"), "b").unwrap();
+        let mut closing = Box::pin(readiness.close());
+        assert!(timeout(Duration::from_millis(10), closing.as_mut())
+            .await
+            .is_err());
+        assert!(a.cancellation().is_cancelled() && b.cancellation().is_cancelled());
+        assert!(preparing.cancellation().is_cancelled());
+        assert!(!readiness.is_ready());
+        let during = registry.action();
+        assert!(during.cancellation().is_cancelled());
+        a.finish(Ok(()));
+        drop(preparing);
+        assert!(timeout(Duration::from_millis(10), closing.as_mut())
+            .await
+            .is_err());
+        b.finish(Ok(()));
+        closing.await.unwrap();
+        assert!(!readiness.is_ready(), "实际排空不授予重新接收资格");
+        readiness.ensure_ready(|| async { Ok(()) }).await.unwrap();
+        assert!(readiness.is_ready());
+        assert!(a.register(&EntryId::from("old"), "old").is_err());
+        assert!(during.register(&EntryId::from("during"), "during").is_err());
+        let new = registry.action();
+        new.register(&EntryId::from("new"), "new").unwrap();
+        new.finish(Ok(()));
+    }
+
+    #[tokio::test]
+    async fn complete_close_preserves_the_original_settlement_source_and_keeps_admission_closed() {
+        let readiness = ReceiveReadinessCoordinator::new();
+        readiness.mark_ready();
+        let registry = readiness.work_registry();
+        let action = registry.action();
+        action.register(&EntryId::from("entry"), "attempt").unwrap();
+        let mut closing = Box::pin(readiness.close());
+        assert!(timeout(Duration::from_millis(10), closing.as_mut())
+            .await
+            .is_err());
+        action.finish(Err(Arc::new(ReceiveWorkError::Action(
+            io::Error::from(ErrorKind::StorageFull).into(),
+        ))));
+        let error = closing.await.unwrap_err();
+        assert!(Error::source(&error).is_some());
+        let ReceiveReadinessError::Stop(source) = error else {
+            panic!("排空失败不能冒充恢复失败")
+        };
+        assert!(source.chain().any(|source| source
+            .downcast_ref::<io::Error>()
+            .is_some_and(|source| source.kind() == ErrorKind::StorageFull)));
+        assert!(!readiness.is_ready());
+        assert!(registry
+            .action()
+            .register(&EntryId::from("blocked"), "blocked")
+            .is_err());
+        drop(action);
+        readiness.close().await.unwrap();
+        assert!(!readiness.is_ready());
+    }
+
+    #[tokio::test]
     async fn recovery_does_not_run_inside_an_accepted_history_clear() {
         let readiness = ReceiveReadinessCoordinator::new();
         readiness.mark_ready();
         let registry = readiness.work_registry();
-        let mut scope = registry.clear_scope().await.unwrap();
+        let mut scope = registry.drain_scope().await.unwrap();
         let called = AtomicUsize::new(0);
         let mut waiter = Box::pin(readiness.wait_ready());
         assert!(
@@ -489,7 +581,7 @@ mod tests {
             })
         };
         started.await.unwrap();
-        let mut clearing = Box::pin(registry.clear_scope());
+        let mut clearing = Box::pin(registry.drain_scope());
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), clearing.as_mut())
                 .await

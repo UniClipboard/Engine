@@ -7,7 +7,9 @@ use std::sync::{atomic::AtomicBool, Arc};
 use anyhow::{anyhow, Error as SourceError};
 use moka::sync::Cache;
 use tracing::instrument;
-use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
+use uc_observability_contract::diagnostics::{
+    connectivity::describe_clipboard_receive_partial, DiagnosticTaskKind, ObservationContext,
+};
 use uc_observability_contract::{
     error_source::io_error_kind,
     log_fields::{log_id, log_vocab},
@@ -2135,6 +2137,11 @@ impl ApplyInboundClipboardUseCase {
             origin: ClipboardOriginKind::Remote,
         }));
 
+        if is_partial {
+            describe_clipboard_receive_partial(
+                materialize_outcome == MaterializeOutcome::PartialCancelled,
+            );
+        }
         Ok(ApplyOutcome::Applied { entry_id })
     }
 

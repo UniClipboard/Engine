@@ -43,7 +43,8 @@ mod authentication;
 mod clipboard_receive;
 pub use authentication::complete_clipboard_receive_failure;
 pub use clipboard_receive::{
-    describe_clipboard_receive_failure, ClipboardReceiveFailure, ClipboardReceiveObservation,
+    describe_clipboard_receive_failure, describe_clipboard_receive_partial,
+    ClipboardReceiveFailure, ClipboardReceiveObservation, ClipboardRetryOutcome,
 };
 mod connection;
 mod group_update;

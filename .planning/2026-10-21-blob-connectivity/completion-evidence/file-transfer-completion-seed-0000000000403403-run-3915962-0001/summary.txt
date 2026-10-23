@@ -1,0 +1,10 @@
+scenario: file-transfer-completion
+outcome: passed
+elapsed: 0 ms
+artifact: file-transfer-completion-seed-0000000000403403
+artifact directory: file-transfer-completion-seed-0000000000403403-run-3915962-0001
+reproduce: cargo nextest run --profile ci --locked -p uc-application -E 'test(file_transfer_completion_scenario_reports_final_state)'
+last event: receiver-transfer-completed
+stage begin-receiver-transfer: 0 ms
+stage report-progress: 0 ms
+stage complete-transfer: 0 ms

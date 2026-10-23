@@ -1,0 +1,27 @@
+{
+  "existing_content_did_not_pull_again": true,
+  "kind": "image",
+  "ordinary_push_disabled": true,
+  "path_validation": "skipped-uncontrolled-network",
+  "pull_paths": [
+    "direct"
+  ],
+  "result": "passed",
+  "selected_path": null,
+  "state_paths": [
+    "direct",
+    "direct",
+    "direct"
+  ],
+  "system_clipboard": {
+    "representations": [
+      {
+        "format": "image",
+        "kind": "inline",
+        "mime_type": "image/png",
+        "sha256": "ae7e7bf96a23cc4dd4ada8641e1c980a698d18d8e7adf21d3fa937a4d47619b3",
+        "size": 73944
+      }
+    ]
+  }
+}

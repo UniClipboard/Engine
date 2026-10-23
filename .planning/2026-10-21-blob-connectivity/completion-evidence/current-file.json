@@ -1,0 +1,37 @@
+{
+  "existing_content_did_not_pull_again": true,
+  "kind": "file",
+  "ordinary_push_disabled": true,
+  "path_validation": "skipped-uncontrolled-network",
+  "pull_paths": [
+    "direct"
+  ],
+  "result": "passed",
+  "selected_path": null,
+  "state_paths": [
+    "direct",
+    "direct"
+  ],
+  "system_clipboard": {
+    "representations": [
+      {
+        "directories": [],
+        "files": [
+          {
+            "kind": "file",
+            "sha256": "f884708bd06c670ba148212f4b60241728a329b75909015f4936560c74181cc5",
+            "size": 28
+          }
+        ],
+        "kind": "files"
+      },
+      {
+        "format": "uniclipboard-file-display-metadata",
+        "kind": "inline",
+        "mime_type": "application/x-uniclipboard-file-display-metadata+json",
+        "sha256": "bd5ccf24d87440477cf7166390cb301f81123f41a777033bc7366a19dc679be5",
+        "size": 75
+      }
+    ]
+  }
+}

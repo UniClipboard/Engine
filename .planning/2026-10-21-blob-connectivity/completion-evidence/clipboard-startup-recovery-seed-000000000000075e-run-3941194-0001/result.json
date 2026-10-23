@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "scenario": "clipboard-startup-recovery",
+  "artifact_id": "clipboard-startup-recovery-seed-000000000000075e",
+  "artifact_directory": "clipboard-startup-recovery-seed-000000000000075e-run-3941194-0001",
+  "seed": 1886,
+  "outcome": "passed",
+  "failure": null,
+  "last_event": null,
+  "stages": [],
+  "resources": [
+    {
+      "kind": "temp-dir",
+      "label": "isolated-profile",
+      "cleanup": "completed"
+    },
+    {
+      "kind": "child-process",
+      "label": "isolated-engine-daemon",
+      "cleanup": "completed"
+    }
+  ],
+  "cleanup": "completed",
+  "total_elapsed_ms": 16346,
+  "reproduce": "just cargo test -p uc-engine --test host_contract clipboard_startup_recovery_process --locked -- --nocapture"
+}

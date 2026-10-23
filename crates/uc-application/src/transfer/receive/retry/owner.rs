@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::oneshot;
 use uc_core::ids::EntryId;
-use uc_observability_contract::diagnostics::ObservationContext;
+use uc_observability_contract::diagnostics::{
+    connectivity::ClipboardReceiveObservation, ObservationContext,
+};
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 pub(crate) struct RetryEntryReceiveUseCase {
@@ -79,7 +81,8 @@ impl RetryEntryReceiveUseCase {
         prepared.accepted = Some(accepted);
         let apply = self.apply.clone();
         let observation = ObservationContext::capture();
-        let task = tokio::spawn(observation.scope(async move {
+        let receive_observation = ClipboardReceiveObservation::capture();
+        let processing = Box::pin(async move {
             // 调用者离开只结束等待；完整接收监督和防重入一直持有到结算结束。
             let _guard = guard;
             let result = apply.execute_retry(prepared).await;
@@ -91,7 +94,10 @@ impl RetryEntryReceiveUseCase {
                 );
             }
             result
-        }));
+        });
+        let task = tokio::spawn(
+            observation.scope(async move { receive_observation.scope(processing).await }),
+        );
         match reply.await {
             Ok(outcome) => Ok(outcome),
             // discarded-source[channel]: 原流程错误保留在实际接收任务结果中。

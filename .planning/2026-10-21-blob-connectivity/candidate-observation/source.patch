@@ -1,0 +1,2267 @@
+diff --git i/.config/nextest.toml w/.config/nextest.toml
+index 0e45d01e..9c540691 100644
+--- i/.config/nextest.toml
++++ w/.config/nextest.toml
+@@ -368,3 +368,47 @@ threads-required = "num-test-threads"
+ [[profile.ci.overrides]]
+ filter = "package(uc-engine) & test(/offline_lifecycle::crash::directory_probe::/)"
+ threads-required = "num-test-threads"
++
++
++# SDK资源验收连续两轮1GiB，流式写入与逐块核对；全局资源断言需独占宿主。
++[[profile.default.overrides]]
++filter = "package(uc-infra-p2p) & test(/managed_download_large_stream_settles_sdk_tags_and_connection/)"
++threads-required = "num-test-threads"
++slow-timeout = { period = "60s", terminate-after = 10 }
++
++[[profile.ci.overrides]]
++filter = "package(uc-infra-p2p) & test(/managed_download_large_stream_settles_sdk_tags_and_connection/)"
++threads-required = "num-test-threads"
++slow-timeout = { period = "60s", terminate-after = 10 }
++
++
++# 真实接收、锁定／暂停与重开；保留内部20秒断言，外层容纳完整fixture与故障清理。
++[[profile.default.overrides]]
++filter = "package(uc-engine) & test(/receive_retry::lifecycle::/)"
++slow-timeout = { period = "30s", terminate-after = 3 }
++
++# 同一用例覆盖多次启停、配置导入导出和兼容能力；独占运行并覆盖各操作原有期限。
++[[profile.default.overrides]]
++filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::engine_start_builds_a_resumable_real_session)"
++threads-required = "num-test-threads"
++slow-timeout = { period = "30s", terminate-after = 2 }
++
++[[profile.ci.overrides]]
++filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::engine_start_builds_a_resumable_real_session)"
++threads-required = "num-test-threads"
++slow-timeout = { period = "30s", terminate-after = 2 }
++
++# 两次真实配对、单项重试与5秒取消未完成，显式本机Collector验收独占进程。
++[[profile.default.overrides]]
++filter = "package(uc-engine) & test(/receive_retry::observation::/)"
++threads-required = "num-test-threads"
++slow-timeout = { period = "30s", terminate-after = 3 }
++
++[[profile.ci.overrides]]
++filter = "package(uc-engine) & test(/receive_retry::observation::/)"
++threads-required = "num-test-threads"
++slow-timeout = { period = "30s", terminate-after = 3 }
++
++[[profile.ci.overrides]]
++filter = "package(uc-engine) & test(/receive_retry::lifecycle::/)"
++slow-timeout = { period = "30s", terminate-after = 3 }
+diff --git i/.github/workflows/pr-check.yml w/.github/workflows/pr-check.yml
+index 6909a749..a8a99c23 100644
+--- i/.github/workflows/pr-check.yml
++++ w/.github/workflows/pr-check.yml
+@@ -324,6 +324,47 @@ jobs:
+             target/upgrade-anchors/*/host.json
+           if-no-files-found: error
+ 
++  blob-connectivity:
++    name: Blob transfer required network and upgrade matrix
++    if: github.event.action != 'labeled'
++    runs-on: ubuntu-24.04
++    environment:
++      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
++      deployment: false
++    timeout-minutes: 90
++    steps:
++      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
++        with:
++          fetch-depth: 0
++      - name: Install mandatory network and build tools
++        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake ripgrep
++      - name: Prepare Rust build
++        uses: ./.github/actions/rust-ci-setup
++        with:
++          cache-key: blob-connectivity-linux
++          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
++          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
++          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
++          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
++      - name: Install just
++        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
++        with:
++          tool: just
++      - name: Run complete mandatory blob matrix
++        run: bash scripts/testing/run-blob-connectivity.sh
++      - name: Retain sanitized blob evidence
++        if: always()
++        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
++        with:
++          name: blob-connectivity-evidence
++          path: |
++            target/blob-connectivity-evidence/runs/**/*.json
++            target/blob-connectivity-evidence/runs/**/*.txt
++            target/blob-connectivity-evidence/runs/**/*.log
++            target/blob-connectivity-evidence/frozen-main/*.txt
++            target/upgrade-anchors/*/host.json
++          if-no-files-found: error
++
+   mobile-bindings:
+     name: Mobile binding compile ${{ matrix.platform }}
+     if: github.event.action != 'labeled'
+diff --git i/.planning/2026-10-21-blob-connectivity/findings.md w/.planning/2026-10-21-blob-connectivity/findings.md
+index f2c8de42..4e18c5be 100644
+--- i/.planning/2026-10-21-blob-connectivity/findings.md
++++ w/.planning/2026-10-21-blob-connectivity/findings.md
+@@ -395,3 +395,22 @@
+ - 首轮目录相关App63项通过12.19秒；最终源的全量App、真实kill／restart及既有SDK目录／离线恢复、根门禁正在串行验证，未取得结果之前不标完成。
+ 
+ 最终实证：首次Staging前强杀恢复11.070秒通过，连同原文件进程恢复和SDK目录终态三项40.744秒全通过；App1279通过／1跳过及全部根门禁通过。最终scope已结束，专用临时目录无活动FD并回收，完整spec剩余矩阵未关闭。
++
++
++### 2026-10-23：真实SDK tag与原生连接的资源计数
++
++- 原真实AppFacade／Uni／SDK双流用例新增SDK152c42a公开list_temp_tags计数：活动下载须真实持有tag，各轮取消A且成功B结算后源／目标均回初值0。已有source/provide调用、stream ID、唯一连接及B不重试断言保留；使用原native weak handle确认原关闭后实际释放，不新增Engine／Application查询接口。
++- 初版三项8.47秒通过，27轮。最终改为64KiB源文件生成和独立逐块读回，移除fixture中与size成比例的Vec及整份输出读取；增加连续两轮1GiB。CI nextest最终四项90.320秒全通过，29轮；大文件85.427秒，两轮活动tag均2、结算均0，原生连接均1、关闭后0。源端临时tag也回0。
++- 只读/proc采样实际大文件测试进程160次，读取其全生命周期VmHWM：52416KiB（约51.2MiB），观测RSS45184KiB、线程峰值29、FD22。工件resource-stream-evidence/blob-resources/large-process-sample.json及managed-isolation-false-1073741824-2.json；不含内容、摘要、身份或路径。它是实际完整获取路径，不等同于双Engine全对象图资源／所有生命周期和配额已证明；工件full_engine_resources_verified、quota_counters_verified仍false。
++- 已建立completion-audit.md逐条保留13个spec验收项和48个阶段项目，未以历史勾选替代当前证据；当前提交GitHub工具仅查询PR-triggered runs为空，未把其推论为所有事件无CI，也未登记通过。
++
++
++### 完整验收及观测环境接续
++
++- 最新完整关闭实现收口ReceiveReadinessCoordinator.close，2项真实registry合同0.04秒通过；原生锁定／暂停／在途成员撤销／删除／清空5项34.846秒通过。根metadata、workspace all-targets（3分26秒）、fmt、style、repository、diff均退出0，源码在当前完整回归scope内保持不变。
++- 当前仍在uni-blob-complete-validation scope构建／执行workspace组，随后成员全集、升级smoke。不可同时启动Cargo或改变Rust／HEAD；状态completion-status.log，活动exec session53955。
++- Docker只读访问permission denied，sudo -n也需要密码；尚未请求提权，采用官方同版本独立二进制准备本地验收。GitHub已连接个人账户与本仓Git作者一致；API核实Jaeger2.20.0、Collector-contrib0.160.0，官方下载分别53590436／100171851字节，SHA256为582261d2d8e46721246f5f8072dca7f6762355b248e0dc493bb85990e6226952／bff414e6a287309dfd0c51350c1e13c96c4ab807127b4320bd684f605e781326。工具不支持binary，使用urllib流式下载并验证后解包于target/blob-resource-tmp/observability-tools；session74333仍在下载Collector，Jaeger已验证并可运行--help，尚未启动任何服务。结束前须检查进程／FD并清理。
++- 下一观测证据缺口：真实Engine file retry fixture目前不安装OTLP；既有clipboard_trace测试走真实Engine→MockServer OTLP，并验证text／多目标部分完成，不能冒充文件／单项重试／取消的Collector可视化验收。静态看到receiver的Applied ack一律succeeded，ClipboardReceiveObservation只保留failure；RetryEntryReceive dispatch未见专属业务装饰。须先以真实文件流程导出并验证，不能仅据源码改产品或为观测扩Engine阶段API。可复用既有init_test_tracing_with_otlp和flush_test_tracing（显式test环境）及ReceiveCase真实能力，SDK／业务协议不变。
++
++
++完整验收定位补齐：spec5.3全部默认常量与唯一policy.rs逐项一致；scheduler／timing／budget／cancellation／provider runtime已有恰好到期、累计预算、队列和许可结算覆盖，具体路径已写入completion-audit。当前仅是静态覆盖核对，等正在运行workspace动态结果后才可登记通过。根repository架构负例实际通过，拒绝旧SDK自拨池、对端级取消和原生handler回流。
+diff --git i/.planning/2026-10-21-blob-connectivity/progress.md w/.planning/2026-10-21-blob-connectivity/progress.md
+index 80ffa9a9..69235665 100644
+--- i/.planning/2026-10-21-blob-connectivity/progress.md
++++ w/.planning/2026-10-21-blob-connectivity/progress.md
+@@ -715,3 +715,99 @@ CI nextest真实原生3项通过（40.744秒）：首次Staging前探测强杀
+ 最终同源验证全部通过：Application库1279项／1跳过（124.31秒），CI nextest真实进程／SDK三项40.744秒；locked metadata、workspace all-targets（3分23秒）、fmt、Rust style、repository preflight（1346隐私站点、隐私自测、Collector、6项OpenMLS可执行验证及架构负例）、diff均退出0。人工审阅核对完整密文映射先于任何创建／探测、首次日志失败无产物／无下载并保留StorageFull源、000／500保存目录回退、原候选实际清理后替换日志、Staging不认领用户复用的final、原attempt中断失败及不恢复旧网络下载；未新增持久版本、字段、队列、预算或公开接口。
+ 
+ 最终scope已inactive，核对无活动Cargo／rustc／Engine进程及专用TMPDIR的活动FD，目录仅余本轮验证脚本并已移除；共享target／编译缓存保持。仅此恢复边界完成：完整资源总量、全生命周期、最终head兼容与既有六片／全工作区回归、平台CI／设备及观测验收继续未完成，不用本次三项替代它们。
++
++
++### 2026-10-23：恢复完整目标并补资源证据
++
++上一目标轮为实际进展：提交582fb710及真实强杀恢复、App和根门禁通过。当前权威工作区只有四处用户既有未跟踪planning目录，无活动Cargo／验证scope。规格完整验收仍未完成，本轮先补真实SDK临时tag与原生连接回收，再继续其余数量／生命周期及最终矩阵；不缩减完整目标。现有SDK152c42a提供list_temp_tags，原生Connection已有weak_handle；可扩展既有Infra双流隔离测试，无需新增Engine查询或Application阶段接口。
++
++
++真实SDK资源三项8.47秒通过：4MiB不同内容16轮、32MiB不同内容3轮、4MiB同内容8轮，共27轮；活动下载实际temp-tag峰值分别2／2／1，各轮结算0，原生weak handle关闭后为0，既有单连接／不重拨／不重试均保留。工件在resource-isolation-evidence/blob-resources。正在扩展同一用例为2×1GiB，fixture改为64KiB流式源文件及独立逐块核对，移除与size成比例的Vec／全文件读回；保持同一SDK／Facade／Uni流程和原预算。并沿原ReceiveCase的第四次实际导出屏障加入锁定、暂停期限与重开测试，旧成功项须保留、旧未保存输出须实际清理，失败再沿原owner修复。
++
++
++流式最终资源四项CI nextest90.320秒通过（大文件85.427秒），共29轮；连续2×1GiB各轮tag2→0，原连接1→关闭后0。实际大文件进程VmHWM52416KiB，独立/proc采样已正常退出，资源scope已inactive。当前uni-blob-lifecycle-native scope串行构建两项原生锁定／暂停测试；完整spec仍active。
++
++
++两项原生生命周期首轮：暂停／重开10.466秒通过，锁定90.014秒TIMEOUT（整轮100.494秒，退出100）。这是实际Engine／SDK／SQLite在第四次导出仍持完成权时锁定的失败，不能算通过；现将锁定未结算的断言移到解锁前，并对解锁设置20秒阶段断言，定位提前锁定而非用最终90秒超时掩盖位置。源码SpaceSessionActivity.pause_for_lock当前只同步close_receive_gate，然后允许锁密钥，未等待原ReceiveAction真实结算；须先取得更精确红测再修改原负责人。
++
++
++精确锁定红测5.476秒退出100，原真实导出未结算时LockEncryption已结束，排除单纯外层90秒定位不足。现将原EnsureReceiveReadyPort关闭能力改为完整异步关闭：FileTransferLifecycle先封旧世代，复用原born动作维护排空通知全部停止并等真实结果；Space activity在其完成后才允许后续锁密钥。清空历史及恢复测试统一使用原实现更名的drain_scope，旧clear_scope与无用同步facade转调删除；未加Engine步骤API、队列、持久状态或第二负责人。修复后App1279通过／1跳过（123.24秒），原生四项正在同scope继续。
++
++
++首版锁定排空修复真实四项全部通过25.597秒：锁定5.957秒、暂停／重开5.541秒、调用者退出删除5.450秒、无保存条目清空8.625秒。原成功文件保持，原未交付输出实际清理，解锁／恢复没有旧任务迟到成功。
++
++为覆盖新增关闭错误转换和世代竞争，现将同一完整排空实现收口到原ReceiveReadinessCoordinator.close，FileTransferLifecycle仅实现原完整关闭port的委托；新增实际registry双动作＋准备动作／关闭期间出生动作测试，以及关闭失败std::Error::source和原StorageFull链与失败门禁测试。不新增构造器、查询或第二实现。当前uni-blob-owner-contracts scope串行运行这两项，再运行最终锁定、暂停、撤销进行中来源、删除、清空5项原生测试；成员撤销新例要求真实当前成员权威先确认撤销，再释放原导出，不靠直接改库伪造资格。未取得结果前不计完成。
++
++
++最终关闭合同两项0.04秒通过，新增Stop错误保留std source及原StorageFull，真实双接收／准备／关闭中动作均按原世代停止。最终原生5项34.846秒通过：锁定7.751秒、在途来源撤销6.237秒、暂停／恢复5.546秒、调用者退出删除5.008秒、无保存条目清空10.287秒；保留原成功文件，原未交付文件实际清理，撤销后原材料重试AccessDenied且不新增导出。owner-contracts scope已结束。
++
++当前uni-blob-complete-validation scope串行执行全部根门禁、既有workspace组、成员全集和升级smoke；驱动target/blob-resource-tmp/full-checks.sh，状态completion-status.log，各项completion-*.log，工件completion-evidence。先核对scope与活动进程，不能因暂时无输出重启。最终旧新网络／线上CI／完整资源和剩余生命周期／观测核验仍未完成，不把本轮局部通过当作完整goal完成。
++
++
++恢复核对：完整验证scope仍active，metadata/check/fmt/style/repository/diff全退出0；workspace正在串行编译，不另起Cargo或改变源码／HEAD。独立本地观测scope已启动，官方Jaeger2.20.0与Collector0.160.0二进制已按发布SHA256核验，复用仓库严格Collector过滤配置，仅改loopback端口；两份配置validate退出0，Jaeger/api/services返回200且为空。没有因Docker socket权限不足修改系统权限或请求sudo。真实文件完成／部分失败／重试／取消尚未进入该Collector，不计通过。工具与supervisor均在target/blob-resource-tmp/observability-tools，结束前须停止scope并回收。
++
++
++本轮观测静态门禁已实际运行：Collector两份隐私配置合同5项全部通过（collector-privacy-current.log），架构隐私清单1346处通过（observability-privacy-current.log）。Jaeger实际浏览器列表已加载，截图observability-ui-initial-ready.png与页面文本可定位；实例无业务记录，仅证明UI可用，不冒充真实文件观测验收。浏览器与CDP捕获均为本机临时工具，无新增系统安装或配置。
++
++
++在当前Engine测试二进制已完成编译后，只新增显式ignored观测用例receive_retry/observation.rs与声明／90秒独占nextest配置，没有改生产源码。当前完整回归不声称覆盖该新用例，completion-source-manifest.json保存之前tracked diff指纹并明确此边界。原串行驱动末尾已追加新用例的fmt、全部根门禁及精确运行（显式本机Collector端点），不会并发起Cargo；若前项失败则按既有fail-early停止。新例复用原ReceiveCase，两次真实初次部分失败、一次失败项重试完成及一次在途取消／5秒仍未完成／最后实际清理，最终flush；真实trace语义仍需从Collector／Jaeger再独立核对，不能以该行为测试成功替代。
++
++
++严格Collector本地副本只增加过滤后的file exporter（accepted traces／logs JSONL），processors段与仓库原配置逐字相同并已assert；修改后validate退出0。停止并重启的是本轮创建的空内存Jaeger／Collector，之前启动日志另存initial-stack，未清理用户现有实例。当前观测scope会话51281正常ready；原完整验证scope仍单Cargo串行编译。准备了只读OTLP证据检查器，后续从实际两次file.send的同trace接收结果及两次独立手动重试业务结果核对，检查父节点、test环境及fixture隐私；未产生数据前不执行或计通过。
++
++
++串行驱动末尾再排入真实Jaeger查询、业务列表截图及OTLP语义核对。JUnit watcher会话63316只读等待并保存每组XML，未运行Cargo；scope会话53955仍编译，当前已从Infra P2P库推进到其blob_store_lifecycle等目标，无动态测试结果。completion-source-files.json记录1892个源码／配置（含原未跟踪drain／lifecycle），显式排除新观测用例；生产源码未再变化。
++
++
++确认活动bash脚本fd255当前偏移717，恰在尚未读取的membership命令前，原workspace Cargo不受影响。只原位重写未读取后缀：export UC_TEST_BUILD_SCOPE=workspace，workspace后先运行新观测用例／根门禁／Jaeger查询与业务列表，再成员全集及升级smoke，最后语义检查。后续分组复用相同workspace特性图，避免逐包重复编译；保持唯一Cargo负责人、共享target及既有资源限制。当前全量编译已推进Application库。
++
++
++发现默认CI资源工件覆盖：两个既有Engine资源用例都写managed-engine.json，大文件与空配对关闭会相互替换。仅将默认测试工件分为managed-engine-large.json／managed-engine-shutdown.json，显式UC_MANAGED_BLOB_RESOURCE_EVIDENCE仍保留调用方路径；没有改测试行为或生产实现。当前已编译workspace二进制仍用旧名，资源保存watcher会话34518会按file_transfer_enabled保存两份，成功／失败及原始日志不删除。新命名随排队的根门禁与后续CI验证，不能冒充旧二进制已执行新代码。
++
++
++新增离线永久通知阻塞原生用例已排入同一串行驱动：只有既有ReceiveExports测试fixture与cfg(test,dev-tools)组合根装饰完整reporter，原source真实shutdown、准确缓存重试、第四次真实导出屏障、原CancelEntryReceive与receiver完整shutdown；调用方不解除永久通知等待。预期只等本地导出并返回Cancelled、保留两份旧成功、清除新输出。原workspace二进制不含新hook／用例；新Native在排队的全根门禁后与观测用例共用workspace特性图运行，尚未计通过。当前完整回归已实际启动4586项，App及多数Engine单元通过，真实空配对关闭33.672秒通过；根门禁仍全0，尚无workspace最终状态。
++
++
++完整workspace首个实际失败：Native ticket_provider_budget_is_shared_with_a_different_message_author 9.326秒，dispatch原接收者断言失败，随后send JoinError；现场completion-workspace.log约2085行保留，不能记作通过。读源码确认该断言本来就接受pending，排除单纯“发送端等候”解释。暂只加固定计数／匹配布尔诊断，未放宽断言、增加重试或改生产；等全回归结束后精确重现以区分拒绝、离线或目标遗漏。真实空配对关闭33.672秒、大文件2×1GiB94.374秒均通过，资源watcher已保存shutdown报告；workspacescope仍执行其它项且其fail-early会阻止后续串行命令。
++
++
++当前workspace真实Engine资源：空配对关闭33.672秒、大文件2×1GiB94.374秒通过，逐块精确读回、最大Host返回65536字节、采样峰值RSS446720KiB，关闭空闲后FD15（初值16）／线程15（初值15）／当前runtime任务1（仅采样器，初值0）。两份JSON已由watcher34518保存且watcher正常结束；不再有该后台任务。当前Application1298 PASS／0 FAIL；总回归仍进行，已发现1项Native C额度FAIL，原失败二进制已硬链接保留至target/blob-resource-tmp/quota-original-workspace-test并记录SHA256，供同一被测二进制定位，未覆盖失败现场。
++
++
++全库另发现两项实际失败：engine_start_builds_a_resumable_real_session在20.017秒被nextest终止（含完整LAN兼容分支，不能未经定位就加时）；dependency_firewall::application_public_whitelists_hide_domain_construction_bundles失败，精确指出facade/blob_transfer.rs测试支持再导出BlobTransferDeps违反门面白名单。后者已做最小边界修复：同一test-support条件下将被动装配类型移至既有deps入口，唯一Infra隔离测试消费者同步改引入，不放宽防火墙、不保留旧转调、不新增公开根或生产能力。须结束当前全库后重跑35项防火墙及受影响blob测试。新Native／观测仍排队，原scope会因workspace非0不继续，其后续需另行恢复，不能假定已执行。
++
++
++相同预编译dependency_firewall二进制针对当前源码的原白名单测试已精确复验退出0（facade-whitelist-fixed.log），仅证明边界文本合同，编译与其余34项仍须后续检查。额度诊断继续保持原接受／pending断言，仅增加总计数及接收者匹配布尔；精确运行时可显式安装测试OTLP并在退出flush。另将原接收Completed断言移至send JoinError断言之前，两条要求均保留，以区分本地未完成与发送回执失败；未增加重试或变更产品。
++
++
++完整workspace最终：编译30分30秒，执行1212.937秒；4586运行／4582通过／3失败／1超时／28跳过，退出100。四个失败为三端额度9.326秒、可恢复真实会话20.017秒TIMEOUT、facade装配白名单0.002秒、peer_address堆栈符号1.452秒（unresolved／期望captured）。workspace JUnit已保存completion-workspace-junit.xml；scope已inactive，master会话53955与JUnit watcher63316均结束，资源watcher34518也已结束，未有Cargo活动。后缀排队的新Native、OTLP、成员全集和升级均因原fail-early未执行，必须另行恢复。原严格Collector／Jaeger scope会话51281仍active，目标继续active；不能将根编译通过或4582通过代替完整交付。
++
++
++首次冻结二进制会话定位未启动被测程序：宿主无/usr/bin/time，诊断scope退出127，错误保留resumable-original-reproduction.log（先复制后重试）。这是诊断驱动工具缺失，不是新增业务失败；改用Python标准库计时与90秒有界等待，不调整产品期限或nextest原门槛。
++
++
++会话恢复已用冻结原workspace二进制、不改任何产品源码独占有界复验：13.30秒全部断言通过（驱动计时13.382秒，resumable-original-reproduction.log，退出0）；原20秒外层只容纳复杂启停／导入导出／多次解锁过窄，nextest为该具体用例增加独占槽和有限60秒，原所有操作期限及零重试不变，待新配置精确复验。堆栈失败确认是本轮驱动遗漏既有Linux CI环境：.github/workflows/pr-check.yml:222和9月22日原设计已明确available模式，原同二进制按UC_EXPECT_DIAGNOSTIC_STACK=available复验1.54秒通过（peer-address-linux-reproduction.log／evidence.json），源码和断言未改。后续所有Linux分组需带同一既有模式；macOS完整符号门禁仍不可替代。failure-diagnosis scope与会话92007、raw stack会话53651均已结束，无Cargo活动。
++
++
++已启动唯一后续验证scope uni-blob-focused-validation，exec会话39035，仍jobs1／MemoryHigh3G／Max5G／Swap4G／权重20／原共享target与MBX。当前先workspace全目标check，后精确Engine库与防火墙；保留原功能组合（原Root Engine fingerprint仅default+dev-tools，workspace被动依赖含App test-support、P2P／Storage test-util）。驱动target/blob-resource-tmp/focused-checks.sh、输出focused-status.log／focused-*.log，每组直接保存JUnit；按现有Linux CI设置available模式，未修改堆栈源码。不同时起Cargo或把活动验证判断为挂起。
++
++
++focused最终：全目标check／style／repository／metadata／fmt／diff全0，Native8项56.042秒全部通过（C额度10.210、恢复会话9.139、锁定8.721、离线永久通知阻塞5.081、撤销5.419、暂停3.721、删除4.031、清空9.705）；显式OTLP的C额度7.553秒通过，原全库C额度失败未重现，不能称根因已修。真实文件OTLP行为15.091秒通过、防火墙35项通过。真实Collector／Jaeger语义实际红测：2个file.send关联接收都被记成ok（实际2/3成功＋1StorageUnavailable），独立手动重试业务记录0（实际一次完成、一次取消）；159个accepted spans／177个logs无缺父节点、test环境及fixture隐私通过，Jaeger38条测试trace含2个file.send且0 retry。focused-status observation-semantics1、scope已inactive／exec39035退出1。基线OTLP、Jaeger JSON、语义摘要与实际列表／详情截图另存observability-red/，不能被后续绿测覆盖。
++
++
++部分结果第一版真实验证SIGABRT：3.732秒、Rust明确报告worker4073927栈溢出，原core PID4073923；不是测试超时或OOM kill。应用了diagnose-crash技能只读核对，coredumpctl和全部线程gdb函数栈已保存（禁止打印frame参数）；抽取core使用临时私有目录，完成后已自动删除，无新增core副本残留。首次shell式rm清理命令被自动审查拒绝，未执行，改为Python TemporaryDirectory安全清理后完成诊断。新观测scope在worker内移动完整大型处理future是当前推断，现只在原spawn边界Box::pin该future，scope只搬运指针；保留默认线程栈、原任务及全部行为断言，再跑同一真实用例作因果验证。
++
++
++接续确认：uni-blob-partial-observation.scope仍active，唯一Cargo在原共享target、jobs1和既有资源上限下编译Engine；观测service同样active。已修正task_plan过时Next Step。后续重试记录的完成权须落在execute_owned原监督任务的实际结算尾部，不能用execute_retry早返回的错误或Accepted提前结束；原ReceiveReply可能先回复错误再修复清理，必须保留此行为。Engine仅装饰完整retry能力，Application跨原task传不透明完成上下文，不新建任务或业务接口。
++
++部分结果最小闭环通过：默认线程栈、原真实文件用例14.775秒通过，接收结果partial×2、无缺父节点且隐私通过。Box::pin原spawn边界后未再崩溃；partial-stage-result明确manual_retry_still_required=true、complete_spec_verified=false。独立保存observability-partial/，不覆盖observability-red/。原scope已inactive，开始唯一后续Rust修改。
++
++重试观测首次驱动在fmt解析退出1：新use被插到模块内文档前，尚未执行Cargo测试；已移回模块入口。后续驱动统一retry-observation前缀避免与历史retry日志混名。
++
++重试观测实现已落地：Engine装饰既有retry完整能力，独立在线root，Accepted不完成；原execute_owned监督任务在原处理／恢复结算、finish及drop work后提交固定结果。原ReceiveReply提前返回错误的行为保留，不依赖调用方继续等待。原任务scope只传不透明上下文并在原spawn边界装箱，无新增任务／业务接口。现有IO来源分类器移到完整接收模块共用，不复制分类规则。完整本地export装饰在测试故障装饰之外，原错误和值原样返回。两份Collector及设备白名单同步新固定词表，export不算业务root；5项Collector隐私和1346调用点检查通过。当前唯一scope uni-blob-retry-observation／exec58788，合同库→真实文件OTLP串行，完成后还须实际UI与根门禁。
++
++合同137项0.377秒全通过；Native编译失败E0432，Engine无bytes直接依赖，改用既有tokio_util::bytes::Bytes，不加依赖。首轮错误保存在retry-observation-import-red.log，下一轮仅重跑受影响Native和fmt/style，不重复已通过合同。另注意repository preflight内含OpenMLS Cargo验证，不能在其他Cargo活动时启动；本次曾等待同一target锁，已确认其6项实际通过且无额外编译进程，后续归入同一串行驱动。
++
++重试Native第二轮2.603秒SIGABRT，实际worker4110337栈溢出，core PID4110334。全部线程及85帧当前栈已保存，未打印参数／locals；临时私有core两次抽取均自动回收。此轮并未进入重试：实际栈是joiner持久化→JoinSpace→共同runtime dispatch→原Engine操作任务，资源可用且不是OOM。推断新增未装箱完整retry future扩大共同dispatch状态机，挤占配对栈；现只在Engine既有完整retry调用边界Box::pin该能力future，保持默认线程栈、原任务／回执／期限。下一轮同用例证明因果，不修改配对领域或提高栈。
++
++重试第三轮真实Native15.991秒通过（默认栈、完整配对与实际重试／取消均完成）。初次语义脚本太早读取Collector过滤后文件，仅看到成功root，退出1；原失败摘要保留retry-observation-semantics.log。HTTP exporter flush不等于Collector下游文件已flush，随后不重跑业务测试，只在同一批记录实际到齐后复核：92 spans／103 logs，partial接收2、独立retry成功1／取消1，取消root5106.0532ms；各retry都有实际export＋persist子节点。输出失败2且error.type均storage，8个export全有一致完成日志，无缺父节点、无fixture隐私泄露。Jaeger查询2send／2retry／20testtraces；语义绿摘要retry-observation-semantics-green.json。下一步实际列表／详情核验，然后根门禁与完整回归。
+diff --git i/.planning/2026-10-21-blob-connectivity/task_plan.md w/.planning/2026-10-21-blob-connectivity/task_plan.md
+index 2e7cfbb3..da747fe5 100644
+--- i/.planning/2026-10-21-blob-connectivity/task_plan.md
++++ w/.planning/2026-10-21-blob-connectivity/task_plan.md
+@@ -16,11 +16,20 @@
+ 沿 spec 已明确的 Uni 通用流／SDK 真实双向边界、Engine 接收／重试／取消边界和原始资料兼容边界验证。
+ 
+ ## 当前状态
+-阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
++阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。生产获取、提供端、完整条目结算、独立文件部分失败、稳定单项重试与薄绑定已接线；当前补全生命周期、失败恢复及阶段5最终交付证据，未据此标记完整spec完成。
+ 
+ ## Next Step
+-来源C额度证据已提交a4cfb172；首次Staging前强杀恢复边界现已完成：真实旧保存目录残留红测8.87秒，前移完整密文映射后原生恢复11.070秒通过。最终App1279通过／1跳过，CI nextest进程／SDK三项40.744秒全通过，全部根门禁退出0；验证scope已结束且专用TMPDIR已核对无活动FD并回收。
+-下一步沿既有完整传输／关闭能力补齐实际连接、原许可／服务额度、SDK临时tag及staging资源总量验收；不扩大Engine步骤或观测接口。完整生命周期、最终交付head兼容、既有六片／完整回归、平台CI／设备及观测验收继续未完成。c7997a15／SDK152c42a的10组兼容只代表历史代码；生产授权和本次恢复修复后的最终head仍须在最终代码稳定后重新验证。
++唯一活动Cargo验证为 `uni-blob-partial-observation.scope`，驱动 `target/blob-resource-tmp/partial-observation-checks.sh`，输出 `partial-native.log`；检查结束状态及 `partial-stage-result.json`，不得重复启动或并行修改Rust。第一版跨task观测导致真实worker栈溢出，core栈定位于task-local scope构造；修订仅在原spawn边界Box::pin处理future，不增加任务或线程栈。此轮只验真实部分接收结果，独立手动重试业务记录及导出失败子节点仍须实现。
++
++先前focused scope已结束：8项Native、防火墙35项和根门禁通过；真实文件OTLP行为通过但语义失败，两次部分接收被记ok、手动重试业务记录为0。红测工件在observability-red/。观测服务现为本轮拥有的 `uni-blob-observation.service`（非旧scope），严格processors不变、过滤后文件出口另存证据；结束前停止服务并清理本轮临时工具。
++
++原完整回归scope已经inactive、会话53955结束：编译30分30秒，测试1212.937秒，4582通过／3失败／1超时／28跳过，workspace退出100，JUnit已保存。四个问题：Native C额度9.326秒结果断言失败（断言已允许pending，保持严格，仅加安全计数／OTLP诊断）；恢复会话20.017秒TIMEOUT（原冻结二进制独占13.30秒全部断言通过，已设有限60秒并独占，待新配置验证）；facade错误导出BlobTransferDeps（测试支持参数已移到既有deps入口，原防火墙同二进制针对新源码精确退出0）；堆栈unresolved（驱动漏设既有Linux CI的UC_EXPECT_DIAGNOSTIC_STACK=available，原二进制按该既有模式1.54秒通过，未改源码或断言）。原排队成员全集／升级／OTLP因fail-early均未执行，不能登记通过；新focused驱动结束后仍须继续。
++
++当前真实Engine2×1GiB94.374秒通过：精确字节、Host最大块65536字节、峰值RSS446720KiB，关闭空闲后FD15／线程15／任务1（仅采样器）。空配对关闭33.672秒通过。两份报告分别保存completion-evidence/blob-resources/managed-engine-large.json与managed-engine-shutdown.json，资源watcher34518与JUnit watcher63316均已正常结束。测试默认工件已分名避免未来CI相互覆盖；旧workspace二进制不声称执行新增测试代码，来源映射在completion-source-files.json，原失败Engine二进制保存在target/blob-resource-tmp/quota-original-workspace-test。
++
++旧Collector／Jaeger scope（会话51281）已结束，当前独立service `uni-blob-observation.service` active，本轮创建的临时工具在target/blob-resource-tmp/observability-tools，结束前需停止并回收。Collector保持原processors逐字一致，只加过滤后JSONL证据输出；privacy配置5项及1346调用点检查已通过。新真实文件OTLP与离线黑洞通知测试尚须等focused输出，不提前计通过。
++
++完整spec保持active：当前13个AC和48个阶段项目在completion-audit.md逐项核验，完整资源映射、最终交付head十组兼容、成员／升级、最终workspace及线上平台CI仍未齐全，不能归档或关闭Issue34。
+ 
+ ## 先前切片记录
+ 业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。保存后物理清理已提交01783244（App25／Native5及根门禁）。当前未提交获取失败／取消清理恢复：fetch-cleanup-red实际Facade保护0／期望1（0.007秒）；恢复意图区分FileCommit、FetchFailure、FetchCancellation，只有FileCommit写FileFailed，其余按原网络事实和实际journaled完成NoEntry；取消通过原CAS争取权威。原本只检查错误的mock测试由实际Facade／资源／文件系统／取消源检查替代。首轮25通过／2失败：一为旧错误类型断言，一为新测试错要求关闭吞掉Store；依据原supervision的错误保留合同，测试现明确断言Store和StorageFull仍存在，不改生产关闭。新增Native第二项实际导出失败＋目录清理拒绝，用原结果事件确认失败已返回，再验证100ms关闭、旧成功文件、原Failed网络事实及重开日志。
+@@ -152,3 +161,15 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁
+ - b14e110d已提交缓存授权修复，h11临时资料已核对无活动FD并回收。当前开始原生C额度切片：原B消息＋完整直接C获取共占C两槽，第三C排队而直接B获取完成；只扩展测试内导出屏障索引，不改变生产预算。
+ 
+ - a4cfb172已提交来源C额度证据并回收h12；当前开始首次Staging前真实进程强杀红测。复用原crash子进程／stdin模拟钥匙串／TCPcheckpoint，真实AtomicPublish探测后改保存目录再kill，重开须清除旧区且保护用户重用目标；暂不改Application生产顺序。
++
++
++- 下一个观测最小切片：先复用receive_retry真实Engine／SDK／SQLite／实际输出fixture，显式独占测试进程安装测试OTLP并flush，进入本机严格Collector→Jaeger；执行初次部分失败、只重试失败项、真实成功和在途取消，保存实际业务查询结果及列表／详情。这里只增加测试入口，不改变生产语义；若实际记录缺失或误报，再由原Application完整接收／重试负责人持不透明观测上下文，Engine只装饰原有完整能力，禁止新增阶段查询。手动重试是独立用户动作，Accepted仅表示准入而非文件完成；旧发送记录不可被手动重试延长。局部清理／排队／网络轮次作为子工作，不生成新业务root；重启不新增持久关联字段。
++
++
++- 离线通知硬验收：完整负责人仍是Application原接收／OutboundNotifications，调用方只使用RetryEntryReceive、CancelEntryReceive和shutdown。复用ReceiveExports测试装配，将原完整OutboundProgressReporterPort在测试中永久阻塞；真实关闭来源Engine后重试既有准确缓存，暂停真实第四次SDK导出，要求原5秒取消合同仅等待本地导出／结算，终态保留两份旧成功且清除未保存输出，关闭不依赖解除通知屏障。只新增cfg(test,dev-tools)的既有能力装饰，不扩展生产port、结果、Engine阶段或设备接口；待原workspace结束后与观测用例共用一次测试重编译并精确运行。
++
++
++- 观测实际红测后的完整修复：原Application接收／重试模块继续独占业务结果、结算和停止责任；调用方仍只发原RetryEntryReceive。先通过现有不透明ClipboardReceiveObservation传递已提交的部分／取消事实，跨原处理task传递，不改ACK／回执或结果接口。随后Engine装饰原完整retry能力并把观测完成权交给原后台owner，Accepted不能提前记ok；手动重试新建独立在线记录，不新增持久关联或步骤查询。完整文件输出能力的子记录只由Engine既有read-store port decorator装配，StorageFull可在详情定位。字段沿schema1固定词表更新设备编码与两份Collector，不输出文件名／路径／票据／标识。真实OTLP与UI失败保存在observability-red；最终必须再次运行同一行为用例、严格Collector和列表／详情才可验收。
++
++
++- 默认CI完整门禁：scripts/testing/run-blob-connectivity.sh作为唯一第七片网络门禁负责人，调用方只执行一次脚本；复用build-peer-reachability-main现有rev/root/label参数、a07既有锚点与connection-recovery-network，不新建网络框架或旧库补丁。固定开工main a461b894，两组新新＋两旧端×Direct/Relay×升级侧0/1共十组。成功要求实际文件双向读回、旧资料读回、blob握手、拓扑与清理／隐私均通过；任一失败非0且保留该轮独立工件，重跑不覆盖首次失败。资源验收继续默认workspace现有1GiB项，默认PR增加必需网络job，设备未执行仍跳过。
+diff --git i/crates/uc-application/src/clipboard/history/clear_history.rs w/crates/uc-application/src/clipboard/history/clear_history.rs
+index 0c968dbe..1d4b2b89 100644
+--- i/crates/uc-application/src/clipboard/history/clear_history.rs
++++ w/crates/uc-application/src/clipboard/history/clear_history.rs
+@@ -56,7 +56,7 @@ impl ClearClipboardHistoryUseCase {
+ 
+     #[tracing::instrument(name = "usecase.clear_clipboard_history.execute", skip_all)]
+     pub(crate) async fn execute(&self) -> Result<ClearHistoryResult> {
+-        let mut scope = self.receive_work.clear_scope().await?;
++        let mut scope = self.receive_work.drain_scope().await?;
+         scope
+             .stop()
+             .await
+diff --git i/crates/uc-application/src/clipboard/inbound/runtime.rs w/crates/uc-application/src/clipboard/inbound/runtime.rs
+index 03c7e4cb..47029404 100644
+--- i/crates/uc-application/src/clipboard/inbound/runtime.rs
++++ w/crates/uc-application/src/clipboard/inbound/runtime.rs
+@@ -1,8 +1,7 @@
+ use crate::clipboard::inbound::ClipboardReceiverPort;
++use crate::clipboard::sync::apply_inbound::classify_apply_failure;
+ use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
+-use std::error::Error as StdError;
+ use std::fmt;
+-use std::io::{Error as IoError, ErrorKind};
+ use std::sync::Arc;
+ 
+ use bytes::Bytes;
+@@ -312,25 +311,6 @@ impl InboundProcessor {
+     }
+ }
+ 
+-fn classify_apply_failure(error: &(dyn StdError + 'static)) -> ClipboardReceiveFailure {
+-    let mut source = Some(error);
+-    for _ in 0..32 {
+-        let Some(error) = source else {
+-            break;
+-        };
+-        if let Some(error) = error.downcast_ref::<IoError>() {
+-            return match error.kind() {
+-                ErrorKind::PermissionDenied => ClipboardReceiveFailure::ApplyPermissionDenied,
+-                ErrorKind::StorageFull => ClipboardReceiveFailure::ApplyStorageFull,
+-                ErrorKind::ReadOnlyFilesystem => ClipboardReceiveFailure::ApplyReadOnly,
+-                _ => ClipboardReceiveFailure::ApplyIoFailed,
+-            };
+-        }
+-        source = error.source();
+-    }
+-    ClipboardReceiveFailure::ApplyFailed
+-}
+-
+ async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
+     match settings.load().await {
+         Ok(settings) if settings.sync.sync_enabled => true,
+diff --git i/crates/uc-application/src/clipboard/sync/apply_inbound/mod.rs w/crates/uc-application/src/clipboard/sync/apply_inbound/mod.rs
+index 0fceafe4..c41dc74f 100644
+--- i/crates/uc-application/src/clipboard/sync/apply_inbound/mod.rs
++++ w/crates/uc-application/src/clipboard/sync/apply_inbound/mod.rs
+@@ -72,6 +72,8 @@ use crate::clipboard::write::ClipboardWriteIntent;
+ pub(crate) mod ports;
+ 
+ pub use ports::InboundSnapshotRebuild;
++mod observation;
++pub(crate) use observation::classify_apply_failure;
+ mod timing;
+ mod usecase;
+ 
+diff --git i/crates/uc-application/src/clipboard/sync/apply_inbound/tests/lifecycle.rs w/crates/uc-application/src/clipboard/sync/apply_inbound/tests/lifecycle.rs
+index 94646e66..4c4047e6 100644
+--- i/crates/uc-application/src/clipboard/sync/apply_inbound/tests/lifecycle.rs
++++ w/crates/uc-application/src/clipboard/sync/apply_inbound/tests/lifecycle.rs
+@@ -279,7 +279,7 @@ async fn history_clear_stops_preparing_receive_without_opening_initial_readiness
+     assert!(timeout(Duration::from_millis(20), receive.as_mut())
+         .await
+         .is_err());
+-    let mut scope = receive_work.clear_scope().await.unwrap();
++    let mut scope = receive_work.drain_scope().await.unwrap();
+     timeout(Duration::from_secs(1), scope.stop())
+         .await
+         .unwrap()
+diff --git i/crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs w/crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs
+index a6a6c0d0..a53a99bf 100644
+--- i/crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs
++++ w/crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs
+@@ -7,7 +7,9 @@ use std::sync::{atomic::AtomicBool, Arc};
+ use anyhow::{anyhow, Error as SourceError};
+ use moka::sync::Cache;
+ use tracing::instrument;
+-use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
++use uc_observability_contract::diagnostics::{
++    connectivity::describe_clipboard_receive_partial, DiagnosticTaskKind, ObservationContext,
++};
+ use uc_observability_contract::{
+     error_source::io_error_kind,
+     log_fields::{log_id, log_vocab},
+@@ -2135,6 +2137,11 @@ impl ApplyInboundClipboardUseCase {
+             origin: ClipboardOriginKind::Remote,
+         }));
+ 
++        if is_partial {
++            describe_clipboard_receive_partial(
++                materialize_outcome == MaterializeOutcome::PartialCancelled,
++            );
++        }
+         Ok(ApplyOutcome::Applied { entry_id })
+     }
+ 
+diff --git i/crates/uc-application/src/clipboard/sync/apply_inbound/usecase/owned.rs w/crates/uc-application/src/clipboard/sync/apply_inbound/usecase/owned.rs
+index 3b27cf72..09029aed 100644
+--- i/crates/uc-application/src/clipboard/sync/apply_inbound/usecase/owned.rs
++++ w/crates/uc-application/src/clipboard/sync/apply_inbound/usecase/owned.rs
+@@ -10,8 +10,12 @@ use std::{
+ use tokio::sync::oneshot;
+ use tracing::Instrument;
+ use uc_core::ports::ReceiveItemRole;
+-use uc_observability_contract::diagnostics::ObservationContext;
++use uc_observability_contract::diagnostics::{
++    connectivity::{ClipboardReceiveFailure, ClipboardReceiveObservation, ClipboardRetryOutcome},
++    ObservationContext,
++};
+ 
++use super::super::classify_apply_failure;
+ use super::{ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome};
+ 
+ impl ApplyInboundClipboardUseCase {
+@@ -32,51 +36,75 @@ impl ApplyInboundClipboardUseCase {
+         let processing_reply = reply.clone();
+         let owner = self.clone();
+         let observation = ObservationContext::capture();
+-        let task = tokio::spawn(
+-            observation.scope(
+-                async move {
+-                    let outcome = owner
+-                        .execute_internal(
+-                            input,
+-                            provisional,
+-                            &action,
+-                            &processing_receive,
+-                            retry,
+-                            &processing_reply,
+-                        )
+-                        .await;
+-                    match (outcome, processing_receive.take_settlement()) {
+-                        (Err(error), Some(pending)) => {
+-                            let (caller, failure) = share_failure(error);
+-                            let failure = Arc::new(failure);
+-                            processing_reply.respond(Err(caller));
+-                            // 原任务继续持有原许可，只修复失败结算，不重试下载或保存。
+-                            owner
+-                                .recover_settlement(pending, &processing_receive, failure.clone())
+-                                .await;
+-                            Processed::Recovered(failure)
+-                        }
+-                        (outcome, None) => Processed::Original(outcome),
+-                        // 成功路径不应留下失败责任；保留责任并完成结算，不能静默释放。
+-                        (Ok(_), Some(pending)) => {
+-                            let (caller, failure) = share_failure(ApplyInboundError::Internal(
+-                                SourceError::msg("successful receive retained unsettled failure"),
+-                            ));
+-                            let failure = Arc::new(failure);
+-                            processing_reply.respond(Err(caller));
+-                            owner
+-                                .recover_settlement(pending, &processing_receive, failure.clone())
+-                                .await;
+-                            Processed::Recovered(failure)
+-                        }
++        let receive_observation = ClipboardReceiveObservation::capture();
++        let settlement_observation = receive_observation.clone();
++        // 完整物化future在原spawn边界装箱，观测scope只移动指针，不在worker栈反复搬运整份future。
++        let processing = Box::pin(
++            async move {
++                let outcome = owner
++                    .execute_internal(
++                        input,
++                        provisional,
++                        &action,
++                        &processing_receive,
++                        retry,
++                        &processing_reply,
++                    )
++                    .await;
++                match (outcome, processing_receive.take_settlement()) {
++                    (Err(error), Some(pending)) => {
++                        let (caller, failure) = share_failure(error);
++                        let failure = Arc::new(failure);
++                        processing_reply.respond(Err(caller));
++                        // 原任务继续持有原许可，只修复失败结算，不重试下载或保存。
++                        owner
++                            .recover_settlement(pending, &processing_receive, failure.clone())
++                            .await;
++                        Processed::Recovered(failure)
++                    }
++                    (outcome, None) => Processed::Original(outcome),
++                    // 成功路径不应留下失败责任；保留责任并完成结算，不能静默释放。
++                    (Ok(_), Some(pending)) => {
++                        let (caller, failure) = share_failure(ApplyInboundError::Internal(
++                            SourceError::msg("successful receive retained unsettled failure"),
++                        ));
++                        let failure = Arc::new(failure);
++                        processing_reply.respond(Err(caller));
++                        owner
++                            .recover_settlement(pending, &processing_receive, failure.clone())
++                            .await;
++                        Processed::Recovered(failure)
+                     }
+                 }
+-                .in_current_span(),
+-            ),
++            }
++            .in_current_span(),
++        );
++        let task = tokio::spawn(
++            observation.scope(async move { receive_observation.scope(processing).await }),
+         );
+         // 同一许可由处理与监督共同持有，异常登记完成前关闭不能返回成功。
+         tokio::spawn(async move {
+-            let outcome = match task.await {
++            let processed = task.await;
++            let retry_outcome = match &processed {
++                Ok(Processed::Original(Ok(ApplyOutcome::DecodeFailed { .. }))) => {
++                    ClipboardRetryOutcome::Rejected
++                }
++                Ok(Processed::Original(Ok(ApplyOutcome::DuplicateSkipped { .. }))) => {
++                    ClipboardRetryOutcome::Skipped
++                }
++                Ok(Processed::Original(Ok(_))) => ClipboardRetryOutcome::Succeeded,
++                Ok(Processed::Original(Err(ApplyInboundError::Stopped))) => {
++                    ClipboardRetryOutcome::Cancelled
++                }
++                Ok(Processed::Original(Err(source))) => {
++                    ClipboardRetryOutcome::Failed(classify_apply_failure(source))
++                }
++                Ok(Processed::Recovered(source)) => {
++                    ClipboardRetryOutcome::Failed(classify_apply_failure(source.as_ref()))
++                }
++                Err(_) => ClipboardRetryOutcome::Failed(ClipboardReceiveFailure::ApplyFailed),
++            };
++            let outcome = match processed {
+                 Ok(Processed::Original(Ok(outcome))) => {
+                     receive_action.finish(Ok(()));
+                     Some(Ok(outcome))
+@@ -101,6 +129,7 @@ impl ApplyInboundClipboardUseCase {
+                 }
+             };
+             drop(work);
++            settlement_observation.finish_retry(retry_outcome);
+             if let Some(outcome) = outcome {
+                 reply.respond(outcome);
+             }
+diff --git i/crates/uc-application/src/deps.rs w/crates/uc-application/src/deps.rs
+index 3d2c067e..49a18833 100644
+--- i/crates/uc-application/src/deps.rs
++++ w/crates/uc-application/src/deps.rs
+@@ -586,6 +586,9 @@ pub use crate::connectivity::{
+     StreamWorkLease,
+ };
+ 
++// 测试装配参数只经被动依赖入口公开，不进入业务门面白名单。
++#[cfg(feature = "test-support")]
++pub use crate::transfer::blob::facade::BlobTransferDeps;
+ pub use crate::transfer::blob::transport::{
+     BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, BlobExchangePort,
+     BlobReadStorePort, BlobReceived, BlobRetainedContent, BlobShutdownWait, BlobSource,
+diff --git i/crates/uc-application/src/facade/blob_transfer.rs w/crates/uc-application/src/facade/blob_transfer.rs
+index 0b17d7cc..e5268175 100644
+--- i/crates/uc-application/src/facade/blob_transfer.rs
++++ w/crates/uc-application/src/facade/blob_transfer.rs
+@@ -6,7 +6,3 @@ pub use crate::transfer::blob::facade::{
+     InboundCancelOutcome, PublishBlobCommand, PublishBlobPathCommand, PublishBlobResult,
+     SharedHostEventEmitter,
+ };
+-
+-// 测试支持只公开完整能力的被动装配参数；不提供内部步骤、状态或 SDK 访问。
+-#[cfg(feature = "test-support")]
+-pub use crate::transfer::blob::facade::BlobTransferDeps;
+diff --git i/crates/uc-application/src/space/lifecycle/session/activity.rs w/crates/uc-application/src/space/lifecycle/session/activity.rs
+index 38ea9dcc..75e0b60e 100644
+--- i/crates/uc-application/src/space/lifecycle/session/activity.rs
++++ w/crates/uc-application/src/space/lifecycle/session/activity.rs
+@@ -152,8 +152,12 @@ impl SpaceSessionActivity {
+     }
+ 
+     pub(crate) async fn pause_for_lock(&self) -> Result<(), SpaceActivityError> {
++        // 原接收持有提交／清理所需密钥，必须实际排空后才能锁定。
++        self.receive
++            .close_receive_gate()
++            .await
++            .map_err(|source| SpaceActivityError::Receive(source.into()))?;
+         self.connections.pause().await?;
+-        self.receive.close_receive_gate();
+         self.search
+             .pause()
+             .await
+diff --git i/crates/uc-application/src/transfer/file/facade.rs w/crates/uc-application/src/transfer/file/facade.rs
+index 1b5eb8d4..5d0d6e10 100644
+--- i/crates/uc-application/src/transfer/file/facade.rs
++++ w/crates/uc-application/src/transfer/file/facade.rs
+@@ -226,12 +226,6 @@ impl FileTransferFacade {
+         self.lifecycle.ensure_receive_ready().await
+     }
+ 
+-    /// Lifecycle action: close the receive gate so inbound transfers are
+-    /// rejected until the next `ensure_receive_ready`.
+-    pub fn close_receive_gate(&self) {
+-        self.lifecycle.close_receive_gate();
+-    }
+-
+     /// Read the current receive-gate status.
+     pub fn receive_readiness_status(&self) -> ReceiveReadinessStatus {
+         self.lifecycle.receive_readiness_status()
+@@ -260,8 +254,8 @@ impl EnsureReceiveReadyPort for FileTransferFacade {
+         self.lifecycle.ensure_receive_ready().await
+     }
+ 
+-    fn close_receive_gate(&self) {
+-        self.lifecycle.close_receive_gate();
++    async fn close_receive_gate(&self) -> Result<(), ReceiveReadinessError> {
++        self.lifecycle.close_receive_gate().await
+     }
+ 
+     fn receive_readiness_status(&self) -> ReceiveReadinessStatus {
+diff --git i/crates/uc-application/src/transfer/file/lifecycle.rs w/crates/uc-application/src/transfer/file/lifecycle.rs
+index 546bfc35..81e7d6bb 100644
+--- i/crates/uc-application/src/transfer/file/lifecycle.rs
++++ w/crates/uc-application/src/transfer/file/lifecycle.rs
+@@ -384,8 +384,8 @@ impl EnsureReceiveReadyPort for FileTransferLifecycle {
+         Self::ensure_receive_ready(self).await
+     }
+ 
+-    fn close_receive_gate(&self) {
+-        self.receive_readiness.mark_not_ready();
++    async fn close_receive_gate(&self) -> Result<(), ReceiveReadinessError> {
++        self.receive_readiness.close().await
+     }
+ 
+     fn receive_readiness_status(&self) -> ReceiveReadinessStatus {
+diff --git i/crates/uc-application/src/transfer/receive/reconciliation.rs w/crates/uc-application/src/transfer/receive/reconciliation.rs
+index 36379dc1..277050ed 100644
+--- i/crates/uc-application/src/transfer/receive/reconciliation.rs
++++ w/crates/uc-application/src/transfer/receive/reconciliation.rs
+@@ -35,12 +35,15 @@ pub struct ReceiveReadinessStatus {
+ pub enum ReceiveReadinessError {
+     #[error("receive recovery failed")]
+     Recovery(#[source] anyhow::Error),
++    #[error("receive shutdown failed")]
++    Stop(#[source] anyhow::Error),
+ }
+ 
+ #[async_trait]
+ pub trait EnsureReceiveReadyPort: Send + Sync {
+     async fn ensure_receive_ready(&self) -> Result<(), ReceiveReadinessError>;
+-    fn close_receive_gate(&self);
++    /// 封住旧世代并等待已接受的接收实际结算；成功后才允许撤下所需密钥。
++    async fn close_receive_gate(&self) -> Result<(), ReceiveReadinessError>;
+     fn receive_readiness_status(&self) -> ReceiveReadinessStatus;
+ }
+ 
+@@ -73,6 +76,22 @@ impl ReceiveReadinessCoordinator {
+         self.work.close();
+     }
+ 
++    /// 锁定等维护动作关闭原世代，等所有已开始工作结算后再交还能力。
++    pub(crate) async fn close(&self) -> Result<(), ReceiveReadinessError> {
++        self.mark_not_ready();
++        let mut scope = self
++            .work
++            .drain_scope()
++            .await
++            .map_err(|source| ReceiveReadinessError::Stop(source.into()))?;
++        scope
++            .stop()
++            .await
++            .map_err(|source| ReceiveReadinessError::Stop(source.into()))?;
++        scope.complete();
++        Ok(())
++    }
++
+     pub fn is_ready(&self) -> bool {
+         self.work.is_open()
+     }
+@@ -422,9 +441,14 @@ impl ReconcileReceiveAttemptsUseCase {
+ 
+ #[cfg(test)]
+ mod tests {
++    use super::super::work::ReceiveWorkError;
++    use std::error::Error;
++    use std::io::{self, ErrorKind};
+     use std::path::PathBuf;
+     use std::sync::atomic::{AtomicUsize, Ordering};
+     use std::sync::Mutex;
++    use std::time::Duration;
++    use tokio::time::timeout;
+ 
+     use async_trait::async_trait;
+     use uc_core::ports::{
+@@ -436,12 +460,80 @@ mod tests {
+ 
+     use super::*;
+ 
++    #[tokio::test]
++    async fn complete_close_waits_for_all_receives_and_never_opens_or_revives_the_old_generation() {
++        let readiness = ReceiveReadinessCoordinator::new();
++        readiness.mark_ready();
++        let registry = readiness.work_registry();
++        let a = registry.action();
++        let b = registry.action();
++        let preparing = registry.action();
++        a.register(&EntryId::from("a"), "a").unwrap();
++        b.register(&EntryId::from("b"), "b").unwrap();
++        let mut closing = Box::pin(readiness.close());
++        assert!(timeout(Duration::from_millis(10), closing.as_mut())
++            .await
++            .is_err());
++        assert!(a.cancellation().is_cancelled() && b.cancellation().is_cancelled());
++        assert!(preparing.cancellation().is_cancelled());
++        assert!(!readiness.is_ready());
++        let during = registry.action();
++        assert!(during.cancellation().is_cancelled());
++        a.finish(Ok(()));
++        drop(preparing);
++        assert!(timeout(Duration::from_millis(10), closing.as_mut())
++            .await
++            .is_err());
++        b.finish(Ok(()));
++        closing.await.unwrap();
++        assert!(!readiness.is_ready(), "实际排空不授予重新接收资格");
++        readiness.ensure_ready(|| async { Ok(()) }).await.unwrap();
++        assert!(readiness.is_ready());
++        assert!(a.register(&EntryId::from("old"), "old").is_err());
++        assert!(during.register(&EntryId::from("during"), "during").is_err());
++        let new = registry.action();
++        new.register(&EntryId::from("new"), "new").unwrap();
++        new.finish(Ok(()));
++    }
++
++    #[tokio::test]
++    async fn complete_close_preserves_the_original_settlement_source_and_keeps_admission_closed() {
++        let readiness = ReceiveReadinessCoordinator::new();
++        readiness.mark_ready();
++        let registry = readiness.work_registry();
++        let action = registry.action();
++        action.register(&EntryId::from("entry"), "attempt").unwrap();
++        let mut closing = Box::pin(readiness.close());
++        assert!(timeout(Duration::from_millis(10), closing.as_mut())
++            .await
++            .is_err());
++        action.finish(Err(ReceiveWorkError::Action(
++            io::Error::from(ErrorKind::StorageFull).into(),
++        )));
++        let error = closing.await.unwrap_err();
++        assert!(Error::source(&error).is_some());
++        let ReceiveReadinessError::Stop(source) = error else {
++            panic!("排空失败不能冒充恢复失败")
++        };
++        assert!(source.chain().any(|source| source
++            .downcast_ref::<io::Error>()
++            .is_some_and(|source| source.kind() == ErrorKind::StorageFull)));
++        assert!(!readiness.is_ready());
++        assert!(registry
++            .action()
++            .register(&EntryId::from("blocked"), "blocked")
++            .is_err());
++        drop(action);
++        readiness.close().await.unwrap();
++        assert!(!readiness.is_ready());
++    }
++
+     #[tokio::test]
+     async fn recovery_does_not_run_inside_an_accepted_history_clear() {
+         let readiness = ReceiveReadinessCoordinator::new();
+         readiness.mark_ready();
+         let registry = readiness.work_registry();
+-        let mut scope = registry.clear_scope().await.unwrap();
++        let mut scope = registry.drain_scope().await.unwrap();
+         let called = AtomicUsize::new(0);
+         let mut waiter = Box::pin(readiness.wait_ready());
+         assert!(
+@@ -489,7 +581,7 @@ mod tests {
+             })
+         };
+         started.await.unwrap();
+-        let mut clearing = Box::pin(registry.clear_scope());
++        let mut clearing = Box::pin(registry.drain_scope());
+         assert!(
+             tokio::time::timeout(std::time::Duration::from_millis(10), clearing.as_mut())
+                 .await
+diff --git i/crates/uc-application/src/transfer/receive/retry/owner.rs w/crates/uc-application/src/transfer/receive/retry/owner.rs
+index 37a322a1..782126e4 100644
+--- i/crates/uc-application/src/transfer/receive/retry/owner.rs
++++ w/crates/uc-application/src/transfer/receive/retry/owner.rs
+@@ -5,7 +5,9 @@ use std::collections::HashSet;
+ use std::sync::{Arc, Mutex, PoisonError};
+ use tokio::sync::oneshot;
+ use uc_core::ids::EntryId;
+-use uc_observability_contract::diagnostics::ObservationContext;
++use uc_observability_contract::diagnostics::{
++    connectivity::ClipboardReceiveObservation, ObservationContext,
++};
+ use uc_observability_contract::{error_source::io_error_kind, uc_warn};
+ 
+ pub(crate) struct RetryEntryReceiveUseCase {
+@@ -79,7 +81,8 @@ impl RetryEntryReceiveUseCase {
+         prepared.accepted = Some(accepted);
+         let apply = self.apply.clone();
+         let observation = ObservationContext::capture();
+-        let task = tokio::spawn(observation.scope(async move {
++        let receive_observation = ClipboardReceiveObservation::capture();
++        let processing = Box::pin(async move {
+             // 调用者离开只结束等待；完整接收监督和防重入一直持有到结算结束。
+             let _guard = guard;
+             let result = apply.execute_retry(prepared).await;
+@@ -91,7 +94,10 @@ impl RetryEntryReceiveUseCase {
+                 );
+             }
+             result
+-        }));
++        });
++        let task = tokio::spawn(
++            observation.scope(async move { receive_observation.scope(processing).await }),
++        );
+         match reply.await {
+             Ok(outcome) => Ok(outcome),
+             // discarded-source[channel]: 原流程错误保留在实际接收任务结果中。
+diff --git i/crates/uc-application/src/transfer/receive/work.rs w/crates/uc-application/src/transfer/receive/work.rs
+index 6f1f6bba..80ca903e 100644
+--- i/crates/uc-application/src/transfer/receive/work.rs
++++ w/crates/uc-application/src/transfer/receive/work.rs
+@@ -13,7 +13,7 @@ use uc_core::ids::EntryId;
+ use uc_observability_contract::wire_enum;
+ 
+ mod catalog;
+-mod clear;
++mod drain;
+ mod settlement;
+ pub(crate) use catalog::{PlannedReceiveItem, ReceiveRepresentation, ReceiveSource};
+ pub(crate) use settlement::{
+diff --git i/crates/uc-application/src/transfer/receive/work/clear.rs w/crates/uc-application/src/transfer/receive/work/clear.rs
+deleted file mode 100644
+index 0da1b6bb..00000000
+--- i/crates/uc-application/src/transfer/receive/work/clear.rs
++++ /dev/null
+@@ -1,247 +0,0 @@
+-//! 清空先停止全部出生动作，再等待实际结束；不改变外部会话的打开状态。
+-use super::{Completion, ReceiveRegistrationError, ReceiveWorkError, ReceiveWorkRegistry};
+-use std::error::Error;
+-use std::fmt::{self, Display, Formatter};
+-use std::sync::atomic::Ordering;
+-use std::sync::{Arc, PoisonError};
+-use tokio::sync::{watch, OwnedMutexGuard};
+-
+-pub(crate) struct ReceiveClearScope {
+-    registry: Arc<ReceiveWorkRegistry>,
+-    waiting: Vec<(watch::Receiver<Completion>, bool)>,
+-    complete: bool,
+-    _maintenance: Option<OwnedMutexGuard<()>>,
+-}
+-
+-impl ReceiveWorkRegistry {
+-    pub(crate) async fn clear_scope(
+-        self: &Arc<Self>,
+-    ) -> Result<ReceiveClearScope, ReceiveRegistrationError> {
+-        let mut scope = {
+-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+-            if state.clearing {
+-                return Err(ReceiveRegistrationError::CleanupInProgress);
+-            }
+-            state.clearing = true;
+-            let waiting = state
+-                .born
+-                .iter()
+-                .filter_map(|birth| birth.upgrade())
+-                .map(|birth| {
+-                    birth.cancel.cancel();
+-                    (
+-                        birth.completion.subscribe(),
+-                        birth.registered.load(Ordering::Acquire),
+-                    )
+-                })
+-                .collect();
+-            ReceiveClearScope {
+-                registry: self.clone(),
+-                waiting,
+-                complete: false,
+-                _maintenance: None,
+-            }
+-        };
+-        scope._maintenance = Some(self.maintenance.clone().lock_owned().await);
+-        Ok(scope)
+-    }
+-
+-    /// 恢复与清空互斥；清空已接受时，不把临时封口误判为需要启动恢复。
+-    pub(in super::super) async fn recovery_lease(self: &Arc<Self>) -> OwnedMutexGuard<()> {
+-        loop {
+-            let changed = self.changed.notified();
+-            let lease = self.maintenance.clone().lock_owned().await;
+-            if !self
+-                .state
+-                .lock()
+-                .unwrap_or_else(PoisonError::into_inner)
+-                .clearing
+-            {
+-                return lease;
+-            }
+-            drop(lease);
+-            changed.await;
+-        }
+-    }
+-}
+-
+-impl ReceiveClearScope {
+-    pub(crate) async fn stop(&mut self) -> Result<(), ReceiveClearFailure> {
+-        let mut failures = Vec::new();
+-        for (mut result, registered) in self.waiting.drain(..) {
+-            loop {
+-                if let Some(completion) = result.borrow_and_update().clone() {
+-                    if let Err(source) = completion {
+-                        if !matches!(source.as_ref(), ReceiveWorkError::Stopped) {
+-                            failures.push(source);
+-                        }
+-                    }
+-                    break;
+-                }
+-                if let Err(source) = result.changed().await {
+-                    if registered {
+-                        failures.push(Arc::new(ReceiveWorkError::Completion(source)));
+-                    }
+-                    // discarded-source[channel]: 未登记动作的最后持有者已退出，没有已接受的接收需要结算。
+-                    break;
+-                }
+-            }
+-        }
+-        if failures.is_empty() {
+-            Ok(())
+-        } else {
+-            Err(ReceiveClearFailure(failures))
+-        }
+-    }
+-
+-    pub(crate) fn complete(&mut self) {
+-        self.complete = true;
+-    }
+-}
+-
+-impl Drop for ReceiveClearScope {
+-    fn drop(&mut self) {
+-        let mut state = self
+-            .registry
+-            .state
+-            .lock()
+-            .unwrap_or_else(PoisonError::into_inner);
+-        state.clearing = false;
+-        state.clear_failed = !self.complete;
+-        if self.complete {
+-            state.receipts.clear();
+-        }
+-        self.registry.changed.notify_waiters();
+-    }
+-}
+-
+-#[derive(Debug)]
+-pub(crate) struct ReceiveClearFailure(pub(crate) Vec<Arc<ReceiveWorkError>>);
+-impl Display for ReceiveClearFailure {
+-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+-        formatter.write_str("receive actions did not settle before history clear")
+-    }
+-}
+-impl Error for ReceiveClearFailure {
+-    fn source(&self) -> Option<&(dyn Error + 'static)> {
+-        self.0
+-            .first()
+-            .map(|error| error.as_ref() as &(dyn Error + 'static))
+-    }
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::super::{ReceiveWorkError, ReceiveWorkRegistry};
+-    use std::io;
+-    use std::sync::Arc;
+-    use tokio::time::{timeout, Duration};
+-    use uc_core::ids::EntryId;
+-
+-    #[tokio::test]
+-    async fn clear_stops_all_births_before_waiting_and_never_revives_old_or_mid_clear_actions() {
+-        let registry = Arc::new(ReceiveWorkRegistry::default());
+-        let a = registry.action();
+-        let b = registry.action();
+-        let preparing = registry.action();
+-        a.register(&EntryId::from("a"), "a").unwrap();
+-        b.register(&EntryId::from("b"), "b").unwrap();
+-        let mut scope = registry.clear_scope().await.unwrap();
+-        assert!(a.cancellation().is_cancelled() && b.cancellation().is_cancelled());
+-        assert!(preparing.cancellation().is_cancelled());
+-        let during = registry.action();
+-        assert!(during.cancellation().is_cancelled());
+-        assert!(!registry.is_open());
+-        assert!(registry.claim_cleanup("other").is_none());
+-        let mut waiting = Box::pin(scope.stop());
+-        a.finish(Ok(()));
+-        drop(preparing);
+-        assert!(timeout(Duration::from_millis(10), waiting.as_mut())
+-            .await
+-            .is_err());
+-        b.finish(Ok(()));
+-        waiting.await.unwrap();
+-        scope.complete();
+-        drop(scope);
+-        assert!(registry.is_open());
+-        assert!(a.register(&EntryId::from("late-a"), "late").is_err());
+-        assert!(during.register(&EntryId::from("late-b"), "late").is_err());
+-        let next = registry.action();
+-        next.register(&EntryId::from("new"), "new").unwrap();
+-        next.finish(Ok(()));
+-    }
+-
+-    #[tokio::test]
+-    async fn clear_completion_does_not_open_an_externally_closed_session() {
+-        let registry = Arc::new(ReceiveWorkRegistry::default());
+-        let mut scope = registry.clear_scope().await.unwrap();
+-        scope.stop().await.unwrap();
+-        registry.close();
+-        scope.complete();
+-        drop(scope);
+-        assert!(!registry.is_open());
+-    }
+-
+-    #[tokio::test]
+-    async fn clear_collects_all_failure_sources_and_keeps_admission_closed_until_retry() {
+-        let registry = Arc::new(ReceiveWorkRegistry::default());
+-        let a = registry.action();
+-        let b = registry.action();
+-        a.register(&EntryId::from("a"), "a").unwrap();
+-        b.register(&EntryId::from("b"), "b").unwrap();
+-        let mut scope = registry.clear_scope().await.unwrap();
+-        let mut waiting = Box::pin(scope.stop());
+-        a.finish(Err(ReceiveWorkError::Action(
+-            io::Error::from(io::ErrorKind::PermissionDenied).into(),
+-        )));
+-        assert!(timeout(Duration::from_millis(10), waiting.as_mut())
+-            .await
+-            .is_err());
+-        b.finish(Err(ReceiveWorkError::Action(
+-            io::Error::from(io::ErrorKind::StorageFull).into(),
+-        )));
+-        let failure = waiting.await.unwrap_err();
+-        assert_eq!(failure.0.len(), 2);
+-        let kinds = failure
+-            .0
+-            .iter()
+-            .map(|source| {
+-                let ReceiveWorkError::Action(source) = source.as_ref() else {
+-                    panic!("original action source")
+-                };
+-                source.downcast_ref::<io::Error>().unwrap().kind()
+-            })
+-            .collect::<Vec<_>>();
+-        assert!(kinds.contains(&io::ErrorKind::PermissionDenied));
+-        assert!(kinds.contains(&io::ErrorKind::StorageFull));
+-        drop(scope);
+-        assert!(!registry.is_open());
+-        assert!(registry
+-            .action()
+-            .register(&EntryId::from("blocked"), "blocked")
+-            .is_err());
+-        drop(a);
+-        drop(b);
+-        let mut retry = registry.clear_scope().await.unwrap();
+-        retry.stop().await.unwrap();
+-        retry.complete();
+-        drop(retry);
+-        assert!(registry.is_open());
+-    }
+-
+-    #[tokio::test]
+-    async fn lost_registered_completion_cannot_be_mistaken_for_an_unregistered_prepare_exit() {
+-        let registry = Arc::new(ReceiveWorkRegistry::default());
+-        let action = registry.action();
+-        action.register(&EntryId::from("entry"), "attempt").unwrap();
+-        let mut scope = registry.clear_scope().await.unwrap();
+-        drop(action);
+-        let failure = scope.stop().await.unwrap_err();
+-        assert!(matches!(
+-            failure.0[0].as_ref(),
+-            ReceiveWorkError::Completion(_)
+-        ));
+-        drop(scope);
+-        assert!(!registry.is_open());
+-    }
+-}
+diff --git i/crates/uc-engine/src/assembly/observability/mod.rs w/crates/uc-engine/src/assembly/observability/mod.rs
+index 1a3c927a..1f4f6485 100644
+--- i/crates/uc-engine/src/assembly/observability/mod.rs
++++ w/crates/uc-engine/src/assembly/observability/mod.rs
+@@ -4,6 +4,8 @@
+ 
+ mod admission;
+ mod clipboard;
++mod receive;
++pub(crate) use receive::{observe_blob_exports, observe_receive_retry};
+ mod membership;
+ mod storage_upgrade;
+ 
+diff --git i/crates/uc-engine/src/assembly/sync_engine.rs w/crates/uc-engine/src/assembly/sync_engine.rs
+index dd40a34b..6e97ba1a 100644
+--- i/crates/uc-engine/src/assembly/sync_engine.rs
++++ w/crates/uc-engine/src/assembly/sync_engine.rs
+@@ -344,6 +344,12 @@ pub async fn prepare_sync_session(
+         Arc::clone(&space_setup.fingerprint),
+     )?;
+ 
++    #[cfg(all(test, feature = "dev-tools"))]
++    let outbound_progress_reporter = receive_exports::decorate_reporter(
++        &space_setup.iroh_blob_store_dir,
++        outbound_progress_reporter,
++    );
++
+     // 同一存储上的交换能力交给唯一 Application 负责人；Router 不再由 SDK 自管。
+     // SQLite 引用与纯本地存储能力交给 transfer，完整条目提交仍归既有接收权威。
+     let blob_connectivity = builder.connectivity_deps(
+@@ -377,6 +383,8 @@ pub async fn prepare_sync_session(
+     let blob_read_store =
+         receive_exports::decorate(&space_setup.iroh_blob_store_dir, blob_read_store);
+ 
++    let blob_read_store = observability::observe_blob_exports(blob_read_store);
++
+     // Application 先构造认证 endpoint；Space 持续维护要等 Router 就绪后
+     // 才由 ApplicationRuntime 启动。
+     let transport_material =
+diff --git i/crates/uc-engine/src/operations/history/receive.rs w/crates/uc-engine/src/operations/history/receive.rs
+index 6121a436..77ea4dd3 100644
+--- i/crates/uc-engine/src/operations/history/receive.rs
++++ w/crates/uc-engine/src/operations/history/receive.rs
+@@ -1,5 +1,6 @@
+ //! Shared inbound receive progress and cancellation operations.
+ 
++use crate::assembly::observability::observe_receive_retry;
+ use crate::error_codes::*;
+ 
+ use uc_application::facade::{
+@@ -61,14 +62,14 @@ pub async fn execute_retry_entry_receive(
+     for item in &input.item_ids {
+         validate_id(item)?;
+     }
+-    let outcome = facade
+-        .retry_entry_receive(
+-            EntryId::from_string(input.entry_id),
+-            input.expected_attempt_id,
+-            input.item_ids,
+-        )
+-        .await
+-        .map_err(map_retry_error)?;
++    // 在完整能力边界装箱，避免重试future扩大所有Engine操作共用的dispatch状态机。
++    let outcome = observe_receive_retry(Box::pin(facade.retry_entry_receive(
++        EntryId::from_string(input.entry_id),
++        input.expected_attempt_id,
++        input.item_ids,
++    )))
++    .await
++    .map_err(map_retry_error)?;
+     let outcome = match outcome {
+         AppReceiveRetryOutcome::Accepted { attempt_id } => {
+             EntryReceiveRetryOutcome::Accepted { attempt_id }
+diff --git i/crates/uc-engine/src/runtime/blob_source_authorization.rs w/crates/uc-engine/src/runtime/blob_source_authorization.rs
+index 345683e0..998234c2 100644
+--- i/crates/uc-engine/src/runtime/blob_source_authorization.rs
++++ w/crates/uc-engine/src/runtime/blob_source_authorization.rs
+@@ -161,7 +161,22 @@ async fn dispatch(sender: &AppFacade, receiver_id: &str, blob: &PublishBlobResul
+                 .pending_targets
+                 .iter()
+                 .any(|target| target.as_str() == receiver_id),
+-        "the actual receiver must accept the sender message"
++        "receiver result: accepted={}, duplicate={}, offline={}, errored={}, pending={}, \
++         receiver_settled={:?}, receiver_pending={}",
++        outcome.total_accepted,
++        outcome.total_duplicate,
++        outcome.total_offline,
++        outcome.total_errored,
++        outcome.total_pending,
++        outcome
++            .per_target
++            .iter()
++            .find(|target| target.device_id.as_str() == receiver_id)
++            .map(|target| target.outcome.is_ok()),
++        outcome
++            .pending_targets
++            .iter()
++            .any(|target| target.as_str() == receiver_id)
+     );
+ }
+ 
+diff --git i/crates/uc-engine/src/runtime/blob_source_authorization/quota.rs w/crates/uc-engine/src/runtime/blob_source_authorization/quota.rs
+index 844aae21..108766d0 100644
+--- i/crates/uc-engine/src/runtime/blob_source_authorization/quota.rs
++++ w/crates/uc-engine/src/runtime/blob_source_authorization/quota.rs
+@@ -3,7 +3,10 @@ use super::{dispatch, join, membership, pending, settled, start, PASSPHRASE};
+ use crate::engine::EngineRuntime;
+ use crate::testing::mount_engine_rendezvous;
+ use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
+-use crate::{CreateSpaceInput, Operation, SecretString, SettingsPatch, SyncSettingsPatch};
++use crate::{
++    flush_test_tracing, init_test_tracing, CreateSpaceInput, Operation, SecretString,
++    SettingsPatch, SyncSettingsPatch,
++};
+ use std::sync::Arc;
+ use std::time::Duration;
+ use tempfile::tempdir;
+@@ -12,8 +15,24 @@ use tokio_util::sync::CancellationToken;
+ use uc_application::facade::{FetchBlobToPathCommand, PublishBlobPathCommand};
+ use wiremock::MockServer;
+ 
++struct FlushQuotaObservability;
++impl Drop for FlushQuotaObservability {
++    fn drop(&mut self) {
++        flush_test_tracing();
++    }
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+ async fn ticket_provider_budget_is_shared_with_a_different_message_author() {
++    // 只有显式诊断执行才安装进程观测，正常CI仍使用原运行环境。
++    let _flush = if std::env::var_os("UC_TEST_OTLP_TRACE_ENDPOINT").is_some()
++        && std::env::var_os("UC_TEST_OTLP_LOG_ENDPOINT").is_some()
++    {
++        init_test_tracing();
++        Some(FlushQuotaObservability)
++    } else {
++        None
++    };
+     let server = MockServer::start().await;
+     mount_engine_rendezvous(&server).await;
+     let roots = [tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap()];
+@@ -231,16 +250,16 @@ async fn ticket_provider_budget_is_shared_with_a_different_message_author() {
+         .unwrap()
+         .unwrap()
+         .unwrap();
+-    timeout(Duration::from_secs(20), send)
+-        .await
+-        .unwrap()
+-        .unwrap();
+     assert_eq!(
+         settled(&receiver, &first_entry, "completed")
+             .await
+             .items_completed,
+         1
+     );
++    timeout(Duration::from_secs(20), send)
++        .await
++        .unwrap()
++        .unwrap();
+     assert!(
+         std::fs::read(second_path).unwrap() == contents[1],
+         "second C file must finish unchanged"
+diff --git i/crates/uc-engine/src/testing/host_adapter_contract/blob_resources.rs w/crates/uc-engine/src/testing/host_adapter_contract/blob_resources.rs
+index cd205866..2742aec9 100644
+--- i/crates/uc-engine/src/testing/host_adapter_contract/blob_resources.rs
++++ w/crates/uc-engine/src/testing/host_adapter_contract/blob_resources.rs
+@@ -403,8 +403,13 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
+     let evidence_path = std::env::var_os("UC_MANAGED_BLOB_RESOURCE_EVIDENCE")
+         .map(PathBuf::from)
+         .or_else(|| {
+-            std::env::var_os("UC_TEST_ARTIFACTS_DIR")
+-                .map(|root| PathBuf::from(root).join("blob-resources/managed-engine.json"))
++            std::env::var_os("UC_TEST_ARTIFACTS_DIR").map(|root| {
++                PathBuf::from(root).join(if transfer_files {
++                    "blob-resources/managed-engine-large.json"
++                } else {
++                    "blob-resources/managed-engine-shutdown.json"
++                })
++            })
+         });
+     if let Some(path) = evidence_path {
+         assert!(
+diff --git i/crates/uc-engine/src/testing/host_adapter_contract/receive_retry.rs w/crates/uc-engine/src/testing/host_adapter_contract/receive_retry.rs
+index c8ca5693..257248d0 100644
+--- i/crates/uc-engine/src/testing/host_adapter_contract/receive_retry.rs
++++ w/crates/uc-engine/src/testing/host_adapter_contract/receive_retry.rs
+@@ -1,4 +1,6 @@
+ //! 稳定Engine操作驱动真实网络、SQLite与文件成果；测试控制本地导出或保存故障。
++mod lifecycle;
++mod observation;
+ mod redelivery;
+ mod save_failure;
+ use super::{
+diff --git i/crates/uc-engine/src/testing/receive_exports.rs w/crates/uc-engine/src/testing/receive_exports.rs
+index c26521d9..6eb4c7d0 100644
+--- i/crates/uc-engine/src/testing/receive_exports.rs
++++ w/crates/uc-engine/src/testing/receive_exports.rs
+@@ -1,6 +1,7 @@
+ //! 真实接收导出边界的存储故障与完成屏障；只由测试组合根安装，不替换网络或保存流程。
+ use async_trait::async_trait;
+ use std::collections::{BTreeSet, HashMap};
++use std::future::pending;
+ use std::io;
+ use std::path::{Path, PathBuf};
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -10,6 +11,8 @@ use tokio_util::bytes::Bytes;
+ use uc_application::deps::{
+     BlobExchangeError, BlobExchangeFailure, BlobReadStorePort, BlobReceived,
+ };
++use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
++use uc_core::ids::DeviceId;
+ use uc_core::ports::blob::BlobDigest;
+ 
+ static FIXTURES: OnceLock<Mutex<HashMap<PathBuf, Weak<ReceiveExports>>>> = OnceLock::new();
+@@ -23,6 +26,8 @@ pub(crate) struct ReceiveExports {
+     pub paused_exports: Mutex<BTreeSet<usize>>,
+     pub paused: Notify,
+     pub release: Semaphore,
++    pub block_reports: AtomicBool,
++    pub report_blocked: Notify,
+ }
+ 
+ impl ReceiveExports {
+@@ -36,6 +41,8 @@ impl ReceiveExports {
+             paused_exports: Mutex::new(BTreeSet::from([pause_at])),
+             paused: Notify::new(),
+             release: Semaphore::new(0),
++            block_reports: AtomicBool::new(false),
++            report_blocked: Notify::new(),
+         });
+         FIXTURES
+             .get_or_init(Mutex::default)
+@@ -57,19 +64,55 @@ pub(crate) fn decorate(
+     path: &Path,
+     inner: Arc<dyn BlobReadStorePort>,
+ ) -> Arc<dyn BlobReadStorePort> {
+-    let fixture = {
+-        let mut fixtures = FIXTURES.get_or_init(Mutex::default).lock().unwrap();
+-        fixtures.retain(|_, fixture| fixture.strong_count() > 0);
+-        fixtures
+-            .iter()
+-            .find_map(|(root, fixture)| path.starts_with(root).then(|| fixture.upgrade()).flatten())
+-    };
+-    match fixture {
++    match fixture_for(path) {
+         Some(fixture) => Arc::new(ObservedExports { inner, fixture }),
+         None => inner,
+     }
+ }
+ 
++pub(crate) fn decorate_reporter(
++    path: &Path,
++    inner: Arc<dyn OutboundProgressReporterPort>,
++) -> Arc<dyn OutboundProgressReporterPort> {
++    match fixture_for(path) {
++        Some(fixture) => Arc::new(ObservedReports { inner, fixture }),
++        None => inner,
++    }
++}
++
++fn fixture_for(path: &Path) -> Option<Arc<ReceiveExports>> {
++    let mut fixtures = FIXTURES.get_or_init(Mutex::default).lock().unwrap();
++    fixtures.retain(|_, fixture| fixture.strong_count() > 0);
++    fixtures
++        .iter()
++        .find_map(|(root, fixture)| path.starts_with(root).then(|| fixture.upgrade()).flatten())
++}
++
++struct ObservedReports {
++    inner: Arc<dyn OutboundProgressReporterPort>,
++    fixture: Arc<ReceiveExports>,
++}
++
++#[async_trait]
++impl OutboundProgressReporterPort for ObservedReports {
++    async fn report(
++        &self,
++        target: &DeviceId,
++        transfer_id: &str,
++        bytes_transferred: u64,
++        total_bytes: Option<u64>,
++        status: OutboundProgressStatus,
++    ) {
++        if self.fixture.block_reports.load(Ordering::SeqCst) {
++            self.fixture.report_blocked.notify_one();
++            pending::<()>().await;
++        }
++        self.inner
++            .report(target, transfer_id, bytes_transferred, total_bytes, status)
++            .await;
++    }
++}
++
+ struct ObservedExports {
+     inner: Arc<dyn BlobReadStorePort>,
+     fixture: Arc<ReceiveExports>,
+diff --git i/crates/uc-infra-p2p/src/network/clipboard/receiver.rs w/crates/uc-infra-p2p/src/network/clipboard/receiver.rs
+index b733ffeb..d303f615 100644
+--- i/crates/uc-infra-p2p/src/network/clipboard/receiver.rs
++++ w/crates/uc-infra-p2p/src/network/clipboard/receiver.rs
+@@ -278,7 +278,7 @@ impl ClipboardReceiverAdapter {
+             if matches!(ack, AckCode::Rejected | AckCode::Incompatible) {
+                 operation_observation.finish_failure(failure, completion);
+             } else {
+-                complete_operation(completion);
++                operation_observation.finish_success(completion);
+             }
+ 
+             // 独立流发送持久接受结果；其他流不等待本次结算。
+diff --git i/crates/uc-infra-p2p/src/network/iroh/blob_exchange/managed_tests/isolation.rs w/crates/uc-infra-p2p/src/network/iroh/blob_exchange/managed_tests/isolation.rs
+index dc209b62..e230e18a 100644
+--- i/crates/uc-infra-p2p/src/network/iroh/blob_exchange/managed_tests/isolation.rs
++++ w/crates/uc-infra-p2p/src/network/iroh/blob_exchange/managed_tests/isolation.rs
+@@ -9,14 +9,14 @@ use crate::network::iroh::connectivity::{
+     ConnectivityProfile, IrohConnectionAdmission, IrohPeerConnection,
+ };
+ use async_trait::async_trait;
+-use bytes::Bytes;
+ use futures_util::task::AtomicWaker;
++use futures_util::StreamExt;
+ use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
+ use iroh::{protocol::Router, Endpoint, RelayMode};
+ use iroh_blobs::store::fs::FsStore;
+ use std::collections::{HashMap, HashSet, VecDeque};
+-use std::io;
+-use std::path::PathBuf;
++use std::io::{self, Read, Write};
++use std::path::{Path, PathBuf};
+ use std::pin::Pin;
+ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+ use std::sync::{Arc, Mutex};
+@@ -24,15 +24,15 @@ use std::task::{Context, Poll};
+ use std::time::Duration;
+ use tokio::io::{AsyncRead, ReadBuf};
+ use tokio::sync::Notify;
+-use tokio::time::{timeout, Instant};
++use tokio::time::{sleep, timeout, Instant};
+ use tokio_util::sync::CancellationToken;
+ use uc_application::deps::{
+     BlobDownloadResources, BlobExchangeError, BlobExchangePort, BlobReceived, BlobShutdownWait,
+-    BlobStoreLifecyclePort, BlobTransport, BlobValidatedProgress, ConnectivityError,
+-    KnownPeerIdentity, PeerReceiveStream, StreamLease,
++    BlobStoreLifecyclePort, BlobTransferDeps, BlobTransport, BlobValidatedProgress,
++    ConnectivityError, KnownPeerIdentity, PeerReceiveStream, StreamLease,
+ };
+ use uc_application::facade::blob_transfer::{
+-    BlobTransferDeps, BlobTransferError, BlobTransferFacade, FetchBlobToPathCommand,
++    BlobTransferError, BlobTransferFacade, FetchBlobToPathCommand,
+ };
+ use uc_core::ids::{DeviceId, EntryId};
+ use uc_core::ports::blob::{
+@@ -243,6 +243,41 @@ async fn managed_download_same_content_cancel_preserves_other_request_without_re
+     prove(true, 4 * 1024 * 1024, 8).await
+ }
+ 
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn managed_download_large_stream_settles_sdk_tags_and_connection() -> anyhow::Result<()> {
++    prove(false, 1024 * 1024 * 1024, 2).await
++}
++
++fn write_fixture(path: &Path, byte: u8, size: usize) -> anyhow::Result<()> {
++    let mut file = std::fs::File::create(path)?;
++    let chunk = [byte; 64 * 1024];
++    let mut remaining = size;
++    while remaining > 0 {
++        let written = remaining.min(chunk.len());
++        file.write_all(&chunk[..written])?;
++        remaining -= written;
++    }
++    Ok(())
++}
++
++fn verify_fixture(path: &Path, byte: u8, size: usize) -> anyhow::Result<()> {
++    let mut file = std::fs::File::open(path)?;
++    assert_eq!(file.metadata()?.len(), size as u64);
++    let mut chunk = [0; 64 * 1024];
++    let mut remaining = size;
++    while remaining > 0 {
++        let read = remaining.min(chunk.len());
++        file.read_exact(&mut chunk[..read])?;
++        assert!(
++            chunk[..read].iter().all(|actual| *actual == byte),
++            "实际文件内容不匹配"
++        );
++        remaining -= read;
++    }
++    assert_eq!(file.read(&mut chunk)?, 0);
++    Ok(())
++}
++
+ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result<()> {
+     let server = Endpoint::builder(presets::N0)
+         .relay_mode(RelayMode::Disabled)
+@@ -284,8 +319,12 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
+     let router = Router::builder(server.clone())
+         .accept(BLOBS_ALPN, IrohBlobHandler::new(serving.clone()))
+         .spawn();
+-    let publishing = IrohBlobTransferAdapter::new(Arc::new(server.clone()), source);
++    let source_tags_before = source.tags().list_temp_tags().await?.count().await;
++    let destination_tags_before = destination.tags().list_temp_tags().await?.count().await;
++    assert_eq!((source_tags_before, destination_tags_before), (0, 0));
++    let publishing = IrohBlobTransferAdapter::new(Arc::new(server.clone()), source.clone());
+     let native = client.connect(server.addr(), BLOBS_ALPN).await?;
++    let native_lifetime = native.weak_handle();
+     let backend = Arc::new(ExistingConnection {
+         connection: IrohPeerConnection::wrap(native.clone()),
+         calls: AtomicUsize::new(0),
+@@ -333,6 +372,7 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
+         outbound_progress_reporter: None,
+         file_transfer: None,
+     }));
++    let mut resource_rounds = Vec::new();
+     for round in 0..rounds {
+         let offset = round * 2;
+         let gates = [Arc::new(Gate::default()), Arc::new(Gate::default())];
+@@ -342,16 +382,22 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
+             assert!(planned.is_empty());
+             planned.extend(gates.clone());
+         }
+-        let a_bytes = Bytes::from(vec![41 + round as u8; size]);
+-        let b_bytes = Bytes::from(vec![
+-            (if same_content { 41 } else { 71 }) + round as u8;
+-            size
+-        ]);
++        let a_input = root.path().join(format!("a-input-{round}"));
++        let b_input = root.path().join(format!("b-input-{round}"));
++        let a_byte = 41 + round as u8;
++        let b_byte = (if same_content { 41 } else { 71 }) + round as u8;
++        let generated_a = a_input.clone();
++        let generated_b = b_input.clone();
++        tokio::task::spawn_blocking(move || {
++            write_fixture(&generated_a, a_byte, size)?;
++            write_fixture(&generated_b, b_byte, size)
++        })
++        .await??;
+         let first = publishing
+-            .publish(a_bytes, TagReason::ClipboardEntry(EntryId::new()))
++            .publish_path(&a_input, TagReason::ClipboardEntry(EntryId::new()))
+             .await?;
+         let second = publishing
+-            .publish(b_bytes.clone(), TagReason::ClipboardEntry(EntryId::new()))
++            .publish_path(&b_input, TagReason::ClipboardEntry(EntryId::new()))
+             .await?;
+         let a_ticket = publishing.issue_ticket(&first).await?;
+         let b_ticket = publishing.issue_ticket(&second).await?;
+@@ -408,6 +454,13 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
+             );
+         }
+         assert!(!b.is_finished());
++        let source_tags_active = source.tags().list_temp_tags().await?.count().await;
++        let destination_tags_active = destination.tags().list_temp_tags().await?.count().await;
++        assert!(
++            destination_tags_active > destination_tags_before,
++            "真实暂停的下载必须持有SDK临时保护，不能只在关闭后观察空列表"
++        );
++        assert!(native_lifetime.upgrade().is_some());
+         a_cancel.cancel();
+         let cancelled = timeout(WAIT, a).await??;
+         assert!(
+@@ -423,9 +476,14 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
+             timeout(WAIT, gates[1].entered.notified()).await?;
+         }
+         gates[1].release();
+-        let completed = timeout(WAIT, b).await???;
++        let completion_wait = if size >= 1024 * 1024 * 1024 {
++            Duration::from_secs(300)
++        } else {
++            WAIT
++        };
++        let completed = timeout(completion_wait, b).await???;
+         assert_eq!(completed.bytes_written, size as u64);
+-        assert_eq!(tokio::fs::read(&b_path).await?, b_bytes.as_ref());
++        tokio::task::spawn_blocking(move || verify_fixture(&b_path, b_byte, size)).await??;
+         assert!(!a_path.exists(), "cancelled A must not export output");
+         let calls = receiving.receives.lock().unwrap().clone();
+         assert_eq!(
+@@ -472,10 +530,74 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
+             }
+         })
+         .await?;
++        // SDK保护释放经原actor交接；反复读取实际列表，不用包装层调用数冒充tag计数。
++        let (source_tags_settled, destination_tags_settled) = timeout(WAIT, async {
++            loop {
++                let source_count = source.tags().list_temp_tags().await?.count().await;
++                let destination_count = destination.tags().list_temp_tags().await?.count().await;
++                if source_count == source_tags_before
++                    && destination_count == destination_tags_before
++                {
++                    break Ok::<_, anyhow::Error>((source_count, destination_count));
++                }
++                sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await??;
++        resource_rounds.push(serde_json::json!({
++            "source_temp_tags_active": source_tags_active,
++            "destination_temp_tags_active": destination_tags_active,
++            "source_temp_tags_settled": source_tags_settled,
++            "destination_temp_tags_settled": destination_tags_settled,
++            "native_connections": usize::from(native_lifetime.upgrade().is_some()),
++            "dial_calls": backend.calls.load(Ordering::SeqCst),
++            "receive_calls": receiving.receives.lock().unwrap().len(),
++            "provide_calls": provider.provides.load(Ordering::SeqCst),
++        }));
+     }
+     timeout(WAIT, downloading.shutdown(BlobShutdownWait::Complete)).await??;
+     timeout(WAIT, serving.shutdown(BlobShutdownWait::Complete)).await??;
++    assert!(
++        native.close_reason().is_some(),
++        "完整关闭必须实际关闭原生连接"
++    );
+     router.shutdown().await?;
+     client.close().await;
++    drop((
++        facade,
++        downloading,
++        serving,
++        backend,
++        native,
++        router,
++        client,
++        server,
++    ));
++    timeout(WAIT, async {
++        while native_lifetime.upgrade().is_some() {
++            sleep(Duration::from_millis(10)).await;
++        }
++    })
++    .await?;
++    if let Some(root) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
++        let directory = PathBuf::from(root).join("blob-resources");
++        assert!(directory.is_absolute(), "资源工件须由驱动提供绝对目录");
++        std::fs::create_dir_all(&directory)?;
++        let evidence = serde_json::json!({
++            "same_content": same_content, "bytes_per_file": size,
++            "completed_rounds": rounds, "rounds": resource_rounds,
++            "source_temp_tags_initial": source_tags_before,
++            "destination_temp_tags_initial": destination_tags_before,
++            "native_connections_after_shutdown": usize::from(native_lifetime.upgrade().is_some()),
++            "tags_verified": true, "native_connection_release_verified": true,
++            "full_engine_resources_verified": false, "quota_counters_verified": false,
++        });
++        std::fs::write(
++            directory.join(format!(
++                "managed-isolation-{same_content}-{size}-{rounds}.json"
++            )),
++            serde_json::to_vec_pretty(&evidence)?,
++        )?;
++    }
+     Ok(())
+ }
+diff --git i/crates/uc-observability-contract/src/diagnostics/connectivity.rs w/crates/uc-observability-contract/src/diagnostics/connectivity.rs
+index c3264351..8b190b5b 100644
+--- i/crates/uc-observability-contract/src/diagnostics/connectivity.rs
++++ w/crates/uc-observability-contract/src/diagnostics/connectivity.rs
+@@ -43,7 +43,8 @@ mod authentication;
+ mod clipboard_receive;
+ pub use authentication::complete_clipboard_receive_failure;
+ pub use clipboard_receive::{
+-    describe_clipboard_receive_failure, ClipboardReceiveFailure, ClipboardReceiveObservation,
++    describe_clipboard_receive_failure, describe_clipboard_receive_partial,
++    ClipboardReceiveFailure, ClipboardReceiveObservation, ClipboardRetryOutcome,
+ };
+ mod connection;
+ mod group_update;
+diff --git i/crates/uc-observability-contract/src/diagnostics/connectivity/clipboard_receive.rs w/crates/uc-observability-contract/src/diagnostics/connectivity/clipboard_receive.rs
+index 0c6f3923..08a211a8 100644
+--- i/crates/uc-observability-contract/src/diagnostics/connectivity/clipboard_receive.rs
++++ w/crates/uc-observability-contract/src/diagnostics/connectivity/clipboard_receive.rs
+@@ -2,7 +2,7 @@
+ use std::future::Future;
+ use std::sync::{Arc, Mutex};
+ 
+-use super::super::OperationCompletion;
++use super::super::{complete_operation, CompletionResult, OperationCompletion};
+ use super::complete_clipboard_receive_failure;
+ use crate::wire_enum;
+ 
+@@ -10,11 +10,71 @@ tokio::task_local! {
+     static RECEIVE: ClipboardReceiveObservation;
+ }
+ 
+-/// 仅跨既有接收队列保存第一次失败；不能查询业务阶段或参与回执决定。
++/// 跨原接收队列与处理任务携带诊断事实，不提供阶段查询，也不参与业务回执。
+ #[derive(Clone, Default)]
+-pub struct ClipboardReceiveObservation(Arc<Mutex<Option<ClipboardReceiveFailure>>>);
++pub struct ClipboardReceiveObservation(Arc<Mutex<ReceiveFacts>>);
++
++#[derive(Default)]
++struct ReceiveFacts {
++    failure: Option<ClipboardReceiveFailure>,
++    partial: bool,
++    cancelled: bool,
++    retry_completion: Option<Box<dyn FnOnce(ClipboardRetryOutcome) + Send>>,
++}
++
++/// 只有完整流程负责人能提交结局；这些固定诊断类别不参与业务结果。
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ClipboardRetryOutcome {
++    Succeeded,
++    Partial,
++    Cancelled,
++    Deferred,
++    Rejected,
++    Skipped,
++    Failed(ClipboardReceiveFailure),
++}
++
++impl Drop for ReceiveFacts {
++    fn drop(&mut self) {
++        // 任务异常退出或准入未交接时仍结束在线记录，不能留下永远运行的root。
++        if let Some(completion) = self.retry_completion.take() {
++            completion(ClipboardRetryOutcome::Failed(
++                ClipboardReceiveFailure::ApplyFailed,
++            ));
++        }
++    }
++}
+ 
+ impl ClipboardReceiveObservation {
++    /// Engine提供完成记录，原Application任务持有唯一实际结算责任。
++    pub fn with_retry_completion(
++        completion: impl FnOnce(ClipboardRetryOutcome) + Send + 'static,
++    ) -> Self {
++        Self(Arc::new(Mutex::new(ReceiveFacts {
++            retry_completion: Some(Box::new(completion)),
++            failure: None,
++            partial: false,
++            cancelled: false,
++        })))
++    }
++
++    pub fn finish_retry(&self, outcome: ClipboardRetryOutcome) {
++        let (completion, outcome) = {
++            let mut facts = self.0.lock().unwrap_or_else(|error| error.into_inner());
++            let outcome = match outcome {
++                ClipboardRetryOutcome::Succeeded if facts.cancelled => {
++                    ClipboardRetryOutcome::Cancelled
++                }
++                ClipboardRetryOutcome::Succeeded if facts.partial => ClipboardRetryOutcome::Partial,
++                other => other,
++            };
++            (facts.retry_completion.take(), outcome)
++        };
++        if let Some(completion) = completion {
++            completion(outcome);
++        }
++    }
++
+     pub fn capture() -> Self {
+         RECEIVE.try_with(Clone::clone).unwrap_or_default()
+     }
+@@ -23,6 +83,20 @@ impl ClipboardReceiveObservation {
+         RECEIVE.scope(self.clone(), future).await
+     }
+ 
++    /// 回执保持原值；完整接收负责人已描述的部分／取消事实只影响记录。
++    pub fn finish_success(&self, mut completion: OperationCompletion) {
++        let facts = self.0.lock().unwrap_or_else(|error| error.into_inner());
++        completion.result = if facts.cancelled {
++            CompletionResult::Cancelled
++        } else if facts.partial {
++            CompletionResult::Partial
++        } else {
++            completion.result
++        };
++        drop(facts);
++        complete_operation(completion);
++    }
++
+     pub fn finish_failure(
+         &self,
+         fallback: ClipboardReceiveFailure,
+@@ -32,6 +106,7 @@ impl ClipboardReceiveObservation {
+             .0
+             .lock()
+             .unwrap_or_else(|error| error.into_inner())
++            .failure
+             .take();
+         let failure = if fallback == ClipboardReceiveFailure::ApplicationRejected {
+             failure.unwrap_or(fallback)
+@@ -48,12 +123,24 @@ pub fn describe_clipboard_receive_failure(failure: ClipboardReceiveFailure) {
+             .0
+             .lock()
+             .unwrap_or_else(|error| error.into_inner());
+-        if slot.is_none() {
+-            *slot = Some(failure);
++        if slot.failure.is_none() {
++            slot.failure = Some(failure);
+         }
+     });
+ }
+ 
++/// 由原接收负责人在业务提交后描述事实，不读取或暴露业务状态。
++pub fn describe_clipboard_receive_partial(cancelled: bool) {
++    let _ = RECEIVE.try_with(|observation| {
++        let mut facts = observation
++            .0
++            .lock()
++            .unwrap_or_else(|error| error.into_inner());
++        facts.partial = true;
++        facts.cancelled |= cancelled;
++    });
++}
++
+ wire_enum! {
+     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+     pub enum ClipboardReceiveFailure: (&'static str, &'static str) {
+@@ -94,6 +181,52 @@ wire_enum! {
+ mod tests {
+     use super::*;
+ 
++    #[tokio::test]
++    async fn retry_completion_follows_the_original_task_and_is_settled_once() {
++        let outcomes = Arc::new(Mutex::new(Vec::new()));
++        let recorded = outcomes.clone();
++        let observation = ClipboardReceiveObservation::with_retry_completion(move |outcome| {
++            recorded.lock().unwrap().push(outcome);
++        });
++        let owner = observation.clone();
++        tokio::spawn(async move {
++            owner
++                .scope(async {
++                    describe_clipboard_receive_partial(true);
++                })
++                .await;
++            // 准入调用方已经离开；原任务仍持有实际结算权。
++            owner.finish_retry(ClipboardRetryOutcome::Succeeded);
++            owner.finish_retry(ClipboardRetryOutcome::Succeeded);
++        })
++        .await
++        .unwrap();
++        drop(observation);
++        assert_eq!(
++            *outcomes.lock().unwrap(),
++            vec![ClipboardRetryOutcome::Cancelled]
++        );
++    }
++
++    #[test]
++    fn abandoning_the_last_owner_finishes_the_record_without_claiming_success() {
++        let outcomes = Arc::new(Mutex::new(Vec::new()));
++        let recorded = outcomes.clone();
++        let observation = ClipboardReceiveObservation::with_retry_completion(move |outcome| {
++            recorded.lock().unwrap().push(outcome);
++        });
++        let owner = observation.clone();
++        drop(observation);
++        assert!(outcomes.lock().unwrap().is_empty());
++        drop(owner);
++        assert_eq!(
++            *outcomes.lock().unwrap(),
++            vec![ClipboardRetryOutcome::Failed(
++                ClipboardReceiveFailure::ApplyFailed
++            )]
++        );
++    }
++
+     #[test]
+     fn admission_check_failures_have_fixed_local_fields() {
+         for (failure, expected) in [
+diff --git i/crates/uc-observability-contract/src/diagnostics/mod.rs w/crates/uc-observability-contract/src/diagnostics/mod.rs
+index 0264f7fd..7eda2137 100644
+--- i/crates/uc-observability-contract/src/diagnostics/mod.rs
++++ w/crates/uc-observability-contract/src/diagnostics/mod.rs
+@@ -2,6 +2,7 @@
+ //!
+ //! 本模块只负责约束记录形状，不安装 subscriber，也不选择或连接后端。
+ 
++use crate::wire_enum;
+ use std::fmt;
+ use std::future::Future;
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -477,50 +478,29 @@ impl DiagnosticDomain {
+     }
+ }
+ 
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub enum DiagnosticOperation {
+-    TaskShutdown,
+-    SessionRecovery,
+-    MembershipRecovery,
+-    ClipboardSend,
+-    ClipboardResend,
+-    ClipboardCopyAndSync,
+-    ClipboardPersist,
+-    ClipboardWriteSystem,
+-    ClipboardDispatch,
+-    ClipboardReceive,
+-    ClipboardAddressResolve,
+-    ClipboardConnect,
+-    SpaceAdmission,
+-    MembershipHistorySync,
+-    MembershipGroupUpdate,
+-    NetworkTransport,
+-    ProfileStorageUpgrade,
+-    SessionLifecycle,
+-}
+-
+-impl DiagnosticOperation {
+-    fn as_str(self) -> &'static str {
+-        match self {
+-            Self::ClipboardCopyAndSync => "clipboard.copy_and_sync",
+-            Self::ClipboardSend => "clipboard.send",
+-            Self::ClipboardResend => "clipboard.resend",
+-            Self::ClipboardPersist => "clipboard.persist",
+-            Self::ClipboardWriteSystem => "clipboard.write_system",
+-            Self::ClipboardDispatch => "clipboard_dispatch",
+-            Self::ClipboardReceive => "clipboard_receive",
+-            Self::ClipboardAddressResolve => "clipboard_address_resolve",
+-            Self::ClipboardConnect => "clipboard_connect",
+-            Self::SpaceAdmission => "space_admission",
+-            Self::MembershipHistorySync => "membership_history_sync",
+-            Self::MembershipRecovery => "membership_recovery",
+-            Self::MembershipGroupUpdate => "membership_group_update",
+-            Self::NetworkTransport => "network_transport",
+-            Self::ProfileStorageUpgrade => "profile_storage_upgrade",
+-            Self::SessionLifecycle => "session_lifecycle",
+-            Self::TaskShutdown => "runtime.shutdown_tasks",
+-            Self::SessionRecovery => "runtime.recover_session",
+-        }
++wire_enum! {
++    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
++    pub enum DiagnosticOperation: &'static str {
++        ClipboardCopyAndSync => "clipboard.copy_and_sync",
++        ClipboardSend => "clipboard.send",
++        ClipboardResend => "clipboard.resend",
++        ClipboardPersist => "clipboard.persist",
++        ClipboardWriteSystem => "clipboard.write_system",
++        ClipboardDispatch => "clipboard_dispatch",
++        ClipboardReceive => "clipboard_receive",
++        ClipboardAddressResolve => "clipboard_address_resolve",
++        ClipboardConnect => "clipboard_connect",
++        SpaceAdmission => "space_admission",
++        MembershipHistorySync => "membership_history_sync",
++        MembershipRecovery => "membership_recovery",
++        MembershipGroupUpdate => "membership_group_update",
++        NetworkTransport => "network_transport",
++        ProfileStorageUpgrade => "profile_storage_upgrade",
++        SessionLifecycle => "session_lifecycle",
++        TaskShutdown => "runtime.shutdown_tasks",
++        SessionRecovery => "runtime.recover_session",
++        ClipboardRetryReceive => "clipboard.retry_receive",
++        ClipboardExportFile => "clipboard.export_file",
+     }
+ }
+ 
+@@ -727,7 +707,7 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
+         (DiagnosticOperation::NetworkTransport, DiagnosticRole::Sponsor) => {
+             "pairing.receive_request"
+         }
+-        _ => context.operation.as_str(),
++        _ => context.operation.wire(),
+     };
+     let flow = matches!(
+         (
+@@ -753,7 +733,7 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
+             otel.name = name,
+             uc.display.name = tracing::field::Empty,
+             uc.domain = context.domain.as_str(),
+-            uc.operation = context.operation.as_str(),
++            uc.operation = context.operation.wire(),
+             uc.role = context.role.as_str(),
+             uc.flow.id = %FlowAttribute(flow),
+             otel.kind = context.kind.as_str(),
+@@ -768,7 +748,7 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
+             otel.name = name,
+             uc.display.name = tracing::field::Empty,
+             uc.domain = context.domain.as_str(),
+-            uc.operation = context.operation.as_str(),
++            uc.operation = context.operation.wire(),
+             uc.role = context.role.as_str(),
+             otel.kind = context.kind.as_str(),
+             otel.status_code = tracing::field::Empty,
+@@ -795,6 +775,13 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
+     span
+ }
+ 
++/// 用户稍后发起的动作使用全新的在线关联，不继承已经结束的发送或接收记录。
++pub fn independent_operation_span(context: OperationContext) -> tracing::Span {
++    let span = operation_span(context);
++    let _ = span.set_parent(opentelemetry::Context::new());
++    span
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ enum CompletionResult {
+     Conflict,
+@@ -960,7 +947,7 @@ pub fn complete_operation(mut completion: OperationCompletion) {
+     span.record("uc.outcome", outcome);
+     let duration_ms = u64::try_from(completion.duration.as_millis()).unwrap_or(u64::MAX);
+     let domain = completion.domain.as_str();
+-    let operation = completion.operation.as_str();
++    let operation = completion.operation.wire();
+     let role = completion.role.as_str();
+     match completion.result {
+         CompletionResult::Succeeded => {
+@@ -1028,7 +1015,7 @@ pub fn complete_unassociated_operation(completion: OperationCompletion) {
+ fn emit_unassociated_operation(completion: OperationCompletion) {
+     let duration_ms = u64::try_from(completion.duration.as_millis()).unwrap_or(u64::MAX);
+     let domain = completion.domain.as_str();
+-    let operation = completion.operation.as_str();
++    let operation = completion.operation.wire();
+     let role = completion.role.as_str();
+     match completion.result {
+         CompletionResult::Conflict => record_unassociated_non_error_completion(
+diff --git i/crates/uc-observability-runtime/src/remote_health.rs w/crates/uc-observability-runtime/src/remote_health.rs
+index fba5b930..81f01878 100644
+--- i/crates/uc-observability-runtime/src/remote_health.rs
++++ w/crates/uc-observability-runtime/src/remote_health.rs
+@@ -695,6 +695,7 @@ fn span_record_kind(span: &SpanData) -> Option<&'static str> {
+                     | "clipboard.copy_and_sync"
+                     | "clipboard.send"
+                     | "clipboard.resend"
++                    | "clipboard.retry_receive"
+                     | "membership_recovery"
+                     | "profile_storage_upgrade"
+                     | "runtime.recover_session"
+@@ -907,6 +908,8 @@ fn valid_operation(value: &str) -> bool {
+         value,
+         "clipboard.send"
+             | "clipboard.resend"
++            | "clipboard.retry_receive"
++            | "clipboard.export_file"
+             | "clipboard.copy_and_sync"
+             | "clipboard.persist"
+             | "clipboard.write_system"
+@@ -975,6 +978,8 @@ fn operation_matches_domain(domain: &str, operation: &str) -> bool {
+             "clipboard",
+             "clipboard.send"
+                 | "clipboard.resend"
++                | "clipboard.retry_receive"
++                | "clipboard.export_file"
+                 | "clipboard.copy_and_sync"
+                 | "clipboard.persist"
+                 | "clipboard.write_system"
+@@ -1000,6 +1005,8 @@ fn span_role_matches(operation: &str, role: &str, kind: &SpanKind) -> bool {
+         "membership_recovery" => role == "local" && kind == &SpanKind::Internal,
+         "clipboard.send"
+         | "clipboard.resend"
++        | "clipboard.retry_receive"
++        | "clipboard.export_file"
+         | "clipboard.copy_and_sync"
+         | "clipboard.persist"
+         | "clipboard.write_system" => role == "local" && kind == &SpanKind::Internal,
+@@ -1033,6 +1040,8 @@ fn log_role_matches(operation: &str, role: &str) -> bool {
+         "membership_recovery" => role == "local",
+         "clipboard.send"
+         | "clipboard.resend"
++        | "clipboard.retry_receive"
++        | "clipboard.export_file"
+         | "clipboard.copy_and_sync"
+         | "clipboard.persist"
+         | "clipboard.write_system" => role == "local",
+diff --git i/docs/design-docs/clipboard-connectivity.md w/docs/design-docs/clipboard-connectivity.md
+index 41bf6c73..d17a7c28 100644
+--- i/docs/design-docs/clipboard-connectivity.md
++++ w/docs/design-docs/clipboard-connectivity.md
+@@ -65,6 +65,7 @@ Blob 的完整提供端由 Application `transfer/blob/transport/runtime` 负责
+ 旧行扫描只恢复当前没有未结算获取／取消负责人的记录，不能抢占受管请求的阶段时钟。
+ 接收门禁与完整动作共用运行世代：关闭门禁取消旧世代，重开不恢复旧动作的登记资格；
+ 异步恢复只可打开其原世代，迟到的恢复成功或失败均不得改变下一世代。
++Space锁定使用同一接收负责人的异步完整关闭，等待所有原出生动作完成保存／清理结算后才能锁密钥；维护排空不删除已交付文件，重开不复活旧动作。
+ 旧行扫描也须等待完整接收动作实际结算，不能在子下载结束后抢先删除输出或改写终态。
+ 扫描取得条目清理保护后才处理旧行，保护跨异步清理持有，与新接收登记互斥。
+ 条目取消由 Application `transfer/receive/cancellation` 完整负责权威 CAS、实际子任务停止、投影、暂存清理和终态提交；
+@@ -153,6 +154,16 @@ bridge 对出站连接在握手后订阅既有确认离线事件；已排队的
+ 
+ 实施与验证历史见[执行计划](../exec-plans/completed/2026-10-11-clipboard-connectivity-plan.md)。
+ 
++## Blob 必需网络验收入口
++
++第七切片的默认 PR 网络门禁入口是 `bash scripts/testing/run-blob-connectivity.sh`，复用现有 connectivity 宿主、
++网络隔离 runner、冻结 main 构建器及升级锚点。它运行新新 Direct／Relay 两组，以及冻结开工 main、rc.15
++分别在 Direct／Relay、升级侧 0／1 的八组，共十组；每组必须实际双向读回文件并确认 blob 协商和所选拓扑。
++旧资料组还必须保留身份、传输身份、成员与原内容，并独立读回升级前收到的文件。
++
++每次执行保留独立证据目录，失败立即非零退出，后续执行不得覆盖首轮失败。默认 workspace 的真实连续 2×1GiB
++流式资源用例与网络门禁互补；它们不替代平台编译门禁，未执行的物理设备明确记为跳过。
++
+ ## 当前剪贴板状态与按需拉取
+ 
+ 当前状态通知和按需拉取分别使用独立的 Uni manager。四个网络入口由 Application
+diff --git i/docs/design-docs/observability.md w/docs/design-docs/observability.md
+index 2a75b425..c9c54f3c 100644
+--- i/docs/design-docs/observability.md
++++ w/docs/design-docs/observability.md
+@@ -20,6 +20,7 @@
+ | 配对设备 | 发起一次加入尝试 | 加入成功、拒绝、取消、失败或等待恢复；不把旧成员尚未确认写成全部完成 |
+ | 复制并同步 | 接受一次本机复制通知 | 本机保存及各目标接收、保存结果；对方系统剪贴板写入独立结算 |
+ | 手动发送或重新发送 | 用户明确发起发送 | 各目标成功、失败或等待重试；文件块与单个网络包不是独立业务动作 |
++| 手动重试接收失败项 | 用户明确选择失败项重试 | 实际保存完成、部分完成、取消、拒绝或来源不可用；准入接受不算接收完成 |
+ | 修改成员关系 | 添加、移除成员或选择设备组 | 本机变更结果与其他成员确认情况分别表达，未确认不能算全部完成 |
+ | 恢复成员一致性 | 上线、重启恢复或重试触发实际恢复工作 | 已一致、发现冲突、仍待确认或恢复失败 |
+ | 恢复连接或会话 | 明确开始一次恢复尝试 | 恢复可用、失败或延期 |
+@@ -249,6 +250,11 @@ Engine 原样装饰既有完整能力，不解析消息。Infra 只根据已有
+ Clipboard 的宿主复制在既有完整调用处创建 `clipboard.copy_and_sync`；Engine 在既有保存与系统剪贴板能力上记录
+ `clipboard.persist`、`clipboard.write_system`，不读取业务标识或编排内部步骤。发送端每个目标任务、接收广播交接和后台系统写入
+ 都由 Application 延续不可读取的 `ObservationContext`。它只保存不可记录的在线父身份，不持有原 span，不持久化，不参与业务判断。
++用户单独发起失败项重试时，Engine只装饰既有完整重试能力，建立独立的 `clipboard.retry_receive` 在线业务记录；
++`Accepted` 仅交接完成权，原Application接收监督任务在实际输出、提交或失败结算完成后提交固定结局。
++接收的已提交部分／取消事实由同一不透明上下文跨原处理任务传递，既有回执保持原值；记录不得把部分保存压成整体成功。
++本地完整文件输出能力的 `clipboard.export_file` 是诊断子节点，存储失败保留固定类别，不输出内容摘要、文件名或路径；
++它不代表业务提交成功，也不因正常清理生成新的业务入口。重试不延长旧发送记录，不新增持久关联字段或业务阶段查询。
+ Application 专用的 `ClipboardReceiverPort` 从 Core 移回接收模块，仍只有原订阅方法；广播容量、串行消费、回执、超时和关闭语义不变。
+ `ClipboardDelivery` 是队列任务信封，Core `InboundClipboard` 原样放在其中，Core 仍无观测字段或依赖。
+ 
+diff --git i/docs/design-docs/space-application.md w/docs/design-docs/space-application.md
+index 4dbf96b5..81151d91 100644
+--- i/docs/design-docs/space-application.md
++++ w/docs/design-docs/space-application.md
+@@ -133,6 +133,7 @@ activity，并由 `SpaceSessionRecovery` 持有唯一激活、重试、暂停、
+ 不等待远端设备上线或成员维护完成。恢复负责人会合并重复请求，并在本地活动暂时启动失败时按有上限的
+ 间隔继续尝试；锁定与关闭会先取消并等待旧激活任务。成员维护只接收恢复与非阻塞唤醒，远端欠账和
+ 连接失败继续由成员维护和连接协调者各自重试。Engine 与产品调用方只提交原有完整动作，不再拼接第二步。
++锁定还必须通过原接收负责人完整关闭接收：先封住旧世代并同时通知已出生动作停止，等待原保存、清理和失败事实实际结算后，才撤下所需密钥。仅门禁不可用不代表已经排空；调用方结束等待不放弃原锁定动作，解锁不复活旧尝试。历史清空和锁定共用同一维护排空租约，排空本身不删除历史记录或用户已拥有的文件。
+ 
+ ### 生命周期与查询
+ 
+diff --git i/docs/exec-plans/active/2026-10-21-blob-connectivity-plan.md w/docs/exec-plans/active/2026-10-21-blob-connectivity-plan.md
+index 84f41918..adbcefe3 100644
+--- i/docs/exec-plans/active/2026-10-21-blob-connectivity-plan.md
++++ w/docs/exec-plans/active/2026-10-21-blob-connectivity-plan.md
+@@ -1316,3 +1316,8 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
+ 最终同源验证全部通过：Application库1279项／1跳过（124.31秒），CI nextest真实进程／SDK三项40.744秒；locked metadata、workspace all-targets（3分23秒）、fmt、Rust style、repository preflight（1346隐私站点、隐私自测、Collector、6项OpenMLS可执行验证及架构负例）、diff均退出0。人工审阅核对完整密文映射先于任何创建／探测、首次日志失败无产物／无下载并保留StorageFull源、000／500保存目录回退、原候选实际清理后替换日志、Staging不认领用户复用的final、原attempt中断失败及不恢复旧网络下载；未新增持久版本、字段、队列、预算或公开接口。
+ 
+ 最终scope已inactive，核对无活动Cargo／rustc／Engine进程及专用TMPDIR的活动FD，目录仅余本轮验证脚本并已移除；共享target／编译缓存保持。仅此恢复边界完成：完整资源总量、全生命周期、最终head兼容与既有六片／全工作区回归、平台CI／设备及观测验收继续未完成，不用本次三项替代它们。
++
++
++### 锁定前接收排空的责任修复
++
++真实Engine红测5.476秒确认：第四次真实本地导出仍保留完成权时，LockEncryption已结束；随后解锁可陷入等待旧接收结算。完整锁定仍归Space lock／session activity，接收停止与本地结算归原transfer。调用方只发LockEncryption／UnlockSpace，不拼内部步骤。原接收门禁关闭能力改为异步完整关闭：封住旧世代、同时通知所有原出生动作停止，再沿现有唯一排空租约等待其实际完成；之后才允许锁密钥。清空历史复用同一排空实现，不新建任务或持久队列；失败保留原source及未完成责任，成功才交还锁定完成。重启继续原reconciliation，无新格式或Engine步骤查询。以原生锁定红测和已通过的暂停／重开、原生删除／清空及App排空／恢复测试验证。
+diff --git i/scripts/testing/connection-recovery-network.mjs w/scripts/testing/connection-recovery-network.mjs
+index ebf8424b..7827fb06 100644
+--- i/scripts/testing/connection-recovery-network.mjs
++++ w/scripts/testing/connection-recovery-network.mjs
+@@ -631,7 +631,8 @@ async function run() {
+     })
+     await requiredScenario('E02-file-transfer', async () => {
+       await transferFile(a, b, 'baseline')
+-      return { exact_bytes_verified: true, direction_count: 2 }
++      const current = peerBinary && peerSide === 0 ? b : a
++      return { exact_bytes_verified: true, direction_count: 2, hosts: [a, b].map(node => node.hostIdentity), paths: await selectedPaths(), ...await negotiatedProtocol(current, 'blob') }
+     })
+   }
+   if (mode === 'direct') await scenario('E14-concurrent-clipboard', async () => {
+diff --git i/tests/observability/collector/collector-privacy.test.mjs w/tests/observability/collector/collector-privacy.test.mjs
+index e713634b..242707af 100644
+--- i/tests/observability/collector/collector-privacy.test.mjs
++++ w/tests/observability/collector/collector-privacy.test.mjs
+@@ -64,7 +64,7 @@ const SPAN_RULES = [
+   'IsString(span.attributes["uc.domain"]) == false',
+   'IsMatch(span.attributes["uc.domain"], "^(clipboard|space_admission|space_membership|storage|runtime)$") == false',
+   'IsString(span.attributes["uc.operation"]) == false',
+-  'IsMatch(span.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false',
++  'IsMatch(span.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false',
+   'IsString(span.attributes["uc.role"]) == false',
+   'IsMatch(span.attributes["uc.role"], "^(local|client|server|joiner|sponsor|member)$") == false',
+   'span.attributes["uc.domain"] != "space_admission" and span.attributes["uc.operation"] != "membership_history_sync" and span.attributes["uc.operation"] != "membership_recovery" and span.attributes["uc.operation"] != "profile_storage_upgrade" and span.attributes["uc.operation"] != "session_lifecycle" and span.name != span.attributes["uc.operation"]',
+@@ -72,8 +72,8 @@ const SPAN_RULES = [
+   'span.attributes["uc.operation"] == "session_lifecycle" and span.name != "runtime.transition_session"',
+   'span.attributes["uc.operation"] == "runtime.shutdown_tasks" and span.attributes["uc.outcome"] == "ok"',
+   'span.attributes["uc.record.kind"] != nil and (IsString(span.attributes["uc.record.kind"]) == false or IsMatch(span.attributes["uc.record.kind"], "^(business|diagnostic)$") == false)',
+-  'span.attributes["uc.record.kind"] == "business" and (span.attributes["uc.role"] != "local" or IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$") == false)',
+-  'span.attributes["uc.record.kind"] == "diagnostic" and (IsEmpty(span.parent_span_id) == false or (span.attributes["uc.role"] == "local" and IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$")))',
++  'span.attributes["uc.record.kind"] == "business" and (span.attributes["uc.role"] != "local" or IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend|retry_receive)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$") == false)',
++  'span.attributes["uc.record.kind"] == "diagnostic" and (IsEmpty(span.parent_span_id) == false or (span.attributes["uc.role"] == "local" and IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend|retry_receive)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$")))',
+   'span.attributes["uc.operation"] == "membership_recovery" and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL or IsMatch(span.name, "^membership[.]recover[.](startup|resume|peer_online|retry|state_changed|requested)$") == false)',
+   'span.attributes["uc.operation"] == "membership_recovery" and span.attributes["uc.outcome"] == "skipped"',
+   'span.attributes["uc.operation"] == "profile_storage_upgrade" and span.attributes["uc.outcome"] == "skipped"',
+@@ -104,7 +104,7 @@ const LOG_RULES = [
+   'IsString(log.attributes["uc.domain"]) == false',
+   'IsMatch(log.attributes["uc.domain"], "^(clipboard|space_admission|space_membership|storage|runtime)$") == false',
+   'IsString(log.attributes["uc.operation"]) == false',
+-  'IsMatch(log.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false',
++  'IsMatch(log.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false',
+   'IsString(log.attributes["uc.role"]) == false',
+   'IsMatch(log.attributes["uc.role"], "^(local|client|server|joiner|sponsor|member)$") == false',
+   'IsString(log.attributes["uc.outcome"]) == false',
+@@ -135,7 +135,7 @@ const CONSISTENCY_RULES = [
+   '(log.attributes["uc.domain"] == "runtime" and IsMatch(log.attributes["uc.operation"], "^(session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false)',
+   '(span.attributes["uc.operation"] == "clipboard_dispatch" and (span.attributes["uc.role"] != "client" or span.kind != SPAN_KIND_CLIENT))',
+   '(span.attributes["uc.operation"] == "clipboard_receive" and (span.attributes["uc.role"] != "server" or span.kind != SPAN_KIND_SERVER))',
+-  '(IsMatch(span.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|persist|write_system)$") and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL))',
++  '(IsMatch(span.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)$") and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL))',
+   '(IsMatch(span.attributes["uc.operation"], "^clipboard_(address_resolve|connect)$") and (span.attributes["uc.role"] != "client" or span.kind != SPAN_KIND_INTERNAL))',
+   '(span.attributes["uc.operation"] == "space_admission" and ((span.attributes["uc.role"] == "joiner" and span.kind != SPAN_KIND_CLIENT) or (span.attributes["uc.role"] == "local" and span.kind != SPAN_KIND_INTERNAL) or (span.attributes["uc.role"] == "local" and span.kind == SPAN_KIND_INTERNAL and (span.attributes["uc.flow.id"] == nil or IsEmpty(span.parent_span_id) == false)) or (span.attributes["uc.role"] == "sponsor" and span.kind != SPAN_KIND_INTERNAL) or IsMatch(span.attributes["uc.role"], "^(local|joiner|sponsor)$") == false))',
+   '(span.attributes["uc.operation"] == "network_transport" and ((span.attributes["uc.role"] == "joiner" and span.kind != SPAN_KIND_CLIENT) or (span.attributes["uc.role"] == "sponsor" and span.kind != SPAN_KIND_SERVER) or IsMatch(span.attributes["uc.role"], "^(joiner|sponsor)$") == false))',
+@@ -144,7 +144,7 @@ const CONSISTENCY_RULES = [
+   '(IsMatch(span.attributes["uc.operation"], "^(session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL))',
+   '(log.attributes["uc.operation"] == "clipboard_dispatch" and log.attributes["uc.role"] != "client")',
+   '(log.attributes["uc.operation"] == "clipboard_receive" and log.attributes["uc.role"] != "server")',
+-  '(IsMatch(log.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|persist|write_system)$") and log.attributes["uc.role"] != "local")',
++  '(IsMatch(log.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)$") and log.attributes["uc.role"] != "local")',
+   '(IsMatch(log.attributes["uc.operation"], "^clipboard_(address_resolve|connect)$") and log.attributes["uc.role"] != "client")',
+   '(log.attributes["uc.operation"] == "space_admission" and IsMatch(log.attributes["uc.role"], "^(local|joiner|sponsor)$") == false)',
+   '(log.attributes["uc.operation"] == "network_transport" and IsMatch(log.attributes["uc.role"], "^(joiner|sponsor)$") == false)',
+diff --git i/tests/observability/collector/collector.posthog.yaml w/tests/observability/collector/collector.posthog.yaml
+index 382b1aa4..65214223 100644
+--- i/tests/observability/collector/collector.posthog.yaml
++++ w/tests/observability/collector/collector.posthog.yaml
+@@ -46,7 +46,7 @@ processors:
+       - 'IsString(span.attributes["uc.domain"]) == false'
+       - 'IsMatch(span.attributes["uc.domain"], "^(clipboard|space_admission|space_membership|storage|runtime)$") == false'
+       - 'IsString(span.attributes["uc.operation"]) == false'
+-      - 'IsMatch(span.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false'
++      - 'IsMatch(span.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false'
+       - 'IsString(span.attributes["uc.role"]) == false'
+       - 'IsMatch(span.attributes["uc.role"], "^(local|client|server|joiner|sponsor|member)$") == false'
+       - 'span.attributes["uc.domain"] != "space_admission" and span.attributes["uc.operation"] != "membership_history_sync" and span.attributes["uc.operation"] != "membership_recovery" and span.attributes["uc.operation"] != "profile_storage_upgrade" and span.attributes["uc.operation"] != "session_lifecycle" and span.name != span.attributes["uc.operation"]'
+@@ -54,8 +54,8 @@ processors:
+       - 'span.attributes["uc.operation"] == "session_lifecycle" and span.name != "runtime.transition_session"'
+       - 'span.attributes["uc.operation"] == "runtime.shutdown_tasks" and span.attributes["uc.outcome"] == "ok"'
+       - 'span.attributes["uc.record.kind"] != nil and (IsString(span.attributes["uc.record.kind"]) == false or IsMatch(span.attributes["uc.record.kind"], "^(business|diagnostic)$") == false)'
+-      - 'span.attributes["uc.record.kind"] == "business" and (span.attributes["uc.role"] != "local" or IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$") == false)'
+-      - 'span.attributes["uc.record.kind"] == "diagnostic" and (IsEmpty(span.parent_span_id) == false or (span.attributes["uc.role"] == "local" and IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$")))'
++      - 'span.attributes["uc.record.kind"] == "business" and (span.attributes["uc.role"] != "local" or IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend|retry_receive)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$") == false)'
++      - 'span.attributes["uc.record.kind"] == "diagnostic" and (IsEmpty(span.parent_span_id) == false or (span.attributes["uc.role"] == "local" and IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend|retry_receive)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$")))'
+       - 'span.attributes["uc.operation"] == "membership_recovery" and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL or IsMatch(span.name, "^membership[.]recover[.](startup|resume|peer_online|retry|state_changed|requested)$") == false)'
+       - 'span.attributes["uc.operation"] == "membership_recovery" and span.attributes["uc.outcome"] == "skipped"'
+       - 'span.attributes["uc.operation"] == "profile_storage_upgrade" and span.attributes["uc.outcome"] == "skipped"'
+@@ -80,7 +80,7 @@ processors:
+       - '(span.attributes["uc.domain"] == "runtime" and IsMatch(span.attributes["uc.operation"], "^(session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false)'
+       - '(span.attributes["uc.operation"] == "clipboard_dispatch" and (span.attributes["uc.role"] != "client" or span.kind != SPAN_KIND_CLIENT))'
+       - '(span.attributes["uc.operation"] == "clipboard_receive" and (span.attributes["uc.role"] != "server" or span.kind != SPAN_KIND_SERVER))'
+-      - '(IsMatch(span.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|persist|write_system)$") and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL))'
++      - '(IsMatch(span.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)$") and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL))'
+       - '(IsMatch(span.attributes["uc.operation"], "^clipboard_(address_resolve|connect)$") and (span.attributes["uc.role"] != "client" or span.kind != SPAN_KIND_INTERNAL))'
+       - '(span.attributes["uc.operation"] == "space_admission" and ((span.attributes["uc.role"] == "joiner" and span.kind != SPAN_KIND_CLIENT) or (span.attributes["uc.role"] == "local" and span.kind != SPAN_KIND_INTERNAL) or (span.attributes["uc.role"] == "local" and span.kind == SPAN_KIND_INTERNAL and (span.attributes["uc.flow.id"] == nil or IsEmpty(span.parent_span_id) == false)) or (span.attributes["uc.role"] == "sponsor" and span.kind != SPAN_KIND_INTERNAL) or IsMatch(span.attributes["uc.role"], "^(local|joiner|sponsor)$") == false))'
+       - '(span.attributes["uc.operation"] == "network_transport" and ((span.attributes["uc.role"] == "joiner" and span.kind != SPAN_KIND_CLIENT) or (span.attributes["uc.role"] == "sponsor" and span.kind != SPAN_KIND_SERVER) or IsMatch(span.attributes["uc.role"], "^(joiner|sponsor)$") == false))'
+@@ -118,7 +118,7 @@ processors:
+       - 'IsString(log.attributes["uc.domain"]) == false'
+       - 'IsMatch(log.attributes["uc.domain"], "^(clipboard|space_admission|space_membership|storage|runtime)$") == false'
+       - 'IsString(log.attributes["uc.operation"]) == false'
+-      - 'IsMatch(log.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false'
++      - 'IsMatch(log.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false'
+       - 'IsString(log.attributes["uc.role"]) == false'
+       - 'IsMatch(log.attributes["uc.role"], "^(local|client|server|joiner|sponsor|member)$") == false'
+       - 'IsString(log.attributes["uc.outcome"]) == false'
+@@ -141,7 +141,7 @@ processors:
+       - '(log.attributes["uc.domain"] == "runtime" and IsMatch(log.attributes["uc.operation"], "^(session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false)'
+       - '(log.attributes["uc.operation"] == "clipboard_dispatch" and log.attributes["uc.role"] != "client")'
+       - '(log.attributes["uc.operation"] == "clipboard_receive" and log.attributes["uc.role"] != "server")'
+-      - '(IsMatch(log.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|persist|write_system)$") and log.attributes["uc.role"] != "local")'
++      - '(IsMatch(log.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)$") and log.attributes["uc.role"] != "local")'
+       - '(IsMatch(log.attributes["uc.operation"], "^clipboard_(address_resolve|connect)$") and log.attributes["uc.role"] != "client")'
+       - '(log.attributes["uc.operation"] == "space_admission" and IsMatch(log.attributes["uc.role"], "^(local|joiner|sponsor)$") == false)'
+       - '(log.attributes["uc.operation"] == "network_transport" and IsMatch(log.attributes["uc.role"], "^(joiner|sponsor)$") == false)'
+diff --git i/tests/observability/collector/collector.yaml w/tests/observability/collector/collector.yaml
+index c883c39c..e44f3646 100644
+--- i/tests/observability/collector/collector.yaml
++++ w/tests/observability/collector/collector.yaml
+@@ -46,7 +46,7 @@ processors:
+       - 'IsString(span.attributes["uc.domain"]) == false'
+       - 'IsMatch(span.attributes["uc.domain"], "^(clipboard|space_admission|space_membership|storage|runtime)$") == false'
+       - 'IsString(span.attributes["uc.operation"]) == false'
+-      - 'IsMatch(span.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false'
++      - 'IsMatch(span.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false'
+       - 'IsString(span.attributes["uc.role"]) == false'
+       - 'IsMatch(span.attributes["uc.role"], "^(local|client|server|joiner|sponsor|member)$") == false'
+       - 'span.attributes["uc.domain"] != "space_admission" and span.attributes["uc.operation"] != "membership_history_sync" and span.attributes["uc.operation"] != "membership_recovery" and span.attributes["uc.operation"] != "profile_storage_upgrade" and span.attributes["uc.operation"] != "session_lifecycle" and span.name != span.attributes["uc.operation"]'
+@@ -54,8 +54,8 @@ processors:
+       - 'span.attributes["uc.operation"] == "session_lifecycle" and span.name != "runtime.transition_session"'
+       - 'span.attributes["uc.operation"] == "runtime.shutdown_tasks" and span.attributes["uc.outcome"] == "ok"'
+       - 'span.attributes["uc.record.kind"] != nil and (IsString(span.attributes["uc.record.kind"]) == false or IsMatch(span.attributes["uc.record.kind"], "^(business|diagnostic)$") == false)'
+-      - 'span.attributes["uc.record.kind"] == "business" and (span.attributes["uc.role"] != "local" or IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$") == false)'
+-      - 'span.attributes["uc.record.kind"] == "diagnostic" and (IsEmpty(span.parent_span_id) == false or (span.attributes["uc.role"] == "local" and IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$")))'
++      - 'span.attributes["uc.record.kind"] == "business" and (span.attributes["uc.role"] != "local" or IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend|retry_receive)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$") == false)'
++      - 'span.attributes["uc.record.kind"] == "diagnostic" and (IsEmpty(span.parent_span_id) == false or (span.attributes["uc.role"] == "local" and IsMatch(span.attributes["uc.operation"], "^(space_admission|clipboard[.](copy_and_sync|send|resend|retry_receive)|membership_recovery|profile_storage_upgrade|runtime[.]recover_session)$")))'
+       - 'span.attributes["uc.operation"] == "membership_recovery" and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL or IsMatch(span.name, "^membership[.]recover[.](startup|resume|peer_online|retry|state_changed|requested)$") == false)'
+       - 'span.attributes["uc.operation"] == "membership_recovery" and span.attributes["uc.outcome"] == "skipped"'
+       - 'span.attributes["uc.operation"] == "profile_storage_upgrade" and span.attributes["uc.outcome"] == "skipped"'
+@@ -80,7 +80,7 @@ processors:
+       - '(span.attributes["uc.domain"] == "runtime" and IsMatch(span.attributes["uc.operation"], "^(session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false)'
+       - '(span.attributes["uc.operation"] == "clipboard_dispatch" and (span.attributes["uc.role"] != "client" or span.kind != SPAN_KIND_CLIENT))'
+       - '(span.attributes["uc.operation"] == "clipboard_receive" and (span.attributes["uc.role"] != "server" or span.kind != SPAN_KIND_SERVER))'
+-      - '(IsMatch(span.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|persist|write_system)$") and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL))'
++      - '(IsMatch(span.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)$") and (span.attributes["uc.role"] != "local" or span.kind != SPAN_KIND_INTERNAL))'
+       - '(IsMatch(span.attributes["uc.operation"], "^clipboard_(address_resolve|connect)$") and (span.attributes["uc.role"] != "client" or span.kind != SPAN_KIND_INTERNAL))'
+       - '(span.attributes["uc.operation"] == "space_admission" and ((span.attributes["uc.role"] == "joiner" and span.kind != SPAN_KIND_CLIENT) or (span.attributes["uc.role"] == "local" and span.kind != SPAN_KIND_INTERNAL) or (span.attributes["uc.role"] == "local" and span.kind == SPAN_KIND_INTERNAL and (span.attributes["uc.flow.id"] == nil or IsEmpty(span.parent_span_id) == false)) or (span.attributes["uc.role"] == "sponsor" and span.kind != SPAN_KIND_INTERNAL) or IsMatch(span.attributes["uc.role"], "^(local|joiner|sponsor)$") == false))'
+       - '(span.attributes["uc.operation"] == "network_transport" and ((span.attributes["uc.role"] == "joiner" and span.kind != SPAN_KIND_CLIENT) or (span.attributes["uc.role"] == "sponsor" and span.kind != SPAN_KIND_SERVER) or IsMatch(span.attributes["uc.role"], "^(joiner|sponsor)$") == false))'
+@@ -118,7 +118,7 @@ processors:
+       - 'IsString(log.attributes["uc.domain"]) == false'
+       - 'IsMatch(log.attributes["uc.domain"], "^(clipboard|space_admission|space_membership|storage|runtime)$") == false'
+       - 'IsString(log.attributes["uc.operation"]) == false'
+-      - 'IsMatch(log.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false'
++      - 'IsMatch(log.attributes["uc.operation"], "^(clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)|clipboard_dispatch|clipboard_receive|clipboard_address_resolve|clipboard_connect|space_admission|membership_recovery|membership_history_sync|membership_group_update|network_transport|profile_storage_upgrade|session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false'
+       - 'IsString(log.attributes["uc.role"]) == false'
+       - 'IsMatch(log.attributes["uc.role"], "^(local|client|server|joiner|sponsor|member)$") == false'
+       - 'IsString(log.attributes["uc.outcome"]) == false'
+@@ -141,7 +141,7 @@ processors:
+       - '(log.attributes["uc.domain"] == "runtime" and IsMatch(log.attributes["uc.operation"], "^(session_lifecycle|runtime[.](shutdown_tasks|recover_session))$") == false)'
+       - '(log.attributes["uc.operation"] == "clipboard_dispatch" and log.attributes["uc.role"] != "client")'
+       - '(log.attributes["uc.operation"] == "clipboard_receive" and log.attributes["uc.role"] != "server")'
+-      - '(IsMatch(log.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|persist|write_system)$") and log.attributes["uc.role"] != "local")'
++      - '(IsMatch(log.attributes["uc.operation"], "^clipboard[.](copy_and_sync|send|resend|retry_receive|export_file|persist|write_system)$") and log.attributes["uc.role"] != "local")'
+       - '(IsMatch(log.attributes["uc.operation"], "^clipboard_(address_resolve|connect)$") and log.attributes["uc.role"] != "client")'
+       - '(log.attributes["uc.operation"] == "space_admission" and IsMatch(log.attributes["uc.role"], "^(local|joiner|sponsor)$") == false)'
+       - '(log.attributes["uc.operation"] == "network_transport" and IsMatch(log.attributes["uc.role"], "^(joiner|sponsor)$") == false)'

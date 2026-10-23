@@ -161,7 +161,22 @@ async fn dispatch(sender: &AppFacade, receiver_id: &str, blob: &PublishBlobResul
                 .pending_targets
                 .iter()
                 .any(|target| target.as_str() == receiver_id),
-        "the actual receiver must accept the sender message"
+        "receiver result: accepted={}, duplicate={}, offline={}, errored={}, pending={}, \
+         receiver_settled={:?}, receiver_pending={}",
+        outcome.total_accepted,
+        outcome.total_duplicate,
+        outcome.total_offline,
+        outcome.total_errored,
+        outcome.total_pending,
+        outcome
+            .per_target
+            .iter()
+            .find(|target| target.device_id.as_str() == receiver_id)
+            .map(|target| target.outcome.is_ok()),
+        outcome
+            .pending_targets
+            .iter()
+            .any(|target| target.as_str() == receiver_id)
     );
 }
 

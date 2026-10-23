@@ -1,0 +1,19 @@
+Jaeger
+Search
+Compare
+System Architecture
+About Jaeger
+Search
+Upload
+Service (0)
+-
+Operation (0)
+all
+Tags 
+Lookback
+Last 1 hour
+Max Duration
+Min Duration
+Limit Results
+Reset
+Find Traces

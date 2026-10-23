@@ -403,8 +403,13 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
     let evidence_path = std::env::var_os("UC_MANAGED_BLOB_RESOURCE_EVIDENCE")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("UC_TEST_ARTIFACTS_DIR")
-                .map(|root| PathBuf::from(root).join("blob-resources/managed-engine.json"))
+            std::env::var_os("UC_TEST_ARTIFACTS_DIR").map(|root| {
+                PathBuf::from(root).join(if transfer_files {
+                    "blob-resources/managed-engine-large.json"
+                } else {
+                    "blob-resources/managed-engine-shutdown.json"
+                })
+            })
         });
     if let Some(path) = evidence_path {
         assert!(

@@ -31,9 +31,9 @@ async fn settlement_failure_keeps_its_source_and_does_not_become_successful_stop
     let entry = EntryId::from("entry");
     action.register(&entry, "attempt").unwrap();
     let stopped = registry.stop(&entry, "attempt").unwrap();
-    action.finish(Err(ReceiveWorkError::Action(
+    action.finish(Err(Arc::new(ReceiveWorkError::Action(
         io::Error::from(io::ErrorKind::PermissionDenied).into(),
-    )));
+    ))));
     let error = stopped.wait().await.unwrap_err();
     let ReceiveWorkError::Action(source) = error.as_ref() else {
         panic!("typed action source")
@@ -56,7 +56,7 @@ async fn task_panic_is_retained_by_the_same_completion() {
             .await
             .unwrap_err(),
     );
-    action.finish(Err(ReceiveWorkError::Task(source.clone())));
+    action.finish(Err(Arc::new(ReceiveWorkError::Task(source.clone()))));
     let error = stopped.wait().await.unwrap_err();
     let ReceiveWorkError::Task(retained) = error.as_ref() else {
         panic!("task source")
@@ -104,9 +104,9 @@ fn a_failed_action_releases_sweep_ownership_only_after_actual_finish() {
     assert!(registry.owns_entry(entry.as_ref()));
     action.cancellation().cancel();
     assert!(registry.owns_entry(entry.as_ref()));
-    action.finish(Err(ReceiveWorkError::Action(
+    action.finish(Err(Arc::new(ReceiveWorkError::Action(
         io::Error::from(io::ErrorKind::StorageFull).into(),
-    )));
+    ))));
     assert!(!registry.owns_entry(entry.as_ref()));
 }
 

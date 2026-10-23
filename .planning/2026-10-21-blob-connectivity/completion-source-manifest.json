@@ -1,0 +1,8 @@
+{
+  "head": "582fb710fdf0b8ef0c6f5f7064c2200b9dfb071d",
+  "tracked_diff_sha256_before_observation_probe": "da0763ec1da1c8541dfbe928ecc8667d9ce820d6e3efc678ad9155aaa5830d32",
+  "observation_probe_in_workspace_binary": false,
+  "production_source_unchanged_after_this_snapshot": true,
+  "note": "新观测用例及资源工件分名只改测试；当前workspace二进制不声称覆盖这些新增测试代码。生产源码未再改变，后续重跑根门禁并精确运行观测用例。",
+  "test_artifact_naming_changed_after_snapshot": true
+}

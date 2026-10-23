@@ -16,11 +16,20 @@
 沿 spec 已明确的 Uni 通用流／SDK 真实双向边界、Engine 接收／重试／取消边界和原始资料兼容边界验证。
 
 ## 当前状态
-阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
+阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。生产获取、提供端、完整条目结算、独立文件部分失败、稳定单项重试与薄绑定已接线；当前补全生命周期、失败恢复及阶段5最终交付证据，未据此标记完整spec完成。
 
 ## Next Step
-来源C额度证据已提交a4cfb172；首次Staging前强杀恢复边界现已完成：真实旧保存目录残留红测8.87秒，前移完整密文映射后原生恢复11.070秒通过。最终App1279通过／1跳过，CI nextest进程／SDK三项40.744秒全通过，全部根门禁退出0；验证scope已结束且专用TMPDIR已核对无活动FD并回收。
-下一步沿既有完整传输／关闭能力补齐实际连接、原许可／服务额度、SDK临时tag及staging资源总量验收；不扩大Engine步骤或观测接口。完整生命周期、最终交付head兼容、既有六片／完整回归、平台CI／设备及观测验收继续未完成。c7997a15／SDK152c42a的10组兼容只代表历史代码；生产授权和本次恢复修复后的最终head仍须在最终代码稳定后重新验证。
+branch-fix唯一scope已inactive、exec10625退出0：App1281通过／1跳过69.067秒，Native receive_retry28/28通过265.831秒，整分支style／diff通过。先提交当前完整改动，再合并main预览中的3文件冲突：UniFFI两处导入保留双方类型，planning指针保持本任务。合并后重新阅读更新的AGENTS与宿主日志／配置合同，补齐活动接收切Space／本机离组及资源证明，再在最终整合源码统一执行根门禁、workspace、成员全集、升级smoke、当前head十组矩阵与线上必需CI。
+
+真实文件观测已完成实际Collector／Jaeger／列表／展开Tags验证，绿证据在observability-green/；137合同＋Native15.991秒通过，红测全部保留。观测service已停止，浏览器／Collector／Jaeger无残留；已验证工具暂保留供整合源码必要复验，任务结束前清理。
+
+原完整回归scope已经inactive、会话53955结束：编译30分30秒，测试1212.937秒，4582通过／3失败／1超时／28跳过，workspace退出100，JUnit已保存。四个问题：Native C额度9.326秒结果断言失败（断言已允许pending，保持严格，仅加安全计数／OTLP诊断）；恢复会话20.017秒TIMEOUT（原冻结二进制独占13.30秒全部断言通过，已设有限60秒并独占，待新配置验证）；facade错误导出BlobTransferDeps（测试支持参数已移到既有deps入口，原防火墙同二进制针对新源码精确退出0）；堆栈unresolved（驱动漏设既有Linux CI的UC_EXPECT_DIAGNOSTIC_STACK=available，原二进制按该既有模式1.54秒通过，未改源码或断言）。原排队成员全集／升级／OTLP因fail-early均未执行，不能登记通过；新focused驱动结束后仍须继续。
+
+当前真实Engine2×1GiB94.374秒通过：精确字节、Host最大块65536字节、峰值RSS446720KiB，关闭空闲后FD15／线程15／任务1（仅采样器）。空配对关闭33.672秒通过。两份报告分别保存completion-evidence/blob-resources/managed-engine-large.json与managed-engine-shutdown.json，资源watcher34518与JUnit watcher63316均已正常结束。测试默认工件已分名避免未来CI相互覆盖；旧workspace二进制不声称执行新增测试代码，来源映射在completion-source-files.json，原失败Engine二进制保存在target/blob-resource-tmp/quota-original-workspace-test。
+
+旧Collector／Jaeger scope（会话51281）已结束，当前独立service `uni-blob-observation.service` active，本轮创建的临时工具在target/blob-resource-tmp/observability-tools，结束前需停止并回收。Collector保持原processors逐字一致，只加过滤后JSONL证据输出；privacy配置5项及1346调用点检查已通过。新真实文件OTLP与离线黑洞通知测试尚须等focused输出，不提前计通过。
+
+完整spec保持active：当前13个AC和48个阶段项目在completion-audit.md逐项核验，完整资源映射、最终交付head十组兼容、成员／升级、最终workspace及线上平台CI仍未齐全，不能归档或关闭Issue34。
 
 ## 先前切片记录
 业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。保存后物理清理已提交01783244（App25／Native5及根门禁）。当前未提交获取失败／取消清理恢复：fetch-cleanup-red实际Facade保护0／期望1（0.007秒）；恢复意图区分FileCommit、FetchFailure、FetchCancellation，只有FileCommit写FileFailed，其余按原网络事实和实际journaled完成NoEntry；取消通过原CAS争取权威。原本只检查错误的mock测试由实际Facade／资源／文件系统／取消源检查替代。首轮25通过／2失败：一为旧错误类型断言，一为新测试错要求关闭吞掉Store；依据原supervision的错误保留合同，测试现明确断言Store和StorageFull仍存在，不改生产关闭。新增Native第二项实际导出失败＋目录清理拒绝，用原结果事件确认失败已返回，再验证100ms关闭、旧成功文件、原Failed网络事实及重开日志。
@@ -152,3 +161,15 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - b14e110d已提交缓存授权修复，h11临时资料已核对无活动FD并回收。当前开始原生C额度切片：原B消息＋完整直接C获取共占C两槽，第三C排队而直接B获取完成；只扩展测试内导出屏障索引，不改变生产预算。
 
 - a4cfb172已提交来源C额度证据并回收h12；当前开始首次Staging前真实进程强杀红测。复用原crash子进程／stdin模拟钥匙串／TCPcheckpoint，真实AtomicPublish探测后改保存目录再kill，重开须清除旧区且保护用户重用目标；暂不改Application生产顺序。
+
+
+- 下一个观测最小切片：先复用receive_retry真实Engine／SDK／SQLite／实际输出fixture，显式独占测试进程安装测试OTLP并flush，进入本机严格Collector→Jaeger；执行初次部分失败、只重试失败项、真实成功和在途取消，保存实际业务查询结果及列表／详情。这里只增加测试入口，不改变生产语义；若实际记录缺失或误报，再由原Application完整接收／重试负责人持不透明观测上下文，Engine只装饰原有完整能力，禁止新增阶段查询。手动重试是独立用户动作，Accepted仅表示准入而非文件完成；旧发送记录不可被手动重试延长。局部清理／排队／网络轮次作为子工作，不生成新业务root；重启不新增持久关联字段。
+
+
+- 离线通知硬验收：完整负责人仍是Application原接收／OutboundNotifications，调用方只使用RetryEntryReceive、CancelEntryReceive和shutdown。复用ReceiveExports测试装配，将原完整OutboundProgressReporterPort在测试中永久阻塞；真实关闭来源Engine后重试既有准确缓存，暂停真实第四次SDK导出，要求原5秒取消合同仅等待本地导出／结算，终态保留两份旧成功且清除未保存输出，关闭不依赖解除通知屏障。只新增cfg(test,dev-tools)的既有能力装饰，不扩展生产port、结果、Engine阶段或设备接口；待原workspace结束后与观测用例共用一次测试重编译并精确运行。
+
+
+- 观测实际红测后的完整修复：原Application接收／重试模块继续独占业务结果、结算和停止责任；调用方仍只发原RetryEntryReceive。先通过现有不透明ClipboardReceiveObservation传递已提交的部分／取消事实，跨原处理task传递，不改ACK／回执或结果接口。随后Engine装饰原完整retry能力并把观测完成权交给原后台owner，Accepted不能提前记ok；手动重试新建独立在线记录，不新增持久关联或步骤查询。完整文件输出能力的子记录只由Engine既有read-store port decorator装配，StorageFull可在详情定位。字段沿schema1固定词表更新设备编码与两份Collector，不输出文件名／路径／票据／标识。真实OTLP与UI失败保存在observability-red；最终必须再次运行同一行为用例、严格Collector和列表／详情才可验收。
+
+
+- 默认CI完整门禁：scripts/testing/run-blob-connectivity.sh作为唯一第七片网络门禁负责人，调用方只执行一次脚本；复用build-peer-reachability-main现有rev/root/label参数、a07既有锚点与connection-recovery-network，不新建网络框架或旧库补丁。固定开工main a461b894，两组新新＋两旧端×Direct/Relay×升级侧0/1共十组。成功要求实际文件双向读回、旧资料读回、blob握手、拓扑与清理／隐私均通过；任一失败非0且保留该轮独立工件，重跑不覆盖首次失败。资源验收继续默认workspace现有1GiB项，默认PR增加必需网络job，设备未执行仍跳过。

@@ -56,7 +56,7 @@ impl ClearClipboardHistoryUseCase {
 
     #[tracing::instrument(name = "usecase.clear_clipboard_history.execute", skip_all)]
     pub(crate) async fn execute(&self) -> Result<ClearHistoryResult> {
-        let mut scope = self.receive_work.clear_scope().await?;
+        let mut scope = self.receive_work.drain_scope().await?;
         scope
             .stop()
             .await

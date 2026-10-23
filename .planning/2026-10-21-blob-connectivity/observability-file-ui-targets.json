@@ -1,0 +1,22 @@
+[
+  {
+    "kind": "send",
+    "trace_id": "428f8b0ea3b2574f33b8d68c55334436",
+    "url": "http://127.0.0.1:16686/trace/428f8b0ea3b2574f33b8d68c55334436"
+  },
+  {
+    "kind": "send",
+    "trace_id": "78580a7b0437ec194a3f557294c1c50a",
+    "url": "http://127.0.0.1:16686/trace/78580a7b0437ec194a3f557294c1c50a"
+  },
+  {
+    "kind": "retry",
+    "trace_id": "604fd1518ce372dd078686cc3616fcac",
+    "url": "http://127.0.0.1:16686/trace/604fd1518ce372dd078686cc3616fcac"
+  },
+  {
+    "kind": "retry",
+    "trace_id": "b8716cbc3802497c7c869f280d92a9f2",
+    "url": "http://127.0.0.1:16686/trace/b8716cbc3802497c7c869f280d92a9f2"
+  }
+]

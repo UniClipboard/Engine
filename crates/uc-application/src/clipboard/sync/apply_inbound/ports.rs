@@ -240,7 +240,7 @@ impl InboundCapture for CaptureClipboardUseCase {
         authoritative_hash: Option<SnapshotHash>,
         commit: DirectoryCaptureCommitContext,
     ) -> Result<Option<EntryId>> {
-        self.execute_directory_with_origin(
+        self.execute_inbound_with_origin(
             snapshot,
             ClipboardChangeOrigin::RemotePush {
                 from_device: Some(from_device),
@@ -248,7 +248,7 @@ impl InboundCapture for CaptureClipboardUseCase {
             entry_id,
             authoritative_hash,
             CommitMode::Create,
-            commit,
+            commit.into(),
         )
         .await
         .map(|outcome| outcome.map(|o| o.entry_id))
@@ -262,7 +262,7 @@ impl InboundCapture for CaptureClipboardUseCase {
         authoritative_hash: Option<SnapshotHash>,
         commit: DirectoryCaptureCommitContext,
     ) -> Result<Option<EntryId>> {
-        self.execute_directory_with_origin(
+        self.execute_inbound_with_origin(
             snapshot,
             ClipboardChangeOrigin::RemotePush {
                 from_device: Some(from_device),
@@ -270,7 +270,7 @@ impl InboundCapture for CaptureClipboardUseCase {
             entry_id,
             authoritative_hash,
             CommitMode::Replace,
-            commit,
+            commit.into(),
         )
         .await
         .map(|outcome| outcome.map(|o| o.entry_id))

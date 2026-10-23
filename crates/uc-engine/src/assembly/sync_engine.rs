@@ -344,6 +344,12 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.fingerprint),
     )?;
 
+    #[cfg(all(test, feature = "dev-tools"))]
+    let outbound_progress_reporter = receive_exports::decorate_reporter(
+        &space_setup.iroh_blob_store_dir,
+        outbound_progress_reporter,
+    );
+
     // 同一存储上的交换能力交给唯一 Application 负责人；Router 不再由 SDK 自管。
     // SQLite 引用与纯本地存储能力交给 transfer，完整条目提交仍归既有接收权威。
     let blob_connectivity = builder.connectivity_deps(
@@ -376,6 +382,8 @@ pub async fn prepare_sync_session(
     #[cfg(all(test, feature = "dev-tools"))]
     let blob_read_store =
         receive_exports::decorate(&space_setup.iroh_blob_store_dir, blob_read_store);
+
+    let blob_read_store = observability::observe_blob_exports(blob_read_store);
 
     // Application 先构造认证 endpoint；Space 持续维护要等 Router 就绪后
     // 才由 ApplicationRuntime 启动。

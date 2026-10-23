@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="35" skipped="0" failures="0" errors="0" uuid="1e185b29-f132-43b1-85fa-bfed321a6198" timestamp="2026-10-23T13:28:27.633+08:00" time="1.337">
+    <testsuite name="uc-engine::dependency_firewall" tests="35" skipped="0" errors="0" failures="0">
+        <testcase name="app_facade_does_not_expose_internal_objects_or_half_ready_slots" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.636+08:00" time="0.002"/>
+        <testcase name="app_facade_is_the_only_application_path_used_by_engine_operations" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.636+08:00" time="0.017"/>
+        <testcase name="application_facade_whitelist_excludes_internal_construction_types" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.654+08:00" time="0.003"/>
+        <testcase name="application_owns_the_top_level_assembly_and_domain_runtime_handles" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.657+08:00" time="0.003"/>
+        <testcase name="application_public_whitelists_hide_domain_construction_bundles" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.660+08:00" time="0.003"/>
+        <testcase name="application_root_only_exposes_facade_and_deps" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.663+08:00" time="0.002"/>
+        <testcase name="application_composition_has_one_entry_and_no_legacy_bundle" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.638+08:00" time="0.029"/>
+        <testcase name="application_runtime_start_requires_every_production_capability" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.665+08:00" time="0.003"/>
+        <testcase name="core_packages_do_not_declare_desktop_path_or_observability_dependencies" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.668+08:00" time="0.453"/>
+        <testcase name="create_space_is_one_application_action" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.121+08:00" time="0.003"/>
+        <testcase name="encryption_facade_is_removed" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.124+08:00" time="0.003"/>
+        <testcase name="core_repository_engine_consumers_do_not_enable_lan_compat" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:27.668+08:00" time="0.527"/>
+        <testcase name="engine_cannot_reconstruct_or_borrow_application_domain_owners" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.128+08:00" time="0.093"/>
+        <testcase name="engine_dispatch_does_not_control_membership_activity_steps" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.220+08:00" time="0.003"/>
+        <testcase name="engine_does_not_assemble_clipboard_internals" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.223+08:00" time="0.060"/>
+        <testcase name="engine_does_not_assemble_search_internals" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.283+08:00" time="0.029"/>
+        <testcase name="engine_does_not_assemble_settings_internals" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.312+08:00" time="0.049"/>
+        <testcase name="engine_does_not_assemble_space_internals" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.361+08:00" time="0.026"/>
+        <testcase name="engine_does_not_own_membership_gossip_or_its_runtime" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.388+08:00" time="0.015"/>
+        <testcase name="engine_does_not_own_mobile_upload_state" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.403+08:00" time="0.002"/>
+        <testcase name="engine_does_not_reassemble_clipboard_inbound_or_transfer_sessions" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.405+08:00" time="0.033"/>
+        <testcase name="engine_does_not_restore_unrelated_search_or_membership_activity_steps" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.438+08:00" time="0.008"/>
+        <testcase name="engine_join_space_does_not_select_an_internal_route" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.445+08:00" time="0.005"/>
+        <testcase name="engine_default_dependency_contract_excludes_lan_compat_dependencies" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.195+08:00" time="0.328"/>
+        <testcase name="engine_only_imports_application_facade_and_deps" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.523+08:00" time="0.023"/>
+        <testcase name="engine_runtime_does_not_start_space_connectivity_maintenance" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.546+08:00" time="0.002"/>
+        <testcase name="engine_session_keeps_only_the_stable_application_handles" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.549+08:00" time="0.002"/>
+        <testcase name="engine_space_operations_do_not_reach_into_space_setup" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.551+08:00" time="0.002"/>
+        <testcase name="engine_normal_dependency_closure_excludes_desktop_packages" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.451+08:00" time="0.405"/>
+        <testcase name="facade_directory_does_not_contain_membership_implementation" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.856+08:00" time="0.003"/>
+        <testcase name="factory_reset_is_one_application_action" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.859+08:00" time="0.002"/>
+        <testcase name="legacy_space_setup_types_are_removed" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.861+08:00" time="0.063"/>
+        <testcase name="no_central_or_nested_usecases_directories_remain" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.924+08:00" time="0.004"/>
+        <testcase name="every_infra_capability_crate_keeps_the_dev_optimization_override" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.553+08:00" time="0.388"/>
+        <testcase name="obsolete_application_shells_are_removed" classname="uc-engine::dependency_firewall" timestamp="2026-10-23T13:28:28.928+08:00" time="0.042"/>
+    </testsuite>
+</testsuites>

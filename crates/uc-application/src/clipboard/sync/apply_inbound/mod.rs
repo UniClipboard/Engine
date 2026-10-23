@@ -72,6 +72,8 @@ use crate::clipboard::write::ClipboardWriteIntent;
 pub(crate) mod ports;
 
 pub use ports::InboundSnapshotRebuild;
+mod observation;
+pub(crate) use observation::classify_apply_failure;
 mod timing;
 mod usecase;
 

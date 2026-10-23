@@ -132,6 +132,42 @@ impl Engine {
   assert.equal(result.status, 0, result.stderr)
 })
 
+test('结果判定不是原样转调，嵌套参数仍不得掩盖薄包装', () => {
+  const mapped = check(`
+impl Batch {
+    fn begin(&self, id: &str) -> bool {
+        self.completion(id).is_some_and(|completion| completion.begin_commit())
+    }
+}
+`)
+  assert.equal(mapped.status, 0, mapped.stderr)
+  const alias = check(`
+impl Batch {
+    fn begin(&self, id: &str) -> bool {
+        self.begin_inner(Some(Request { id, mode: Mode::Fixed })).await?
+    }
+}
+`)
+  assert.equal(alias.status, 1)
+  assert.match(alias.stderr, /begin 只转调 begin_inner/)
+})
+
+test('只接受ErrorClass统一词表适配，其他trait别名仍拒绝', () => {
+  const adapter = check(`
+impl ErrorClass for ReceiveError {
+    fn class(&self) -> &'static str { self.wire() }
+}
+`)
+  assert.equal(adapter.status, 0, adapter.stderr)
+  const alias = check(`
+impl Worker for Receive {
+    fn run(&self) { self.run_inner() }
+}
+`)
+  assert.equal(alias.status, 1)
+  assert.match(alias.stderr, /run 只转调 run_inner/)
+})
+
 test('接受包含实际处理的仓库内部方法', () => {
   const result = check(`
 impl Maintenance {

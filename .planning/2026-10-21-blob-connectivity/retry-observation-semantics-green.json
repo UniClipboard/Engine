@@ -1,0 +1,46 @@
+{
+  "real_engine_sends": 2,
+  "receive_outcomes": {
+    "partial": 2
+  },
+  "manual_retry_business_outcomes": {
+    "ok": 1,
+    "cancelled": 1
+  },
+  "manual_retry_operation": "clipboard.retry_receive",
+  "accepted_spans": 92,
+  "accepted_logs": 103,
+  "missing_file_trace_parents": [],
+  "fixture_privacy_passed": true,
+  "manual_retry_independent_roots": true,
+  "manual_retry_trace_operations": [
+    {
+      "outcome": "ok",
+      "operations": {
+        "clipboard.export_file": 1,
+        "clipboard.persist": 2,
+        "clipboard.retry_receive": 1
+      },
+      "duration_ms": 64.85074
+    },
+    {
+      "outcome": "cancelled",
+      "operations": {
+        "clipboard.export_file": 1,
+        "clipboard.persist": 2,
+        "clipboard.retry_receive": 1
+      },
+      "duration_ms": 5106.0532
+    }
+  ],
+  "file_export_outcomes": {
+    "ok": 6,
+    "error": 2
+  },
+  "failed_export_error_types": {
+    "storage": 2
+  },
+  "completion_mismatches": [],
+  "real_jaeger_ui_verified": false,
+  "semantics_passed": true
+}

@@ -1,0 +1,9 @@
+{
+  "baseline_head": "582fb710fdf0b8ef0c6f5f7064c2200b9dfb071d",
+  "test": "runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author",
+  "original_workspace_binary_sha256": "425a37f2837b23f6b522811f2557af09560a7ca88703a6242bf682555ac9a561",
+  "preserved_binary": "target/blob-resource-tmp/quota-original-workspace-test",
+  "first_failure_seconds": 9.326,
+  "assertion_not_relaxed": true,
+  "private_payloads_recorded": false
+}

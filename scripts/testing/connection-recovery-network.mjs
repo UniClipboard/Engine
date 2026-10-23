@@ -631,7 +631,8 @@ async function run() {
     })
     await requiredScenario('E02-file-transfer', async () => {
       await transferFile(a, b, 'baseline')
-      return { exact_bytes_verified: true, direction_count: 2 }
+      const current = peerBinary && peerSide === 0 ? b : a
+      return { exact_bytes_verified: true, direction_count: 2, hosts: [a, b].map(node => node.hostIdentity), paths: await selectedPaths(), ...await negotiatedProtocol(current, 'blob') }
     })
   }
   if (mode === 'direct') await scenario('E14-concurrent-clipboard', async () => {

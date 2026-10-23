@@ -4,6 +4,8 @@
 
 mod admission;
 mod clipboard;
+mod receive;
+pub(crate) use receive::{observe_blob_exports, observe_receive_retry};
 mod membership;
 mod storage_upgrade;
 

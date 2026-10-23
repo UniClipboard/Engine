@@ -279,7 +279,7 @@ async fn history_clear_stops_preparing_receive_without_opening_initial_readiness
     assert!(timeout(Duration::from_millis(20), receive.as_mut())
         .await
         .is_err());
-    let mut scope = receive_work.clear_scope().await.unwrap();
+    let mut scope = receive_work.drain_scope().await.unwrap();
     timeout(Duration::from_secs(1), scope.stop())
         .await
         .unwrap()

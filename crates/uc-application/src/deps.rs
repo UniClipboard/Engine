@@ -586,6 +586,9 @@ pub use crate::connectivity::{
     StreamWorkLease,
 };
 
+// 测试装配参数只经被动依赖入口公开，不进入业务门面白名单。
+#[cfg(feature = "test-support")]
+pub use crate::transfer::blob::facade::BlobTransferDeps;
 pub use crate::transfer::blob::transport::{
     BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, BlobExchangePort,
     BlobReadStorePort, BlobReceived, BlobRetainedContent, BlobShutdownWait, BlobSource,

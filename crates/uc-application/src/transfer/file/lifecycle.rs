@@ -384,8 +384,8 @@ impl EnsureReceiveReadyPort for FileTransferLifecycle {
         Self::ensure_receive_ready(self).await
     }
 
-    fn close_receive_gate(&self) {
-        self.receive_readiness.mark_not_ready();
+    async fn close_receive_gate(&self) -> Result<(), ReceiveReadinessError> {
+        self.receive_readiness.close().await
     }
 
     fn receive_readiness_status(&self) -> ReceiveReadinessStatus {

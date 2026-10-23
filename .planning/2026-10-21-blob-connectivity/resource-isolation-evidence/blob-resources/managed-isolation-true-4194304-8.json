@@ -1,0 +1,94 @@
+{
+  "bytes_per_file": 4194304,
+  "completed_rounds": 8,
+  "destination_temp_tags_initial": 0,
+  "full_engine_resources_verified": false,
+  "native_connection_release_verified": true,
+  "native_connections_after_shutdown": 0,
+  "quota_counters_verified": false,
+  "rounds": [
+    {
+      "destination_temp_tags_active": 1,
+      "destination_temp_tags_settled": 0,
+      "dial_calls": 1,
+      "native_connections": 1,
+      "provide_calls": 2,
+      "receive_calls": 2,
+      "source_temp_tags_active": 1,
+      "source_temp_tags_settled": 0
+    },
+    {
+      "destination_temp_tags_active": 1,
+      "destination_temp_tags_settled": 0,
+      "dial_calls": 1,
+      "native_connections": 1,
+      "provide_calls": 4,
+      "receive_calls": 4,
+      "source_temp_tags_active": 1,
+      "source_temp_tags_settled": 0
+    },
+    {
+      "destination_temp_tags_active": 1,
+      "destination_temp_tags_settled": 0,
+      "dial_calls": 1,
+      "native_connections": 1,
+      "provide_calls": 6,
+      "receive_calls": 6,
+      "source_temp_tags_active": 1,
+      "source_temp_tags_settled": 0
+    },
+    {
+      "destination_temp_tags_active": 1,
+      "destination_temp_tags_settled": 0,
+      "dial_calls": 1,
+      "native_connections": 1,
+      "provide_calls": 8,
+      "receive_calls": 8,
+      "source_temp_tags_active": 1,
+      "source_temp_tags_settled": 0
+    },
+    {
+      "destination_temp_tags_active": 1,
+      "destination_temp_tags_settled": 0,
+      "dial_calls": 1,
+      "native_connections": 1,
+      "provide_calls": 10,
+      "receive_calls": 10,
+      "source_temp_tags_active": 1,
+      "source_temp_tags_settled": 0
+    },
+    {
+      "destination_temp_tags_active": 1,
+      "destination_temp_tags_settled": 0,
+      "dial_calls": 1,
+      "native_connections": 1,
+      "provide_calls": 12,
+      "receive_calls": 12,
+      "source_temp_tags_active": 1,
+      "source_temp_tags_settled": 0
+    },
+    {
+      "destination_temp_tags_active": 1,
+      "destination_temp_tags_settled": 0,
+      "dial_calls": 1,
+      "native_connections": 1,
+      "provide_calls": 14,
+      "receive_calls": 14,
+      "source_temp_tags_active": 1,
+      "source_temp_tags_settled": 0
+    },
+    {
+      "destination_temp_tags_active": 1,
+      "destination_temp_tags_settled": 0,
+      "dial_calls": 1,
+      "native_connections": 1,
+      "provide_calls": 16,
+      "receive_calls": 16,
+      "source_temp_tags_active": 1,
+      "source_temp_tags_settled": 0
+    }
+  ],
+  "same_content": true,
+  "source_temp_tags_initial": 0,
+  "tags_verified": true
+}

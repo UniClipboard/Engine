@@ -13,7 +13,7 @@ use uc_core::ids::EntryId;
 use uc_observability_contract::wire_enum;
 
 mod catalog;
-mod clear;
+mod drain;
 mod settlement;
 pub(crate) use catalog::{PlannedReceiveItem, ReceiveRepresentation, ReceiveSource};
 pub(crate) use settlement::{
@@ -350,11 +350,7 @@ impl ReceiveAction {
             .unwrap_or_else(|| self.generation.child_token())
     }
 
-    pub(crate) fn finish(&self, result: Result<(), ReceiveWorkError>) {
-        self.finish_shared(result.map_err(Arc::new));
-    }
-
-    pub(crate) fn finish_shared(&self, result: Result<(), Arc<ReceiveWorkError>>) {
+    pub(crate) fn finish(&self, result: Result<(), Arc<ReceiveWorkError>>) {
         if let Err(source) = &result {
             self.batch
                 .fail_unsettled_files(Arc::new(SourceError::new(source.clone())));
