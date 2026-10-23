@@ -19,7 +19,7 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。生产获取、提供端、完整条目结算、独立文件部分失败、稳定单项重试与薄绑定已接线；当前补全生命周期、失败恢复及阶段5最终交付证据，未据此标记完整spec完成。
 
 ## Next Step
-本轮基于18569132补完SQLite并发提交与完整SDK资源证据，默认八项全部通过（final-resource-native-junit.xml、sdk-large-evidence-3/summary.json），原scope已inactive。下一动作提交候选，然后以唯一受限Cargo运行target/blob-resource-tmp/final-candidate-checks.sh，输出final-validation-1/；最终被测head以该目录head.txt为准。完整workspace／成员全集／升级smoke、交付head十组网络与必需平台CI尚未通过，spec保持active。
+本轮基于18569132补完SQLite并发提交与完整SDK资源证据，默认八项全部通过（final-resource-native-junit.xml、sdk-large-evidence-3/summary.json），原scope已inactive。已提交并推送667009b9，草稿PR#230。当前唯一Cargo uni-blob-final-validation.scope（exec42867）运行target/blob-resource-tmp/final-candidate-checks.sh，根六项全部0，workspace统一特性编译中；成员全集与升级smoke在同一串行驱动后续执行。输出final-validation-1/，最终被测head以head.txt为准。CI两工作流已运行，HarmonyOS真实SDK编译已成功，其余必需平台／矩阵待实际结果。完整workspace／成员全集／升级smoke、交付head十组网络与必需平台CI尚未通过，spec保持active。
 
 原C偶发问题已复现并捕获真实sqlite_busy、FetchTerminalFailure／Store链9；父入站提交Backend链3亦有证据。四个完整写事务已改immediate，原只读准备与CAS恢复规则不变，全部临时probe已删除。原C Native11.084秒、冻结修复后二进制12轮及默认下一轮C9.755秒均通过。原始红及probe源码保留；不把历史focused绿当根因证明。
 
@@ -169,3 +169,8 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 
 
 - 默认CI完整门禁：scripts/testing/run-blob-connectivity.sh作为唯一第七片网络门禁负责人，调用方只执行一次脚本；复用build-peer-reachability-main现有rev/root/label参数、a07既有锚点与connection-recovery-network，不新建网络框架或旧库补丁。固定开工main a461b894，两组新新＋两旧端×Direct/Relay×升级侧0/1共十组。成功要求实际文件双向读回、旧资料读回、blob握手、拓扑与清理／隐私均通过；任一失败非0且保留该轮独立工件，重跑不覆盖首次失败。资源验收继续默认workspace现有1GiB项，默认PR增加必需网络job，设备未执行仍跳过。
+
+
+- 2026-10-23 CI 候选修复（基底667009b9）：线上 workspace、八项真实资源、testkit、成员 smoke、升级 smoke／固定main成员与主动剪贴板双向验收、iOS／Android／HarmonyOS编译已通过；完整Engine job尚有后续步骤。安全审计发现当日RUSTSEC-2026-0385，ctutils仅从0.4.2更新0.4.4，其余包未升级；本地cargo audit JSON为0漏洞，未抑制既有维护警告。原网络runner在屏蔽UDP前要求baseline为Relay，两个必需矩阵均失败；同一现有宿主二进制运行原E02-file-transfer复现5秒路径断言失败，faults为空。独立blob Relay格现改为配对前屏蔽双方IPv4／IPv6 UDP，保留实际双向路径、握手和精确字节断言；完整恢复场景未隔离基线只证明精确内容，路径断言在实际隔离阶段执行；额外尝试要求direct的基线仍可能返回未分类路径而失败，现场亦保留，不放宽隔离阶段的relay断言。修复后单格通过、双方实际relay、blob握手、精确双向字节、明文扫描及清理均通过；这只证明harness修复，不代替新交付head十格及完整回归。证据ci-candidate-fixes。旧本地final-validation-1六项根门禁均0，workspace编译中主动停止（143），成员／升级未开始，不记通过；确认scope及Cargo进程终止后才更新锁文件。
+
+- CI runner修复最终局部验证：原E02 Relay格红测；修复后Direct文件、真正隔离的Relay文件均通过且实际路径／blob握手／精确双向字节成立；原E10-relay-only恢复连续两轮通过14.937s／25.661s，隔离后Relay文本／文件前置证明、IPv4／IPv6计数、清理与明文扫描亦通过。未隔离基线不承诺单一路径，其错误的direct／任意已分类路径尝试均保留红现场。所有隔离阶段严格路径断言未放宽。最新线上667009b9 Engine完整job也已成功；下一步提交最小依赖及harness修复，重新跑交付head必需矩阵与本地完整验证。

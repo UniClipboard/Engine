@@ -1,0 +1,1911 @@
+{
+  "sequence": "fixed-short-long-heal-v2",
+  "reproduction": "bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat 2 --mode relay --case E10-relay-only",
+  "binaries": [
+    {
+      "sha256": "5a6236e7d8587cedfbbfb491a499346f9a0ced5adff82032cbb49791d927ab7a"
+    },
+    {
+      "sha256": "bfd9483c4791ae431ea793b976f9e1fd7f61b34dd70c5d6e721846679acc5371"
+    }
+  ],
+  "faults": [],
+  "records": [],
+  "timings": {
+    "prepare_ms": 11538,
+    "scenario_ms": 0,
+    "cleanup_ms": 641,
+    "total_ms": 12179
+  },
+  "cleaned": true,
+  "plaintext_clean": true,
+  "failed": true,
+  "nodes": [
+    {
+      "label": "A",
+      "version": "1.1.0-rc.23",
+      "events": [
+        {
+          "at_ms": 6267,
+          "kind": "peer",
+          "peer": "B",
+          "state": "online"
+        }
+      ],
+      "resources": [],
+      "failure_reasons": [],
+      "network_facts": [
+        {
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 0
+        },
+        {
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 0
+        },
+        {
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 1
+        },
+        {
+          "connected_count": 1,
+          "event.name": "relay.status.observed",
+          "known_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "peer_reachability_v2"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 1,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 1,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "peer_reachability_v2"
+        },
+        {
+          "direct_count": 1,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 1,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 1,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "blob"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "blob"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        }
+      ],
+      "network_diagnostics": [
+        {
+          "timestamp": "2026-10-23T09:39:33.590601Z",
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 0
+        },
+        {
+          "timestamp": "2026-10-23T09:39:33.774159Z",
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 0
+        },
+        {
+          "timestamp": "2026-10-23T09:39:36.775245Z",
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 1
+        },
+        {
+          "timestamp": "2026-10-23T09:39:36.779372Z",
+          "connected_count": 1,
+          "event.name": "relay.status.observed",
+          "known_count": 1
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.468533Z",
+          "direction": "inbound",
+          "event.name": "presence.connection.closed"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.497265Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.497458Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.501875Z",
+          "attempt_index": 1,
+          "duration_ms": 4,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.501987Z",
+          "duration_ms": 4,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.504956Z",
+          "duration_ms": 8,
+          "event.name": "presence.check.completed",
+          "uc.outcome": "ok"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.505049Z",
+          "error_kind": "none",
+          "outcome": "online",
+          "trigger": "member_available"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.521556Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.521763Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.527265Z",
+          "attempt_index": 1,
+          "duration_ms": 5,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.527424Z",
+          "duration_ms": 5,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.600269Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.600646Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.606718Z",
+          "attempt_index": 1,
+          "duration_ms": 5,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.607052Z",
+          "duration_ms": 6,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.659094Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.659720Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.669677Z",
+          "attempt_index": 1,
+          "duration_ms": 9,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.670013Z",
+          "duration_ms": 10,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.768571Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.768810Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.776280Z",
+          "attempt_index": 1,
+          "duration_ms": 7,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.776585Z",
+          "duration_ms": 7,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        }
+      ]
+    },
+    {
+      "label": "B",
+      "version": "1.1.0-rc.23",
+      "events": [
+        {
+          "at_ms": 6270,
+          "kind": "peer",
+          "peer": "A",
+          "state": "offline"
+        },
+        {
+          "at_ms": 6270,
+          "kind": "peer",
+          "peer": "A",
+          "state": "online"
+        }
+      ],
+      "resources": [],
+      "failure_reasons": [],
+      "network_facts": [
+        {
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 0
+        },
+        {
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 0
+        },
+        {
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 1
+        },
+        {
+          "connected_count": 1,
+          "event.name": "relay.status.observed",
+          "known_count": 1
+        },
+        {
+          "direct_count": 1,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 1,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 1,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 1,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "peer_reachability_v2"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "peer_reachability_v2"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "blob"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.used",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "other"
+        },
+        {
+          "event.name": "connection.protocol.negotiated",
+          "protocol": "blob"
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        },
+        {
+          "direct_count": 0,
+          "event.name": "address.loaded",
+          "other_count": 0,
+          "relay_count": 1
+        }
+      ],
+      "network_diagnostics": [
+        {
+          "timestamp": "2026-10-23T09:39:34.235649Z",
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 0
+        },
+        {
+          "timestamp": "2026-10-23T09:39:34.408450Z",
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 0
+        },
+        {
+          "timestamp": "2026-10-23T09:39:37.409303Z",
+          "connected_count": 0,
+          "event.name": "relay.status.observed",
+          "known_count": 1
+        },
+        {
+          "timestamp": "2026-10-23T09:39:37.416191Z",
+          "connected_count": 1,
+          "event.name": "relay.status.observed",
+          "known_count": 1
+        },
+        {
+          "timestamp": "2026-10-23T09:39:37.889795Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:37.889989Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:37.905032Z",
+          "attempt_index": 1,
+          "duration_ms": 14,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:37.905344Z",
+          "duration_ms": 15,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:38.433203Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:38.433421Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:38.438048Z",
+          "attempt_index": 1,
+          "duration_ms": 4,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:38.438145Z",
+          "duration_ms": 4,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:38.735435Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:38.736017Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:38.757712Z",
+          "attempt_index": 1,
+          "duration_ms": 21,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:38.758032Z",
+          "duration_ms": 22,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.454745Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.454937Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.458319Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.458507Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.465224Z",
+          "attempt_index": 1,
+          "duration_ms": 10,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.465373Z",
+          "duration_ms": 10,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.465553Z",
+          "attempt_index": 1,
+          "duration_ms": 6,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.465653Z",
+          "duration_ms": 7,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.468518Z",
+          "direction": "outbound",
+          "event.name": "presence.connection.closed"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.468711Z",
+          "duration_ms": 14,
+          "error.phase": "confirmation",
+          "error.reason": "peer_not_admitted",
+          "event.name": "presence.check.completed",
+          "uc.outcome": "rejected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.469080Z",
+          "error_kind": "connect_failed",
+          "outcome": "offline",
+          "trigger": "member_available"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.570208Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.570442Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.576345Z",
+          "attempt_index": 1,
+          "duration_ms": 5,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.576506Z",
+          "duration_ms": 6,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.608010Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.608304Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.615844Z",
+          "attempt_index": 1,
+          "duration_ms": 7,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.615972Z",
+          "duration_ms": 7,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.621197Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.621510Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.630798Z",
+          "attempt_index": 1,
+          "duration_ms": 9,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.630931Z",
+          "duration_ms": 9,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.680967Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.681274Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.691481Z",
+          "attempt_index": 1,
+          "duration_ms": 10,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.691605Z",
+          "duration_ms": 10,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.746862Z",
+          "event.name": "connection.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.747207Z",
+          "attempt_index": 1,
+          "event.name": "connection.attempt.started"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.755800Z",
+          "attempt_index": 1,
+          "duration_ms": 8,
+          "event.name": "connection.attempt.finished",
+          "outcome": "connected"
+        },
+        {
+          "timestamp": "2026-10-23T09:39:39.756077Z",
+          "duration_ms": 9,
+          "event.name": "connection.finished",
+          "outcome": "connected"
+        }
+      ]
+    }
+  ]
+}

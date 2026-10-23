@@ -619,6 +619,9 @@ async function run() {
     return
   }
   const [a, b, c] = nodes
+  // 独立文件互通格从配对前就隔离直连；恢复场景先保留未隔离的双路径基线。
+  const relayOnlyFile = mode === 'relay' && only === 'E02-file-transfer'
+  if (relayOnlyFile) for (const node of nodes) blockDirect(node)
   await requiredScenario('E01-complete-pairing', async () => {
     const created = await paired(nodes)
     return pairingProof(nodes, created)
@@ -632,8 +635,14 @@ async function run() {
     await requiredScenario('E02-file-transfer', async () => {
       await transferFile(a, b, 'baseline')
       const current = peerBinary && peerSide === 0 ? b : a
-      return { exact_bytes_verified: true, direction_count: 2, hosts: [a, b].map(node => node.hostIdentity), paths: await selectedPaths(), ...await negotiatedProtocol(current, 'blob') }
+      // 未隔离的恢复基线仅证明内容；严格路径证明在对应的隔离阶段执行。
+      const topologyProof = mode === 'relay' && !relayOnlyFile ? {} : { paths: await selectedPaths() }
+      return { exact_bytes_verified: true, direction_count: 2, direct_paths_blocked: relayOnlyFile, hosts: [a, b].map(node => node.hostIdentity), ...topologyProof, ...await negotiatedProtocol(current, 'blob') }
     })
+  }
+  if (only === 'E02-file-transfer') {
+    for (const node of nodes) await node.stop()
+    return
   }
   if (mode === 'direct') await scenario('E14-concurrent-clipboard', async () => {
     const sender = peerBinary && peerSide === 0 ? b : a
@@ -877,17 +886,23 @@ async function negotiatedProtocol(node, expected) {
 async function selectedPaths() {
   const expected = mode === 'relay' ? 'relay' : 'direct'
   const paths = []
-  await until(async () => {
-    paths.length = 0
-    for (const node of nodes) {
-      const peers = await node.call('peers')
-      for (const peer of nodes.filter(peer => peer !== node)) {
-        const row = peers.find(row => row.peer_id === peer.id)
-        paths.push({ node: node.label, peer: peer.label, selected_path: row?.channel })
+  try {
+    await until(async () => {
+      paths.length = 0
+      for (const node of nodes) {
+        const peers = await node.call('peers')
+        for (const peer of nodes.filter(peer => peer !== node)) {
+          const row = peers.find(row => row.peer_id === peer.id)
+          paths.push({ node: node.label, peer: peer.label, selected_path: row?.channel })
+        }
       }
-    }
-    return paths.every(row => row.selected_path === expected)
-  }, 5000, 'actual selected path did not match the isolated topology')
+      return paths.every(row => row.selected_path === expected)
+    }, 5000, 'actual selected path did not match the isolated topology')
+  } catch (error) {
+    // 失败现场只保留固定路径分类与测试端角色，不输出对端身份或地址。
+    const observed = paths.map(row => `${row.node}->${row.peer}:${['direct', 'relay', 'offline', 'unknown'].includes(row.selected_path) ? row.selected_path : 'unavailable'}`).join(',')
+    throw new Error(`${error.message}; expected=${expected}, observed=${observed}`, { cause: error })
+  }
   return paths
 }
 

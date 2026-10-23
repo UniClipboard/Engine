@@ -86,6 +86,11 @@ for label in labels:
         assert any(host['engine_rev']==old_revision for host in proof['hosts'])
     else:
         assert proof['exact_bytes_verified'] is True and proof['direction_count']==2
+        if mode=='relay':
+            assert proof['direct_paths_blocked'] is True
+            blocked=[fault for fault in result['faults'] if fault['action']=='direct_paths_blocked']
+            assert {fault['node'] for fault in blocked}=={'A','B'}
+            assert all(fault['ipv4_drop_packets']>0 and fault['ipv6_drop_packets']>0 for fault in blocked)
     cases.append({'case':label,'passed':True,'topology':mode,'exact_bidirectional_files':True,
                   'original_received_files_readable':legacy,'actual_blob_handshake_observed':True,
                   'cleaned':True,'plaintext_clean':True,

@@ -1,0 +1,97 @@
+diff --git i/Cargo.lock w/Cargo.lock
+index 8ee0e635..f1436509 100644
+--- i/Cargo.lock
++++ w/Cargo.lock
+@@ -1183,9 +1183,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "ctutils"
+-version = "0.4.2"
++version = "0.4.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
++checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
+ dependencies = [
+  "cmov",
+  "subtle",
+diff --git i/scripts/testing/connection-recovery-network.mjs w/scripts/testing/connection-recovery-network.mjs
+index 7827fb06..7a1bc119 100644
+--- i/scripts/testing/connection-recovery-network.mjs
++++ w/scripts/testing/connection-recovery-network.mjs
+@@ -619,6 +619,9 @@ async function run() {
+     return
+   }
+   const [a, b, c] = nodes
++  // 独立文件互通格从配对前就隔离直连；恢复场景先保留未隔离的双路径基线。
++  const relayOnlyFile = mode === 'relay' && only === 'E02-file-transfer'
++  if (relayOnlyFile) for (const node of nodes) blockDirect(node)
+   await requiredScenario('E01-complete-pairing', async () => {
+     const created = await paired(nodes)
+     return pairingProof(nodes, created)
+@@ -632,9 +635,15 @@ async function run() {
+     await requiredScenario('E02-file-transfer', async () => {
+       await transferFile(a, b, 'baseline')
+       const current = peerBinary && peerSide === 0 ? b : a
+-      return { exact_bytes_verified: true, direction_count: 2, hosts: [a, b].map(node => node.hostIdentity), paths: await selectedPaths(), ...await negotiatedProtocol(current, 'blob') }
++      // 未隔离的恢复基线仅证明内容；严格路径证明在对应的隔离阶段执行。
++      const topologyProof = mode === 'relay' && !relayOnlyFile ? {} : { paths: await selectedPaths() }
++      return { exact_bytes_verified: true, direction_count: 2, direct_paths_blocked: relayOnlyFile, hosts: [a, b].map(node => node.hostIdentity), ...topologyProof, ...await negotiatedProtocol(current, 'blob') }
+     })
+   }
++  if (only === 'E02-file-transfer') {
++    for (const node of nodes) await node.stop()
++    return
++  }
+   if (mode === 'direct') await scenario('E14-concurrent-clipboard', async () => {
+     const sender = peerBinary && peerSide === 0 ? b : a
+     const receiver = sender === a ? b : a
+@@ -877,17 +886,23 @@ async function negotiatedProtocol(node, expected) {
+ async function selectedPaths() {
+   const expected = mode === 'relay' ? 'relay' : 'direct'
+   const paths = []
+-  await until(async () => {
+-    paths.length = 0
+-    for (const node of nodes) {
+-      const peers = await node.call('peers')
+-      for (const peer of nodes.filter(peer => peer !== node)) {
+-        const row = peers.find(row => row.peer_id === peer.id)
+-        paths.push({ node: node.label, peer: peer.label, selected_path: row?.channel })
++  try {
++    await until(async () => {
++      paths.length = 0
++      for (const node of nodes) {
++        const peers = await node.call('peers')
++        for (const peer of nodes.filter(peer => peer !== node)) {
++          const row = peers.find(row => row.peer_id === peer.id)
++          paths.push({ node: node.label, peer: peer.label, selected_path: row?.channel })
++        }
+       }
+-    }
+-    return paths.every(row => row.selected_path === expected)
+-  }, 5000, 'actual selected path did not match the isolated topology')
++      return paths.every(row => row.selected_path === expected)
++    }, 5000, 'actual selected path did not match the isolated topology')
++  } catch (error) {
++    // 失败现场只保留固定路径分类与测试端角色，不输出对端身份或地址。
++    const observed = paths.map(row => `${row.node}->${row.peer}:${['direct', 'relay', 'offline', 'unknown'].includes(row.selected_path) ? row.selected_path : 'unavailable'}`).join(',')
++    throw new Error(`${error.message}; expected=${expected}, observed=${observed}`, { cause: error })
++  }
+   return paths
+ }
+ 
+diff --git i/scripts/testing/run-blob-connectivity.sh w/scripts/testing/run-blob-connectivity.sh
+index 42140d9c..69672b5c 100755
+--- i/scripts/testing/run-blob-connectivity.sh
++++ w/scripts/testing/run-blob-connectivity.sh
+@@ -86,6 +86,11 @@ for label in labels:
+         assert any(host['engine_rev']==old_revision for host in proof['hosts'])
+     else:
+         assert proof['exact_bytes_verified'] is True and proof['direction_count']==2
++        if mode=='relay':
++            assert proof['direct_paths_blocked'] is True
++            blocked=[fault for fault in result['faults'] if fault['action']=='direct_paths_blocked']
++            assert {fault['node'] for fault in blocked}=={'A','B'}
++            assert all(fault['ipv4_drop_packets']>0 and fault['ipv6_drop_packets']>0 for fault in blocked)
+     cases.append({'case':label,'passed':True,'topology':mode,'exact_bidirectional_files':True,
+                   'original_received_files_readable':legacy,'actual_blob_handshake_observed':True,
+                   'cleaned':True,'plaintext_clean':True,

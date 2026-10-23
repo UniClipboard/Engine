@@ -1,0 +1,12 @@
+{
+  "metadata": 0,
+  "fmt": 0,
+  "rust_style": 0,
+  "repository": 0,
+  "javascript_syntax": 0,
+  "shell_syntax": 0,
+  "diff": 0,
+  "audit": 0,
+  "check": "待新候选完整编译",
+  "workspace": "待新候选完整执行"
+}
