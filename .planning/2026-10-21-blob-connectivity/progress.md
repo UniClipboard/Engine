@@ -847,3 +847,7 @@ Reset第二轮已通过未归还前不完成、真实Space身份改变、原atte
 资源首轮六项225.791秒：锁定／源撤销／本机离组／切Space／活动删除五项通过，均FD15／线程17／任务0回原值；失败结算shutdown56.376秒只剩FD16（基线15），线程17和任务0已回值。发现该原测试长期持有read_dir.find得到的generation:DirEntry；Rust本机标准库fs文档明确Unix DirEntry保留原目录FD，路径已经独立后仍持有该测试句柄。现于取得database PathBuf后立即drop(generation)，不放宽资源门槛、不改生产；先保留原资源目录全部数字和首轮日志／JUnit，只精确重跑失败用例证明因果。
 
 失败结算shutdown资源修复因果验证32.953秒通过：只提前释放测试DirEntry，严格FD由16回到基线15，线程17／任务0保持原基线。现六类生命周期均有真实内核资源绿证据；lifecycle-resource-summary.json明确5项首轮＋1项fixture修复后精确重跑，single_six_case_green_run=false，不伪称重跑了全组。首轮失败目录／日志／JUnit原样保留。原生连接／tag／quota直接计数仍单独列未完成，不用内核计数代替。
+
+资源切片已提交214f9ef1，当前无Cargo活动。下一最小资源证明为Application原下载调度器的真实4／2占用及归还：只在既有test-support且显式资源证据env时，由私有scheduler测试模块在原锁内读取真实slots／running／pending计数，记录到该测试目录。调用方仍只执行完整Engine操作，不增加任何facade／port／结果／Engine阶段查询，也不把业务标识、peer key或内容写入工件；生产默认编译不含此模块。先用原三端C额度Native证明峰值4／每端2及最后slots0，再复用大文件与生命周期路径；正常功能与观测词表／协议／持久格式不变，重试／恢复仍归原调度owner。
+
+实际下载额度最小切片通过：调度8项0.100秒全通过；原三端C提供端Native9.583秒通过，真实5个scheduler实例中2个实际工作。直接计数主实例峰值active4／peer_active_max2／queued1，最终closed=true、event=settled、active=queued=slots=0；另一实际工作实例峰值1并归零。summary在quota-counter-evidence-1/summary.json，不把该证据误称提供端服务池或SDK tag已验证。原完整workspace C额度失败仍未复现、未宣称根因已修。默认PR资源入口现包含6个生命周期＋原C额度场景，并独立校验实际private计数；零重试与业务期限保持。scope已inactive、exec63101退出0。

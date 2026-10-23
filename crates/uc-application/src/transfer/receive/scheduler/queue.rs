@@ -11,6 +11,10 @@ use uc_core::error_class::ErrorClass;
 // 排队前只需要票据中的认证公钥；业务 DeviceId 仍由当前权威目录解析。
 type DownloadPeer = [u8; 32];
 use uc_observability_contract::wire_enum;
+#[cfg(feature = "test-support")]
+mod test_support;
+#[cfg(feature = "test-support")]
+use test_support::{record_snapshot, ResourceEvidenceId, SnapshotEvent};
 
 wire_enum! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -63,6 +67,8 @@ impl Slot {
 
 #[derive(Default)]
 struct State {
+    #[cfg(feature = "test-support")]
+    resource_evidence: ResourceEvidenceId,
     changed: Arc<Notify>,
     slots: HashMap<u64, Arc<Slot>>,
     pending: HashMap<DownloadPeer, VecDeque<u64>>,
@@ -150,9 +156,26 @@ impl State {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(in super::super::super) struct DownloadScheduler {
     state: Arc<Mutex<State>>,
+}
+
+impl Default for DownloadScheduler {
+    fn default() -> Self {
+        let scheduler = Self {
+            state: Arc::default(),
+        };
+        #[cfg(feature = "test-support")]
+        record_snapshot(
+            &scheduler
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            SnapshotEvent::Created,
+        );
+        scheduler
+    }
 }
 
 /// 唯一逻辑项的额度；不可克隆，实际任务及本地结算完成后才允许丢弃。
@@ -169,6 +192,8 @@ impl Drop for DownloadReservation {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.remove(self.slot.id, None);
         state.dispatch(Instant::now());
+        #[cfg(feature = "test-support")]
+        record_snapshot(&state, SnapshotEvent::Returned);
         let changed = state.changed.clone();
         drop(state);
         changed.notify_waiters();
@@ -186,13 +211,17 @@ impl DownloadScheduler {
             .clone();
         loop {
             let notified = changed.notified();
-            if self
-                .state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .slots
-                .is_empty()
-            {
+            let settled = {
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                if state.slots.is_empty() {
+                    #[cfg(feature = "test-support")]
+                    record_snapshot(&state, SnapshotEvent::Settled);
+                    true
+                } else {
+                    false
+                }
+            };
+            if settled {
                 return;
             }
             notified.await;
@@ -238,6 +267,8 @@ impl DownloadScheduler {
             }
             state.pending.entry(peer).or_default().push_back(id);
             state.dispatch(now);
+            #[cfg(feature = "test-support")]
+            record_snapshot(&state, SnapshotEvent::Reserved);
             DownloadReservation {
                 state: self.state.clone(),
                 slot,
@@ -258,6 +289,8 @@ impl DownloadScheduler {
         for id in pending {
             state.remove(id, Some(ScheduleRefusal::Closed));
         }
+        #[cfg(feature = "test-support")]
+        record_snapshot(&state, SnapshotEvent::Closed);
         // 运行中许可仍归实际任务，关闭不虚放额度；完整负责人另行发出停止意图。
     }
 }

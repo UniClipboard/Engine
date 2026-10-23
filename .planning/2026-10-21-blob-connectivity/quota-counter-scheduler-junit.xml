@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="8" skipped="0" failures="0" errors="0" uuid="e7a9c075-1bd0-45bb-affc-286659da5cce" timestamp="2026-10-23T15:29:20.114+08:00" time="0.100">
+    <testsuite name="uc-application" tests="8" skipped="0" errors="0" failures="0">
+        <testcase name="transfer::receive::scheduler::tests::active_limits_and_round_robin_preserve_each_peer_order" classname="uc-application" timestamp="2026-10-23T15:29:20.188+08:00" time="0.005"/>
+        <testcase name="transfer::receive::scheduler::tests::activation_clock_is_the_actual_grant_time_not_late_poll_time" classname="uc-application" timestamp="2026-10-23T15:29:20.188+08:00" time="0.009"/>
+        <testcase name="transfer::receive::scheduler::tests::cancelled_or_dropped_handoff_releases_only_its_own_reservation" classname="uc-application" timestamp="2026-10-23T15:29:20.195+08:00" time="0.004"/>
+        <testcase name="transfer::receive::scheduler::tests::exact_queue_deadline_wins_over_a_simultaneous_capacity_release" classname="uc-application" timestamp="2026-10-23T15:29:20.199+08:00" time="0.004"/>
+        <testcase name="transfer::receive::scheduler::tests::close_seals_pending_and_new_intents_without_releasing_actual_work" classname="uc-application" timestamp="2026-10-23T15:29:20.197+08:00" time="0.007"/>
+        <testcase name="transfer::receive::scheduler::tests::expired_unpolled_waiters_do_not_occupy_queue_capacity_or_restart_their_deadline" classname="uc-application" timestamp="2026-10-23T15:29:20.203+08:00" time="0.004"/>
+        <testcase name="transfer::receive::scheduler::tests::queue_limits_are_atomic_and_cancelled_waiters_leave_no_hidden_queue" classname="uc-application" timestamp="2026-10-23T15:29:20.204+08:00" time="0.007"/>
+        <testcase name="transfer::receive::scheduler::tests::simultaneous_enqueue_and_cancellation_never_accept_more_than_the_waiting_capacity" classname="uc-application" timestamp="2026-10-23T15:29:20.208+08:00" time="0.006"/>
+    </testsuite>
+</testsuites>

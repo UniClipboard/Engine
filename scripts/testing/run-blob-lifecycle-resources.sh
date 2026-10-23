@@ -13,7 +13,7 @@ if previous.exists():
     shutil.copy2(previous,root/'previous-junit.xml')
     previous.unlink()
 PYSETUP
-filter='package(uc-engine) & kind(lib) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/)'
+filter='package(uc-engine) & kind(lib) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/) | (package(uc-engine) & kind(lib) & test(=runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author))'
 if [[ "${UC_TEST_BUILD_SCOPE:-group}" == workspace ]]; then
   bash scripts/testing/run-test-group.sh workspace -E "$filter"
 else
@@ -29,9 +29,20 @@ assert len(reports)==6, 'all six independent lifecycle reports are required'
 assert all(report['resource_settlement_verified'] is True for report in reports)
 assert all(report['fd_return_to_initial_verified'] and report['thread_return_to_initial_verified']
            and report['runtime_tasks_return_to_initial_verified'] for report in reports)
-(root/'summary.json').write_text(json.dumps({'completed_cases':len(reports),
- 'fd_threads_and_runtime_tasks_verified':True,
- 'tag_and_quota_counts_directly_observed':False,
- 'cases':reports},indent=2)+'\n')
-print('six native lifecycle resource reports passed')
+schedulers=[]
+for path in root.glob('download-scheduler-*.jsonl'):
+ records=[json.loads(line) for line in path.read_text().splitlines()]
+ assert records and records[0]['event']=='created' and records[0]['slots']==0
+ assert all(r['active']<=4 and r['peer_active_max']<=2 and r['queued']<=64 and r['peer_queued_max']<=16 for r in records)
+ if any(r['slots'] for r in records):
+  final=records[-1]
+  assert final['event']=='settled' and final['closed'] and final['slots']==final['active']==final['queued']==0
+  schedulers.append({'evidence':path.name,'peak_active':max(r['active'] for r in records),
+   'peak_peer_active':max(r['peer_active_max'] for r in records),'final':final})
+assert any(r['peak_active']==4 and r['peak_peer_active']==2 for r in schedulers), 'actual provider C quota occupancy missing'
+(root/'summary.json').write_text(json.dumps({'completed_lifecycle_cases':len(reports),
+ 'fd_threads_and_runtime_tasks_verified':True,'download_quota_counters_verified':True,
+ 'sdk_tags_and_native_connection_counts_directly_observed':False,
+ 'download_schedulers':schedulers,'cases':reports},indent=2)+'\n')
+print('six native lifecycle resources and actual download quota counters passed')
 PY

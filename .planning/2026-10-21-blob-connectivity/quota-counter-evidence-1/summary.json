@@ -1,0 +1,38 @@
+{
+  "actual_native_provider_c_budget_verified": true,
+  "scheduler_instances": 5,
+  "used_instances": [
+    {
+      "evidence": "download-scheduler-51124-1.jsonl",
+      "peak_active": 4,
+      "peak_peer_active": 2,
+      "peak_queued": 1,
+      "final": {
+        "active": 0,
+        "closed": true,
+        "event": "settled",
+        "peer_active_max": 0,
+        "peer_queued_max": 0,
+        "queued": 0,
+        "slots": 0
+      }
+    },
+    {
+      "evidence": "download-scheduler-51124-5.jsonl",
+      "peak_active": 1,
+      "peak_peer_active": 1,
+      "peak_queued": 0,
+      "final": {
+        "active": 0,
+        "closed": true,
+        "event": "settled",
+        "peer_active_max": 0,
+        "peer_queued_max": 0,
+        "queued": 0,
+        "slots": 0
+      }
+    }
+  ],
+  "all_used_schedulers_returned_to_zero": true,
+  "provider_and_sdk_tag_counters_verified": false
+}
