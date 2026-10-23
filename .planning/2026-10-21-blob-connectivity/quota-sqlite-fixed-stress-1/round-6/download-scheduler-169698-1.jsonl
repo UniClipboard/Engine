@@ -1,0 +1,13 @@
+{"active":0,"closed":false,"event":"created","peer_active_max":0,"peer_queued_max":0,"queued":0,"slots":0}
+{"active":1,"closed":false,"event":"reserved","peer_active_max":1,"peer_queued_max":0,"queued":0,"slots":1}
+{"active":2,"closed":false,"event":"reserved","peer_active_max":2,"peer_queued_max":0,"queued":0,"slots":2}
+{"active":2,"closed":false,"event":"reserved","peer_active_max":2,"peer_queued_max":1,"queued":1,"slots":3}
+{"active":3,"closed":false,"event":"reserved","peer_active_max":2,"peer_queued_max":1,"queued":1,"slots":4}
+{"active":4,"closed":false,"event":"reserved","peer_active_max":2,"peer_queued_max":1,"queued":1,"slots":5}
+{"active":3,"closed":false,"event":"returned","peer_active_max":2,"peer_queued_max":1,"queued":1,"slots":4}
+{"active":2,"closed":false,"event":"returned","peer_active_max":2,"peer_queued_max":1,"queued":1,"slots":3}
+{"active":2,"closed":false,"event":"returned","peer_active_max":2,"peer_queued_max":0,"queued":0,"slots":2}
+{"active":1,"closed":false,"event":"returned","peer_active_max":1,"peer_queued_max":0,"queued":0,"slots":1}
+{"active":0,"closed":false,"event":"returned","peer_active_max":0,"peer_queued_max":0,"queued":0,"slots":0}
+{"active":0,"closed":true,"event":"closed","peer_active_max":0,"peer_queued_max":0,"queued":0,"slots":0}
+{"active":0,"closed":true,"event":"settled","peer_active_max":0,"peer_queued_max":0,"queued":0,"slots":0}

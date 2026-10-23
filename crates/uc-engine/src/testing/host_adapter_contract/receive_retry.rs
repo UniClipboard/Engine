@@ -87,7 +87,11 @@ pub(super) async fn member_id(engine: &Engine) -> String {
                     return choices.device_trust.local_device_id
                 }
                 Ok(OperationResult::DeviceGroupChoices(_)) => {}
-                Err(error) if error.code() == 1103 => {}
+                // 原稳定查询允许暂态不可用；只在原30秒准备期限内继续查询。
+                Err(error)
+                    if error.code() == 1103
+                        || (error.category() == EngineErrorCategory::Unavailable
+                            && error.is_retryable()) => {}
                 other => panic!("membership readiness failed: {other:?}"),
             }
             sleep(Duration::from_millis(20)).await;

@@ -1,0 +1,15 @@
+{
+  "artifact_record_missing": false,
+  "artifact_state_mismatch": false,
+  "attempt_state_mismatch": false,
+  "backend": false,
+  "context_identity": false,
+  "context_materialize": false,
+  "directory_record_missing": false,
+  "file_progress_commit": false,
+  "file_save": false,
+  "io_kind": null,
+  "missing_original_identity": false,
+  "no_matching_entry": false,
+  "source_chain_length": 9
+}

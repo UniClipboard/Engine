@@ -1,0 +1,61 @@
+{
+  "actual_native_blob_handles_observed": true,
+  "before_shared_cpu_pool": {
+    "fds": 16,
+    "peak_rss_kib": 19440,
+    "rss_kib": 19440,
+    "runtime_tasks": 0,
+    "threads": 7
+  },
+  "case": "testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity",
+  "closed": {
+    "fds": 15,
+    "peak_rss_kib": 451904,
+    "rss_kib": 343536,
+    "runtime_tasks": 8,
+    "threads": 57
+  },
+  "closed_after_idle": {
+    "fds": 15,
+    "peak_rss_kib": 451904,
+    "rss_kib": 339696,
+    "runtime_tasks": 0,
+    "threads": 17
+  },
+  "closed_before_case_drop": {
+    "fds": 39,
+    "peak_rss_kib": 451904,
+    "rss_kib": 343568,
+    "runtime_tasks": 9,
+    "threads": 57
+  },
+  "fd_return_to_initial_verified": true,
+  "idle_settlement_ms": 29938,
+  "initial": {
+    "fds": 15,
+    "peak_rss_kib": 25888,
+    "rss_kib": 25888,
+    "runtime_tasks": 0,
+    "threads": 17
+  },
+  "native_blob_connection_counts_observed": true,
+  "native_blob_handles_returned_to_initial": true,
+  "native_handles_after_idle": [
+    2,
+    0
+  ],
+  "native_handles_before_case_drop": [
+    2,
+    0
+  ],
+  "native_handles_initial": [
+    0,
+    0
+  ],
+  "no_sampler_task": true,
+  "quota_counts_observed": false,
+  "resource_settlement_verified": true,
+  "runtime_tasks_return_to_initial_verified": true,
+  "tag_counts_observed": false,
+  "thread_return_to_initial_verified": true
+}

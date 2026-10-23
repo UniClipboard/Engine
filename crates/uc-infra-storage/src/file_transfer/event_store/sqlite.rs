@@ -86,7 +86,9 @@ impl<E: DbExecutor> FileTransferEventStorePort for SqliteFileTransferEventStore<
                 .run(move |conn| read_next_sequence(conn, &transfer_id))?;
             let row = prepare_event_row(event.clone(), sequence, &protection).await?;
             let result = self.executor.run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| append_prepared_event(conn, &row))
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    append_prepared_event(conn, &row)
+                })
             });
             match result {
                 Ok(()) => return Ok(()),

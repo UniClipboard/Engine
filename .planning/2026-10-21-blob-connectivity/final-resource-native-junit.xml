@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="8" skipped="0" failures="0" errors="0" uuid="2d7ff6cc-9848-475e-b693-23e81ded80bc" timestamp="2026-10-23T16:44:34.294+08:00" time="311.502">
+    <testsuite name="uc-engine" tests="8" skipped="0" errors="0" failures="0">
+        <testcase name="runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author" classname="uc-engine" timestamp="2026-10-23T16:44:34.310+08:00" time="10.130"/>
+        <testcase name="testing::host_adapter_contract::blob_resources::managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and_tasks" classname="uc-engine" timestamp="2026-10-23T16:44:44.440+08:00" time="95.126"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_lock_waits_for_active_retry_export_and_preserves_saved_files" classname="uc-engine" timestamp="2026-10-23T16:46:19.569+08:00" time="34.209"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_revocation_during_retry_prevents_old_output_from_being_committed" classname="uc-engine" timestamp="2026-10-23T16:46:53.779+08:00" time="33.829"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_confirmed_local_removal_prevents_active_retry_from_publishing" classname="uc-engine" timestamp="2026-10-23T16:47:27.609+08:00" time="34.000"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity" classname="uc-engine" timestamp="2026-10-23T16:48:01.609+08:00" time="36.224"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state" classname="uc-engine" timestamp="2026-10-23T16:48:37.834+08:00" time="34.054"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair" classname="uc-engine" timestamp="2026-10-23T16:49:11.890+08:00" time="33.896"/>
+    </testsuite>
+</testsuites>

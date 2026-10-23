@@ -28,6 +28,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
+use uc_infra_p2p::network::iroh::test_support::blob_native_handle_counts;
 use url::Url;
 use wiremock::MockServer;
 
@@ -246,6 +247,8 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
     let server = MockServer::start().await;
     mount_engine_rendezvous(&server).await;
     let initial = Resources::read()?;
+    let native_handles_initial = blob_native_handle_counts();
+    let mut native_handles_per_round = Vec::new();
     let (stop, mut stopped) = oneshot::channel();
     let sampler = tokio::spawn(async move {
         let mut peak = Resources::read()?;
@@ -362,11 +365,13 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
             let path = saved_path(&receiver, &entry, receiver_root.path()).await?;
             tokio::task::spawn_blocking(move || verify_file(&path, round)).await??;
             rounds.push(Resources::read()?);
+            native_handles_per_round.push(blob_native_handle_counts());
         }
         Ok(())
     })
     .await
     .unwrap_or_else(|source| Err(SourceError::new(source).context("large file scenario deadline")));
+    let native_handles_before_shutdown = blob_native_handle_counts();
     receiver.shutdown_until_complete().await?;
     source.shutdown_until_complete().await?;
     drop((receiver, source));
@@ -389,7 +394,8 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
             let value = Resources::read()?;
             if value.threads <= initial.threads
                 && value.runtime_tasks <= initial.runtime_tasks + 1
-                && value.fds <= initial.fds + 8
+                && value.fds <= initial.fds
+                && blob_native_handle_counts().1 == native_handles_initial.1
             {
                 break Ok::<_, anyhow::Error>(value);
             }
@@ -397,11 +403,16 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
         }
     })
     .await;
+    let native_handles_after_idle = blob_native_handle_counts();
+    let native_counts_enabled = std::env::var_os("UC_RECEIVE_RESOURCE_EVIDENCE_DIR").is_some();
+    let native_handles_verified = native_counts_enabled
+        && native_handles_after_idle.0 > native_handles_initial.0
+        && native_handles_after_idle.1 == native_handles_initial.1;
     let idle_ms = idle_started.elapsed().as_millis();
     let closed_after_idle = Resources::read()?;
     let _ = stop.send(());
     let peaks = sampler.await??;
-    let evidence = serde_json::json!({ "bytes_per_file": FILE_BYTES, "completed_rounds": rounds.len(), "exact_bytes": transfer_files && outcome.is_ok(), "source_max_chunk_bytes": files.max_returned.load(Ordering::SeqCst), "source_reads": files.reads.load(Ordering::SeqCst), "before_shared_cpu_pool": before_shared_cpu_pool, "shared_cpu_pool_threads": shared_cpu_pool_threads, "initial": initial, "prepared": prepared, "rounds": rounds, "peaks": peaks, "closed": closed, "tags_verified": false, "quota_verified": false, "native_blob_connections_verified": false, "sampler_included_in_closed_tasks": true, "file_transfer_enabled": transfer_files, "thread_groups_after_idle": thread_groups()?, "thread_return_to_initial_verified": matches!(&idle_settled, Ok(Ok(_))), "tasks_without_sampler_return_to_initial_verified": closed_after_idle.runtime_tasks <= initial.runtime_tasks + 1, "closed_after_idle": closed_after_idle, "idle_settlement_ms": idle_ms });
+    let evidence = serde_json::json!({ "bytes_per_file": FILE_BYTES, "completed_rounds": rounds.len(), "exact_bytes": transfer_files && outcome.is_ok(), "source_max_chunk_bytes": files.max_returned.load(Ordering::SeqCst), "source_reads": files.reads.load(Ordering::SeqCst), "before_shared_cpu_pool": before_shared_cpu_pool, "shared_cpu_pool_threads": shared_cpu_pool_threads, "initial": initial, "prepared": prepared, "rounds": rounds, "peaks": peaks, "closed": closed, "tags_verified": false, "quota_verified": false, "native_blob_connections_verified": native_handles_verified, "native_handles_initial": native_handles_initial, "native_handles_per_round": native_handles_per_round, "native_handles_before_shutdown": native_handles_before_shutdown, "native_handles_after_idle": native_handles_after_idle, "sampler_included_in_closed_tasks": true, "file_transfer_enabled": transfer_files, "thread_groups_after_idle": thread_groups()?, "thread_return_to_initial_verified": matches!(&idle_settled, Ok(Ok(_))), "tasks_without_sampler_return_to_initial_verified": closed_after_idle.runtime_tasks <= initial.runtime_tasks + 1, "closed_after_idle": closed_after_idle, "idle_settlement_ms": idle_ms });
     let evidence_path = std::env::var_os("UC_MANAGED_BLOB_RESOURCE_EVIDENCE")
         .map(PathBuf::from)
         .or_else(|| {
@@ -424,6 +435,9 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
         std::fs::write(path, serde_json::to_vec_pretty(&evidence)?)?;
     }
     outcome?;
+    if native_counts_enabled && transfer_files {
+        assert!(native_handles_verified, "必须实际观察原生blob句柄并归零");
+    }
     assert_eq!(rounds.len(), if transfer_files { 2 } else { 0 });
     assert!(
         matches!(settled, Ok(Ok(_))),

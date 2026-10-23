@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="8" skipped="0" failures="1" errors="0" uuid="2b0d222e-0f0a-4ae1-a066-e18a006000be" timestamp="2026-10-23T15:58:24.331+08:00" time="356.199">
+    <testsuite name="uc-engine" tests="8" skipped="0" errors="0" failures="1">
+        <testcase name="runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author" classname="uc-engine" timestamp="2026-10-23T15:58:24.368+08:00" time="28.994">
+            <failure message="thread &apos;runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author&apos; (97983) panicked at crates/uc-engine/src/runtime/blob_source_authorization.rs:238:25" type="test failure with exit code 101">thread &apos;runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author&apos; (97983) panicked at crates/uc-engine/src/runtime/blob_source_authorization.rs:238:25:
+original receive must settle as completed; last: Some((&quot;failed&quot;, 0, [Some(StorageUnavailable)]))</failure>
+            <system-out>
+running 1 test
+test runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author ... FAILED
+
+failures:
+
+failures:
+    runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 335 filtered out; finished in 28.98s
+
+</system-out>
+            <system-err>
+thread &apos;tokio-rt-worker&apos; (97987) panicked at crates/uc-engine/src/runtime/blob_source_authorization.rs:155:5:
+receiver result: accepted=1, duplicate=0, offline=0, errored=1, pending=0, receiver_settled=Some(false), receiver_pending=false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread &apos;runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author&apos; (97983) panicked at crates/uc-engine/src/runtime/blob_source_authorization.rs:238:25:
+original receive must settle as completed; last: Some((&quot;failed&quot;, 0, [Some(StorageUnavailable)]))
+</system-err>
+        </testcase>
+        <testcase name="testing::host_adapter_contract::blob_resources::managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and_tasks" classname="uc-engine" timestamp="2026-10-23T15:58:53.366+08:00" time="122.094"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_lock_waits_for_active_retry_export_and_preserves_saved_files" classname="uc-engine" timestamp="2026-10-23T16:00:55.462+08:00" time="33.409"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_revocation_during_retry_prevents_old_output_from_being_committed" classname="uc-engine" timestamp="2026-10-23T16:01:28.872+08:00" time="33.961"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_confirmed_local_removal_prevents_active_retry_from_publishing" classname="uc-engine" timestamp="2026-10-23T16:02:02.834+08:00" time="34.065"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity" classname="uc-engine" timestamp="2026-10-23T16:02:36.902+08:00" time="35.486"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state" classname="uc-engine" timestamp="2026-10-23T16:03:12.389+08:00" time="34.241"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair" classname="uc-engine" timestamp="2026-10-23T16:03:46.632+08:00" time="33.891"/>
+    </testsuite>
+</testsuites>

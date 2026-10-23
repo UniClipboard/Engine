@@ -43,7 +43,7 @@ impl<E: DbExecutor> DieselInboundReceiveCommitRepository<E> {
         });
         self.executor
             .run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     validate_file_settlement(conn, &entry, &attempt, &item, failure)?;
                     prepared.commit_log(conn, &entry, &attempt, now_ms)?;
                     if let Some(code) = code {

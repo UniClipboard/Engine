@@ -1,0 +1,6 @@
+{
+  "contains_only_resource_counts": true,
+  "phase": "before_sdk_store_shutdown",
+  "sdk_temp_tags": 0,
+  "store_open_during_count": true
+}

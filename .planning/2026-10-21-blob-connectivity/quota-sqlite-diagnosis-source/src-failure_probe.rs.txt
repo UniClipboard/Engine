@@ -1,0 +1,42 @@
+//! 临时SQLite来源诊断，只写固定错误分类；最终修复前删除。
+use anyhow::Error;
+use diesel::result::{DatabaseErrorKind, Error as DieselError};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+pub(super) fn record(source: &Error) {
+    let Some(root) = std::env::var_os("UC_BLOB_RECEIVE_FAILURE_PROBE") else {
+        return;
+    };
+    let sql = source
+        .chain()
+        .find_map(|source| source.downcast_ref::<DieselError>());
+    let database = match sql {
+        Some(DieselError::DatabaseError(kind, info)) => Some((kind, info)),
+        _ => None,
+    };
+    let report = serde_json::json!({
+        "diesel": sql.is_some(),
+        "sqlite_busy": database.is_some_and(|(_, info)| matches!(info.message(), "database is locked" | "database table is locked")),
+        "unique": database.is_some_and(|(kind, _)| *kind == DatabaseErrorKind::UniqueViolation),
+        "foreign_key": database.is_some_and(|(kind, _)| *kind == DatabaseErrorKind::ForeignKeyViolation),
+        "not_null": database.is_some_and(|(kind, _)| *kind == DatabaseErrorKind::NotNullViolation),
+        "check": database.is_some_and(|(kind, _)| *kind == DatabaseErrorKind::CheckViolation),
+        "not_found": matches!(sql, Some(DieselError::NotFound)),
+        "serialization_failure": matches!(sql, Some(DieselError::SerializationError(_))),
+        "deserialization_failure": matches!(sql, Some(DieselError::DeserializationError(_))),
+        "source_chain_length": source.chain().count(),
+    });
+    let root = PathBuf::from(root);
+    std::fs::create_dir_all(&root).expect("创建固定SQLite错误证据目录");
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    std::fs::write(
+        root.join(format!(
+            "database-failure-{}-{sequence}.json",
+            std::process::id()
+        )),
+        serde_json::to_vec_pretty(&report).expect("编码固定SQLite错误分类"),
+    )
+    .expect("保存固定SQLite错误分类");
+}

@@ -19,21 +19,13 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。生产获取、提供端、完整条目结算、独立文件部分失败、稳定单项重试与薄绑定已接线；当前补全生命周期、失败恢复及阶段5最终交付证据，未据此标记完整spec完成。
 
 ## Next Step
-最新提交a8684f3b（真实下载额度4／2及归零），前214f9ef1六类内核资源、119a1f6e切Space／离组、0c0cfb03整合main。SDK直接资源最小切片已通过：真实锁定33.833秒，登记端侧native weak句柄2且最终0存活，store仍打开时三份temp tag计数均0，实际下载slots归零。原scope uni-blob-sdk-resources已inactive，JUnit和原始计数保留于sdk-resource-evidence-1/。
+本轮基于18569132补完SQLite并发提交与完整SDK资源证据，默认八项全部通过（final-resource-native-junit.xml、sdk-large-evidence-3/summary.json），原scope已inactive。下一动作提交候选，然后以唯一受限Cargo运行target/blob-resource-tmp/final-candidate-checks.sh，输出final-validation-1/；最终被测head以该目录head.txt为准。完整workspace／成员全集／升级smoke、交付head十组网络与必需平台CI尚未通过，spec保持active。
 
-当前唯一Cargo uni-blob-sdk-lifecycle-all.scope（exec71230），驱动原lifecycle-resource-checks.sh，默认run-blob-lifecycle-resources.sh串行选择六生命周期＋C额度七项，输出lifecycle-resource-native.log和sdk-lifecycle-evidence-1/。聚合器新增要求各生命周期真实native句柄归零、SDK关闭前tag全0，同时保留原FD／线程／任务和4／2下载额度断言。源码冻结直至结束。
+原C偶发问题已复现并捕获真实sqlite_busy、FetchTerminalFailure／Store链9；父入站提交Backend链3亦有证据。四个完整写事务已改immediate，原只读准备与CAS恢复规则不变，全部临时probe已删除。原C Native11.084秒、冻结修复后二进制12轮及默认下一轮C9.755秒均通过。原始红及probe源码保留；不把历史focused绿当根因证明。
 
-随后沿同一技术计数能力补2×1GiB大文件最终资源证明，再统一完整根门禁、workspace、成员全集、升级smoke、交付head十组兼容及必需线上平台CI。原工作区C额度偶发失败保留且未声称已定位根因。四个无关用户planning目录未跟踪且未加入提交。
+上一默认八项7绿1红（已修准备helper且最终八项全绿）：C、大文件93.874秒与五生命周期均通过，撤销项在接收开始前因准备查询1211／Unavailable／retryable=true立即panic。原稳定查询合同明确这种错误需重试，helper现仅在原30秒内继续查询可重试Unavailable；永久／恢复错误仍失败，Active成员断言及业务期限不变。原失败、JUnit、partial-summary均在sdk-large-evidence-2/，不覆盖。
 
-合并前最后证据：App1281通过／1跳过69.067秒，Native receive_retry28/28通过265.831秒；观测137合同＋Native15.991秒及严格Collector／Jaeger／列表／展开Tags全通过，绿工件observability-green/、红测保留。观测service已停止、无浏览器／Collector／Jaeger残留。工具暂保留供整合源码观测复验，任务结束前清理。最终资源／生命周期映射、完整workspace／成员全集／升级smoke、当前交付head十组网络及线上平台CI仍待完成，不归档spec／plan。
-
-原完整回归scope已经inactive、会话53955结束：编译30分30秒，测试1212.937秒，4582通过／3失败／1超时／28跳过，workspace退出100，JUnit已保存。四个问题：Native C额度9.326秒结果断言失败（断言已允许pending，保持严格，仅加安全计数／OTLP诊断）；恢复会话20.017秒TIMEOUT（原冻结二进制独占13.30秒全部断言通过，已设有限60秒并独占，待新配置验证）；facade错误导出BlobTransferDeps（测试支持参数已移到既有deps入口，原防火墙同二进制针对新源码精确退出0）；堆栈unresolved（驱动漏设既有Linux CI的UC_EXPECT_DIAGNOSTIC_STACK=available，原二进制按该既有模式1.54秒通过，未改源码或断言）。原排队成员全集／升级／OTLP因fail-early均未执行，不能登记通过；新focused驱动结束后仍须继续。
-
-当前真实Engine2×1GiB94.374秒通过：精确字节、Host最大块65536字节、峰值RSS446720KiB，关闭空闲后FD15／线程15／任务1（仅采样器）。空配对关闭33.672秒通过。两份报告分别保存completion-evidence/blob-resources/managed-engine-large.json与managed-engine-shutdown.json，资源watcher34518与JUnit watcher63316均已正常结束。测试默认工件已分名避免未来CI相互覆盖；旧workspace二进制不声称执行新增测试代码，来源映射在completion-source-files.json，原失败Engine二进制保存在target/blob-resource-tmp/quota-original-workspace-test。
-
-旧Collector／Jaeger scope（会话51281）已结束，当前独立service `uni-blob-observation.service` active，本轮创建的临时工具在target/blob-resource-tmp/observability-tools，结束前需停止并回收。Collector保持原processors逐字一致，只加过滤后JSONL证据输出；privacy配置5项及1346调用点检查已通过。新真实文件OTLP与离线黑洞通知测试尚须等focused输出，不提前计通过。
-
-完整spec保持active：当前13个AC和48个阶段项目在completion-audit.md逐项核验，完整资源映射、最终交付head十组兼容、成员／升级、最终workspace及线上平台CI仍未齐全，不能归档或关闭Issue34。
+诊断Collector／Jaeger service已停止，无活跃浏览器或观测子进程；压力OTLP归档quota-sqlite-fixed-stress-1，根原green JSONL已按HEAD字节恢复。默认资源绿后提交具体候选，继续根门禁、最终workspace／成员全集／升级smoke、交付head十组兼容与必需线上平台CI，再复验整合源码实际文件观测。完整13AC／48项仍在completion-audit.md核对，spec／plan不提前归档，不关闭Issue34。四个无关用户planning目录保持未跟踪。
 
 ## 先前切片记录
 业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。保存后物理清理已提交01783244（App25／Native5及根门禁）。当前未提交获取失败／取消清理恢复：fetch-cleanup-red实际Facade保护0／期望1（0.007秒）；恢复意图区分FileCommit、FetchFailure、FetchCancellation，只有FileCommit写FileFailed，其余按原网络事实和实际journaled完成NoEntry；取消通过原CAS争取权威。原本只检查错误的mock测试由实际Facade／资源／文件系统／取消源检查替代。首轮25通过／2失败：一为旧错误类型断言，一为新测试错要求关闭吞掉Store；依据原supervision的错误保留合同，测试现明确断言Store和StorageFull仍存在，不改生产关闭。新增Native第二项实际导出失败＋目录清理拒绝，用原结果事件确认失败已返回，再验证100ms关闭、旧成功文件、原Failed网络事实及重开日志。

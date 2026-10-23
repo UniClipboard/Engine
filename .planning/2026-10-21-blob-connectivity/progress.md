@@ -857,3 +857,19 @@ Reset第二轮已通过未归还前不完成、真实Space身份改变、原atte
 - SDK直接资源最小切片通过：真实Engine锁定场景33.833s，原生端侧弱句柄登记2／空闲存活0，3次store仍打开时临时tag均0，实际使用的下载scheduler终态settled／slots=active=queued=0。scope uni-blob-sdk-resources已inactive；原始JUnit与计数保存在sdk-resource-evidence-1。现在把直接SDK断言接入原默认资源脚本，独占串行运行六生命周期＋三端配额七项，不修改源码直至结束。
 
 - SDK资源默认脚本完整七项210.976s通过，六生命周期均FD15／线程17／runtime任务0，真实native弱句柄最终0；24次SDK actor仍打开时temp tags全0，所有实际使用下载调度器均settled且slots／active／queued=0，三端场景实际达到4／2。原始完整JUnit、txt和sdk-lifecycle-evidence-1聚合报告保留；scope已结束。下一步复用相同test-util计数补Engine连续2×1GiB，没有扩展生产API或流程步骤。
+
+- 18569132提交SDK全生命周期直接证据。大文件最小变更复用原测试采样，额外记录每轮实际弱句柄、关闭前后计数，空闲FD要求回初始值；显式验收必须真实登记并最终无存活。默认原资源脚本加入原2×1GiB测试，仍为既有Engine测试／nextest，聚合真实SDK／quota工件；修正默认相对证据目录为绝对路径，防止nextest crate cwd导致CI工件写散。唯一Cargo将运行默认八项，保留相对输入以验证目录修正。
+
+- 八项默认验收真实复现C配额Native失败28.994秒：receiver accepted1／errored1，原接收最终failed／0／StorageUnavailable。三端调度严格断言未放宽，原始输出立即归档quota-reproduced-red-1/native-at-failure.txt；原scope继续其已选择的大文件等测试，源码冻结。按diagnosing-bugs使用同一测试二进制和已有显式OTLP，区分SQLite持久提交／SDK导出或本地IO／终态记账竞争，不能把focused绿结果当根因修复。
+
+- 冻结同一二进制的OTLP首轮再次复现相同failed0／StorageUnavailable，文件导出与两次persist子记录均ok；两轮gdb确认错误在原owner交接，但debuginfo=1只有行信息，无法读参数。另见failed1／无项错误的父失败变体，不能混称同一根因。当前临时test-support来源探针仅记固定布尔／IO kind和原source chain长度，不记录错误正文／内容／路径、不改变返回或接口，修复完成前删除。首轮fmt发现探针import插在workflow内doc之前，已移动到doc之后，原解析错误保留quota-source-probe-fmt.log（将归档）。
+
+- 来源探针第一轮实际再现failed0／StorageUnavailable：file_save=false、file_progress_commit=false、各InboundReceiveCommitError固定分类均false、io_kind=null、source_chain_length=9；这不足以断言数据库或SDK根因。JUnit quota-source-probe-junit.xml，raw输出另存quota-source-probe-native-1.txt。继续同一私有probe补FetchTerminalFailure／FileTransferApplicationError／Projection类型和原anyhow创建堆栈；堆栈只保留函数符号，不输出路径或错误正文。当前唯一Cargo uni-blob-quota-source-probe-two.scope（exec57735），RUST_LIB_BACKTRACE=1，输出quota-source-probe-native-2.log、quota-source-probe-2/，源码冻结。所有probe最终删除；保留首轮red和原文档green。
+
+- SQLite分类Native首轮9.965秒通过，冻结同一二进制压力第5轮红（前4绿）：真实sqlite_busy且原FetchTerminalFailure／Store链9，锁竞争不再只有推测。原临时探针源码与补丁已保留，最终实现删除全部探针并只把四个受管写事务改为immediate，保留receiver只读准备事务。下一唯一scope执行同一C Native、冻结12轮压力及默认八资源，保持原业务期限和断言。
+
+- 原C Native修复后11.084秒通过，冻结修复后二进制12轮全通过，原断言／业务期限／零CI重试不变；当前默认八项资源已启动，C项9.755秒再次通过，尚待其余7项。原C问题已由失败来源与单变量四写事务修复的前后运行取得因果证据，不再把单次focused绿冒充根因。临时probe删除，原probe源码／红记录保存。诊断Collector／Jaeger service已停止，完整压力OTLP归档quota-sqlite-fixed-stress-1，根旧green JSONL已按HEAD原字节恢复。
+
+- 修复后默认八项7绿1红：C9.755秒、大文件93.874秒及其余五生命周期通过；撤销项3.839秒在原member_id准备查询因1211／Unavailable／retryable=true立即panic，尚未开始接收。原稳定QueryDeviceGroupChoices代码及public_query_errors_distinguish_retry_from_user_recovery测试明确1211需重试、1212／1213不可重试。仅修测试准备helper：原30秒内继续查询可重试Unavailable，保留原1103等待与Active＋至少一个Active远端断言；永久／恢复错误仍立即失败，全部业务期限不变。原失败与JUnit／partial-summary保留sdk-large-evidence-2。下一默认八项重新验证修正后的真实fixture，不重复已独立12轮C压力。
+
+- 最终默认八项全部通过：三端10.130s、连续2×1GiB95.126s、六生命周期34.209／33.829／34.000／36.224／34.054／33.896s。六类真实FD／线程／任务回基线，27次SDK仍打开时临时tag全0，native端侧句柄最终无存活，全部实际下载scheduler终态settled且slots／active／queued=0，主场景峰值4／2。大文件峰值RSS452576KiB，关闭空闲FD15／线程15／任务1仅采样器，native2→0；原始工件sdk-large-evidence-3/和final-resource-native-junit.xml。原两次八项red均保留。scope uni-blob-final-resources已inactive，临时probe源码全删除，人工审阅确认仅四写事务提前获取写权、只读准备及原CAS／source／加密规则保持，准备查询仅依稳定可重试合同在原30秒内等待。下一步提交具体候选、完整根门禁及workspace／成员／升级／交付head网络／平台CI。

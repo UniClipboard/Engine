@@ -436,3 +436,7 @@
 下载真实计数已补：原三端C场景9.583秒通过，5个scheduler实例、2个实际工作，主实例peak active4／per-provider2／queued1，两个实际工作实例最终closed、settled且slots/active/queued0。原SDK资源证据仅Infra层，现开始真实Engine直接计数：IrohPeerConnection构造路径仅测试显式模式注册weak_handle，技术getter只返回registered/alive两个整数；SDK已有BlobStoreLifecyclePort.shutdown原能力在store仍开时数temp tags，固定数字工件不含hash／tag名。新test-util模块不创建后台采样任务，不返回连接，Engine只在私有测试采样器组合外部/proc与技术弱句柄数。先锁定单项实测（exec17798），不据代码假定所有资源已绿。
 
 - SDK技术资源证据只在test-util＋显式资源目录开启：原生计数保存WeakConnectionHandle，不持强引用、不启动任务；原store shutdown前查询真实temp tags。锁定场景实际弱句柄2→0、tag3次0，不把端侧句柄数当作跨双端去重的逻辑连接数。完整Engine资源与下载quota分别使用现有真实计数，聚合器要求各自原始证据。
+
+- 同一18569132后大文件私有计数候选真实复现原workspace的C额度失败：初次接收权威failed／StorageUnavailable，回执receiver_settled=false。完整八项中其余七项均通过（大文件122.094秒，六生命周期约34秒），不归类为调度配额断言失败，不声称完整资源默认验收通过。相对目录已正确集中至仓库指定绝对证据根；大文件每轮native登记2／存活2，关闭后2／0，精确2×1GiB、FD15≤初16、线程15和任务1仅采样器，raw tags全0。部分汇总明确whole_eight_case_run_passed=false。
+
+- 原C失败已取得直接来源证据：quota-source-database-stress-1前4轮绿，第5轮红，同一进程database-failure固定分类diesel=true／sqlite_busy=true，其余约束和序列化分类false；App完整来源FetchTerminalFailure=true／FileTransferApplicationError::Store=true，链长9。另已复现父保存InboundReceiveCommitError::Backend、链长3。SQLite官方isolation文档明确WAL读快照过期后升级写会BUSY_SNAPSHOT，BEGIN IMMEDIATE在读前取得写权；当前事件追加／接收完整提交均存在先读后写普通事务。最小修复只调整四个完整写事务（原子事件、receiver事件＋projection、入站交付、文件失败清理），保留只读加密准备事务与原四次CAS冲突恢复，不增加App／网络重试。全部临时App／Infra探针已删除，源码快照归档quota-sqlite-diagnosis-source。

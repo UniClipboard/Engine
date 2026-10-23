@@ -71,7 +71,7 @@ impl<E: DbExecutor> FileTransferEventStorePort for SqliteReceiverFileTransferSto
             let event_row = prepare_event_row(event.clone(), sequence, &protection).await?;
             let projection = prepare_projection(&event, projection_snapshot, &protection).await?;
             let result = self.executor.run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     append_prepared_event(conn, &event_row)?;
                     apply_prepared_projection(conn, &projection)?;
                     Ok(())

@@ -355,7 +355,7 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
 
         self.executor
             .run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     if let Some((terminal, artifacts)) = no_entry_replay {
                         if confirm_no_entry_replay(
                             conn,
