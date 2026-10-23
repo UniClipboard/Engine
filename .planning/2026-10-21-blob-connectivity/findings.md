@@ -365,3 +365,22 @@
 真实三端 B 消息／C ticket 已完成 A 的原始文件精确读回。撤销 C 后 A 仍确认 B Active；缓存获取经过完整原动作后得到 Integrity 而非准入拒绝，说明原始文件进入了内存解密。源码确认 IrohConnectionAdmission::Attempt::check_current 只看冻结撤销 epoch；新请求冻结的是撤销后的新 epoch，未建立连接时没有 Grant 的成员权威检查。BlobDownloadResources 对缓存前后调用 request.validate，但此检查不能拒绝新的已撤销成员请求。须仅收紧 Blob 的既有准入检查到 owner.check，保持其他协议策略。先改为真实原始文件 fetch_to_path 取得成功越权的直接红测，再改生产实现。
 
 此前测试装配失败不算产品红测：StartupProgressInput 需 clone；终态不能从仅非终态列表查询，应从实际 IncomingPending 中取得 entry_id 并按项查询；原始文件必须用 publish_blob_path，内存 publish_blob 会加密。B 的撤销通知30秒未收敛，单列为未通过，不作为 C 获取授权的前提。
+
+
+### ticket提供端额度已由完整原生动作验证（2026-10-23）
+
+实际B消息携带C票据的获取与直接C获取共占C两槽；第三C等待。保留另外一项B原完成权后，另一B仍使用第四槽交付，避免以Uni每端流上限误认下载许可归属；释放后实际导出C／C／B／B／C、精确文件和原关闭全部通过。生产调度无需修复，测试屏障改为明确索引集合且旧24项真实接收回归通过；CI nextest额度8.363秒／授权13.933秒及最终门禁通过。总连接／tag／staging及最终交付head矩阵仍未完成。
+
+### 下一强杀切片的只读方案（尚未实现／验证）
+
+后续首次Staging前强杀切片的只读调研（尚未实现／验证）：
+1. materialization/workflow.rs open_publication 先创建 staging 并执行 supports_no_replace，再在 build_and_publish_directory 计算 roots/plans 及 record_phase(Staging)。现有 startup sweep 只扫描当前 save_dir 与 managed cache；切换 save_dir 后旧候选不可达。reconciliation.rs:323 从已持久 root_map 推导 staging 区；phase=Staging 时不接管 final_path，因此可安全提前记录完整根计划，不需要新格式。
+2. 强原生红测建议放在现有 testing::host_adapter_contract::offline_lifecycle::crash 的子模块 directory_probe，复用 OwnedChild、MemoryHostSecureStorage、persistent_engine_host 与 TCP checkpoint／stdin 私有管道。已存在 crash.rs 的 ChildInput 将 secure_storage HashMap 通过 stdin 交给 ignored 子测试，不明文落盘密钥。父进程正常创建／配对两个 Engine，保存接收端 memory secure storage 后原 shutdown；子进程重开同一 root／bind_port／keys，安装原 AtomicPublishPort 的 test-only probe 完成屏障。父 sender 从可变 HostClipboard 的真实目录 text/uri-list 调 ObserveClipboardChange(dispatch=true)，沿原V3／SDK进入目录接收。
+3. 测试组合根可仿 ReceiveExports：testing::directory_probe 仅在 cfg(all(test,feature=dev-tools)) 下装饰已有 FsAtomicPublisher。assembly/sync_engine.rs:570 的 active_pull_publisher 本就 Arc<dyn AtomicPublishPort>，同时供完整 interactive/store-only 接收。按实际 probe_dir 匹配安装的旧 save_dir，先调用真实 inner.supports_no_replace，再 Notify + pause，拒绝增加 Engine 阶段接口。安装只在子进程、目标目录严格隔离；其他 publish 方法透传。
+4. 子进程在真实探测已完成且 staging 实际存在后，通过完整 Engine.UpdateSettings 将 file_sync.auto_save_dir 换到另一目录，再发固定 checkpoint。父收到后 kill 子进程并 wait（OwnedChild Drop 保底 kill/wait），关闭 sender 避免重投，再用原 root／keys 启动 receiver。断言 readiness 成功、原尝试中断失败、旧 save_dir staging 消失；保留旧目录无关文件。可在 kill 后、restart 前创建原计划 final basename 的用户目录／keep 文件，验证 Staging 恢复不误认尚未发布的目标。旧代码若仅扫描新 save_dir 会留下旧 staging，必须在实际 kill+restart 后取得红测。
+5. 最小生产方向：在 open_publication 的候选内先验证 manifest roots、只读解析完整 root plans、record_phase(Staging) 成功，再构造 DirectoryPublication／set_journal 并创建／探测 staging。build_and_publish_directory 复用同一 roots/plans，不重建另一计划；Publishing 与 gated rename 仍保持当前流程。避免新格式、sentinel root_map 或 Engine 查询。
+6. 关键回退陷阱：若早期 journal 已持久，当前 publication.rollback 会 record_partial(0)。随后换到 managed 候选时 record_phase 的SQL upsert不重置 partial flags；旧 partial=0 会让新 Publishing 恢复跳过实际可见根。无需扩展SQL／格式：尚未开始发布的 open/probe 失败只清理 staging，保留原 Staging 日志语义，不写 partial；实际清理成功后才能写新候选 root_map。清理失败则保留原 publication 给原 batch，走现有本地 rollback／NoEntry 修复，不继续回退。
+7. DirectoryPublication::commit 当前只 remove_dir_all(staging) 并 settled=true，仅 settlement_recovery.rs:33 调用。可把该内部完整清理能力改名 cleanup_staging 并迁移原调用，注明仅在无可见发布根或已持久保存时调用；open/probe 失败也用它。失败包成原 DirectoryRollbackError { visible_roots:0,cause,additional:[] }，交接原 batch，不新增清理任务。真实发布后撤回仍用 rollback，继续持久 partial=0 避免删除用户重用路径。
+8. 现有 directory_settlement/preparation.rs RejectStagingLog 用 root_map[0].0.parent 推导区域并阻塞 destination；新顺序下日志失败不应创建 staging，旧 fail_log=true 测试若要求实际 cleanup 被阻塞需改为准确无产物结果，仍验证 StorageFull source、无成员下载／保存及未调用不存在的 record_partial。非日志失败 cleanup 用例继续验证原责任。
+9. 路径规划无需扩大接口。可将 roots 校验和只读 plans 提前，PublishPlan 私有结构持 roots 与 plans；build 阶段沿同一计划创建、获取、验证身份、Publishing、claim commit、rename。旧 publish_gated_root 已在冲突重选时更新 logged_root_map，不要破坏它。空目录以 Directory member 表示，应保留，勿未经证据改变空 manifest 语义。
+10. 所有内容为只读规划，未算完成。h12 quota gate 完成后先提交并回收 h12，再新短磁盘 TMPDIR 开此切片；继续单scope串行、共享 target／缓存和既有5GiB／4GiB上限。用户四处其他 planning 目录不动。C额度当前代码仅测试变更；生产授权修复已在 b14e110d。

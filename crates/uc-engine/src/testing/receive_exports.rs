@@ -1,6 +1,6 @@
-//! 真实接收导出边界的单次存储故障；只由测试组合根安装，不替换网络或保存流程。
+//! 真实接收导出边界的存储故障与完成屏障；只由测试组合根安装，不替换网络或保存流程。
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +20,7 @@ pub(crate) struct ReceiveExports {
     pub paths: Mutex<Vec<PathBuf>>,
     pub obstruct_failure: AtomicBool,
     fail_at: usize,
-    pause_at: usize,
+    pub paused_exports: Mutex<BTreeSet<usize>>,
     pub paused: Notify,
     pub release: Semaphore,
 }
@@ -33,7 +33,7 @@ impl ReceiveExports {
             paths: Mutex::new(Vec::new()),
             obstruct_failure: AtomicBool::new(false),
             fail_at,
-            pause_at,
+            paused_exports: Mutex::new(BTreeSet::from([pause_at])),
             paused: Notify::new(),
             release: Semaphore::new(0),
         });
@@ -105,7 +105,8 @@ impl BlobReadStorePort for ObservedExports {
             ));
         }
         let result = self.inner.export(digest, target).await;
-        if index == self.fixture.pause_at {
+        let pause = self.fixture.paused_exports.lock().unwrap().contains(&index);
+        if pause {
             // 重试的真实文件已写完，但本地能力尚未交回完成权。
             self.fixture.paused.notify_one();
             self.fixture.release.acquire().await.unwrap().forget();
