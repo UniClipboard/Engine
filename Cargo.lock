@@ -2956,7 +2956,7 @@ dependencies = [
 [[package]]
 name = "iroh-blobs"
 version = "0.103.0"
-source = "git+https://github.com/UniClipboard/iroh-blobs.git?rev=124780fb69768b8506565b2760c435182f9e2d20#124780fb69768b8506565b2760c435182f9e2d20"
+source = "git+https://github.com/UniClipboard/iroh-blobs.git?rev=152c42a9217f1377a998b271e0052311e8ada789#152c42a9217f1377a998b271e0052311e8ada789"
 dependencies = [
  "arrayvec",
  "bao-tree",
@@ -7272,6 +7272,7 @@ dependencies = [
  "diesel",
  "opentelemetry-proto",
  "prost",
+ "rayon",
  "serde",
  "serde_json",
  "sha2 0.10.9",

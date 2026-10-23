@@ -19,7 +19,8 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-目录成员原终态等待与非终态失败原因切片已完成：Core 3、定向Native目录／表示2项（25.138秒）、全量App＋file_transfer1285（124.457秒）、Native receive_retry24（236.065秒）及真实入站查询13（2.799秒）通过；1项默认ignored未执行，Native其余300项不在过滤范围。locked metadata、workspace all-targets（3分29秒）、fmt、style、repository及diff通过，所有scope已结束，提交后核验专用磁盘TMPDIR已回收。接下来继续成功staging清理、open/probe失败、其他撤回入口；目录真实测试已具备可变HostClipboard＋ObserveClipboardChange入口。完整生命周期、来源C、受管1GiB、最终兼容／设备矩阵保持未完成，原完整spec目标不缩减。日志 `directory-terminal-*`。
+SDK关闭修订已固定同一fork 152c42a：SDK自有生命周期（含跨runtime）及20项文件／GC、正式停止／故障／协议／Store三项、真实双Engine和2×1GiB已通过。本仓门禁全部通过（同helper严格关闭33.796秒、workspace全目标2分27秒、metadata／fmt／style／repository／diff），准备提交。SDK独立线程期限仍2秒；Engine框架退出实测28／29秒，采样窗口加调度余量至45秒，线程／FD／任务资源上限不变，重跑同一helper的无文件严格回归；大文件已在更严格30秒窗口通过，不重复无关数据传输。
+接下来完整spec仍需：实际blob连接／quota／tag／staging资源计数，完整锁定／暂停／切换／离开／撤销／删除／provisional／重启生命周期，来源B与ticket提供端C不同，首次Staging日志前强杀恢复，最终旧新／新新兼容、既有六片、平台CI与设备矩阵及观测验收。未执行不勾选通过，原目录与提交边界证明保留。
 
 ## 先前切片记录
 业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。保存后物理清理已提交01783244（App25／Native5及根门禁）。当前未提交获取失败／取消清理恢复：fetch-cleanup-red实际Facade保护0／期望1（0.007秒）；恢复意图区分FileCommit、FetchFailure、FetchCancellation，只有FileCommit写FileFailed，其余按原网络事实和实际journaled完成NoEntry；取消通过原CAS争取权威。原本只检查错误的mock测试由实际Facade／资源／文件系统／取消源检查替代。首轮25通过／2失败：一为旧错误类型断言，一为新测试错要求关闭吞掉Store；依据原supervision的错误保留合同，测试现明确断言Store和StorageFull仍存在，不改生产关闭。新增Native第二项实际导出失败＋目录清理拒绝，用原结果事件确认失败已返回，再验证100ms关闭、旧成功文件、原Failed网络事实及重开日志。
@@ -140,3 +141,8 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 - 清除剩余只记警告的撤回入口：捕获失败或返回None时，无权威attempt的内部组合也交给原fail_directory_receive，不能丢弃实际发布责任；placeholder防御退出若携带发布责任，同样先完整失败结算。以完整App及真实文件系统验证失败／空捕获、实际撤回受阻、关闭未完成和恢复后的自动清理。原错误分类及来源保留，不新增稳定接口或无跟踪生产旁路。
 
 - 当前受管Engine资源验收：沿既有稳定Engine、HostFileAccess、真实成员配对、SDK和SQLite路径连续传2份不同内容的1GiB文件，生成式Host每块最多128KiB，接收输出逐块独立比对固定字节。采样进程RSS／FD／线程／当前runtime任务，保存传前、每轮、峰值、关闭后计数；默认workspace CI已经通过connectivity host依赖启用dev-tools，nextest为该单项设独占和明确10分钟期限而不重试。测试只读已有完整能力，不扩展Engine观测／步骤API；尚未取得的tag、实际blob连接和quota计数明确不算完成。测试数据仅使用磁盘专用TMPDIR，构建继续单scope串行及原限制。
+
+- 受管大文件关闭后的严格观测：固定Tokio源代码确认阻塞池默认空闲保留10秒，原即时快照不构成泄漏或已回收证明。保留即时计数，再于同一原runtime内观察最多30秒，要求OS线程回初值、当前runtime任务仅余采样器、FD不超过原预算；不改线程池期限、不丢runtime强行退出、不扩展Engine观测API。依然连续2×1GiB实际传输，未达成时记录新工件失败，而非放宽原门槛。
+
+
+- 最新SDK生命周期切片：用户已批准同一fork兼容修订。最小Store关闭及原导入屏障回归通过，私有runtime由SDK监督器完整回收后才回应。当前运行真实双Engine严格关闭；后续SDK自有回归、真实2×1GiB、固定新git修订、阶段0／协议／最终兼容及资源矩阵均不能跳过。本地相邻checkout与根path patch是暂态验证，交付前删除path patch；保持原共享target、串行scope与内存上限。

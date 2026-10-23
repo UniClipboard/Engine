@@ -53,6 +53,10 @@
 `GetStreamPair`，提供端 `provider::handle_stream` 接受通用 `StreamPair`，是候选接缝，
 不是已验证的端到端方案。已有 SDK Downloader 会自行连接并启动后台工作，丢弃进度接收器不等于任务停止。
 
+2026-10-23 用户明确批准同一 fork 的兼容 store 生命周期修复，实施候选固定为
+`152c42a9217f1377a998b271e0052311e8ada789`。SDK版本系列、线上协议、ticket与磁盘格式不变；
+前述开工冻结证据保留，新修订的停止、协议、资源及旧新矩阵须重新验收。
+
 接收权威已有 `EntryReceiveAttempt` 的 Receiving／Committing／Cancelling 等状态，以及
 提交声明、产物日志和恢复能力；本片复用这些机制，不建立第二套条目提交权威。
 目录路径失败时回滚，不能从普通文件的部分成功推导目录也允许部分交付。

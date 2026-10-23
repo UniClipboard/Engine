@@ -49,6 +49,8 @@ chrono = { version = "0.4", features = ["serde"] }
 diesel = { version = "2.3.5", features = ["sqlite"] }
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs"] }
 prost = "0.14"
+# 资源回归预热已存在的进程级 CPU 池，不把一次初始化算作 Engine 泄漏。
+rayon = "1"
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"

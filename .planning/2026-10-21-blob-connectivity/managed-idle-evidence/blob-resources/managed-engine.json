@@ -1,0 +1,65 @@
+{
+  "bytes_per_file": 1073741824,
+  "closed": {
+    "fds": 15,
+    "peak_rss_kib": 438592,
+    "rss_kib": 110992,
+    "runtime_tasks": 4,
+    "threads": 59
+  },
+  "closed_after_idle": {
+    "fds": 15,
+    "peak_rss_kib": 438592,
+    "rss_kib": 107984,
+    "runtime_tasks": 1,
+    "threads": 45
+  },
+  "completed_rounds": 2,
+  "exact_bytes": true,
+  "idle_settlement_ms": 30001,
+  "initial": {
+    "fds": 16,
+    "peak_rss_kib": 20464,
+    "rss_kib": 20464,
+    "runtime_tasks": 0,
+    "threads": 5
+  },
+  "native_blob_connections_verified": false,
+  "peaks": {
+    "fds": 68,
+    "peak_rss_kib": 441680,
+    "rss_kib": 441680,
+    "runtime_tasks": 145,
+    "threads": 79
+  },
+  "prepared": {
+    "fds": 62,
+    "peak_rss_kib": 438592,
+    "rss_kib": 322240,
+    "runtime_tasks": 119,
+    "threads": 79
+  },
+  "quota_verified": false,
+  "rounds": [
+    {
+      "fds": 62,
+      "peak_rss_kib": 438592,
+      "rss_kib": 411024,
+      "runtime_tasks": 115,
+      "threads": 58
+    },
+    {
+      "fds": 62,
+      "peak_rss_kib": 438592,
+      "rss_kib": 92576,
+      "runtime_tasks": 113,
+      "threads": 59
+    }
+  ],
+  "sampler_included_in_closed_tasks": true,
+  "source_max_chunk_bytes": 65536,
+  "source_reads": 32768,
+  "tags_verified": false,
+  "tasks_without_sampler_return_to_initial_verified": true,
+  "thread_return_to_initial_verified": false
+}

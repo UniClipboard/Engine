@@ -26,7 +26,7 @@ use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{field::Visit, Event, Subscriber};
 use tracing_subscriber::{layer::Context, prelude::*, Layer};
-use uc_application::deps::{BlobExchangeFailure, BlobExchangePort};
+use uc_application::deps::{BlobExchangeFailure, BlobExchangePort, BlobStoreLifecyclePort};
 use uc_core::ports::blob::BlobDigest;
 use uc_infra_p2p::network::iroh::blob_exchange::IrohBlobExchangeAdapter;
 
@@ -622,6 +622,11 @@ async fn prove_export_worker_failure(gate: &Arc<ImportGate>) -> anyhow::Result<(
     client.close().await;
     server.close().await;
     destination.shutdown().await?;
-    source.shutdown().await?;
+    // worker panic 不能再被 metadata 的成功确认掩盖；既有生命周期 port 保留失败来源。
+    let error = timeout(DEADLINE, IrohBlobExchangeAdapter::new(source).shutdown())
+        .await?
+        .expect_err("SDK worker panic must fail complete store shutdown");
+    assert_eq!(error.kind, BlobExchangeFailure::Store);
+    assert!(error.source().is_some());
     Ok(())
 }

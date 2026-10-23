@@ -1,0 +1,78 @@
+{
+  "before_shared_cpu_pool": {
+    "fds": 10,
+    "peak_rss_kib": 12736,
+    "rss_kib": 12736,
+    "runtime_tasks": 0,
+    "threads": 4
+  },
+  "bytes_per_file": 1073741824,
+  "closed": {
+    "fds": 15,
+    "peak_rss_kib": 440224,
+    "rss_kib": 326736,
+    "runtime_tasks": 4,
+    "threads": 22
+  },
+  "closed_after_idle": {
+    "fds": 15,
+    "peak_rss_kib": 440224,
+    "rss_kib": 326400,
+    "runtime_tasks": 1,
+    "threads": 15
+  },
+  "completed_rounds": 2,
+  "exact_bytes": true,
+  "file_transfer_enabled": true,
+  "idle_settlement_ms": 9550,
+  "initial": {
+    "fds": 16,
+    "peak_rss_kib": 21808,
+    "rss_kib": 21808,
+    "runtime_tasks": 0,
+    "threads": 15
+  },
+  "native_blob_connections_verified": false,
+  "peaks": {
+    "fds": 64,
+    "peak_rss_kib": 444080,
+    "rss_kib": 444080,
+    "runtime_tasks": 147,
+    "threads": 71
+  },
+  "prepared": {
+    "fds": 59,
+    "peak_rss_kib": 440224,
+    "rss_kib": 322048,
+    "runtime_tasks": 116,
+    "threads": 71
+  },
+  "quota_verified": false,
+  "rounds": [
+    {
+      "fds": 59,
+      "peak_rss_kib": 440224,
+      "rss_kib": 402480,
+      "runtime_tasks": 118,
+      "threads": 50
+    },
+    {
+      "fds": 59,
+      "peak_rss_kib": 440224,
+      "rss_kib": 344400,
+      "runtime_tasks": 117,
+      "threads": 50
+    }
+  ],
+  "sampler_included_in_closed_tasks": true,
+  "shared_cpu_pool_threads": 10,
+  "source_max_chunk_bytes": 65536,
+  "source_reads": 32768,
+  "tags_verified": false,
+  "tasks_without_sampler_return_to_initial_verified": true,
+  "thread_groups_after_idle": {
+    "other": 13,
+    "tokio": 2
+  },
+  "thread_return_to_initial_verified": true
+}

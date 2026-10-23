@@ -13,7 +13,9 @@ use crate::{
     SendFilesInput, SettingsPatch, SyncSettingsPatch,
 };
 use anyhow::{anyhow, Context, Error as SourceError, Result};
+use rayon::current_num_threads;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -21,7 +23,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
 use url::Url;
@@ -193,7 +195,52 @@ fn verify_file(path: &Path, round: usize) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and_tasks(
 ) -> Result<()> {
+    run_managed_resources(true).await
+}
+
+// 同一真实配对接缝验证关闭后的 SDK 私有线程，不依赖大文件传输。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_engine_pair_shutdown_waits_for_sdk_runtimes() -> Result<()> {
+    run_managed_resources(false).await
+}
+
+fn thread_groups() -> Result<BTreeMap<&'static str, usize>> {
+    let mut groups = BTreeMap::new();
+    for entry in std::fs::read_dir("/proc/self/task")? {
+        let name = match std::fs::read_to_string(entry?.path().join("comm")) {
+            Ok(name) => name,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(3) =>
+            {
+                continue
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let kind = if name.starts_with("tokio") {
+            "tokio"
+        } else if name.starts_with("r2d2") {
+            "sqlite_pool"
+        } else if name.starts_with("iroh") {
+            "iroh"
+        } else if name.starts_with("tantivy") || name.starts_with("thrd-tantivy") {
+            "search"
+        } else if name.starts_with("rayon") {
+            "rayon"
+        } else {
+            "other"
+        };
+        *groups.entry(kind).or_default() += 1;
+    }
+    Ok(groups)
+}
+
+async fn run_managed_resources(transfer_files: bool) -> Result<()> {
     let _guard = ENGINE_TEST_LOCK.lock().await;
+    let before_shared_cpu_pool = Resources::read()?;
+    // 关闭断点的真实堆栈已确认：未命名 Rayon worker 会继承创建线程的名称。
+    // 只预热进程级共享池，保留冷计数；不得预先创建 Engine 或 SDK Store。
+    let shared_cpu_pool_threads = current_num_threads();
     let server = MockServer::start().await;
     mount_engine_rendezvous(&server).await;
     let initial = Resources::read()?;
@@ -267,7 +314,7 @@ async fn managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_
     let prepared = Resources::read()?;
     let mut rounds = Vec::new();
     let outcome: Result<()> = timeout(Duration::from_secs(480), async {
-        for round in 0..2 {
+        for round in 0..if transfer_files { 2 } else { 0 } {
             let sent = source
                 .execute(Operation::SendFiles(SendFilesInput {
                     files: vec![HostFileHandle::new(round.to_string())],
@@ -333,9 +380,26 @@ async fn managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_
     })
     .await;
     let closed = Resources::read()?;
+    // 实测框架空闲退出接近30秒，预留调度余量；资源上限与SDK独立退出期限不放宽。
+    let idle_started = Instant::now();
+    let idle_settled = timeout(Duration::from_secs(45), async {
+        loop {
+            let value = Resources::read()?;
+            if value.threads <= initial.threads
+                && value.runtime_tasks <= initial.runtime_tasks + 1
+                && value.fds <= initial.fds + 8
+            {
+                break Ok::<_, anyhow::Error>(value);
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let idle_ms = idle_started.elapsed().as_millis();
+    let closed_after_idle = Resources::read()?;
     let _ = stop.send(());
     let peaks = sampler.await??;
-    let evidence = serde_json::json!({ "bytes_per_file": FILE_BYTES, "completed_rounds": rounds.len(), "exact_bytes": outcome.is_ok(), "source_max_chunk_bytes": files.max_returned.load(Ordering::SeqCst), "source_reads": files.reads.load(Ordering::SeqCst), "initial": initial, "prepared": prepared, "rounds": rounds, "peaks": peaks, "closed": closed, "tags_verified": false, "quota_verified": false, "native_blob_connections_verified": false, "sampler_included_in_closed_tasks": true, "thread_return_to_initial_verified": false });
+    let evidence = serde_json::json!({ "bytes_per_file": FILE_BYTES, "completed_rounds": rounds.len(), "exact_bytes": transfer_files && outcome.is_ok(), "source_max_chunk_bytes": files.max_returned.load(Ordering::SeqCst), "source_reads": files.reads.load(Ordering::SeqCst), "before_shared_cpu_pool": before_shared_cpu_pool, "shared_cpu_pool_threads": shared_cpu_pool_threads, "initial": initial, "prepared": prepared, "rounds": rounds, "peaks": peaks, "closed": closed, "tags_verified": false, "quota_verified": false, "native_blob_connections_verified": false, "sampler_included_in_closed_tasks": true, "file_transfer_enabled": transfer_files, "thread_groups_after_idle": thread_groups()?, "thread_return_to_initial_verified": matches!(&idle_settled, Ok(Ok(_))), "tasks_without_sampler_return_to_initial_verified": closed_after_idle.runtime_tasks <= initial.runtime_tasks + 1, "closed_after_idle": closed_after_idle, "idle_settlement_ms": idle_ms });
     let evidence_path = std::env::var_os("UC_MANAGED_BLOB_RESOURCE_EVIDENCE")
         .map(PathBuf::from)
         .or_else(|| {
@@ -353,7 +417,7 @@ async fn managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_
         std::fs::write(path, serde_json::to_vec_pretty(&evidence)?)?;
     }
     outcome?;
-    assert_eq!(rounds.len(), 2);
+    assert_eq!(rounds.len(), if transfer_files { 2 } else { 0 });
     assert!(
         matches!(settled, Ok(Ok(_))),
         "关闭后进程FD或任务未回到原预算，详见计数工件"
@@ -362,10 +426,16 @@ async fn managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_
         peaks.peak_rss_kib.saturating_sub(prepared.peak_rss_kib) * 1024 < FILE_BYTES / 2,
         "大文件路径不能出现整文件内存增长"
     );
-    assert!(rounds[1].runtime_tasks <= rounds[0].runtime_tasks + 4);
-    assert!(rounds[1].fds <= rounds[0].fds + 4);
-    assert!(rounds[1].threads <= rounds[0].threads + 2);
-    assert!(rounds[1].rss_kib <= rounds[0].rss_kib + 64 * 1024);
+    assert!(
+        matches!(idle_settled, Ok(Ok(_))),
+        "空闲保留期限结束后线程或任务未回初值，详见计数工件"
+    );
+    if transfer_files {
+        assert!(rounds[1].runtime_tasks <= rounds[0].runtime_tasks + 4);
+        assert!(rounds[1].fds <= rounds[0].fds + 4);
+        assert!(rounds[1].threads <= rounds[0].threads + 2);
+        assert!(rounds[1].rss_kib <= rounds[0].rss_kib + 64 * 1024);
+    }
     assert!(files.max_returned.load(Ordering::SeqCst) <= MAX_CHUNK);
     Ok(())
 }

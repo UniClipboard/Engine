@@ -633,3 +633,36 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 用例加入既有host_adapter_contract，只有Linux＋dev-tools编译；既有workspace默认解析由connectivity host启用Engine dev-tools，locked metadata已实查features为default／dev-tools。默认workspace CI因此运行该非ignored用例；nextest明确独占、零重试及10分钟期限。沿既有UC_TEST_ARTIFACTS_DIR生成计数工件，保留显式绝对路径覆盖；本地最终运行只设置原CI工件变量，已验证自动创建目录和写入。没有新建替代测试框架、扩大Engine观测接口或增加测试专属生产阶段查询。
 
 最终同源检查：受管2×1GiB用例1项通过（81.319秒），其余324项未纳入过滤；locked metadata、workspace all-targets（2分13秒）、fmt、Rust style、repository preflight（含隐私与负例）、diff均退出0。人工审阅核对生成式Host有限块、文件核对独立期望、无整份ReadBlob、关闭后计数范围、未知项false标记、工件绝对路径及workspace默认特性。生产代码未改，未重复无关App全量回归。构建始终单scope串行、jobs=1、共享target／缓存，5GiB内存／4GiB swap上限保持；scope已inactive，确认无本轮活动编译，磁盘TMPDIR为空并回收。完整spec继续active，资源缺口及其他未完成矩阵不勾选通过。
+
+### 2026-10-23：关闭后线程诊断
+
+严格大文件107.729秒、无文件最小配对36.097秒、临时无GC最小配对36.254秒均实际失败；30秒主runtime仅余采样器，原GC下iroh类30线程、临时无GC下3线程。生产GC已恢复且node.rs diff为空。排除“大文件才触发”和“只需等待Tokio10秒即可全部回收”；未将尚未取得堆栈的剩余SDK线程写成已证实死锁。完整设计取舍见sdk-store-lifecycle-decision.md。默认原大文件门禁保留，严格线程回归明确known-gap跳过，整体SDK资源退出不计通过；等待固定SDK修订取舍时其他未完成矩阵仍可继续。
+
+
+### 2026-10-23：获准修订同一 SDK fork，推进完整 store 关闭
+
+用户明确批准同一 fork 生命周期修复，保持协议、ticket 和磁盘格式不变，不再等待该范围确认。新 checkout 位于相邻 `iroh-blobs-lifecycle`，分支 `fix/store-shutdown-runtime`，未修改共享 Cargo checkout。根 Cargo.toml 的本地 patch 仅用于验证，交付前必须删除并固定同一 fork 的新 git 修订。
+
+最小 public Store::shutdown 红测实际失败（2.024秒），GC=false 时返回成功后仍有10个SDK线程；真实2×1GiB与无文件原失败证据保留。SDK改为独立监督线程拥有私有runtime，GC睡眠只保留弱sender，关闭时abort并join GC，停止新命令、推进已接受导入与内部FinishImport、关闭并join metadata，再回收runtime及监督线程后回应原关闭请求。未改线上编码、ticket或存储表。
+
+首个最小回归通过（0.012秒），扩展导入屏障和落盘重开后通过（0.189秒）：GC开／关、通用Store引用仍持有、关闭等待原导入、输出读回均验证。即时/proc线程条目断言曾两次失败（1／0），调试器关闭断点仅见调用方Tokio工作线程、无SDK worker；统一沿原两秒实际退出观察，未取消线程断言。真实双Engine严格回归已取消ignored，当前仍在串行编译运行，不能提前记通过。SDK自有回归尚待单独运行，本地patch尚未交付。
+
+
+追加实证：新SDK真实双Engine严格退出仍失败（34.446秒），30秒后15线程／初值5，SDK命名前缀线程已为0。gdb先捕获全部runtime创建，再在关闭后的断点取得完整线程栈；多出的10个实际是rayon_core全局池空闲worker，继承了创建方Tokio线程的comm，不能按名称认定为Tokio runtime。证据sdk-runtime-python.log、sdk-idle-stacks.log及sdk-fixed-native-evidence。资源测试改为在基线前只初始化既有Rayon全局池，并同时保存before_shared_cpu_pool及池大小；不预建Engine／Store、不放宽严格退出断言，该校准后的Native尚待运行。
+
+SDK自有公开API回归通过（0.220秒），新增覆盖全部引用自然释放及加载失败的回收。SDK actor任务panic不再被记作成功关闭。SDK文件／GC原有库回归当前串行运行；暂态SDK Cargo.lock使用Engine锁与相同iroh修订，原锁保存在专用TMPDIR/sdk-original-Cargo.lock，SDK检查结束后必须恢复，不能提交这次验证用锁变化。首次独立SDK构建因默认大调试信息而主动终止143，改用与本仓一致的line-tables-only/unpacked后通过；无共享缓存清理或绕过。
+
+
+### 2026-10-23：正式SDK修订与跨runtime完整负责人
+
+同一fork先提交560d65d并删除根path patch；正式git依赖的SDK停止／故障、协议向量及Store生命周期3项通过（0.815秒），严格双Engine通过33.844秒，连续2×1GiB通过100.929秒。最后工件线程15／正式初值15（共享Rayon10），FD15／16，任务1为采样器，真实字节全部通过；quota、tag、实际blob连接仍为false。新SDK捕获export worker panic后关闭失败，旧可行性探针错误要求成功已改为沿原生命周期port断言Store失败并保留source；首个失败0.478秒保留，不算通过。
+
+最终审阅发现560d65d的确认任务仍依赖加载方runtime；跨runtime实际红测0.376秒SenderClosed。最新SDK修订152c42a9217f1377a998b271e0052311e8ada789由监督线程在私有runtime退出后独立送达原确认，不借用调用方runtime；失败回应也持有至私有runtime退出。跨runtime及其余公开API回归通过0.374秒，原文件／GC20项通过2.997秒。首次green的/proc读取遇到ESRCH，采样器统一按线程已退出处理ENOENT／ESRCH后重跑；没有放宽线程上限。SDK原Cargo.lock恢复且仓库clean，已推同一fork的fix/store-shutdown-runtime分支。Root候选已更新152c42a，正式最终验证仍需全部重跑，不能沿用560d65d的通过作为152c42a结果。
+
+
+最终152c42a正式证据：SDK停止／故障、rc.15协议向量、Store生命周期3项通过0.909秒；真实双Engine33.624秒、连续2×1GiB91.727秒通过。大文件峰值RSS443520KiB（约433MiB），32768次最多64KiB读取；最终FD15／初值16、线程15／初值15（已记录Rayon10预热）、任务1仅采样器，真实字节与线程归初值标记true。数据在sdk-final-native-evidence及sdk-final-large-evidence，旧实验分目录保留。实际连接、quota、tags仍false，不算完整资源AC。实测空闲结算29.5／28.39秒接近30秒窗口，为CI调度预留至45秒，资源上限及SDK独立2秒期限不变；重跑无文件同helper与根门禁，不重复已经在更严格30秒条件通过的大文件读回。
+
+
+交付前检查全部通过：45秒观察窗口的真实双Engine同helper回归1项33.796秒；locked metadata、workspace all-targets check（2分27秒）、fmt、Rust style、repository preflight（含1345站点隐私及负例、6项OpenMLS可执行验证）、diff均退出0。手工审阅核对SDK私有runtime独立所有权、成功及失败通道均在回收后结算、观察订阅与导入区分、临时覆盖已删除、同fork不可变修订及原SDK锁恢复、公共接口／协议／格式不变、Rayon预热与冷值、未知资源false和两份文件独立读回。完整spec、最终旧新／新新、生命周期、来源C及平台／设备矩阵保持未完成，不重复无关App全量回归。
+
+所有本轮构建／诊断scope已结束，核对生产node.rs与实验前备份一致、SDK原锁及仓库clean；SDK源码checkout已脱离共享Cargo对象缓存并通过连通性检查。检查专用TMPDIR无活动文件描述符后清理全部本轮失败实验残留，未清理共享target／编译缓存或用户其它planning目录。
