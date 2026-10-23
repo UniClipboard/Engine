@@ -95,7 +95,7 @@
 
 矩阵细则只在 spec §8–9 定义。以下逐项记录实际范围；候选资料矩阵不能替代尚未完成的资源、生命周期和交付head检查：
 
-* [x] 新新及两个冻结旧端，新版获取／提供双角色 × Direct／强制 Relay，真实资料和精确内容读回通过。本地工作区候选十组及实际blob协商已验证；交付head复核仍由后续门禁项跟踪。
+* [x] 新新及两个冻结旧端，新版获取／提供双角色 × Direct／强制 Relay，真实资料和精确内容读回通过。被测代码提交c7997a15、最终SDK修订152c42a的十组及实际blob协商已重新验证；其它交付head与线上检查仍由后续门禁项跟踪。
 * [ ] 两流共用连接的独立取消、离线通知阻塞、共享内容等待者、永久错误和网络恢复在真实 Engine 路径通过。
 * [ ] 至少 1GiB 流式内存、FD／任务／连接／额度与 tag／staging 恢复有前后证据，连续运行无持续增长。
 * [ ] 默认 CI 中包含本片必需网络与资源验收；扩展既有 tests/hosts/connectivity 和 testing harness，不另建替代框架。
@@ -1279,3 +1279,10 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 本切片交付前检查全部通过：45秒观察窗口的真实双Engine同helper回归1项33.796秒；locked metadata、workspace all-targets check（2分27秒）、fmt、Rust style、repository preflight（含1345站点隐私及负例、6项OpenMLS可执行验证）、diff均退出0。手工审阅核对SDK私有runtime独立所有权、成功及失败通道均在回收后结算、观察订阅与导入区分、临时覆盖已删除、同fork不可变修订及原SDK锁恢复、公共接口／协议／格式不变、Rayon预热与冷值、未知资源false和两份文件独立读回。完整spec、最终旧新／新新、生命周期、来源C及平台／设备矩阵保持未完成，不重复无关App全量回归。
 
 所有本轮构建／诊断scope已结束，核对生产node.rs与实验前备份一致、SDK原锁及仓库clean；SDK源码checkout已脱离共享Cargo对象缓存并通过连通性检查。检查专用TMPDIR无活动文件描述符后清理全部本轮失败实验残留，未清理共享target／编译缓存或用户其它planning目录。
+
+
+### 2026-10-23：最终SDK修订的旧新／新新完整文件互通
+
+代码提交c7997a15660078d31b3f2fd2f19b91518f17d78c、SDK152c42a，current host重新构建4分22秒后验证：开工main a461b894与rc.15 f6f305d9 × Direct／强制Relay × 升级两侧8组，加当前版本双向Direct／Relay2组，共10／10通过。每组旧旧正常配对／重开、独立原资料复制、身份／传输身份／成员／历史保留、原接收文件读回和升级后双向文件精确字节、实际blob握手及预期通道均通过；新新两组使用同一当前宿主重开资料，不冒充旧版升级。全部原始工件cleaned与plaintext_clean为true、failed为false；固定旧库未打补丁，二进制摘要与先前冻结值一致。
+
+私有完整工件保存在target/blob-connectivity-evidence/final-c7997a15-sdk-152c42a-2026-10-23；可提交汇总sdk-final-compat-summary.json只保留固定分类、计数、时间及代码／工件摘要，不含运行身份、地址或路径。逐项脚本断言十组使用固定二进制、相同被测head及源码树摘要、空工作差异。该矩阵只证明独立文件真实互通与旧资料重开；实际连接／quota／tag／staging完整资源、生命周期、来源C、首次Staging前强杀、完整回归及平台CI仍未完成。

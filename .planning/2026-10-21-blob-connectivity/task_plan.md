@@ -19,8 +19,8 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-SDK关闭修订已固定同一fork 152c42a：SDK自有生命周期（含跨runtime）及20项文件／GC、正式停止／故障／协议／Store三项、真实双Engine和2×1GiB已通过。本仓门禁全部通过（同helper严格关闭33.796秒、workspace全目标2分27秒、metadata／fmt／style／repository／diff），准备提交。SDK独立线程期限仍2秒；Engine框架退出实测28／29秒，采样窗口加调度余量至45秒，线程／FD／任务资源上限不变，重跑同一helper的无文件严格回归；大文件已在更严格30秒窗口通过，不重复无关数据传输。
-接下来完整spec仍需：实际blob连接／quota／tag／staging资源计数，完整锁定／暂停／切换／离开／撤销／删除／provisional／重启生命周期，来源B与ticket提供端C不同，首次Staging日志前强杀恢复，最终旧新／新新兼容、既有六片、平台CI与设备矩阵及观测验收。未执行不勾选通过，原目录与提交边界证明保留。
+SDK关闭修订已固定同一fork 152c42a：SDK自有生命周期（含跨runtime）及20项文件／GC、正式停止／故障／协议／Store三项、真实双Engine和2×1GiB已通过。已提交c7997a15；本仓门禁全部通过（严格关闭33.796秒、workspace全目标2分27秒、metadata／fmt／style／repository／diff）。同一代码／SDK的最终旧新8组及新新2组已重新验证10／10，全部实际blob握手、精确文件与资料重开、清理／明文扫描通过。SDK独立线程期限仍2秒；Engine框架退出实测28／29秒，采样窗口加调度余量至45秒，线程／FD／任务资源上限不变，重跑同一helper的无文件严格回归；大文件已在更严格30秒窗口通过，不重复无关数据传输。
+接下来完整spec仍需：实际blob连接／quota／tag／staging资源计数，完整锁定／暂停／切换／离开／撤销／删除／provisional／重启生命周期，来源B与ticket提供端C不同，首次Staging日志前强杀恢复，最终交付head复核、既有六片、平台CI与设备矩阵及观测验收。未执行不勾选通过，原目录与提交边界证明保留。
 
 ## 先前切片记录
 业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。保存后物理清理已提交01783244（App25／Native5及根门禁）。当前未提交获取失败／取消清理恢复：fetch-cleanup-red实际Facade保护0／期望1（0.007秒）；恢复意图区分FileCommit、FetchFailure、FetchCancellation，只有FileCommit写FileFailed，其余按原网络事实和实际journaled完成NoEntry；取消通过原CAS争取权威。原本只检查错误的mock测试由实际Facade／资源／文件系统／取消源检查替代。首轮25通过／2失败：一为旧错误类型断言，一为新测试错要求关闭吞掉Store；依据原supervision的错误保留合同，测试现明确断言Store和StorageFull仍存在，不改生产关闭。新增Native第二项实际导出失败＋目录清理拒绝，用原结果事件确认失败已返回，再验证100ms关闭、旧成功文件、原Failed网络事实及重开日志。

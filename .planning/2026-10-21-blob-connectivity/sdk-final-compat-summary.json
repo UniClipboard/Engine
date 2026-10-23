@@ -1,0 +1,292 @@
+{
+  "head": "c7997a15660078d31b3f2fd2f19b91518f17d78c",
+  "sdk_revision": "152c42a9217f1377a998b271e0052311e8ada789",
+  "working_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "binaries": {
+    "current": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b",
+    "frozen_main": "0f4aa2e58e72efadc65279a2b43db233200b6dc178d970dca4724b7661524340",
+    "rc15": "34a071326dad9401646a1316fcb655f63b8c4f9fa9644037a6cc09ec9529bfd3",
+    "relay": "bfd9483c4791ae431ea793b976f9e1fd7f61b34dd70c5d6e721846679acc5371"
+  },
+  "scope": "旧新8组及新新2组；真实独立文件双角色互通与资料重开，不替代完整生命周期或资源计数验收",
+  "cases": [
+    {
+      "case": "main-direct-side0",
+      "passed": true,
+      "mode": "direct",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "35b158472164344e9fab16c422ec1ac11906db9e5b3dc6f5e170054f3edfa1ad",
+      "timings_ms": {
+        "prepare_ms": 1311,
+        "scenario_ms": 7157,
+        "cleanup_ms": 737,
+        "total_ms": 9205
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "0f4aa2e58e72efadc65279a2b43db233200b6dc178d970dca4724b7661524340"
+        }
+      ]
+    },
+    {
+      "case": "main-direct-side1",
+      "passed": true,
+      "mode": "direct",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "2212d39bb06d8f5a0bd53e0d1895f6c789a7162bfcffa4e241d0aab91a05ba92",
+      "timings_ms": {
+        "prepare_ms": 1417,
+        "scenario_ms": 9668,
+        "cleanup_ms": 756,
+        "total_ms": 11842
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "0f4aa2e58e72efadc65279a2b43db233200b6dc178d970dca4724b7661524340"
+        }
+      ]
+    },
+    {
+      "case": "main-relay-side0",
+      "passed": true,
+      "mode": "relay",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "c15f153ef9ad593fddf4e5a42cc268f4aa7fe4b47d06b05f1b9e156ec875b5a1",
+      "timings_ms": {
+        "prepare_ms": 4480,
+        "scenario_ms": 15798,
+        "cleanup_ms": 796,
+        "total_ms": 21075
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "0f4aa2e58e72efadc65279a2b43db233200b6dc178d970dca4724b7661524340"
+        },
+        {
+          "sha256": "bfd9483c4791ae431ea793b976f9e1fd7f61b34dd70c5d6e721846679acc5371"
+        }
+      ]
+    },
+    {
+      "case": "main-relay-side1",
+      "passed": true,
+      "mode": "relay",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "fbecae572991d481a5f0e5a67b4aa29b05b07b55a7126fb919cc0369676635a8",
+      "timings_ms": {
+        "prepare_ms": 4549,
+        "scenario_ms": 15313,
+        "cleanup_ms": 822,
+        "total_ms": 20684
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "0f4aa2e58e72efadc65279a2b43db233200b6dc178d970dca4724b7661524340"
+        },
+        {
+          "sha256": "bfd9483c4791ae431ea793b976f9e1fd7f61b34dd70c5d6e721846679acc5371"
+        }
+      ]
+    },
+    {
+      "case": "rc15-direct-side0",
+      "passed": true,
+      "mode": "direct",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "98206116eba105a102c508dc2837ec0d46670ac2afaf416ff1268eddf03b78a5",
+      "timings_ms": {
+        "prepare_ms": 818,
+        "scenario_ms": 20967,
+        "cleanup_ms": 760,
+        "total_ms": 22546
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "34a071326dad9401646a1316fcb655f63b8c4f9fa9644037a6cc09ec9529bfd3"
+        }
+      ]
+    },
+    {
+      "case": "rc15-direct-side1",
+      "passed": true,
+      "mode": "direct",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "929f8bd7baeee68d895d8d83644870063de4bcaae316791a814715e4a5d12686",
+      "timings_ms": {
+        "prepare_ms": 863,
+        "scenario_ms": 15438,
+        "cleanup_ms": 745,
+        "total_ms": 17046
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "34a071326dad9401646a1316fcb655f63b8c4f9fa9644037a6cc09ec9529bfd3"
+        }
+      ]
+    },
+    {
+      "case": "rc15-relay-side0",
+      "passed": true,
+      "mode": "relay",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "456ac9d037e027e76e771b2b269c4013e63d8b2a2ddbafb430159f6a90c9d0e6",
+      "timings_ms": {
+        "prepare_ms": 4072,
+        "scenario_ms": 31279,
+        "cleanup_ms": 856,
+        "total_ms": 36206
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "34a071326dad9401646a1316fcb655f63b8c4f9fa9644037a6cc09ec9529bfd3"
+        },
+        {
+          "sha256": "bfd9483c4791ae431ea793b976f9e1fd7f61b34dd70c5d6e721846679acc5371"
+        }
+      ]
+    },
+    {
+      "case": "rc15-relay-side1",
+      "passed": true,
+      "mode": "relay",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "9cbc9ee4cc833491f42215bd1dad4983cf08bb7ce050b3427a906d15e535e198",
+      "timings_ms": {
+        "prepare_ms": 3890,
+        "scenario_ms": 31668,
+        "cleanup_ms": 740,
+        "total_ms": 36298
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "34a071326dad9401646a1316fcb655f63b8c4f9fa9644037a6cc09ec9529bfd3"
+        },
+        {
+          "sha256": "bfd9483c4791ae431ea793b976f9e1fd7f61b34dd70c5d6e721846679acc5371"
+        }
+      ]
+    },
+    {
+      "case": "current-direct",
+      "passed": true,
+      "mode": "direct",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "06f87498ce00c2650be4096bc9059971ae8407be919571d965fe78fd433d988e",
+      "timings_ms": {
+        "prepare_ms": 1588,
+        "scenario_ms": 13131,
+        "cleanup_ms": 704,
+        "total_ms": 15423
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        }
+      ]
+    },
+    {
+      "case": "current-relay",
+      "passed": true,
+      "mode": "relay",
+      "exact_bidirectional_files": true,
+      "original_received_files_readable": true,
+      "identity_transport_members_history_retained": true,
+      "actual_blob_handshake_observed": true,
+      "cleaned": true,
+      "plaintext_clean": true,
+      "evidence_sha256": "34def81b834a9937599cc3ad2e5a2d6ef6d7cdfdc3e668cfb186c5bcdab99325",
+      "timings_ms": {
+        "prepare_ms": 4707,
+        "scenario_ms": 15867,
+        "cleanup_ms": 863,
+        "total_ms": 21437
+      },
+      "binaries": [
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "6d33e21ddd6c3bdf873ad42368bae168cf661881d47153fa34269449cd1d555b"
+        },
+        {
+          "sha256": "bfd9483c4791ae431ea793b976f9e1fd7f61b34dd70c5d6e721846679acc5371"
+        }
+      ]
+    }
+  ],
+  "source_tree_sha256": "77e116e117042189df09ab3265e273de99dc4668e24830ba19cb6ecefdffc87b",
+  "passed": 10,
+  "failed": 0
+}
