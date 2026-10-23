@@ -22,7 +22,8 @@ async-trait = "0.1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+# RUSTSEC-2026-0386：稳定入口要求已修复版本，避免宿主继续锁定旧 Tokio。
+tokio = { version = "1.53.3", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7"
 tracing = "0.1"
 thiserror = "2.0"
@@ -54,7 +55,7 @@ rayon = "1"
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 toml = "1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

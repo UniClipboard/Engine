@@ -127,6 +127,16 @@ Application [资源查询](../../../crates/uc-application/src/clipboard/history/
 查询不重试缺失、不增加持久格式；稳定 Engine 操作和结果保持，Engine 只装配该完整能力。
 此局部红绿证明不替代最终真实 Engine 场景和完整交付门禁。
 
+## Tokio 安全下限
+
+2026-10-23 发布的 [RUSTSEC-2026-0386](https://rustsec.org/advisories/RUSTSEC-2026-0386.html)
+将旧 Tokio 的 AsyncFd 构造器列为 I/O safety 问题，当前 CI 的 `cargo audit --deny unsound` 因锁定
+1.52.3 阻断。[Tokio 1.53.3](https://github.com/tokio-rs/tokio/releases/tag/tokio-1.53.3)
+属于公告列出的修复范围；本片将锁文件升级到该最小向前修复版本，并在稳定 `uc-engine` 入口声明
+相同最低版本，避免宿主继续解析旧运行时。不新增审计忽略或降低门禁，其他锁定包与 SDK 修订保持。
+本仓及受管第三方源码没有直接使用这些 AsyncFd 构造器；运行时升级后的网络、取消、计时与资源验收
+仍须完整重跑。升级不作为旧 SDK 暂停屏障偶发超时的已确认根因修复。
+
 ## 真实互通与可重复验证
 
 - [协议向量](../../../crates/uc-infra-p2p/tests/blob_protocol_vectors.rs)对照冻结 rc.15 的 ticket、请求及原始／合法空响应。
