@@ -29,6 +29,10 @@ assert len(reports)==6, 'all six independent lifecycle reports are required'
 assert all(report['resource_settlement_verified'] is True for report in reports)
 assert all(report['fd_return_to_initial_verified'] and report['thread_return_to_initial_verified']
            and report['runtime_tasks_return_to_initial_verified'] for report in reports)
+assert all(report['actual_native_blob_handles_observed'] and report['native_blob_handles_returned_to_initial'] for report in reports)
+tags=[json.loads(path.read_text()) for path in root.glob('sdk-tags-*.json')]
+assert len(tags)>=12, 'SDK store shutdown observations missing'
+assert all(report['store_open_during_count'] and report['sdk_temp_tags']==0 for report in tags)
 schedulers=[]
 for path in root.glob('download-scheduler-*.jsonl'):
  records=[json.loads(line) for line in path.read_text().splitlines()]
@@ -42,7 +46,8 @@ for path in root.glob('download-scheduler-*.jsonl'):
 assert any(r['peak_active']==4 and r['peak_peer_active']==2 for r in schedulers), 'actual provider C quota occupancy missing'
 (root/'summary.json').write_text(json.dumps({'completed_lifecycle_cases':len(reports),
  'fd_threads_and_runtime_tasks_verified':True,'download_quota_counters_verified':True,
- 'sdk_tags_and_native_connection_counts_directly_observed':False,
+ 'sdk_tags_and_native_connection_counts_directly_observed':True,
+ 'sdk_store_tag_observations':tags,
  'download_schedulers':schedulers,'cases':reports},indent=2)+'\n')
-print('six native lifecycle resources and actual download quota counters passed')
+print('six native lifecycle resources, SDK tags and native handles, and actual download quota counters passed')
 PY

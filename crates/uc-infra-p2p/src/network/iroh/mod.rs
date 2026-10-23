@@ -114,3 +114,6 @@ pub fn product_alpns() -> Vec<&'static [u8]> {
     ]
 }
 pub use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
+
+#[cfg(feature = "test-util")]
+pub mod test_support;

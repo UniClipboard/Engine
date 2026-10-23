@@ -851,3 +851,9 @@ Reset第二轮已通过未归还前不完成、真实Space身份改变、原atte
 资源切片已提交214f9ef1，当前无Cargo活动。下一最小资源证明为Application原下载调度器的真实4／2占用及归还：只在既有test-support且显式资源证据env时，由私有scheduler测试模块在原锁内读取真实slots／running／pending计数，记录到该测试目录。调用方仍只执行完整Engine操作，不增加任何facade／port／结果／Engine阶段查询，也不把业务标识、peer key或内容写入工件；生产默认编译不含此模块。先用原三端C额度Native证明峰值4／每端2及最后slots0，再复用大文件与生命周期路径；正常功能与观测词表／协议／持久格式不变，重试／恢复仍归原调度owner。
 
 实际下载额度最小切片通过：调度8项0.100秒全通过；原三端C提供端Native9.583秒通过，真实5个scheduler实例中2个实际工作。直接计数主实例峰值active4／peer_active_max2／queued1，最终closed=true、event=settled、active=queued=slots=0；另一实际工作实例峰值1并归零。summary在quota-counter-evidence-1/summary.json，不把该证据误称提供端服务池或SDK tag已验证。原完整workspace C额度失败仍未复现、未宣称根因已修。默认PR资源入口现包含6个生命周期＋原C额度场景，并独立校验实际private计数；零重试与业务期限保持。scope已inactive、exec63101退出0。
+
+下载额度已提交a8684f3b。下一SDK资源最小证明：仅test-util＋显式资源目录时，Infra原生连接适配器保存SDK公开weak_handle，不持有native强引用、不创建采样任务；Engine的测试私有/proc采样同时读取Infra测试支持的技术句柄总数／存活数，不返回连接或业务对象，不新增稳定Engine／Application／Core查询。原SDK shutdown完整能力在所有工作结算后、store关闭前直接list_temp_tags计数并保存纯数字；只在测试功能存在，不改变协议、回执或生产默认路径。先复用原六生命周期＋C额度场景确认真实已注册句柄并归零、store仍打开时tag为0，再补2×1GiB同一路径最终证明。
+
+- SDK直接资源最小切片通过：真实Engine锁定场景33.833s，原生端侧弱句柄登记2／空闲存活0，3次store仍打开时临时tag均0，实际使用的下载scheduler终态settled／slots=active=queued=0。scope uni-blob-sdk-resources已inactive；原始JUnit与计数保存在sdk-resource-evidence-1。现在把直接SDK断言接入原默认资源脚本，独占串行运行六生命周期＋三端配额七项，不修改源码直至结束。
+
+- SDK资源默认脚本完整七项210.976s通过，六生命周期均FD15／线程17／runtime任务0，真实native弱句柄最终0；24次SDK actor仍打开时temp tags全0，所有实际使用下载调度器均settled且slots／active／queued=0，三端场景实际达到4／2。原始完整JUnit、txt和sdk-lifecycle-evidence-1聚合报告保留；scope已结束。下一步复用相同test-util计数补Engine连续2×1GiB，没有扩展生产API或流程步骤。

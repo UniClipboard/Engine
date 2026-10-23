@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
+use uc_infra_p2p::network::iroh::test_support::blob_native_handle_counts;
 
 static REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -14,6 +15,8 @@ pub(in super::super) struct ReceiveResourceBaseline {
     closed_before_case_drop: Option<Resources>,
     directory: PathBuf,
     case: String,
+    native_handles_initial: (usize, usize),
+    native_handles_before_case_drop: Option<(usize, usize)>,
 }
 
 impl ReceiveResourceBaseline {
@@ -26,6 +29,8 @@ impl ReceiveResourceBaseline {
             before_shared_cpu_pool,
             initial: Resources::read().expect("读取原生资源基线"),
             closed_before_case_drop: None,
+            native_handles_initial: blob_native_handle_counts(),
+            native_handles_before_case_drop: None,
             directory: PathBuf::from(directory),
             case: std::thread::current()
                 .name()
@@ -35,6 +40,7 @@ impl ReceiveResourceBaseline {
     }
 
     pub(in super::super) fn record_before_case_drop(&mut self) {
+        self.native_handles_before_case_drop = Some(blob_native_handle_counts());
         self.closed_before_case_drop = Some(Resources::read().expect("读取SDK关闭后的资源"));
     }
 
@@ -47,7 +53,8 @@ impl ReceiveResourceBaseline {
             after_idle = Resources::read().expect("读取原生资源空闲收尾");
             let at_baseline = after_idle.fds <= self.initial.fds
                 && after_idle.threads <= self.initial.threads
-                && after_idle.runtime_tasks <= self.initial.runtime_tasks;
+                && after_idle.runtime_tasks <= self.initial.runtime_tasks
+                && blob_native_handle_counts().1 == self.native_handles_initial.1;
             if at_baseline || started.elapsed() >= Duration::from_secs(45) {
                 settled = at_baseline;
                 break;
@@ -69,7 +76,12 @@ impl ReceiveResourceBaseline {
             "resource_settlement_verified": settled,
             "tag_counts_observed": false,
             "quota_counts_observed": false,
-            "native_blob_connection_counts_observed": false,
+            "native_blob_connection_counts_observed": true,
+            "native_handles_initial": self.native_handles_initial,
+            "native_handles_before_case_drop": self.native_handles_before_case_drop,
+            "native_handles_after_idle": blob_native_handle_counts(),
+            "actual_native_blob_handles_observed": blob_native_handle_counts().0 > self.native_handles_initial.0,
+            "native_blob_handles_returned_to_initial": blob_native_handle_counts().1 == self.native_handles_initial.1,
         });
         std::fs::create_dir_all(&self.directory).expect("创建资源证据目录");
         let sequence = REPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -82,6 +94,10 @@ impl ReceiveResourceBaseline {
             serde_json::to_vec_pretty(&report).expect("编码资源计数"),
         )
         .expect("保存资源计数");
+        assert!(
+            blob_native_handle_counts().0 > self.native_handles_initial.0,
+            "必须实际观察到原生blob句柄，不能把空计数当验收"
+        );
         assert!(
             settled,
             "实际生命周期结束后FD、线程与任务必须回到基线；原始计数已保留"

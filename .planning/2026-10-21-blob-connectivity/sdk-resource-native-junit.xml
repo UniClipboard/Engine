@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="1" skipped="0" failures="0" errors="0" uuid="fdab5bbd-7c11-4b16-842e-ebb65c4a4ad1" timestamp="2026-10-23T15:47:36.776+08:00" time="33.852">
+    <testsuite name="uc-engine" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::real_engine_lock_waits_for_active_retry_export_and_preserves_saved_files" classname="uc-engine" timestamp="2026-10-23T15:47:36.794+08:00" time="33.833"/>
+    </testsuite>
+</testsuites>

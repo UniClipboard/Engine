@@ -1,0 +1,17 @@
+{
+  "actual_engine_kernel_counts_returned": true,
+  "native_blob_handle_counts": [
+    2,
+    0
+  ],
+  "native_blob_handles_released": true,
+  "sdk_tag_counts_before_store_shutdown": [
+    0,
+    0,
+    0
+  ],
+  "actual_download_quotas_returned_to_zero": true,
+  "used_schedulers": [
+    "download-scheduler-73006-3.jsonl"
+  ]
+}

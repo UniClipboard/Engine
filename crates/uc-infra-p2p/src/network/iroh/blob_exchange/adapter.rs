@@ -1,3 +1,5 @@
+#[cfg(feature = "test-util")]
+use super::super::test_support::record_blob_tags_before_shutdown;
 use super::{
     failure::{self, combine},
     io, provide, receive, without_request_span,
@@ -108,6 +110,8 @@ impl BlobExchangePort for IrohBlobExchangeAdapter {
 impl BlobStoreLifecyclePort for IrohBlobExchangeAdapter {
     async fn shutdown(&self) -> Result<(), BlobExchangeError> {
         without_request_span(|| async {
+            #[cfg(feature = "test-util")]
+            record_blob_tags_before_shutdown(&self.store).await;
             self.store
                 .shutdown()
                 .await

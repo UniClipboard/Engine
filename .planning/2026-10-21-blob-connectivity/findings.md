@@ -432,3 +432,7 @@
 已纠正仅看App Rebuild的静态推断：完整稳定Engine ResetSpace先走SessionSupervisor.reset_space，封operations、等待/关闭旧session、取消原file transfers，再调用App完整数据重建并安装新session；交接期间facade缺失使readiness查询按1103不可用。真实本机离组6.505秒通过，Reset当前关键生命周期／产物断言也已通过，只在新Space重新配对态使用了不适用的device-group选择查询，现按既有Reset验收改用ListDevices。未修改生产行为或增加接口；不将测试合同错误称为生产缺口。
 
 生命周期资源首轮实际中间结果：锁定34.149秒、源撤销33.175秒、本机离组33.227秒通过；三份原始报告均initial fds15/threads17/tasks0，closed_after_idle同为15/17/0，实际idle26.230／28.083／27.493秒。说明只看动作返回时的线程即时计数会误判原共享库空闲回收；专门外层90秒包含观察，业务取消5秒等内部合同未改。剩余三场景仍在同一串行scope。
+
+下载真实计数已补：原三端C场景9.583秒通过，5个scheduler实例、2个实际工作，主实例peak active4／per-provider2／queued1，两个实际工作实例最终closed、settled且slots/active/queued0。原SDK资源证据仅Infra层，现开始真实Engine直接计数：IrohPeerConnection构造路径仅测试显式模式注册weak_handle，技术getter只返回registered/alive两个整数；SDK已有BlobStoreLifecyclePort.shutdown原能力在store仍开时数temp tags，固定数字工件不含hash／tag名。新test-util模块不创建后台采样任务，不返回连接，Engine只在私有测试采样器组合外部/proc与技术弱句柄数。先锁定单项实测（exec17798），不据代码假定所有资源已绿。
+
+- SDK技术资源证据只在test-util＋显式资源目录开启：原生计数保存WeakConnectionHandle，不持强引用、不启动任务；原store shutdown前查询真实temp tags。锁定场景实际弱句柄2→0、tag3次0，不把端侧句柄数当作跨双端去重的逻辑连接数。完整Engine资源与下载quota分别使用现有真实计数，聚合器要求各自原始证据。
