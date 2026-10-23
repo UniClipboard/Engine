@@ -358,3 +358,10 @@
 真实Engine目录URI复制＋V3／SDK／SQLite触发器已复现：成员仍Transferring时，父目录报告Failed（6.770秒）。表示和目录现共用私有原终态等待，先保留已知业务失败，不完成原资源交接，原成员完成后再继续目录失败结算。Core聚合保留非终态目录的已知失败原因，仍不把它当父终态。Core 3项、实际Native目录及表示2项通过（25.138秒）；扩大门禁正在进行。成功staging清理、open/probe失败及其他撤回入口仍未完成。
 
 后续目录Native测试入口已定位：SendFilesInput只有HostFileHandle列表，当前receive_retry::Files仅支持数值句柄，不能把目录路径直接传给它。capture/usecase的build_entry_file_set支持inline text/uri-list并通过实际文件系统展开目录；应使用测试内可变HostClipboard，在配对和SQL故障安装完成后提交真实目录URI，再走ObserveClipboardChange(dispatch=true)，避免启动时提前同步。ReceiveItemRole只有Representation／File，目录成员仍是file，不存在directory_member角色；触发器应针对本次目录接收的真实file行。不得为了测试新增公开Engine步骤或发送原始信封操作。
+
+
+### 提供端 C 撤销后缓存获取缺少当前权威检查（2026-10-23）
+
+真实三端 B 消息／C ticket 已完成 A 的原始文件精确读回。撤销 C 后 A 仍确认 B Active；缓存获取经过完整原动作后得到 Integrity 而非准入拒绝，说明原始文件进入了内存解密。源码确认 IrohConnectionAdmission::Attempt::check_current 只看冻结撤销 epoch；新请求冻结的是撤销后的新 epoch，未建立连接时没有 Grant 的成员权威检查。BlobDownloadResources 对缓存前后调用 request.validate，但此检查不能拒绝新的已撤销成员请求。须仅收紧 Blob 的既有准入检查到 owner.check，保持其他协议策略。先改为真实原始文件 fetch_to_path 取得成功越权的直接红测，再改生产实现。
+
+此前测试装配失败不算产品红测：StartupProgressInput 需 clone；终态不能从仅非终态列表查询，应从实际 IncomingPending 中取得 entry_id 并按项查询；原始文件必须用 publish_blob_path，内存 publish_blob 会加密。B 的撤销通知30秒未收敛，单列为未通过，不作为 C 获取授权的前提。

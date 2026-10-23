@@ -358,7 +358,7 @@ impl Respond for ResolveEnginePairingTicket {
 }
 
 #[cfg(feature = "dev-tools")]
-async fn mount_engine_rendezvous(server: &MockServer) {
+pub(crate) async fn mount_engine_rendezvous(server: &MockServer) {
     const INVITATION_CODE: &str = "E2E0-A001";
     const EXPIRES_AT_MS: i64 = 1_900_000_000_000;
 

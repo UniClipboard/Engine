@@ -109,7 +109,11 @@ struct Attempt {
 #[async_trait]
 impl AdmissionAttempt for Attempt {
     async fn check_current(&self) -> Result<(), ConnectivityError> {
-        // 请求围栏只验证自身快照；当前成员权威读取与整体关闭由连接 grant 统一负责。
+        // Blob 可直接交付本机缓存，没有连接 grant；请求本身也须核对当前成员权威。
+        if self.owner.protocol == InboundPeerProtocol::Blob {
+            return self.owner.check(self.peer, self.epoch).await;
+        }
+        // 其他协议仍由请求围栏验证快照，连接 grant 读取当前成员权威并负责整体关闭。
         if self.owner.connections.current(&self.peer, self.epoch) {
             Ok(())
         } else {

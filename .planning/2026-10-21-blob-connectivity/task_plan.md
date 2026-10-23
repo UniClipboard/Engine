@@ -19,8 +19,9 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。阶段 1／2 推进：生产获取和提供端已接线，输出／解密及引用／tag 受监督；完整条目结算、部分失败、稳定重试与薄绑定继续。
 
 ## Next Step
-SDK关闭修订已固定同一fork 152c42a：SDK自有生命周期（含跨runtime）及20项文件／GC、正式停止／故障／协议／Store三项、真实双Engine和2×1GiB已通过。已提交c7997a15；本仓门禁全部通过（严格关闭33.796秒、workspace全目标2分27秒、metadata／fmt／style／repository／diff）。同一代码／SDK的最终旧新8组及新新2组已重新验证10／10，全部实际blob握手、精确文件与资料重开、清理／明文扫描通过。SDK独立线程期限仍2秒；Engine框架退出实测28／29秒，采样窗口加调度余量至45秒，线程／FD／任务资源上限不变，重跑同一helper的无文件严格回归；大文件已在更严格30秒窗口通过，不重复无关数据传输。
-接下来完整spec仍需：实际blob连接／quota／tag／staging资源计数，完整锁定／暂停／切换／离开／撤销／删除／provisional／重启生命周期，来源B与ticket提供端C不同，首次Staging日志前强杀恢复，最终交付head复核、既有六片、平台CI与设备矩阵及观测验收。未执行不勾选通过，原目录与提交边界证明保留。
+第三方 ticket 的缓存授权已修复并通过真实三端回归：B 认证消息、C 提供实际文件；A 撤销 C 后保留 B，缓存与 B 后续 C 引用均拒绝，已保存文件保留。P2P 全库326通过／3跳过、固定SDK三合同、真实Engine接收重试24项及根门禁通过。测试失败消息已收紧；CI nextest配置下13.965秒通过，最终metadata／workspace全目标46.569秒／fmt／style／repository／diff均退出0。该授权切片可以提交。
+下一独立切片是实际提供端 C 的下载额度归属：在同一 A 接收进程暂停两项 C 的真实本地导出，其中一项来自 B 的实际消息、另一项由完整 fetch-to-path 动作直接获取同一 C；证明第三项 C 仍排队，而另一合法提供端 B 可继续；保持现有4／2预算与原许可至业务交接。
+其余完整 spec 仍需实际连接／quota／tag／staging资源、完整生命周期、首次Staging前强杀、最终交付head兼容、既有六片／完整回归、平台CI／设备及观测验收。原c7997a15／SDK152c42a的10组兼容证据保留；本次新增生产授权修复后不能称其为当前最终head的互通证明，须在最终代码稳定后复核。
 
 ## 先前切片记录
 业务计数切片完成同源全部门禁：五crate库2244通过／9跳过（282.213秒），metadata812包、workspace全目标check3m41s、fmt／style／repository／1350隐私／diff通过；34 App、4 Native及33真实SQLite／AEAD契约通过。已提交b3cacddf。保存失败＋物理清理拒绝已复现原保护0／期望1及原source覆盖；同一ReceiveAction已接线清理恢复，25 App回归通过（25.148秒），包括原路径复用保护。保存后物理清理已提交01783244（App25／Native5及根门禁）。当前未提交获取失败／取消清理恢复：fetch-cleanup-red实际Facade保护0／期望1（0.007秒）；恢复意图区分FileCommit、FetchFailure、FetchCancellation，只有FileCommit写FileFailed，其余按原网络事实和实际journaled完成NoEntry；取消通过原CAS争取权威。原本只检查错误的mock测试由实际Facade／资源／文件系统／取消源检查替代。首轮25通过／2失败：一为旧错误类型断言，一为新测试错要求关闭吞掉Store；依据原supervision的错误保留合同，测试现明确断言Store和StorageFull仍存在，不改生产关闭。新增Native第二项实际导出失败＋目录清理拒绝，用原结果事件确认失败已返回，再验证100ms关闭、旧成功文件、原Failed网络事实及重开日志。
@@ -146,3 +147,5 @@ FileCleaned已提交da77bea0（Core／App30、Profile42、Native14及根门禁�
 
 
 - 最新SDK生命周期切片：用户已批准同一fork兼容修订。最小Store关闭及原导入屏障回归通过，私有runtime由SDK监督器完整回收后才回应。当前运行真实双Engine严格关闭；后续SDK自有回归、真实2×1GiB、固定新git修订、阶段0／协议／最终兼容及资源矩阵均不能跳过。本地相邻checkout与根path patch是暂态验证，交付前删除path patch；保持原共享target、串行scope与内存上限。
+
+- 当前切片：真实三端完整 facade 动作验证发送者 B 与提供端 C 分离，生产装配不增加公开阶段或上下文构造；成功文件读回、撤销 C 后新内容失败及缓存旧 ticket 拒绝。先授权，后额度；完整 spec 保持 active。

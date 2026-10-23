@@ -1286,3 +1286,12 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 代码提交c7997a15660078d31b3f2fd2f19b91518f17d78c、SDK152c42a，current host重新构建4分22秒后验证：开工main a461b894与rc.15 f6f305d9 × Direct／强制Relay × 升级两侧8组，加当前版本双向Direct／Relay2组，共10／10通过。每组旧旧正常配对／重开、独立原资料复制、身份／传输身份／成员／历史保留、原接收文件读回和升级后双向文件精确字节、实际blob握手及预期通道均通过；新新两组使用同一当前宿主重开资料，不冒充旧版升级。全部原始工件cleaned与plaintext_clean为true、failed为false；固定旧库未打补丁，二进制摘要与先前冻结值一致。
 
 私有完整工件保存在target/blob-connectivity-evidence/final-c7997a15-sdk-152c42a-2026-10-23；可提交汇总sdk-final-compat-summary.json只保留固定分类、计数、时间及代码／工件摘要，不含运行身份、地址或路径。逐项脚本断言十组使用固定二进制、相同被测head及源码树摘要、空工作差异。该矩阵只证明独立文件真实互通与旧资料重开；实际连接／quota／tag／staging完整资源、生命周期、来源C、首次Staging前强杀、完整回归及平台CI仍未完成。
+
+
+### 消息作者与 ticket 提供端不同的原生验收切片
+
+完整接收、授权及资源结算仍由原 Application transfer 负责。使用既有完整 AppFacade 发布／带引用分发动作及 EngineRuntime 查询／成员操作，在生产装配的三个 runtime 中让 B 的真实认证消息携带 C 发布的 ticket；不新增 Engine 信封注入、阶段查询或构造旁路。先证明 A 正常读回 C 的文件，再撤销 C、保留 B，验证 B 的后续消息不能授予 C 权限，本地已缓存的旧 ticket 也不能绕过当前授权。启动、SQLite、Uni、SDK 与关闭均使用原生产对象图；测试只复用既有 rendezvous HTTP fixture。此切片先验证授权，额度归属及全部生命周期矩阵仍需独立证据。
+
+该切片已定位缓存命中授权缺口：既有 request.validate 调用的 blob AdmissionAttempt 只校验撤销基线，新请求无法据此排除已经撤销的 C。最小修复由原 Infra 准入能力读取 Application 当前成员权威，仍由原 transfer 负责完整获取／拒绝及资源结算，不建立缓存专用授权池、不拨号验证、不扩大 Engine。以原始文件缓存的真实 fetch-to-path 成功越权作为红测，修复后要求准入拒绝、无目标文件及 B 后续 C 引用失败。
+
+授权红测9.86秒实际越过撤销并写出原文件；最小修复后真实三端12.74秒／10.15秒通过，缓存错误保留准入拒绝源且无目标输出，B 后续 C 引用 Failed／AccessDenied，已保存成果保留。P2P全库326通过／3跳过，固定SDK三合同、Engine真实接收重试24项及根门禁通过。额度归属仍未证明；c7997a15的兼容矩阵仅代表该历史代码，当前生产授权修复后的最终head兼容继续待验收。

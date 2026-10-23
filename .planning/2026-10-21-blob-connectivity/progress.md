@@ -673,3 +673,16 @@ SDK自有公开API回归通过（0.220秒），新增覆盖全部引用自然释
 代码提交c7997a15660078d31b3f2fd2f19b91518f17d78c、SDK152c42a，current host重新构建4分22秒后验证：开工main a461b894与rc.15 f6f305d9 × Direct／强制Relay × 升级两侧8组，加当前版本双向Direct／Relay2组，共10／10通过。每组旧旧正常配对／重开、独立原资料复制、身份／传输身份／成员／历史保留、原接收文件读回和升级后双向文件精确字节、实际blob握手及预期通道均通过；新新两组使用同一当前宿主重开资料，不冒充旧版升级。全部原始工件cleaned与plaintext_clean为true、failed为false；固定旧库未打补丁，二进制摘要与先前冻结值一致。
 
 私有完整工件保存在target/blob-connectivity-evidence/final-c7997a15-sdk-152c42a-2026-10-23；可提交汇总sdk-final-compat-summary.json只保留固定分类、计数、时间及代码／工件摘要，不含运行身份、地址或路径。逐项脚本断言十组使用固定二进制、相同被测head及源码树摘要、空工作差异。该矩阵只证明独立文件真实互通与旧资料重开；实际连接／quota／tag／staging完整资源、生命周期、来源C、首次Staging前强杀、完整回归及平台CI仍未完成。
+
+
+### 2026-10-23：真实第三方 ticket 的缓存授权红测
+
+生产装配三 runtime、真实签名 B 消息携带 C 原始文件 ticket，A 正常接收并独立读回。A 撤销 C 后仍将 B 视为 Active；不要求 B 先知晓撤销。原始文件 fetch-to-path 在 A 的本机缓存命中后仍成功写出27字节（真实红测9.86秒），固定分类摘要见source-authorization-13-red.log；此前内存 fetch 得到 Integrity 也说明越过授权进入了不适用于原始文件的解密，不能当作正确拒绝。根因是新请求冻结撤销后的 epoch，Attempt::check_current 仅验证 epoch，不读取当前成员；缓存路径无连接 Grant，因而缺少后者的权威校验。
+
+最小修复仅对既有 Blob Attempt 调用原 owner.check，同时核对当前成员与前后epoch；其他协议保留原策略。无新接口、许可、连接、持久格式或独立任务。测试改为从 A 的真实 IncomingPending 确认作者 B 和原 attempt，再按 entry_id 查询完整终态；目标使用磁盘原始文件，失败断言不输出内容。修复后真实缓存拒绝、B 后续 C 引用 AccessDenied 与关闭尚待验证；额度归属仍未完成。
+
+修复后真实三端回归1项通过（12.74秒）：B 的实际认证消息携带 C ticket 成功接收、字节精确匹配；A 撤销 C 且仍确认 B Active 后，缓存获取的错误链包含原 ConnectivityError::Denied、未留下目标文件，B 的后续 C 引用在原接收尝试中 Failed／AccessDenied；已有文件保留，三端原 shutdown 成功。不把 B 撤销通知未收敛当作已通过，也不以缺少通知延后 A 的授权拒绝。最终源只修改既有 Blob Attempt 的当前校验，未添加 Engine 能力、连接或持久格式。相关 P2P 全库／SDK合同与根门禁待完成；nextest 将该真实三端用例设为独占、60秒期限、零重试。
+
+扩大验证全部通过：P2P库326项／3跳过（183.68秒）；固定SDK停止／协议向量／Store生命周期3项（0.51／0.00／0.35秒）；真实Engine receive_retry24项（221.06秒）；三端授权再次通过10.15秒。locked metadata、workspace all-targets（2分37秒）、fmt、Rust style、repository preflight（1345隐私站点与负例）及diff均退出0。构建单scope串行，观察到峰值约3.0GiB，5GiB内存／4GiB swap上限未改变。最后人工审阅将测试身份比较改为固定失败消息，避免断言在失败时输出随机身份；nextest配置及该最终测试源码待直接复核。旧c7997a15的10组兼容证据保留，但本次生产授权修复后的最终head仍须重新验证，未冒充已通过。
+
+最终源码的CI nextest用例13.965秒通过（其余326项未选中），独占与60秒期限配置有效；最终locked metadata、workspace all-targets（46.569秒）、fmt、style、repository与diff全退出0。测试身份／条目比较使用固定失败消息，不输出动态标识或内容。人工审阅确认真实B消息来源、C ticket及当前成员权威、缓存前后校验、无目标输出、AccessDenied终态、原文件保留及完整关闭；测试只复用现有完整Facade动作和生产Runtime装配，未增加生产Engine入口。所有验证scope已结束，提交该最小授权修复；来源C额度、staging与其余完整验收仍未完成。
