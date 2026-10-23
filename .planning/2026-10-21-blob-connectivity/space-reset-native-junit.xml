@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="1" skipped="0" failures="0" errors="0" uuid="3daca0e5-9b71-4ad4-839b-22793dad4c25" timestamp="2026-10-23T14:59:58.565+08:00" time="5.426">
+    <testsuite name="uc-engine" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity" classname="uc-engine" timestamp="2026-10-23T14:59:58.579+08:00" time="5.411"/>
+    </testsuite>
+</testsuites>

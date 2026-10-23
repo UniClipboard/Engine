@@ -1,4 +1,5 @@
 //! 原生锁定与暂停必须等待同一接收任务的实际导出结算，重开不允许旧任务发布。
+mod space;
 use super::*;
 use crate::{EngineState, UnlockSpaceInput};
 use std::sync::atomic::Ordering;

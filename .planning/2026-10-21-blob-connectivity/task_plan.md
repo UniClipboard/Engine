@@ -19,9 +19,9 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。生产获取、提供端、完整条目结算、独立文件部分失败、稳定单项重试与薄绑定已接线；当前补全生命周期、失败恢复及阶段5最终交付证据，未据此标记完整spec完成。
 
 ## Next Step
-当前已提交3de9f9c0，main合并的3处冲突已逐一保留双方合同；UniFFI全目标check1分32秒、fmt／整分支style／工作区及暂存diff均通过，scope已结束；`.planning/.active_plan`保持本任务。提交已验证的merge之后先补真实活动接收切Space／本机离组及资源证明，再统一最终根门禁、workspace、成员全集、升级smoke、当前head十组矩阵与必需线上CI，避免在源码尚会变化时反复跑全量。
+main已整合提交0c0cfb03（前一提交3de9f9c0），UniFFI全目标check1分32秒、fmt／整分支style／diff通过。本机离组真实6.505秒通过。Reset用例已通过实际切Space、原attempt中断、旧成果保留与新输出清理，先后两次失败均为新增测试末尾查询合同假设（会话封口时readiness为1103／Unavailable；重新配对态device-group choices为1213／InvalidState），原日志与JUnit保留。当前唯一Cargo `uni-blob-space-reset.scope`（exec71911），驱动space-reset-checks.sh，最终设备断言沿既有ListDevices合同，精确运行Reset；不再把静态App内层Rebuild当完整Engine流程，未改生产实现。源码保持不变等待实际结果，不重复启动Cargo。当前4个用户无关planning目录仍未跟踪且未加入任何提交。
 
-合并前最后证据：App1281通过／1跳过69.067秒，Native receive_retry28/28通过265.831秒；观测137合同＋Native15.991秒及严格Collector／Jaeger／列表／展开Tags全通过，绿工件observability-green/、红测保留。观测service已停止、无浏览器／Collector／Jaeger残留。工具暂保留供整合源码观测复验，任务结束前清理。
+合并前最后证据：App1281通过／1跳过69.067秒，Native receive_retry28/28通过265.831秒；观测137合同＋Native15.991秒及严格Collector／Jaeger／列表／展开Tags全通过，绿工件observability-green/、红测保留。观测service已停止、无浏览器／Collector／Jaeger残留。工具暂保留供整合源码观测复验，任务结束前清理。最终资源／生命周期映射、完整workspace／成员全集／升级smoke、当前交付head十组网络及线上平台CI仍待完成，不归档spec／plan。
 
 原完整回归scope已经inactive、会话53955结束：编译30分30秒，测试1212.937秒，4582通过／3失败／1超时／28跳过，workspace退出100，JUnit已保存。四个问题：Native C额度9.326秒结果断言失败（断言已允许pending，保持严格，仅加安全计数／OTLP诊断）；恢复会话20.017秒TIMEOUT（原冻结二进制独占13.30秒全部断言通过，已设有限60秒并独占，待新配置验证）；facade错误导出BlobTransferDeps（测试支持参数已移到既有deps入口，原防火墙同二进制针对新源码精确退出0）；堆栈unresolved（驱动漏设既有Linux CI的UC_EXPECT_DIAGNOSTIC_STACK=available，原二进制按该既有模式1.54秒通过，未改源码或断言）。原排队成员全集／升级／OTLP因fail-early均未执行，不能登记通过；新focused驱动结束后仍须继续。
 

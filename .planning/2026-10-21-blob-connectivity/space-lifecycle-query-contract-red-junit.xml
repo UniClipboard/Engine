@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="2" skipped="0" failures="1" errors="0" uuid="1f62cd94-7690-48aa-9ec3-436b75810ee5" timestamp="2026-10-23T14:54:37.289+08:00" time="11.032">
+    <testsuite name="uc-engine" tests="2" skipped="0" errors="0" failures="1">
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_confirmed_local_removal_prevents_active_retry_from_publishing" classname="uc-engine" timestamp="2026-10-23T14:54:37.316+08:00" time="6.505"/>
+        <testcase name="testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity" classname="uc-engine" timestamp="2026-10-23T14:54:43.822+08:00" time="4.498">
+            <failure message="thread &apos;testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity&apos; (4186101) panicked at crates/uc-engine/src/testing/host_adapter_contract/receive_retry/lifecycle/space.rs:47:91" type="test failure with exit code 101">thread &apos;testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity&apos; (4186101) panicked at crates/uc-engine/src/testing/host_adapter_contract/receive_retry/lifecycle/space.rs:47:91:
+called `Result::unwrap()` on an `Err` value: EngineError { code: 1103, category: Unavailable, retryable: false, admission_recovery: None }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity ... FAILED
+
+failures:
+
+failures:
+    testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 335 filtered out; finished in 4.47s
+
+</system-out>
+            <system-err>
+thread &apos;testing::host_adapter_contract::receive_retry::lifecycle::space::real_engine_space_reset_seals_active_retry_before_switching_identity&apos; (4186101) panicked at crates/uc-engine/src/testing/host_adapter_contract/receive_retry/lifecycle/space.rs:47:91:
+called `Result::unwrap()` on an `Err` value: EngineError { code: 1103, category: Unavailable, retryable: false, admission_recovery: None }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+    </testsuite>
+</testsuites>

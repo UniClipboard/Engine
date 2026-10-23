@@ -424,3 +424,9 @@
 重新核对spec §8原文，集成验收明确要求成员撤销、锁定、切Space、删除及shutdown后检查任务／流／连接／FD／许可／未完成产物。现有新Native明确覆盖锁定／暂停／源成员撤销／删除／清空／离线通知取消，但尚无活动导出中的本机离组或切Space事实；不能只据共用close推论这些已通过。稳定API没有SwitchSpace／LeaveSpace操作，真实本机离组沿远端RemoveMember→QueryDeviceGroupChoices→ChooseDeviceGroup(apply,confirm_local_removal=true)；现有成员E2E harness/membership_topology.rs:814及removal_convergence.rs:R2可复用行为步骤。切Space应进一步核对原ResetSpace／JoinSpace与成员分支切换的实际生命周期，不新增观测阶段API。
 
 资源证据目前分层：Engine2×1GiB的RSS／FD／线程／任务；真实AppFacade-Uni-SDK的tag2→0及native连接1→0；原生三端C额度用例的4全局／2提供端占用与释放行为。它们不能冒称每种Engine生命周期的全部数字已直接采到；后续先定位既有测试装配与资源采样能力，在原合法测试边界补证据，避免为观测扩大业务facade／port／结果。当前完整candidate串行Cargo运行中，未修改Rust来补这些缺口。
+
+### 切Space／本机离组正在取得真实证据
+
+合并main后新增lifecycle/space.rs两项，只用既有ResetSpace／RemoveMember／ChooseDeviceGroup／readiness／成员／进度查询，真实第四次SDK导出持完成权，验证旧输出清理和两份旧成功。唯一scope uni-blob-space-lifecycle（exec44078），尚在构建，不计通过。静态定位：RebuildSpaceUseCase执行prepare(snapshot)→stage→rebind→membership rebuild→commit/finalize，目前未见原session activity封口；SpaceFacade.reset只调用该owner并wake maintenance。原SpaceFacade已经有DeferredSpaceSessionActivity并在bind_session_activity绑定真实receive/search/connections，pause_for_lock内部先完整close_receive_gate再pauseconnections/search；combined activity还包membership暂停。若Native证实reset缺口，应由Application完整Space重建owner统一暂停／实际排空、快照／重绑／提交、恢复，不让Engine增加步骤或Infra编排业务；注意maintenance exclusion与membership.pause的锁顺序，不能等拿到维护排斥锁后再等待maintenance停止。尚未修改生产实现。
+
+已纠正仅看App Rebuild的静态推断：完整稳定Engine ResetSpace先走SessionSupervisor.reset_space，封operations、等待/关闭旧session、取消原file transfers，再调用App完整数据重建并安装新session；交接期间facade缺失使readiness查询按1103不可用。真实本机离组6.505秒通过，Reset当前关键生命周期／产物断言也已通过，只在新Space重新配对态使用了不适用的device-group选择查询，现按既有Reset验收改用ListDevices。未修改生产行为或增加接口；不将测试合同错误称为生产缺口。
