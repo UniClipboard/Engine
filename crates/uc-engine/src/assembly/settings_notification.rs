@@ -66,17 +66,15 @@ impl SettingsPort for NotifyingSettings {
     }
 }
 
-const ALL_SECTIONS: [SettingsSection; 10] = [
+const ALL_SECTIONS: [SettingsSection; 8] = [
     SettingsSection::General,
     SettingsSection::Sync,
     SettingsSection::RetentionPolicy,
     SettingsSection::Security,
     SettingsSection::Pairing,
-    SettingsSection::KeyboardShortcuts,
     SettingsSection::FileSync,
     SettingsSection::Network,
     SettingsSection::MobileSync,
-    SettingsSection::QuickPanel,
 ];
 
 /// 逐分区比较两份设置；`schema_version` 不属于任何分区，不单独通知。
@@ -108,10 +106,6 @@ fn changed_sections(before: &Settings, after: &Settings) -> Vec<SettingsSection>
         differs(&before.pairing, &after.pairing),
     );
     push(
-        SettingsSection::KeyboardShortcuts,
-        differs(&before.keyboard_shortcuts, &after.keyboard_shortcuts),
-    );
-    push(
         SettingsSection::FileSync,
         differs(&before.file_sync, &after.file_sync),
     );
@@ -122,10 +116,6 @@ fn changed_sections(before: &Settings, after: &Settings) -> Vec<SettingsSection>
     push(
         SettingsSection::MobileSync,
         differs(&before.mobile_sync, &after.mobile_sync),
-    );
-    push(
-        SettingsSection::QuickPanel,
-        differs(&before.quick_panel, &after.quick_panel),
     );
     changed
 }
@@ -193,13 +183,13 @@ mod tests {
     async fn only_the_sections_that_changed_are_reported() {
         let (settings, _inner, emitter) = fixture();
         let mut next = settings.load().await.unwrap();
-        next.general.language = Some("zh-CN".into());
-        next.quick_panel.enabled = !next.quick_panel.enabled;
+        next.general.device_name = Some("Desk".into());
+        next.network.allow_relay_fallback = !next.network.allow_relay_fallback;
         settings.save(&next).await.unwrap();
 
         assert_eq!(
             emitter.events.lock().unwrap().as_slice(),
-            [vec![SettingsSection::General, SettingsSection::QuickPanel]]
+            [vec![SettingsSection::General, SettingsSection::Network]]
         );
     }
 
@@ -216,7 +206,7 @@ mod tests {
         let (settings, inner, emitter) = fixture();
         *inner.1.lock().unwrap() = true;
         let mut next = settings.load().await.unwrap();
-        next.general.language = Some("fr".into());
+        next.general.device_name = Some("Office".into());
         assert!(settings.save(&next).await.is_err());
         assert!(emitter.events.lock().unwrap().is_empty());
     }
@@ -226,11 +216,11 @@ mod tests {
         let (settings, inner, emitter) = fixture();
         *emitter.fail.lock().unwrap() = true;
         let mut next = settings.load().await.unwrap();
-        next.general.language = Some("de".into());
+        next.general.device_name = Some("Laptop".into());
         settings.save(&next).await.unwrap();
         assert_eq!(
-            inner.load().await.unwrap().general.language.as_deref(),
-            Some("de")
+            inner.load().await.unwrap().general.device_name.as_deref(),
+            Some("Laptop")
         );
     }
 
@@ -288,19 +278,19 @@ mod tests {
         let settings = Arc::new(NotifyingSettings::new(inner.clone(), emitter.clone()));
 
         let base = Settings::default();
-        let mut quick_panel = base.clone();
-        quick_panel.quick_panel.enabled = !base.quick_panel.enabled;
-        let mut language = base.clone();
-        language.general.language = Some("zh-CN".into());
+        let mut network = base.clone();
+        network.network.allow_relay_fallback = !base.network.allow_relay_fallback;
+        let mut device_name = base.clone();
+        device_name.general.device_name = Some("Desk".into());
 
         let first = {
             let settings = Arc::clone(&settings);
-            tokio::spawn(async move { settings.save(&quick_panel).await })
+            tokio::spawn(async move { settings.save(&network).await })
         };
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let second = {
             let settings = Arc::clone(&settings);
-            tokio::spawn(async move { settings.save(&language).await })
+            tokio::spawn(async move { settings.save(&device_name).await })
         };
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();

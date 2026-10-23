@@ -53,6 +53,14 @@ pub struct ConfigImportPreview {
     pub device_fingerprint: String,
 }
 
+/// 持久暂存未被采用的安全原因；不携带来源路径、身份或凭据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigImportRejection {
+    UnsupportedFormat,
+    MalformedMarker,
+    MissingRuntimeMembers,
+}
+
 /// Outcome of staging an import for later application.
 ///
 /// Staging only validates and records the pending migration; it does not

@@ -113,6 +113,13 @@ impl Fixture {
             Arc::new(ProfileStartupStorage::new(
                 self.paths.clone(),
                 self.storage.clone(),
+                uc_core::app_dirs::HostConfigurationFiles::default(),
+                Arc::new(super::super::ProfileKeyRecoveryStore::new(
+                    self.paths.clone(),
+                    "default".into(),
+                    self.storage.clone(),
+                )),
+                self.backup.clone(),
             )),
             Arc::new(ProfileLifecycleRepository::new(self.storage.clone())),
             target,
@@ -449,6 +456,13 @@ async fn inaccessible_keychain_still_leaves_files_restorable_after_userdata_dele
         Arc::new(ProfileStartupStorage::new(
             fixture.paths.clone(),
             denied.clone(),
+            uc_core::app_dirs::HostConfigurationFiles::default(),
+            Arc::new(super::super::ProfileKeyRecoveryStore::new(
+                fixture.paths.clone(),
+                "default".into(),
+                denied.clone(),
+            )),
+            backup.clone(),
         )),
         Arc::new(ProfileLifecycleRepository::new(denied)),
         fixture.target(),
@@ -751,6 +765,13 @@ async fn independent_userdata_roots_never_reuse_each_others_backup() {
         Arc::new(ProfileStartupStorage::new(
             second.paths.clone(),
             second.storage.clone(),
+            uc_core::app_dirs::HostConfigurationFiles::default(),
+            Arc::new(super::super::ProfileKeyRecoveryStore::new(
+                second.paths.clone(),
+                "default".into(),
+                second.storage.clone(),
+            )),
+            second_backup.clone(),
         )),
         Arc::new(ProfileLifecycleRepository::new(second.storage.clone())),
         second.target(),

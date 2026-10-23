@@ -248,6 +248,7 @@ pub(super) fn build_config_migration_deps(
     secure_storage: &Arc<dyn SecureStoragePort>,
     iroh_identity_storage: &Arc<dyn SecureStoragePort>,
     db_pool_for_config_migration: DbPool,
+    control_db_pool_for_config_migration: DbPool,
     clock: &Arc<dyn ClockPort>,
     current_space_identity: &Arc<dyn CurrentSpaceIdentityPort>,
     portable_current_space_identity: &Arc<dyn PortableCurrentSpaceIdentityPort>,
@@ -266,6 +267,7 @@ pub(super) fn build_config_migration_deps(
         ConfigMigrationAdapter::new(
             secure_storage.clone(),
             db_pool_for_config_migration,
+            control_db_pool_for_config_migration,
             config_migration_local_identity,
             clock.clone(),
             migration_paths,

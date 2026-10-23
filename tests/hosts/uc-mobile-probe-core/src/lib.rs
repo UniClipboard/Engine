@@ -705,7 +705,6 @@ fn operation_response(result: OperationResult) -> Value {
             "auto_sync_enabled": settings.sync.auto_sync_enabled,
             "retention_enabled": settings.retention_policy.enabled,
             "retention_rule_count": settings.retention_policy.rules.len(),
-            "shortcut_count": settings.keyboard_shortcuts.len(),
             "custom_relay_count": settings.network.custom_relay_urls.len(),
             "has_auto_save_dir": settings.file_sync.auto_save_dir.is_some(),
         }),
@@ -789,15 +788,7 @@ fn operation_response(result: OperationResult) -> Value {
         OperationResult::DiagnosticsStatus(status) => json!({
             "ok": true,
             "kind": "diagnostics_status",
-            "debug_mode": status.debug_mode,
             "effective_log_profile": status.effective_log_profile,
-            "restart_required": status.restart_required,
-        }),
-        OperationResult::DebugModeUpdated(result) => json!({
-            "ok": true,
-            "kind": "debug_mode_updated",
-            "debug_mode": result.debug_mode,
-            "restart_required": result.restart_required,
         }),
         OperationResult::DiagnosticLogsExported(result) => json!({
             "ok": true,

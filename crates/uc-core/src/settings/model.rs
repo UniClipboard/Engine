@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -8,148 +7,24 @@ use serde_with::{serde_as, DurationSeconds};
 /// (`ByAge(30d) + ByCount(500)`) to the new default (`ByAge(180d)`, no count
 /// cap). See `uc_infra_local::settings::migration::MigrationV1ToV2`.
 ///
-/// v2 -> v3: one-time rewrite of the legacy `silent_start` /
-/// `lightweight_start` booleans into the mutually-exclusive `startup_mode`
-/// enum. See `uc_infra_local::settings::migration::MigrationV2ToV3`.
+/// v2 -> v3: originally rewrote the legacy startup booleans into a startup
+/// mode. Startup preferences now belong to the host product, so this step
+/// only advances the version. See
+/// `uc_infra_local::settings::migration::MigrationV2ToV3`.
 pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 // 所有 settings struct 统一使用 `#[serde(default)]`：缺字段时回退到
 // `Default::default()`（在 `defaults.rs` 中实现），保证向后兼容。
 // 详见 issue #581：旧版本 settings.json 缺新增字段会让 daemon 启动失败。
+/// Engine 拥有的通用设置。
+///
+/// 宿主产品外壳偏好（启动方式、自动启动、更新、主题、语言、产品分析许可、
+/// 快捷键与快捷面板、调试日志开关）归宿主产品保存，不属于 Engine 设置。旧版
+/// settings.json 中残留的这些键在加载时被忽略，下一次保存时不再写出。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GeneralSettings {
-    pub auto_start: bool,
-    /// Legacy pre-v3 field, superseded by `startup_mode`. Retained only so
-    /// `MigrationV2ToV3` can read a pre-v3 settings.json's boolean state
-    /// once; no code reads or writes this field anymore — read
-    /// `startup_mode` instead.
-    pub silent_start: bool,
-    /// Legacy pre-v3 field, superseded by `startup_mode`. Retained only so
-    /// `MigrationV2ToV3` can read a pre-v3 settings.json's boolean state
-    /// once; no code reads or writes this field anymore — read
-    /// `startup_mode` instead.
-    pub lightweight_start: bool,
-    /// How the app presents itself at launch: `Normal` shows the window as
-    /// usual; `Silent` skips straight to running in the background/tray;
-    /// `Lightweight` exits the interactive process entirely once background
-    /// sync is confirmed ready, leaving only the background sync service
-    /// running — but only when this launch is the one that started that
-    /// service (a cold start). If the background service was already running
-    /// (e.g. reopening after an earlier Lightweight launch), the window is
-    /// shown instead, so the app stays reachable to turn the preference back
-    /// off.
-    pub startup_mode: StartupMode,
-    /// Whether to push the most recent clipboard history entry back onto
-    /// the OS clipboard once background sync is confirmed ready at startup.
-    pub restore_last_entry_on_startup: bool,
-    pub auto_check_update: bool,
-    /// Whether to download the next available update in the background.
-    ///
-    /// Pre-fetching the installer bytes lets the click-to-install flow
-    /// skip the download step entirely. Independent of
-    /// `auto_check_update`: the daemon only honours this flag when the
-    /// frontend has actually checked for an update; the UI further
-    /// gates the toggle on `auto_check_update` so users can't get into
-    /// "download but never check" states.
-    pub auto_download_update: bool,
-    pub theme: Theme,
-    /// 旧版"全局主题预设"字段（v0.7 之前唯一字段）。
-    ///
-    /// 现在仅作为 `theme_color_light` / `theme_color_dark` 都为 `None` 时的
-    /// 回退值,目的是让 v0.7 前持久化的用户偏好（"我选过 catppuccin"）
-    /// 在升级后第一次 light/dark 切换之前仍生效。
-    ///
-    /// # Removal plan
-    /// 一旦新版 UI 写入过 `theme_color_light` / `theme_color_dark`,这个字段
-    /// 不再被读取。计划在 v0.9 把字段彻底删除并 bump `schema_version`。
-    /// 删除前请确认 release notes / changelog 已经向用户提示过迁移窗口。
-    #[serde(default)]
-    pub theme_color: Option<String>,
-    /// Light 模式下使用的主题预设名（如 `"zinc"`、`"catppuccin"`）。
-    /// 为 `None` 时回退到 `theme_color`,再为 `None` 时使用引擎默认。
-    #[serde(default)]
-    pub theme_color_light: Option<String>,
-    /// Dark 模式下使用的主题预设名（如 `"zinc"`、`"catppuccin"`）。
-    /// 为 `None` 时回退到 `theme_color`,再为 `None` 时使用引擎默认。
-    #[serde(default)]
-    pub theme_color_dark: Option<String>,
-    /// Light 模式下用户对预设 token 的自定义覆盖。
-    ///
-    /// Key 限制在 4 个核心 token：`primary` / `background` / `foreground` / `border`。
-    /// Value 为 `oklch(L C H)` 字符串。前端在保存前会做格式校验,daemon 层只做透传。
-    /// 空 map 表示不覆盖任何值,完全跟随当前 preset。
-    #[serde(default)]
-    pub theme_overrides_light: BTreeMap<String, String>,
-    /// Dark 模式下用户对预设 token 的自定义覆盖。语义同 `theme_overrides_light`。
-    #[serde(default)]
-    pub theme_overrides_dark: BTreeMap<String, String>,
-    pub language: Option<String>,
     pub device_name: Option<String>,
-    /// Update channel preference. `None` means auto-detect from version string;
-    /// `Some(channel)` means the user has overridden the channel.
-    pub update_channel: Option<UpdateChannel>,
-    /// Whether anonymous product usage analytics is enabled.
-    /// 该字段只控制产品漏斗、留存和同步可靠性事件；运行诊断许可由宿主
-    /// 进程独立拥有，不属于 Engine settings。
-    pub usage_analytics_enabled: bool,
-    /// Enables a persistent local diagnostic logging profile on the next process start.
-    ///
-    /// This only changes local log verbosity. It does not change sync behavior,
-    /// network policy, telemetry/analytics gates, or clipboard content handling.
-    pub debug_mode: bool,
-}
-
-impl GeneralSettings {
-    /// 解析 light 模式下应使用的主题预设名,带旧字段回退。
-    pub fn effective_theme_color_light(&self) -> Option<&str> {
-        self.theme_color_light
-            .as_deref()
-            .or(self.theme_color.as_deref())
-    }
-
-    /// 解析 dark 模式下应使用的主题预设名,带旧字段回退。
-    pub fn effective_theme_color_dark(&self) -> Option<&str> {
-        self.theme_color_dark
-            .as_deref()
-            .or(self.theme_color.as_deref())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Theme {
-    Light,
-    Dark,
-    System,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum UpdateChannel {
-    Stable,
-    Alpha,
-    Beta,
-    Rc,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StartupMode {
-    Normal,
-    Silent,
-    Lightweight,
-}
-
-/// A keyboard shortcut value that can be either a single key combo or multiple alternatives.
-///
-/// Serialised with `#[serde(untagged)]` so that `"Ctrl+C"` and `["Ctrl+C","Meta+C"]` are both
-/// accepted without a wrapping tag, matching the TypeScript type `string | string[]`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum ShortcutKey {
-    Single(String),
-    Multiple(Vec<String>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -441,46 +316,6 @@ pub struct NetworkSettings {
 ///
 /// 任意字段变更后都需要重启 daemon 才能生效(v1 不做配置热重载,详见
 /// `.context/mobile-sync/SPEC.md` §1.2.5)。
-/// 快捷面板出现的位置偏好。
-///
-/// 表达用户希望面板"在哪里出现"这一领域偏好，不关心具体的几何换算或
-/// 屏幕坐标系实现：
-/// * `Center` —— 在用户当前活动屏幕的中央出现。
-/// * `FollowCursor` —— 在用户指针附近出现，靠近指针落点。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum QuickPanelPosition {
-    Center,
-    FollowCursor,
-}
-
-/// A modifier that may toggle the quick panel when tapped twice by itself.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum QuickPanelDoubleTapModifier {
-    #[default]
-    Disabled,
-    Alt,
-    Control,
-    Meta,
-}
-
-/// 快捷面板（Spotlight 风格）功能偏好。
-///
-/// 表达用户对快捷面板的偏好：是否启用、出现在哪里。具体如何落地（全局
-/// 快捷键注册、窗口生命周期、坐标换算等）由上层执行，与本模型无关。
-///
-/// `enabled` 默认 `true`：快捷面板是产品的核心交互入口，新装即应可用；
-/// 需要避开全局快捷键的用户（与其他工具冲突 / 企业策略）可在设置页关闭。
-/// `position` 默认 `Center`，保持历史行为；`double_tap_modifier` 默认关闭。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct QuickPanelSettings {
-    pub enabled: bool,
-    pub position: QuickPanelPosition,
-    pub double_tap_modifier: QuickPanelDoubleTapModifier,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct MobileSyncSettings {
@@ -531,9 +366,6 @@ pub struct Settings {
     pub pairing: PairingSettings,
 
     #[serde(default)]
-    pub keyboard_shortcuts: HashMap<String, ShortcutKey>,
-
-    #[serde(default)]
     pub file_sync: FileSyncSettings,
 
     #[serde(default)]
@@ -541,9 +373,6 @@ pub struct Settings {
 
     #[serde(default)]
     pub mobile_sync: MobileSyncSettings,
-
-    #[serde(default)]
-    pub quick_panel: QuickPanelSettings,
 }
 
 /// Schema version assumed for a settings.json missing the `schema_version`

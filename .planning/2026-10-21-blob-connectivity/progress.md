@@ -829,3 +829,7 @@ main预合并只读merge-tree发现3文件冲突（active_plan、UniFFI lib.rs�
 branch-fix最终：App1281通过／1跳过69.067秒，Native receive_retry28/28通过265.831秒（包含锁定、暂停、撤销、离线永久通知阻塞、目录和网络终态修复等），整分支style／diff通过，scope已inactive、exec10625退出0。当前源码允许形成可回退本地提交；完整spec仍缺最终全量／资源生命周期／十组矩阵和线上CI，不能归档。
 
 暂存原始证据后git diff --cached --check发现原始patch上下文空行及Jaeger页面文本的表格尾随tab；未改写原始证据。仅在本任务证据目录用.gitattributes声明patch／txt空白为原始数据，源码仍正常检查；随后重新执行暂存检查。
+
+已提交3de9f9c0：完整锁定排空、结果观测、资源与必需CI入口、整分支薄包装及检查器修复，含实际红绿工件。随后执行merge --no-commit origin/main，恰好3处冲突：planning指针保持本任务；UniFFI lib导出合并ConfigImport／RejectedConfigImport与ReceiveItem／Progress／RetryOutcome；runtime导入保留原取消／重试全部类型并新增main的ConfigImport错误别名，未选单边覆盖。已读取整合后的AGENTS；用户会话给定约束仍优先，本切片不新增配置明文例外。待实际绑定全目标编译通过再提交合并。
+
+main整合验证全部退出0：UniFFI全部目标check1分32秒（含Engine及其依赖）、fmt、整分支style、工作区与暂存diff均通过；scope inactive、exec57856结束0。main宿主日志档位仅报告宿主声明，不改变Engine采集／远程合同，已核对更新文档；冲突仅导入联合与指针保留。接下来提交merge，再补活动接收切Space／本机离组等明确未完成验收。

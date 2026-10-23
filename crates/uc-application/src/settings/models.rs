@@ -1,33 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use uc_core::settings::model as core;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ThemeView {
-    Light,
-    Dark,
-    System,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateChannelView {
-    Stable,
-    Alpha,
-    Beta,
-    Rc,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StartupModeView {
-    Normal,
-    Silent,
-    Lightweight,
-}
-
-/// Type alias — `ShortcutKeyView` is now `uc_core::settings::model::ShortcutKey`.
-/// Kept as a alias for backward-compatible re-export.
-pub type ShortcutKeyView = core::ShortcutKey;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentTypesView {
@@ -83,28 +57,7 @@ pub enum RetentionRuleView {
 
 #[derive(Debug, Clone)]
 pub struct GeneralSettingsView {
-    pub auto_start: bool,
-    pub startup_mode: StartupModeView,
-    pub restore_last_entry_on_startup: bool,
-    pub auto_check_update: bool,
-    pub auto_download_update: bool,
-    pub theme: ThemeView,
-    /// 旧版"统一主题预设"字段。新 UI 仅在 light/dark 字段都为 None 时回退。
-    /// 删除计划见 `uc_core::settings::model::GeneralSettings::theme_color`。
-    pub theme_color: Option<String>,
-    /// Light 模式下的主题预设名（如 `"zinc"`）；None 时回退到 `theme_color`。
-    pub theme_color_light: Option<String>,
-    /// Dark 模式下的主题预设名（如 `"zinc"`）；None 时回退到 `theme_color`。
-    pub theme_color_dark: Option<String>,
-    /// Light 模式下用户对预设 token 的自定义覆盖（key = token 名, value = oklch 字符串）。
-    pub theme_overrides_light: BTreeMap<String, String>,
-    /// Dark 模式下用户对预设 token 的自定义覆盖（语义同 light）。
-    pub theme_overrides_dark: BTreeMap<String, String>,
-    pub language: Option<String>,
     pub device_name: Option<String>,
-    pub update_channel: Option<UpdateChannelView>,
-    pub usage_analytics_enabled: bool,
-    pub debug_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -173,30 +126,6 @@ pub enum CongestionControllerView {
     Bbr3,
 }
 
-/// 快捷面板出现位置业务镜像。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuickPanelPositionView {
-    Center,
-    FollowCursor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuickPanelDoubleTapModifierView {
-    Disabled,
-    Alt,
-    Control,
-    Meta,
-}
-
-/// 快捷面板功能偏好业务镜像。承载用户对"是否启用 / 出现在哪里"的偏好；
-/// 落地副作用（OS 快捷键、窗口生命周期、坐标换算等）由消费此视图的上层负责。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuickPanelSettingsView {
-    pub enabled: bool,
-    pub position: QuickPanelPositionView,
-    pub double_tap_modifier: QuickPanelDoubleTapModifierView,
-}
-
 #[derive(Debug, Clone)]
 pub struct SettingsView {
     pub schema_version: u32,
@@ -205,36 +134,13 @@ pub struct SettingsView {
     pub retention_policy: RetentionPolicyView,
     pub security: SecuritySettingsView,
     pub pairing: PairingSettingsView,
-    pub keyboard_shortcuts: HashMap<String, ShortcutKeyView>,
     pub file_sync: FileSyncSettingsView,
     pub network: NetworkSettingsView,
-    pub quick_panel: QuickPanelSettingsView,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct GeneralSettingsPatch {
-    pub auto_start: Option<bool>,
-    pub startup_mode: Option<StartupModeView>,
-    pub restore_last_entry_on_startup: Option<bool>,
-    pub auto_check_update: Option<bool>,
-    pub auto_download_update: Option<bool>,
-    pub theme: Option<ThemeView>,
-    /// 旧版"统一主题预设"字段。新 UI 不再写入,但仍保留 patch 入口便于
-    /// 显式清空（`Some(None)`）旧字段或在迁移工具里使用。
-    pub theme_color: Option<Option<String>>,
-    /// Light 模式下的主题预设名 patch；`Some(None)` = 显式清空,`None` = 不修改。
-    pub theme_color_light: Option<Option<String>>,
-    /// Dark 模式下的主题预设名 patch；`Some(None)` = 显式清空,`None` = 不修改。
-    pub theme_color_dark: Option<Option<String>>,
-    /// Light 模式 overrides patch。`Some(map)` 整体替换；`None` 表示不修改。
-    pub theme_overrides_light: Option<BTreeMap<String, String>>,
-    /// Dark 模式 overrides patch（语义同 light）。
-    pub theme_overrides_dark: Option<BTreeMap<String, String>>,
-    pub language: Option<Option<String>>,
     pub device_name: Option<Option<String>>,
-    pub update_channel: Option<Option<UpdateChannelView>>,
-    pub usage_analytics_enabled: Option<bool>,
-    pub debug_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -312,14 +218,6 @@ pub struct NetworkSettingsPatch {
     pub congestion_controller: Option<CongestionControllerView>,
 }
 
-/// 快捷面板字段 patch 镜像 —— `None` = 不修改。
-#[derive(Debug, Clone, Default)]
-pub struct QuickPanelSettingsPatch {
-    pub enabled: Option<bool>,
-    pub position: Option<QuickPanelPositionView>,
-    pub double_tap_modifier: Option<QuickPanelDoubleTapModifierView>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct SettingsPatch {
     pub general: Option<GeneralSettingsPatch>,
@@ -327,101 +225,8 @@ pub struct SettingsPatch {
     pub retention_policy: Option<RetentionPolicyPatch>,
     pub security: Option<SecuritySettingsPatch>,
     pub pairing: Option<PairingSettingsPatch>,
-    pub keyboard_shortcuts: Option<HashMap<String, Option<ShortcutKeyView>>>,
     pub file_sync: Option<FileSyncSettingsPatch>,
     pub network: Option<NetworkSettingsPatch>,
-    pub quick_panel: Option<QuickPanelSettingsPatch>,
-}
-
-impl From<core::Theme> for ThemeView {
-    fn from(value: core::Theme) -> Self {
-        match value {
-            core::Theme::Light => Self::Light,
-            core::Theme::Dark => Self::Dark,
-            core::Theme::System => Self::System,
-        }
-    }
-}
-
-impl From<ThemeView> for core::Theme {
-    fn from(value: ThemeView) -> Self {
-        match value {
-            ThemeView::Light => Self::Light,
-            ThemeView::Dark => Self::Dark,
-            ThemeView::System => Self::System,
-        }
-    }
-}
-
-impl From<core::StartupMode> for StartupModeView {
-    fn from(value: core::StartupMode) -> Self {
-        match value {
-            core::StartupMode::Normal => Self::Normal,
-            core::StartupMode::Silent => Self::Silent,
-            core::StartupMode::Lightweight => Self::Lightweight,
-        }
-    }
-}
-
-impl From<StartupModeView> for core::StartupMode {
-    fn from(value: StartupModeView) -> Self {
-        match value {
-            StartupModeView::Normal => Self::Normal,
-            StartupModeView::Silent => Self::Silent,
-            StartupModeView::Lightweight => Self::Lightweight,
-        }
-    }
-}
-
-impl From<core::UpdateChannel> for UpdateChannelView {
-    fn from(value: core::UpdateChannel) -> Self {
-        match value {
-            core::UpdateChannel::Stable => Self::Stable,
-            core::UpdateChannel::Alpha => Self::Alpha,
-            core::UpdateChannel::Beta => Self::Beta,
-            core::UpdateChannel::Rc => Self::Rc,
-        }
-    }
-}
-
-impl From<core::QuickPanelPosition> for QuickPanelPositionView {
-    fn from(value: core::QuickPanelPosition) -> Self {
-        match value {
-            core::QuickPanelPosition::Center => Self::Center,
-            core::QuickPanelPosition::FollowCursor => Self::FollowCursor,
-        }
-    }
-}
-
-impl From<QuickPanelPositionView> for core::QuickPanelPosition {
-    fn from(value: QuickPanelPositionView) -> Self {
-        match value {
-            QuickPanelPositionView::Center => Self::Center,
-            QuickPanelPositionView::FollowCursor => Self::FollowCursor,
-        }
-    }
-}
-
-impl From<core::QuickPanelDoubleTapModifier> for QuickPanelDoubleTapModifierView {
-    fn from(value: core::QuickPanelDoubleTapModifier) -> Self {
-        match value {
-            core::QuickPanelDoubleTapModifier::Disabled => Self::Disabled,
-            core::QuickPanelDoubleTapModifier::Alt => Self::Alt,
-            core::QuickPanelDoubleTapModifier::Control => Self::Control,
-            core::QuickPanelDoubleTapModifier::Meta => Self::Meta,
-        }
-    }
-}
-
-impl From<QuickPanelDoubleTapModifierView> for core::QuickPanelDoubleTapModifier {
-    fn from(value: QuickPanelDoubleTapModifierView) -> Self {
-        match value {
-            QuickPanelDoubleTapModifierView::Disabled => Self::Disabled,
-            QuickPanelDoubleTapModifierView::Alt => Self::Alt,
-            QuickPanelDoubleTapModifierView::Control => Self::Control,
-            QuickPanelDoubleTapModifierView::Meta => Self::Meta,
-        }
-    }
 }
 
 impl From<core::CongestionController> for CongestionControllerView {
@@ -441,21 +246,6 @@ impl From<CongestionControllerView> for core::CongestionController {
         }
     }
 }
-
-impl From<UpdateChannelView> for core::UpdateChannel {
-    fn from(value: UpdateChannelView) -> Self {
-        match value {
-            UpdateChannelView::Stable => Self::Stable,
-            UpdateChannelView::Alpha => Self::Alpha,
-            UpdateChannelView::Beta => Self::Beta,
-            UpdateChannelView::Rc => Self::Rc,
-        }
-    }
-}
-
-// From<ShortcutKey> for ShortcutKeyView and vice versa removed —
-// ShortcutKeyView is now a type alias for core::ShortcutKey, so the
-// blanket From<T> for T handles identity conversion.
 
 impl From<core::ContentTypes> for ContentTypesView {
     fn from(value: core::ContentTypes) -> Self {
@@ -560,22 +350,7 @@ impl From<core::Settings> for SettingsView {
         Self {
             schema_version: value.schema_version,
             general: GeneralSettingsView {
-                auto_start: value.general.auto_start,
-                startup_mode: value.general.startup_mode.into(),
-                restore_last_entry_on_startup: value.general.restore_last_entry_on_startup,
-                auto_check_update: value.general.auto_check_update,
-                auto_download_update: value.general.auto_download_update,
-                theme: value.general.theme.into(),
-                theme_color: value.general.theme_color,
-                theme_color_light: value.general.theme_color_light,
-                theme_color_dark: value.general.theme_color_dark,
-                theme_overrides_light: value.general.theme_overrides_light,
-                theme_overrides_dark: value.general.theme_overrides_dark,
-                language: value.general.language,
                 device_name: value.general.device_name,
-                update_channel: value.general.update_channel.map(Into::into),
-                usage_analytics_enabled: value.general.usage_analytics_enabled,
-                debug_mode: value.general.debug_mode,
             },
             sync: SyncSettingsView {
                 sync_enabled: value.sync.sync_enabled,
@@ -607,7 +382,6 @@ impl From<core::Settings> for SettingsView {
                 max_retries: value.pairing.max_retries,
                 protocol_version: value.pairing.protocol_version,
             },
-            keyboard_shortcuts: value.keyboard_shortcuts,
             file_sync: FileSyncSettingsView {
                 file_sync_enabled: value.file_sync.file_sync_enabled,
                 small_file_threshold: value.file_sync.small_file_threshold,
@@ -625,11 +399,6 @@ impl From<core::Settings> for SettingsView {
                 custom_relay_urls: value.network.custom_relay_urls,
                 congestion_controller: value.network.congestion_controller.into(),
             },
-            quick_panel: QuickPanelSettingsView {
-                enabled: value.quick_panel.enabled,
-                position: value.quick_panel.position.into(),
-                double_tap_modifier: value.quick_panel.double_tap_modifier.into(),
-            },
         }
     }
 }
@@ -639,53 +408,8 @@ pub(crate) fn apply_settings_patch(
     patch: SettingsPatch,
 ) -> core::Settings {
     if let Some(general) = patch.general {
-        if let Some(v) = general.auto_start {
-            existing.general.auto_start = v;
-        }
-        if let Some(v) = general.startup_mode {
-            existing.general.startup_mode = v.into();
-        }
-        if let Some(v) = general.restore_last_entry_on_startup {
-            existing.general.restore_last_entry_on_startup = v;
-        }
-        if let Some(v) = general.auto_check_update {
-            existing.general.auto_check_update = v;
-        }
-        if let Some(v) = general.auto_download_update {
-            existing.general.auto_download_update = v;
-        }
-        if let Some(v) = general.theme {
-            existing.general.theme = v.into();
-        }
-        if let Some(v) = general.theme_color {
-            existing.general.theme_color = v;
-        }
-        if let Some(v) = general.theme_color_light {
-            existing.general.theme_color_light = v;
-        }
-        if let Some(v) = general.theme_color_dark {
-            existing.general.theme_color_dark = v;
-        }
-        if let Some(v) = general.theme_overrides_light {
-            existing.general.theme_overrides_light = v;
-        }
-        if let Some(v) = general.theme_overrides_dark {
-            existing.general.theme_overrides_dark = v;
-        }
-        if let Some(v) = general.language {
-            existing.general.language = v;
-        }
         if let Some(v) = general.device_name {
             existing.general.device_name = v;
-        }
-        if let Some(v) = general.update_channel {
-            existing.general.update_channel = v.map(Into::into);
-        }
-        if let Some(v) = general.usage_analytics_enabled {
-            existing.general.usage_analytics_enabled = v;
-        }
-        if let Some(v) = general.debug_mode {
-            existing.general.debug_mode = v;
         }
     }
 
@@ -746,19 +470,6 @@ pub(crate) fn apply_settings_patch(
         }
     }
 
-    if let Some(keyboard_shortcuts) = patch.keyboard_shortcuts {
-        for (name, value) in keyboard_shortcuts {
-            match value {
-                Some(shortcut) => {
-                    existing.keyboard_shortcuts.insert(name, shortcut);
-                }
-                None => {
-                    existing.keyboard_shortcuts.remove(&name);
-                }
-            }
-        }
-    }
-
     if let Some(file_sync) = patch.file_sync {
         if let Some(v) = file_sync.file_sync_enabled {
             existing.file_sync.file_sync_enabled = v;
@@ -809,18 +520,6 @@ pub(crate) fn apply_settings_patch(
         }
         if let Some(v) = network.congestion_controller {
             existing.network.congestion_controller = v.into();
-        }
-    }
-
-    if let Some(quick_panel) = patch.quick_panel {
-        if let Some(v) = quick_panel.enabled {
-            existing.quick_panel.enabled = v;
-        }
-        if let Some(v) = quick_panel.position {
-            existing.quick_panel.position = v.into();
-        }
-        if let Some(v) = quick_panel.double_tap_modifier {
-            existing.quick_panel.double_tap_modifier = v.into();
         }
     }
 

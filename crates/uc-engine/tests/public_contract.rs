@@ -527,10 +527,6 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
     let mut settings = uc_engine::SettingsSummary::default();
     settings.general.device_name = Some("Private Mac".into());
     settings
-        .general
-        .theme_overrides_light
-        .insert("primary".into(), "private-theme-value".into());
-    settings
         .network
         .custom_relay_urls
         .push("https://private-relay.example".into());
@@ -558,7 +554,6 @@ fn settings_contract_preserves_updates_and_probe_outcomes_without_debugging_user
     let debug = format!("{save_relay:?} {values:?}");
     for secret in [
         "Private Mac",
-        "private-theme-value",
         "private-relay.example",
         "/private/export/path",
         "private validation detail",
@@ -610,10 +605,6 @@ fn diagnostics_contract_exports_through_host_handles_without_debugging_paths() {
         Operation::QueryDiagnostics.kind(),
         OperationKind::QueryDiagnostics
     );
-    assert_eq!(
-        Operation::UpdateDebugMode(uc_engine::UpdateDebugModeInput { enabled: true }).kind(),
-        OperationKind::UpdateDebugMode
-    );
     let export = Operation::ExportDiagnosticLogs(uc_engine::ExportDiagnosticLogsInput {
         since_hours: Some(48),
         destination: uc_engine::HostFileHandle::new("private diagnostic destination"),
@@ -640,6 +631,7 @@ fn config_migration_contract_uses_host_handles_and_redacts_identity_metadata() {
         password: uc_engine::SecretString::new("private config password"),
     });
     let stage = Operation::StageConfigImport(uc_engine::StageConfigImportInput {
+        replace_rejected_import: false,
         source: uc_engine::HostFileHandle::new("private config source"),
         password: uc_engine::SecretString::new("private config password"),
     });

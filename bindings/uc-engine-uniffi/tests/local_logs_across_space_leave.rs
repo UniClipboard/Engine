@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use uc_engine_uniffi::{
-    install_process_observability, prepare_local_diagnostic_export, BindingClipboardSnapshot,
-    BindingConfig, BindingDeploymentEnvironment, BindingFileMetadata, BindingHost,
-    BindingObservabilityConfig, BindingObservabilitySetupStatus, BindingObservabilitySignalResult,
-    HostBindingError, MobileEngine,
+    install_process_observability, prepare_local_diagnostic_export, shutdown_process_observability,
+    BindingClipboardSnapshot, BindingConfig, BindingDeploymentEnvironment, BindingFileMetadata,
+    BindingHost, BindingObservabilityConfig, BindingObservabilitySetupStatus,
+    BindingObservabilitySignalResult, HostBindingError, MobileEngine,
 };
 
 const PASSPHRASE: &str = "correct horse battery staple";
@@ -130,10 +130,13 @@ impl BindingHost for DirectoryHost {
     }
 }
 
-/// 与移动端导出相同：先由 Engine 刷新并报告写入计数，再列出日志目录里的受管文件。
-fn export_written_and_on_disk(logs: &Path) -> (u64, u64) {
+/// 先取得公开导出计数，再读取受管文件；调用方显式指定是否已完成关闭屏障。
+fn export_written_and_on_disk(
+    logs: &Path,
+    expected_flush: BindingObservabilitySignalResult,
+) -> (u64, u64) {
     let report = prepare_local_diagnostic_export(1_000).expect("diagnostic export report");
-    assert_eq!(report.flush, BindingObservabilitySignalResult::Completed);
+    assert_eq!(report.flush, expected_flush);
     let written = report.files.iter().map(|file| file.written_count).sum();
     let on_disk = fs::read_dir(logs)
         .map(|entries| {
@@ -204,16 +207,25 @@ fn leaving_a_space_keeps_the_active_engine_log_exportable() {
     engine
         .create_space(Some("before leave".to_owned()), PASSPHRASE.to_owned())
         .expect("create space");
-    let (written_before, on_disk_before) = export_written_and_on_disk(&logs);
+    let (written_before, on_disk_before) =
+        export_written_and_on_disk(&logs, BindingObservabilitySignalResult::Completed);
     assert!(written_before > 0, "the engine must have written records");
-    assert_eq!(on_disk_before, written_before + LEGACY_RECORDS);
+    // 报告之后仍可追加记录；活动期磁盘读取只能以报告计数作为下界。
+    assert!(on_disk_before >= written_before + LEGACY_RECORDS);
 
     engine.leave_space().expect("leave space");
     engine
         .create_space(Some("after leave".to_owned()), PASSPHRASE.to_owned())
         .expect("the same instance can create a space after leaving");
 
-    let (written_after, on_disk_after) = export_written_and_on_disk(&logs);
+    // 使用公开关闭屏障停止生产者和写入器，再做严格计数比较。
+    engine
+        .shutdown(SHUTDOWN_DEADLINE_MS)
+        .expect("engine shutdown");
+    let shutdown = shutdown_process_observability(SHUTDOWN_DEADLINE_MS).expect("process shutdown");
+    assert_eq!(shutdown.logs, BindingObservabilitySignalResult::Completed);
+    let (written_after, on_disk_after) =
+        export_written_and_on_disk(&logs, BindingObservabilitySignalResult::AlreadyShutdown);
     assert!(
         written_after > written_before,
         "records must keep being written after leaving"
@@ -224,7 +236,11 @@ fn leaving_a_space_keeps_the_active_engine_log_exportable() {
         "every record the engine reports as written must still be exportable after leaving"
     );
 
-    engine
-        .shutdown(SHUTDOWN_DEADLINE_MS)
-        .expect("engine shutdown");
+    if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
+        let directory = PathBuf::from(directory).join("local-logs-across-space-leave");
+        fs::create_dir_all(&directory).expect("artifact directory");
+        fs::write(directory.join("counts.txt"), format!(
+            "written_before={written_before}\non_disk_before={on_disk_before}\nwritten_after={written_after}\non_disk_after={on_disk_after}\nlegacy_records={LEGACY_RECORDS}\nshutdown=completed\n"
+        )).expect("count artifact");
+    }
 }

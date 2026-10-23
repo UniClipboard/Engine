@@ -465,6 +465,11 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 路径；health 仍通过独立接受门与只接受 HEALTH_TARGET 的格式层写入同一队列，在 SDK 收尾和遥测
 抑制时仍能记录健康结果。两个入口的 target 集合互斥，不会重复写入同一记录。健康记录经同一份本地关联信封标注，带 `local_schema_version`、`run_id`、`source_commit` 等运行字段，可与同一次运行的其他记录对应。
 
+宿主日志档位由宿主自己持有。Engine 不保存日志偏好、不读取环境变量或构建类型，也不据此改变任何 Engine 日志；宿主经
+`EngineConfig::with_host_log_profile` 声明其实际安装的档位名称后，诊断状态与导出清单的 `effectiveLogProfile` 原样报告它，
+未声明为缺失（见 [Engine 接口](uc-engine-interface.md#host-declared-log-profile)）。档位名称不改变标准/详细采集模式、模块日志等级、
+网络库日志规则或预算。
+
 桌面等已有日志输出的宿主使用 `ProcessObservabilityRuntime::install_with_host_layers` 在一次安装中
 提交标准 tracing Layer。共同运行时将核心记录与宿主记录分组过滤；宿主层不能接收核心合同事件、
 核心普通模块或网络依赖的原始诊断，不会复制核心文件记录或通过旧上传层外发本地详情。该能力由

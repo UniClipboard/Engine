@@ -155,7 +155,12 @@ fn probe_no_replace(probe_dir: &Path) -> bool {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    windows
+))]
 fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), PublishError> {
     rename_no_replace_io(source, destination).map_err(classify_os_error)
 }
@@ -188,6 +193,20 @@ pub fn rename_no_replace_io(source: &Path, destination: &Path) -> std::io::Resul
 ))]
 fn rename_no_replace(_source: &Path, _destination: &Path) -> Result<(), PublishError> {
     Err(PublishError::Unsupported)
+}
+
+/// 未验证原生不覆盖移动的平台必须保留来源并明确拒绝，不能退回可覆盖 rename。
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    windows
+)))]
+pub fn rename_no_replace_io(_source: &Path, _destination: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "native no-replace rename is unavailable",
+    ))
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -242,15 +261,19 @@ fn rename_plain(source: &Path, destination: &Path) -> Result<(), PublishError> {
     std::fs::rename(source, destination).map_err(classify_os_error)
 }
 
+/// Windows 同步流程复用同一个不覆盖移动，并保留原始系统错误。
 #[cfg(windows)]
-fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), PublishError> {
+pub fn rename_no_replace_io(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
     let to_wide = |path: &Path| {
         let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
         if wide.contains(&0) {
-            return Err(PublishError::Io("path contains an interior NUL".into()));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains an interior NUL",
+            ));
         }
         wide.push(0);
         Ok(wide)
@@ -258,15 +281,18 @@ fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), PublishErr
     let source = to_wide(source)?;
     let destination = to_wide(destination)?;
 
-    // Flags deliberately empty. MOVEFILE_REPLACE_EXISTING would clobber the
-    // destination; MOVEFILE_COPY_ALLOWED would turn a cross-volume move into a
-    // non-atomic copy. Without either, an occupied destination fails and a
-    // cross-volume move fails, which is exactly the contract.
-    let ok = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) };
+    // 不允许覆盖或跨卷复制；WRITE_THROUGH 在返回前提交移动，供同步持久化流程复用。
+    let ok = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
     if ok != 0 {
         return Ok(());
     }
-    Err(classify_os_error(std::io::Error::last_os_error()))
+    Err(std::io::Error::last_os_error())
 }
 
 #[cfg(windows)]
@@ -288,7 +314,12 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        windows
+    ))]
     #[test]
     fn synchronous_publication_preserves_existing_archive_and_original_error() {
         let tmp = TempDir::new().unwrap();

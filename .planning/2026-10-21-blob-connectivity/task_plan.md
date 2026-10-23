@@ -19,9 +19,9 @@
 阶段 0 前置证明完成：SDK／Uni 完成等待、原始材料、当前授权、同内容隔离、协议向量、8 组旧资料矩阵与 1GiB 基线均有证据。生产获取、提供端、完整条目结算、独立文件部分失败、稳定单项重试与薄绑定已接线；当前补全生命周期、失败恢复及阶段5最终交付证据，未据此标记完整spec完成。
 
 ## Next Step
-branch-fix唯一scope已inactive、exec10625退出0：App1281通过／1跳过69.067秒，Native receive_retry28/28通过265.831秒，整分支style／diff通过。先提交当前完整改动，再合并main预览中的3文件冲突：UniFFI两处导入保留双方类型，planning指针保持本任务。合并后重新阅读更新的AGENTS与宿主日志／配置合同，补齐活动接收切Space／本机离组及资源证明，再在最终整合源码统一执行根门禁、workspace、成员全集、升级smoke、当前head十组矩阵与线上必需CI。
+当前已提交3de9f9c0，main合并的3处冲突已逐一保留双方合同；UniFFI全目标check1分32秒、fmt／整分支style／工作区及暂存diff均通过，scope已结束；`.planning/.active_plan`保持本任务。提交已验证的merge之后先补真实活动接收切Space／本机离组及资源证明，再统一最终根门禁、workspace、成员全集、升级smoke、当前head十组矩阵与必需线上CI，避免在源码尚会变化时反复跑全量。
 
-真实文件观测已完成实际Collector／Jaeger／列表／展开Tags验证，绿证据在observability-green/；137合同＋Native15.991秒通过，红测全部保留。观测service已停止，浏览器／Collector／Jaeger无残留；已验证工具暂保留供整合源码必要复验，任务结束前清理。
+合并前最后证据：App1281通过／1跳过69.067秒，Native receive_retry28/28通过265.831秒；观测137合同＋Native15.991秒及严格Collector／Jaeger／列表／展开Tags全通过，绿工件observability-green/、红测保留。观测service已停止、无浏览器／Collector／Jaeger残留。工具暂保留供整合源码观测复验，任务结束前清理。
 
 原完整回归scope已经inactive、会话53955结束：编译30分30秒，测试1212.937秒，4582通过／3失败／1超时／28跳过，workspace退出100，JUnit已保存。四个问题：Native C额度9.326秒结果断言失败（断言已允许pending，保持严格，仅加安全计数／OTLP诊断）；恢复会话20.017秒TIMEOUT（原冻结二进制独占13.30秒全部断言通过，已设有限60秒并独占，待新配置验证）；facade错误导出BlobTransferDeps（测试支持参数已移到既有deps入口，原防火墙同二进制针对新源码精确退出0）；堆栈unresolved（驱动漏设既有Linux CI的UC_EXPECT_DIAGNOSTIC_STACK=available，原二进制按该既有模式1.54秒通过，未改源码或断言）。原排队成员全集／升级／OTLP因fail-early均未执行，不能登记通过；新focused驱动结束后仍须继续。
 

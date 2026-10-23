@@ -120,9 +120,7 @@ pub use clipboard_history::{
 };
 pub use clipboard_restore::{ClipboardRestoreError, ClipboardRestoreFacade};
 pub use config_migration::ConfigMigrationFacade;
-pub use diagnostics::{
-    DebugStatusView, DiagnosticsFacade, DiagnosticsFacadeError, LogExportView, UpdateDebugModeView,
-};
+pub use diagnostics::{DebugStatusView, DiagnosticsFacade, DiagnosticsFacadeError, LogExportView};
 pub use file_transfer::{
     BeginReceiverTransfer, FileTransferApplicationError, FileTransferFacade,
     ReceiverTransferHandle, ReceiverTransferRegistration,
@@ -158,8 +156,7 @@ pub use settings::{
     RelayProbeReport, RelayProbeReportView, RetentionPolicyPatch, RetentionPolicyView,
     RetentionRulePatchValue, RetentionRuleView, RuleEvaluationView, SecuritySettingsPatch,
     SecuritySettingsView, SettingsFacade, SettingsFacadeError, SettingsPatch, SettingsView,
-    ShortcutKeyView, SyncFrequencyView, SyncSettingsPatch, SyncSettingsView, ThemeView,
-    UpdateChannelView,
+    SyncFrequencyView, SyncSettingsPatch, SyncSettingsView,
 };
 
 pub use space_setup::{

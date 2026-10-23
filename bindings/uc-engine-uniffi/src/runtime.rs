@@ -13,8 +13,9 @@ use uc_engine::observability::{
 };
 use uc_engine::{
     CancelEntryReceiveInput, CancelInboundTransferInput, ChangeEncryptionPassphraseInput,
-    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, CustomRelayMutation,
-    CustomRelayMutationOutcome, CustomRelayRejection, Engine, EngineConfig,
+    ClipboardRestoreMode, ClipboardRestoreOutcome,
+    ConfigImportRejectionReason as EngineConfigImportRejectionReason, CreateSpaceInput,
+    CustomRelayMutation, CustomRelayMutationOutcome, CustomRelayRejection, Engine, EngineConfig,
     EntryReceiveProgressInput, EntryReceiveRetryOutcome as EngineReceiveRetryOutcome,
     ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
@@ -363,6 +364,21 @@ pub struct PeerConnectionRefresh {
     pub errors: u64,
 }
 
+/// 配置导入未完成的安全原因；不包含私有文件或凭据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ConfigImportRejectionReason {
+    UnsupportedFormat,
+    MalformedMarker,
+    MissingRuntimeMembers,
+}
+
+/// 真实 Engine 查询的持久拒绝结果；Mobile 负责按原因本地化提示。
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RejectedConfigImport {
+    pub reason: ConfigImportRejectionReason,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NetworkRecoveryStatus {
     pub phase: String,
@@ -632,6 +648,9 @@ enum WorkerCommand {
     },
     QueryNetworkRecoveryStatus {
         response: mpsc::Sender<Result<NetworkRecoveryStatus, BindingError>>,
+    },
+    QueryRejectedConfigImport {
+        response: mpsc::Sender<Result<Option<RejectedConfigImport>, BindingError>>,
     },
     QuerySpaceState {
         response: mpsc::Sender<Result<SpaceState, BindingError>>,
@@ -1200,6 +1219,13 @@ impl MobileEngine {
 
     pub fn query_network_recovery_status(&self) -> Result<NetworkRecoveryStatus, BindingError> {
         self.request(|response| WorkerCommand::QueryNetworkRecoveryStatus { response })
+    }
+
+    /// 查询持久拒绝状态；None 不表示导入成功，读取错误保留 Engine 错误字段。
+    pub fn query_rejected_config_import(
+        &self,
+    ) -> Result<Option<RejectedConfigImport>, BindingError> {
+        self.request(|response| WorkerCommand::QueryRejectedConfigImport { response })
     }
 
     pub fn query_space_state(&self) -> Result<SpaceState, BindingError> {
@@ -1855,6 +1881,17 @@ async fn run_operations(
                     .and_then(map_network_recovery_status);
                 let _ = response.send(result);
             }
+            WorkerCommand::QueryRejectedConfigImport { response } => {
+                let result = engine
+                    .execute(Operation::QueryDiagnostics)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(map_rejected_config_import);
+                if let Err(error) = &result {
+                    log_mobile_failure("query_rejected_config_import", error);
+                }
+                let _ = response.send(result);
+            }
             WorkerCommand::QuerySpaceState { response } => {
                 let result = engine
                     .execute(Operation::QuerySetupState)
@@ -2393,6 +2430,19 @@ fn map_space_created(result: OperationResult) -> Result<SpaceCreated, BindingErr
         self_device_id,
         identity_fingerprint,
     })
+}
+
+fn map_rejected_config_import(
+    result: OperationResult,
+) -> Result<Option<RejectedConfigImport>, BindingError> {
+    unpack_operation!(result, OperationResult::DiagnosticsStatus(status) => status.rejected_config_import.map(|rejected| RejectedConfigImport {
+        reason: match rejected.reason {
+            EngineConfigImportRejectionReason::UnsupportedFormat => ConfigImportRejectionReason::UnsupportedFormat,
+            EngineConfigImportRejectionReason::MalformedMarker => ConfigImportRejectionReason::MalformedMarker,
+            EngineConfigImportRejectionReason::MissingRuntimeMembers => ConfigImportRejectionReason::MissingRuntimeMembers,
+        },
+        message: rejected.message,
+    }))
 }
 
 fn map_space_state(result: OperationResult) -> Result<SpaceState, BindingError> {

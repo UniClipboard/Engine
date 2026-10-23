@@ -42,6 +42,7 @@ use crate::facade::{
     MembershipDiagnosticsView, MembershipReadiness, QueryMembershipDiagnosticsError,
     QueryMembershipReadinessError,
 };
+use crate::settings::diagnostics::DiagnosticsFacadeError;
 use crate::space::PeerConnectionError;
 
 pub use crate::space::{DeviceGroupChoicesView, QueryDeviceGroupChoicesError};
@@ -134,12 +135,12 @@ use crate::facade::upgrade::UpgradeFacade;
 use crate::facade::{
     BlobTransferError, BlobTransferFacade, ChangeEncryptionPassphraseError, ClipboardCaptureFacade,
     ClipboardHistoryFacade, ClipboardOutboundFacade, ClipboardRestoreError, ClipboardRestoreFacade,
-    ClipboardSyncError, ClipboardSyncFacade, DiagnosticsFacade, DispatchEntryOutcome,
-    FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand, FetchBlobToPathResult,
-    LocalDeviceInfo, ProbeProfileKeyAccessError, PublishBlobCommand, PublishBlobPathCommand,
-    PublishBlobResult, QuerySpaceAccessStateError, ResendEntryCommand, ResendEntryError,
-    ResendReport, ResourceFacade, SearchFacade, SearchFacadeError, SearchPageView,
-    SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
+    ClipboardSyncError, ClipboardSyncFacade, DebugStatusView, DiagnosticsFacade,
+    DispatchEntryOutcome, FetchBlobCommand, FetchBlobResult, FetchBlobToPathCommand,
+    FetchBlobToPathResult, LocalDeviceInfo, ProbeProfileKeyAccessError, PublishBlobCommand,
+    PublishBlobPathCommand, PublishBlobResult, QuerySpaceAccessStateError, ResendEntryCommand,
+    ResendEntryError, ResendReport, ResourceFacade, SearchFacade, SearchFacadeError,
+    SearchPageView, SearchQueryInput, SearchRebuildAcceptedView, SearchStatusView, SettingsFacade,
     SettingsFacadeError, SpaceAccessState, SpaceFacade, StorageFacade,
 };
 use crate::profile::probe_profile_key_access::ProbeProfileKeyAccessUseCase;
@@ -1004,11 +1005,14 @@ impl AppFacade {
         &self,
         password: &uc_core::crypto::domain::Passphrase,
         source: &Path,
+        replace_rejected_import: bool,
     ) -> Result<
         uc_core::ports::config_migration::StagedConfigImport,
         uc_core::ports::config_migration::ConfigMigrationError,
     > {
-        self.config_migration.stage_import(password, source).await
+        self.config_migration
+            .stage_import(password, source, replace_rejected_import)
+            .await
     }
 
     pub async fn member_sync_preferences(
@@ -1034,17 +1038,14 @@ impl AppFacade {
         self.space.space_protection().await
     }
 
-    pub async fn diagnostics_status(
-        &self,
-    ) -> Result<crate::facade::DebugStatusView, crate::facade::DiagnosticsFacadeError> {
-        self.diagnostics.debug_status().await
-    }
-
-    pub async fn update_debug_mode(
-        &self,
-        enabled: bool,
-    ) -> Result<crate::facade::UpdateDebugModeView, crate::facade::DiagnosticsFacadeError> {
-        self.diagnostics.set_debug_mode(enabled).await
+    pub async fn diagnostics_status(&self) -> Result<DebugStatusView, DiagnosticsFacadeError> {
+        let mut status = self.diagnostics.debug_status();
+        status.rejected_config_import = self
+            .config_migration
+            .query_rejected_import()
+            .await
+            .map_err(DiagnosticsFacadeError::ImportStatus)?;
+        Ok(status)
     }
 
     pub async fn export_diagnostic_logs(
@@ -1094,30 +1095,13 @@ impl AppFacade {
             .update(SettingsPatch {
                 general: Some(GeneralSettingsPatch {
                     device_name: Some(Some(device_name)),
-                    auto_start: None,
-                    startup_mode: None,
-                    restore_last_entry_on_startup: None,
-                    auto_check_update: None,
-                    auto_download_update: None,
-                    theme: None,
-                    theme_color: None,
-                    theme_color_light: None,
-                    theme_color_dark: None,
-                    theme_overrides_light: None,
-                    theme_overrides_dark: None,
-                    language: None,
-                    update_channel: None,
-                    usage_analytics_enabled: None,
-                    debug_mode: None,
                 }),
                 sync: None,
                 retention_policy: None,
                 security: None,
                 pairing: None,
-                keyboard_shortcuts: None,
                 file_sync: None,
                 network: None,
-                quick_panel: None,
             })
             .await?;
         Ok(())

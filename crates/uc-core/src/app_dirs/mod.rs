@@ -1,5 +1,11 @@
 use std::path::PathBuf;
 
+mod host_configuration_files;
+
+pub use host_configuration_files::{
+    HostConfigurationFileError, HostConfigurationFileReset, HostConfigurationFiles,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppDirs {
     pub app_data_root: PathBuf,
@@ -48,18 +54,6 @@ impl AppPaths {
 
     pub fn daemon_pid_path(&self) -> PathBuf {
         self.app_data_root_dir.join(".daemon-pid")
-    }
-
-    pub fn last_notified_update_path(&self) -> PathBuf {
-        self.app_data_root_dir.join("last_notified_update.json")
-    }
-
-    pub fn skipped_version_path(&self) -> PathBuf {
-        self.app_data_root_dir.join("skipped_version.json")
-    }
-
-    pub fn update_prompt_throttle_path(&self) -> PathBuf {
-        self.app_data_root_dir.join("update_prompt_throttle.json")
     }
 
     pub fn from_app_dirs(dirs: &AppDirs) -> Self {

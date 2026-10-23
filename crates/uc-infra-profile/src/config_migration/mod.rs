@@ -19,10 +19,12 @@
 //! * [`adapter`] — the port-implementing adapter that ties them together.
 
 pub mod adapter;
+pub(crate) mod adoption;
 pub mod archive;
 pub mod bundle;
 pub mod db_snapshot;
 pub mod manifest;
+pub(crate) mod pending;
 pub mod secret_keys;
 pub mod staging;
 
@@ -164,6 +166,16 @@ mod tests {
             b"encrypted-current-space-id",
         )
         .unwrap();
+        for name in [
+            "profile-content-key-vault-v1.json",
+            ".active-space-manifest-v2",
+            "profile-secrets-v1",
+        ] {
+            if !vault.join(name).exists() {
+                std::fs::write(vault.join(name), b"synthetic encrypted port fixture").unwrap();
+            }
+        }
+        std::fs::write(data_root.join(".engine-upgrade-cursor.json"), b"{}").unwrap();
         std::fs::write(data_root.join("settings.json"), b"{\"schema_version\":1}").unwrap();
 
         // Seed the iroh device-identity directory with the 0600 files the
@@ -175,15 +187,22 @@ mod tests {
         let identity = IdentityFingerprint::from_raw_string("ABCDEFGHIJKLMNOP").unwrap();
 
         let paths = ConfigMigrationPaths {
+            blob_root: {
+                let path = data_root.join("fixture-blobs");
+                std::fs::create_dir_all(&path).unwrap();
+                path
+            },
             db_path,
             vault_dir: vault,
             iroh_identity_dir,
             settings_path: data_root.join("settings.json"),
             app_data_root: data_root.clone(),
+            host_configuration_files: uc_core::app_dirs::HostConfigurationFiles::default(),
         };
 
         let adapter = Arc::new(ConfigMigrationAdapter::new(
             secure_storage.clone(),
+            pool.clone(),
             pool,
             Arc::new(FixedIdentity(identity)),
             Arc::new(FixedClock(1_700_000_000_000)),
@@ -256,7 +275,7 @@ mod tests {
 
         let staged = fx
             .adapter
-            .stage_import(&password, &dest)
+            .stage_import(&password, &dest, false)
             .await
             .expect("stage should succeed");
 
@@ -337,7 +356,10 @@ mod tests {
             .await
             .expect("export should succeed without identity files");
 
-        fx.adapter.stage_import(&password, &dest).await.unwrap();
+        fx.adapter
+            .stage_import(&password, &dest, false)
+            .await
+            .unwrap();
         let layout = StagingLayout::new(&fx.data_root);
         // No identity files reached staging.
         assert!(!layout

@@ -5,21 +5,18 @@ use std::time::Duration;
 
 use uc_application::facade::settings as app;
 use uc_application::facade::AppFacade;
-use uc_core::settings::model::ShortcutKey;
 use uc_core::settings::relay_routing::RelayRouting;
 
 use crate::{
     CongestionControllerSummary, CustomRelayMutation, CustomRelayMutationOutcome,
     CustomRelayRejection, CustomRelaySummary, EngineError, EngineErrorCategory,
     FileSyncSettingsSummary, GeneralSettingsSummary, NetworkSettingsSummary, OperationResult,
-    PairingSettingsSummary, QuickPanelDoubleTapModifierSummary, QuickPanelPositionSummary,
-    QuickPanelSettingsSummary, RelayCredentialEdit, RelayCredentialInput, RelayCredentialStatus,
+    PairingSettingsSummary, RelayCredentialEdit, RelayCredentialInput, RelayCredentialStatus,
     RelayEntrySource, RelayOverview, RelayOverviewEntry, RelayProbeCredential, RelayProbeInput,
     RelayProbeOutcome, RelayRoutingMode, RetentionPolicySummary, RetentionRulePatch,
     RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput, SaveRelayOutcome,
     SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch, SettingsPatch,
-    SettingsSummary, SettingsUpdateOutcome, ShortcutKeySummary, StartupModeSummary,
-    SyncFrequencySummary, SyncSettingsSummary, ThemeSummary, UpdateChannelSummary,
+    SettingsSummary, SettingsUpdateOutcome, SyncFrequencySummary, SyncSettingsSummary,
 };
 
 pub(crate) async fn execute_query_custom_relays(
@@ -321,22 +318,7 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
     SettingsSummary {
         schema_version: settings.schema_version,
         general: GeneralSettingsSummary {
-            auto_start: settings.general.auto_start,
-            startup_mode: map_startup_mode(settings.general.startup_mode),
-            restore_last_entry_on_startup: settings.general.restore_last_entry_on_startup,
-            auto_check_update: settings.general.auto_check_update,
-            auto_download_update: settings.general.auto_download_update,
-            theme: map_theme(settings.general.theme),
-            theme_color: settings.general.theme_color,
-            theme_color_light: settings.general.theme_color_light,
-            theme_color_dark: settings.general.theme_color_dark,
-            theme_overrides_light: settings.general.theme_overrides_light,
-            theme_overrides_dark: settings.general.theme_overrides_dark,
-            language: settings.general.language,
             device_name: settings.general.device_name,
-            update_channel: settings.general.update_channel.map(map_update_channel),
-            usage_analytics_enabled: settings.general.usage_analytics_enabled,
-            debug_mode: settings.general.debug_mode,
         },
         sync: SyncSettingsSummary {
             sync_enabled: settings.sync.sync_enabled,
@@ -368,11 +350,6 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
             max_retries: settings.pairing.max_retries,
             protocol_version: settings.pairing.protocol_version,
         },
-        keyboard_shortcuts: settings
-            .keyboard_shortcuts
-            .into_iter()
-            .map(|(name, shortcut)| (name, map_shortcut(shortcut)))
-            .collect(),
         file_sync: FileSyncSettingsSummary {
             file_sync_enabled: settings.file_sync.file_sync_enabled,
             small_file_threshold: settings.file_sync.small_file_threshold,
@@ -392,35 +369,13 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
                 settings.network.congestion_controller,
             ),
         },
-        quick_panel: QuickPanelSettingsSummary {
-            enabled: settings.quick_panel.enabled,
-            position: map_quick_panel_position(settings.quick_panel.position),
-            double_tap_modifier: map_double_tap_modifier(settings.quick_panel.double_tap_modifier),
-        },
     }
 }
 
 fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
     Ok(app::SettingsPatch {
         general: patch.general.map(|value| app::GeneralSettingsPatch {
-            auto_start: value.auto_start,
-            startup_mode: value.startup_mode.map(unmap_startup_mode),
-            restore_last_entry_on_startup: value.restore_last_entry_on_startup,
-            auto_check_update: value.auto_check_update,
-            auto_download_update: value.auto_download_update,
-            theme: value.theme.map(unmap_theme),
-            theme_color: value.theme_color,
-            theme_color_light: value.theme_color_light,
-            theme_color_dark: value.theme_color_dark,
-            theme_overrides_light: value.theme_overrides_light,
-            theme_overrides_dark: value.theme_overrides_dark,
-            language: value.language,
             device_name: value.device_name,
-            update_channel: value
-                .update_channel
-                .map(|channel| channel.map(unmap_update_channel)),
-            usage_analytics_enabled: value.usage_analytics_enabled,
-            debug_mode: value.debug_mode,
         }),
         sync: patch.sync.map(|value| app::SyncSettingsPatch {
             sync_enabled: value.sync_enabled,
@@ -460,12 +415,6 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
             session_timeout: value.session_timeout_secs.map(Duration::from_secs),
             max_retries: value.max_retries,
         }),
-        keyboard_shortcuts: patch.keyboard_shortcuts.map(|shortcuts| {
-            shortcuts
-                .into_iter()
-                .map(|(name, shortcut)| (name, shortcut.map(unmap_shortcut)))
-                .collect()
-        }),
         file_sync: patch.file_sync.map(|value| app::FileSyncSettingsPatch {
             file_sync_enabled: value.file_sync_enabled,
             small_file_threshold: value.small_file_threshold,
@@ -483,62 +432,7 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
             custom_relay_urls: value.custom_relay_urls,
             congestion_controller: value.congestion_controller.map(unmap_congestion_controller),
         }),
-        quick_panel: patch.quick_panel.map(|value| app::QuickPanelSettingsPatch {
-            enabled: value.enabled,
-            position: value.position.map(unmap_quick_panel_position),
-            double_tap_modifier: value.double_tap_modifier.map(unmap_double_tap_modifier),
-        }),
     })
-}
-
-fn map_theme(value: app::ThemeView) -> ThemeSummary {
-    match value {
-        app::ThemeView::Light => ThemeSummary::Light,
-        app::ThemeView::Dark => ThemeSummary::Dark,
-        app::ThemeView::System => ThemeSummary::System,
-    }
-}
-
-fn unmap_theme(value: ThemeSummary) -> app::ThemeView {
-    match value {
-        ThemeSummary::Light => app::ThemeView::Light,
-        ThemeSummary::Dark => app::ThemeView::Dark,
-        ThemeSummary::System => app::ThemeView::System,
-    }
-}
-
-fn map_startup_mode(value: app::StartupModeView) -> StartupModeSummary {
-    match value {
-        app::StartupModeView::Normal => StartupModeSummary::Normal,
-        app::StartupModeView::Silent => StartupModeSummary::Silent,
-        app::StartupModeView::Lightweight => StartupModeSummary::Lightweight,
-    }
-}
-
-fn unmap_startup_mode(value: StartupModeSummary) -> app::StartupModeView {
-    match value {
-        StartupModeSummary::Normal => app::StartupModeView::Normal,
-        StartupModeSummary::Silent => app::StartupModeView::Silent,
-        StartupModeSummary::Lightweight => app::StartupModeView::Lightweight,
-    }
-}
-
-fn map_update_channel(value: app::UpdateChannelView) -> UpdateChannelSummary {
-    match value {
-        app::UpdateChannelView::Stable => UpdateChannelSummary::Stable,
-        app::UpdateChannelView::Alpha => UpdateChannelSummary::Alpha,
-        app::UpdateChannelView::Beta => UpdateChannelSummary::Beta,
-        app::UpdateChannelView::Rc => UpdateChannelSummary::Rc,
-    }
-}
-
-fn unmap_update_channel(value: UpdateChannelSummary) -> app::UpdateChannelView {
-    match value {
-        UpdateChannelSummary::Stable => app::UpdateChannelView::Stable,
-        UpdateChannelSummary::Alpha => app::UpdateChannelView::Alpha,
-        UpdateChannelSummary::Beta => app::UpdateChannelView::Beta,
-        UpdateChannelSummary::Rc => app::UpdateChannelView::Rc,
-    }
 }
 
 fn map_sync_frequency(value: app::SyncFrequencyView) -> SyncFrequencySummary {
@@ -652,20 +546,6 @@ fn unmap_retention_rule(value: RetentionRulePatch) -> Result<app::RetentionRuleP
     })
 }
 
-fn map_shortcut(value: ShortcutKey) -> ShortcutKeySummary {
-    match value {
-        ShortcutKey::Single(value) => ShortcutKeySummary::Single(value),
-        ShortcutKey::Multiple(values) => ShortcutKeySummary::Multiple(values),
-    }
-}
-
-fn unmap_shortcut(value: ShortcutKeySummary) -> ShortcutKey {
-    match value {
-        ShortcutKeySummary::Single(value) => ShortcutKey::Single(value),
-        ShortcutKeySummary::Multiple(values) => ShortcutKey::Multiple(values),
-    }
-}
-
 fn map_congestion_controller(value: app::CongestionControllerView) -> CongestionControllerSummary {
     match value {
         app::CongestionControllerView::Cubic => CongestionControllerSummary::Cubic,
@@ -682,50 +562,6 @@ fn unmap_congestion_controller(
     }
 }
 
-fn map_quick_panel_position(value: app::QuickPanelPositionView) -> QuickPanelPositionSummary {
-    match value {
-        app::QuickPanelPositionView::Center => QuickPanelPositionSummary::Center,
-        app::QuickPanelPositionView::FollowCursor => QuickPanelPositionSummary::FollowCursor,
-    }
-}
-
-fn unmap_quick_panel_position(value: QuickPanelPositionSummary) -> app::QuickPanelPositionView {
-    match value {
-        QuickPanelPositionSummary::Center => app::QuickPanelPositionView::Center,
-        QuickPanelPositionSummary::FollowCursor => app::QuickPanelPositionView::FollowCursor,
-    }
-}
-
-fn map_double_tap_modifier(
-    value: app::QuickPanelDoubleTapModifierView,
-) -> QuickPanelDoubleTapModifierSummary {
-    match value {
-        app::QuickPanelDoubleTapModifierView::Disabled => {
-            QuickPanelDoubleTapModifierSummary::Disabled
-        }
-        app::QuickPanelDoubleTapModifierView::Alt => QuickPanelDoubleTapModifierSummary::Alt,
-        app::QuickPanelDoubleTapModifierView::Control => {
-            QuickPanelDoubleTapModifierSummary::Control
-        }
-        app::QuickPanelDoubleTapModifierView::Meta => QuickPanelDoubleTapModifierSummary::Meta,
-    }
-}
-
-fn unmap_double_tap_modifier(
-    value: QuickPanelDoubleTapModifierSummary,
-) -> app::QuickPanelDoubleTapModifierView {
-    match value {
-        QuickPanelDoubleTapModifierSummary::Disabled => {
-            app::QuickPanelDoubleTapModifierView::Disabled
-        }
-        QuickPanelDoubleTapModifierSummary::Alt => app::QuickPanelDoubleTapModifierView::Alt,
-        QuickPanelDoubleTapModifierSummary::Control => {
-            app::QuickPanelDoubleTapModifierView::Control
-        }
-        QuickPanelDoubleTapModifierSummary::Meta => app::QuickPanelDoubleTapModifierView::Meta,
-    }
-}
-
 fn internal_error(code: u32) -> EngineError {
     EngineError::new(code, EngineErrorCategory::Internal, false)
 }
@@ -739,8 +575,6 @@ mod tests {
         let patch = SettingsPatch {
             general: Some(crate::GeneralSettingsPatch {
                 device_name: Some(None),
-                language: None,
-                ..Default::default()
             }),
             ..Default::default()
         };
@@ -748,7 +582,6 @@ mod tests {
         let mapped = map_patch(patch).expect("valid patch");
         let general = mapped.general.expect("general patch");
         assert_eq!(general.device_name, Some(None));
-        assert_eq!(general.language, None);
     }
 
     #[test]
@@ -767,12 +600,6 @@ mod tests {
         };
 
         assert!(map_patch(patch).is_err());
-    }
-
-    #[test]
-    fn shortcut_debug_output_redacts_key_values() {
-        let shortcut = ShortcutKeySummary::Multiple(vec!["Private+Key".to_string()]);
-        assert!(!format!("{shortcut:?}").contains("Private+Key"));
     }
 
     #[test]

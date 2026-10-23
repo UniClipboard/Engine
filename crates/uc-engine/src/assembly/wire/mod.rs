@@ -30,8 +30,9 @@ use uc_application::deps::{
     SpaceAccessPorts, SpaceRebuildProgressPort, StoragePorts, SystemPorts,
 };
 use uc_application::facade::HostEventEmitterPort;
-use uc_core::app_dirs::AppPaths;
+use uc_core::app_dirs::{AppPaths, HostConfigurationFiles};
 use uc_core::clipboard::SelectRepresentationPolicyV1;
+use uc_core::diagnostics::HostLogProfile;
 use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
@@ -184,6 +185,8 @@ pub struct CoreWiringInputs {
     pub startup_progress: Arc<dyn uc_infra_profile::security::StorageUpgradeObserver>,
     pub profile_key_recovery: Arc<dyn ProfilePassphraseRecoveryPort>,
     pub upgrade_backup_security: Arc<dyn RetireUpgradeBackupSecurityRecordsPort>,
+    pub host_configuration_files: HostConfigurationFiles,
+    pub host_log_profile: Option<HostLogProfile>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -340,6 +343,8 @@ pub async fn wire_dependencies_from_inputs(
         startup_progress,
         profile_key_recovery,
         upgrade_backup_security,
+        host_configuration_files,
+        host_log_profile,
     } = inputs;
     let profile_reset_paths = paths.clone();
     let profile_reset_profile_id = profile_id.inner().to_owned();
@@ -430,6 +435,7 @@ pub async fn wire_dependencies_from_inputs(
     // Config-migration export produces a consistent db snapshot via `VACUUM INTO`
     // off its own pooled connection; clone before infra consumes the pool.
     let db_pool_for_config_migration = db_pool.clone();
+    let control_db_pool_for_config_migration = control_db_pool.clone();
 
     let mut infra = create_infra_layer(
         db_pool,
@@ -450,7 +456,7 @@ pub async fn wire_dependencies_from_inputs(
         secure_storage,
         profile_id,
         &vault_path,
-        blob_store_dir,
+        blob_store_dir.clone(),
         infra.blob_repository.clone(),
         infra.clock.clone(),
         storage_config.clone(),
@@ -882,6 +888,7 @@ pub async fn wire_dependencies_from_inputs(
             db_pool_for_profile_reset,
             profile_reset_paths,
             db_path.clone(),
+            host_configuration_files.clone(),
         )),
     };
     // Whole-installation configuration migration (export / import preview /
@@ -893,6 +900,7 @@ pub async fn wire_dependencies_from_inputs(
         &platform.secure_storage,
         &iroh_identity_storage,
         db_pool_for_config_migration,
+        control_db_pool_for_config_migration,
         &infra.clock,
         &current_space_identity,
         &portable_current_space_identity,
@@ -900,11 +908,13 @@ pub async fn wire_dependencies_from_inputs(
         app_version,
         config_source_mode,
         ConfigMigrationPaths {
+            blob_root: blob_store_dir.clone(),
             db_path: db_path.clone(),
             vault_dir: vault_path.clone(),
             settings_path: settings_path.clone(),
             app_data_root: app_data_root.clone(),
             iroh_identity_dir,
+            host_configuration_files,
         },
     );
 
@@ -934,6 +944,7 @@ pub async fn wire_dependencies_from_inputs(
 
     let mut deps = ApplicationDeps {
         paths: paths.clone(),
+        host_log_profile,
         relay_diagnostic: build_relay_diagnostic(),
         host_event_bus: Arc::clone(&host_event_bus),
         file_transfer_event_store: file_transfer_store_arc,

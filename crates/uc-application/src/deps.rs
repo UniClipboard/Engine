@@ -11,6 +11,7 @@ pub use crate::transfer::receive::retry::{
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort};
+use uc_core::diagnostics::HostLogProfile;
 use uc_core::ids::RepresentationId;
 use uc_core::membership::GroupRevocationPort;
 use uc_core::ports::clipboard::{
@@ -517,6 +518,8 @@ pub struct SystemPorts {
 pub struct ApplicationDeps {
     /// Application 稳定目录输入；领域 assembly 不再向 Engine 重新请求路径。
     pub paths: crate::facade::AppPaths,
+    /// 宿主声明的、本进程实际安装的日志档位；诊断只原样报告。
+    pub host_log_profile: Option<HostLogProfile>,
     /// Engine 选择的 relay 连通性诊断端口；Settings 决定是否及如何使用。
     pub relay_diagnostic: Option<Arc<dyn crate::settings::RelayDiagnosticPort>>,
     /// Application 内部各领域 assembly 共享的宿主事件出口。
@@ -565,8 +568,8 @@ pub struct ApplicationDeps {
     pub search: SearchPorts,
     /// 接收产品分析事件的横切上报端口。
     ///
-    /// 组合根使用带开关的 observer 包装具体 sink。调用方只需提交事件，
-    /// 不需重复查询 `usage_analytics_enabled`。
+    /// 组合根使用带开关的 observer 包装具体 sink，开关由宿主的产品分析许可决定。
+    /// 调用方只需提交事件，不需重复查询许可。
     pub analytics: Arc<dyn AnalyticsPort>,
 }
 pub use crate::space::MembershipProjectionPlan;

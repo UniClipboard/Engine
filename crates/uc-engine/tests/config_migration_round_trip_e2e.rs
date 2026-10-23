@@ -1,4 +1,7 @@
-//! Engine-level config-migration round trip: real `export_bundle` →
+//! 本文件验证真实 Infra 端口管线。运行期密文使用合成占位值，不验证 Engine 启动。
+//! 公开 Engine 启动、代次采用与加密内容读写由 host_configuration_files_e2e 验证。
+//!
+//! Infra-port config-migration round trip: real `export_bundle` →
 //! `stage_import` → boot-time `apply_pending_import` → landed-state assertions.
 //!
 //! The per-layer unit tests exercise each step against synthetic fakes; this
@@ -164,6 +167,16 @@ async fn build_source(passphrase: &Passphrase) -> Source {
     )
     .unwrap();
     std::fs::write(vault_dir.join("profile-secrets-v1"), PROFILE_SECRETS_BYTES).unwrap();
+    for name in [
+        "profile-content-key-vault-v1.json",
+        ".active-space-manifest-v2",
+        "profile-secrets-v1",
+    ] {
+        if !vault_dir.join(name).exists() {
+            std::fs::write(vault_dir.join(name), b"synthetic encrypted port fixture").unwrap();
+        }
+    }
+    std::fs::write(data_root.join(".engine-upgrade-cursor.json"), b"{}").unwrap();
     std::fs::write(data_root.join("settings.json"), SETTINGS_JSON).unwrap();
     std::fs::write(
         iroh_identity_dir.join(IROH_IDENTITY_FILE),
@@ -178,16 +191,23 @@ async fn build_source(passphrase: &Passphrase) -> Source {
     ));
 
     let paths = ConfigMigrationPaths {
+        blob_root: {
+            let path = data_root.join("fixture-blobs");
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        },
         db_path: db_path.clone(),
         vault_dir: vault_dir.clone(),
         iroh_identity_dir: iroh_identity_dir.clone(),
         settings_path: data_root.join("settings.json"),
         app_data_root: data_root.clone(),
+        host_configuration_files: uc_core::app_dirs::HostConfigurationFiles::default(),
     };
 
     let settings_path = data_root.join("settings.json");
     let adapter = ConfigMigrationAdapter::new(
         kek_storage.clone(),
+        pool.clone(),
         pool,
         local_identity,
         Arc::new(SystemClock),
@@ -254,15 +274,22 @@ fn build_target() -> Target {
     ));
 
     let paths = ConfigMigrationPaths {
+        blob_root: {
+            let path = data_root.join("fixture-blobs");
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        },
         db_path: db_path.clone(),
         vault_dir: vault_dir.clone(),
         iroh_identity_dir: iroh_identity_dir.clone(),
         settings_path: data_root.join("settings.json"),
         app_data_root: data_root.clone(),
+        host_configuration_files: uc_core::app_dirs::HostConfigurationFiles::default(),
     };
 
     let adapter = ConfigMigrationAdapter::new(
         core_secure_storage.clone(),
+        pool.clone(),
         pool,
         local_identity,
         Arc::new(SystemClock),
@@ -329,7 +356,7 @@ async fn export_stage_apply_round_trip_lands_db_vault_identity_and_kek() {
     //    space passphrase that derives the KEK.
     let staged = tgt
         .adapter
-        .stage_import(&passphrase, &bundle_path)
+        .stage_import(&passphrase, &bundle_path, false)
         .await
         .expect("stage should succeed");
 
@@ -357,6 +384,7 @@ async fn export_stage_apply_round_trip_lands_db_vault_identity_and_kek() {
         &tgt.vault_dir,
         &tgt.settings_path,
         &tgt.iroh_identity_dir,
+        &uc_core::app_dirs::HostConfigurationFiles::default(),
         tgt.core_secure_storage.as_ref(),
     )
     .expect("apply_pending_import should succeed");
@@ -443,7 +471,7 @@ async fn stage_import_with_wrong_passphrase_is_invalid_or_corrupt() {
 
     let err = tgt
         .adapter
-        .stage_import(&Passphrase::from("wrong-passphrase"), &bundle_path)
+        .stage_import(&Passphrase::from("wrong-passphrase"), &bundle_path, false)
         .await
         .expect_err("staging with the wrong passphrase must fail");
 
