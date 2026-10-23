@@ -10,8 +10,8 @@ use tokio::io::{AsyncRead, ReadBuf};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    BlobExchangeError, BlobExchangePort, BlobReceived, BlobValidatedProgress, ConnectivityError,
-    PeerReceiveStream, StreamLease,
+    BlobExchangeError, BlobExchangeFailure, BlobExchangePort, BlobReceived, BlobValidatedProgress,
+    ConnectivityError, PeerReceiveStream, StreamLease,
 };
 use uc_core::ports::blob::BlobDigest;
 
@@ -22,11 +22,13 @@ pub(crate) struct ReceiveStream {
     pub digest: BlobDigest,
     pub stream_id: u64,
     pub validated: AtomicU64,
+    pub read: AtomicU64,
     pub total: AtomicU64,
     pub paused: AtomicBool,
     pub stopped: AtomicBool,
     pub finished: AtomicBool,
     pub injected_failure: AtomicBool,
+    pub failure: Mutex<Option<(BlobExchangeFailure, Option<io::ErrorKind>)>>,
     released: AtomicBool,
     reader: Mutex<Option<Waker>>,
 }
@@ -116,11 +118,13 @@ impl BlobExchangePort for ObservedExchange {
             digest,
             stream_id: stream.receive.id(),
             validated: AtomicU64::new(0),
+            read: AtomicU64::new(0),
             total: AtomicU64::new(0),
             paused: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             injected_failure: AtomicBool::new(false),
+            failure: Mutex::new(None),
             released: AtomicBool::new(!self.fixture.gate_receives.load(Ordering::SeqCst)),
             reader: Mutex::new(None),
         });
@@ -139,6 +143,13 @@ impl BlobExchangePort for ObservedExchange {
             observation: observation.clone(),
         });
         let result = self.inner.receive(stream, digest, cancel, progress).await;
+        if let Err(error) = &result {
+            let io_kind = error
+                .source
+                .chain()
+                .find_map(|source| source.downcast_ref::<io::Error>().map(io::Error::kind));
+            *observation.failure.lock().unwrap() = Some((error.kind, io_kind));
+        }
         observation.finished.store(true, Ordering::SeqCst);
         result
     }
@@ -206,7 +217,12 @@ impl AsyncRead for ObservedReader {
                 return Poll::Pending;
             }
         }
-        Pin::new(&mut self.inner).poll_read(cx, buffer)
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buffer);
+        self.observation
+            .read
+            .fetch_add((buffer.filled().len() - before) as u64, Ordering::SeqCst);
+        result
     }
 }
 impl PeerReceiveStream for ObservedReader {

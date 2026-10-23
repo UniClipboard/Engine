@@ -117,13 +117,23 @@ fn content_streams(streams: &ReceiveStreams) -> Vec<Arc<ReceiveStream>> {
         .collect()
 }
 
-async fn paused_stream(streams: &ReceiveStreams, index: usize) -> Arc<ReceiveStream> {
+async fn paused_stream(
+    streams: &ReceiveStreams,
+    index: usize,
+    stage: &'static str,
+) -> Arc<ReceiveStream> {
     timeout(Duration::from_secs(30), async {
         loop {
             if let Some(stream) = content_streams(streams).get(index) {
                 if stream.paused.load(Ordering::SeqCst) {
                     assert!(stream.validated.load(Ordering::SeqCst) >= 64 * 1024);
                     assert!(stream.validated.load(Ordering::SeqCst) < LARGE_BYTES as u64);
+                    assert!(
+                        stream.read.load(Ordering::SeqCst) < LARGE_BYTES as u64,
+                        "暂停时必须仍有内容未从真实流读取: stage={stage}, read={}, validated={}",
+                        stream.read.load(Ordering::SeqCst),
+                        stream.validated.load(Ordering::SeqCst),
+                    );
                     assert!(!stream.finished.load(Ordering::SeqCst));
                     return stream.clone();
                 }
@@ -132,7 +142,18 @@ async fn paused_stream(streams: &ReceiveStreams, index: usize) -> Arc<ReceiveStr
         }
     })
     .await
-    .unwrap()
+    .unwrap_or_else(|_| {
+        let states: Vec<_> = streams.receives().iter().map(|stream| (
+            stream.total.load(Ordering::SeqCst),
+            stream.read.load(Ordering::SeqCst),
+            stream.validated.load(Ordering::SeqCst),
+            stream.paused.load(Ordering::SeqCst),
+            stream.stopped.load(Ordering::SeqCst),
+            stream.finished.load(Ordering::SeqCst),
+            *stream.failure.lock().unwrap(),
+        )).collect();
+        panic!("SDK暂停屏障超时: stage={stage}, index={index}, total/read/validated/paused/stopped/finished/failure={states:?}")
+    })
 }
 
 async fn stage_files(source: &Engine, handles: &[&str]) -> String {
@@ -290,7 +311,7 @@ async fn prove_engine_streams(shared_content: bool, recover_second: bool, observ
         })
     };
     let entry_a = receiving_entry(&receiver, None).await;
-    let stream_a = paused_stream(&receiving, 0).await;
+    let stream_a = paused_stream(&receiving, 0, "first_transfer").await;
     let preserved = saved_files(&receiver, &entry_a.entry_id, receiver_root.path()).await;
     assert_eq!(preserved.len(), 1);
     assert!(preserved.contains_key(&vec![0x55; TAIL_BYTES]));
@@ -339,7 +360,7 @@ async fn prove_engine_streams(shared_content: bool, recover_second: bool, observ
             "两个条目的大文件必须共享相同内容"
         );
     } else {
-        paused_stream(&receiving, 1).await;
+        paused_stream(&receiving, 1, "sibling_before_cancel").await;
         assert!(stream_a.digest != stream_b.digest, "独立文件应使用不同内容");
     }
     assert_ne!(stream_a.stream_id, stream_b.stream_id);
@@ -370,7 +391,7 @@ async fn prove_engine_streams(shared_content: bool, recover_second: bool, observ
         stream_a.finished.load(Ordering::SeqCst),
         "取消成功必须在原SDK交换结束之后"
     );
-    paused_stream(&receiving, 1).await;
+    paused_stream(&receiving, 1, "sibling_after_cancel").await;
     assert!(
         !stream_b.finished.load(Ordering::SeqCst),
         "取消A不能结束仍暂停的B"
