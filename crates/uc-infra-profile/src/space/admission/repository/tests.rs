@@ -870,6 +870,47 @@ fn pending_join_for_recovery(id: u8) -> uc_core::membership::JoinerAdmission {
 }
 
 #[tokio::test]
+async fn recovery_summary_rebuild_survives_concurrent_database_write() {
+    let mut fixture = Fixture::new();
+    fixture.save_pending_v3(0x41);
+    sql_query("DELETE FROM admission_recovery_summary")
+        .execute(&mut fixture.connection)
+        .unwrap();
+    let metadata = sql_query(
+        "SELECT encrypted_payload FROM admission_repository_state WHERE singleton_id = 1",
+    )
+    .get_result::<PayloadRow>(&mut fixture.connection)
+    .unwrap();
+    let storage = Arc::new(ConcurrentWriterStorage::new(
+        fixture._directory.path().join("profile.sqlite"),
+    ));
+    *storage.values.lock().unwrap() = fixture.storage.0.lock().unwrap().clone();
+    storage.replace_payload_on_third_read(metadata.encrypted_payload);
+    storage.reset_reads();
+    fixture.repository.keys = Arc::new(AdmissionKeyManager::new(storage.clone(), [0x31; 16]));
+
+    // 第三次安全材料读取发生于恢复快照内，另一个真实连接在此提交写入。
+    // 重建派生摘要必须从事务开始就持有写资格，不能依靠重试整个配对流程。
+    let loaded = PendingAdmissionRecoveryStatePort::load(
+        &fixture.repository,
+        AdmissionRecoveryTrigger::StateChanged,
+        0,
+    )
+    .await;
+
+    assert!(storage.interference_attempted.load(Ordering::SeqCst));
+    let loaded = loaded.expect("并发写入不能使恢复摘要重建失去第一次推进机会");
+    let (mut pending, _, _, _, _, _) = loaded.into_parts();
+    assert_eq!(pending.len(), 1);
+    let (admission, _) = pending.remove(0).into_parts();
+    assert_eq!(admission.admission_id().as_bytes(), &[0x41; 32]);
+    let summaries = sql_query("SELECT COUNT(*) AS count FROM admission_recovery_summary")
+        .get_result::<CountRow>(&mut fixture.connection)
+        .unwrap();
+    assert_eq!(summaries.count, 1);
+}
+
+#[tokio::test]
 async fn recovery_does_not_reopen_unchanged_unrelated_records() {
     use uc_application::deps::{AdmissionRecoveryTrigger, PendingAdmissionRecoveryStatePort};
     let mut fixture = Fixture::new();

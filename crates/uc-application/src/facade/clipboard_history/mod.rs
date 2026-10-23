@@ -1,4 +1,5 @@
 pub use crate::clipboard::history::clear_history::HistoryDeletionTargetsPort;
+use crate::deps::ReadEntryResourceSnapshotPort;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,6 +60,7 @@ pub use crate::clipboard::history_tags::{
 /// wiring deps and pass it once to `ClipboardHistoryFacade::new`. The facade
 /// then owns the use cases internally; no per-call gateway adapter is needed.
 pub struct ClipboardHistoryFacadeDeps {
+    pub resource_snapshot: Arc<dyn ReadEntryResourceSnapshotPort>,
     pub(crate) receive_work: Arc<ReceiveWorkRegistry>,
     pub file_references: Arc<dyn HistoryFileReferencePort>,
     pub entry_ports: ClipboardEntryPorts,
@@ -116,6 +118,7 @@ pub struct ClipboardHistoryFacade {
 impl ClipboardHistoryFacade {
     pub fn new(deps: ClipboardHistoryFacadeDeps) -> Self {
         let ClipboardHistoryFacadeDeps {
+            resource_snapshot,
             receive_work,
             file_references,
             entry_ports,
@@ -187,13 +190,7 @@ impl ClipboardHistoryFacade {
             payload_resolver.clone(),
         );
 
-        let resource_uc = GetEntryResourceUseCase::new(
-            entry_get.clone(),
-            selection_repo.clone(),
-            rep_get.clone(),
-            rep_list_for_event.clone(),
-            payload_resolver,
-        );
+        let resource_uc = GetEntryResourceUseCase::new(resource_snapshot, payload_resolver);
 
         let mut toggle_favorite_uc = ToggleFavoriteClipboardEntryUseCase::new(entry_set_favorite);
         if let Some(idx) = search_index.clone() {

@@ -4,15 +4,51 @@ use futures_util::StreamExt;
 use iroh::endpoint::{Connection, WeakConnectionHandle};
 use iroh_blobs::store::fs::FsStore;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 static NATIVE_HANDLES: Mutex<Vec<WeakConnectionHandle>> = Mutex::new(Vec::new());
 static TAG_REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static NATIVE_OBSERVERS: AtomicUsize = AtomicUsize::new(0);
+
+/// 测试显式观察新增原生句柄；只持弱引用，不修改进程环境或产品接口。
+pub struct BlobNativeObservation {
+    initial: usize,
+}
+impl BlobNativeObservation {
+    pub fn start() -> Self {
+        let handles = NATIVE_HANDLES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        NATIVE_OBSERVERS.fetch_add(1, Ordering::SeqCst);
+        Self {
+            initial: handles.len(),
+        }
+    }
+    pub fn counts(&self) -> (usize, usize) {
+        let handles = NATIVE_HANDLES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let observed = &handles[self.initial..];
+        (
+            observed.len(),
+            observed
+                .iter()
+                .filter(|handle| handle.upgrade().is_some())
+                .count(),
+        )
+    }
+}
+impl Drop for BlobNativeObservation {
+    fn drop(&mut self) {
+        NATIVE_OBSERVERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub(crate) fn register_blob_connection(connection: &Connection) {
     if connection.alpn() == BLOBS_ALPN
-        && std::env::var_os("UC_RECEIVE_RESOURCE_EVIDENCE_DIR").is_some()
+        && (std::env::var_os("UC_RECEIVE_RESOURCE_EVIDENCE_DIR").is_some()
+            || NATIVE_OBSERVERS.load(Ordering::SeqCst) > 0)
     {
         NATIVE_HANDLES
             .lock()

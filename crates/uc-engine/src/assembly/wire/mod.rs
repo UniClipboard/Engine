@@ -79,7 +79,7 @@ use uc_infra_storage::db::repositories::{
     DieselBlobReferenceRepository, DieselBlobRepository, DieselClipboardEntryReplaceRepository,
     DieselClipboardEntryRepository, DieselClipboardEventRepository,
     DieselClipboardRepresentationRepository, DieselClipboardSelectionRepository,
-    DieselEntryAvailabilityRepository, DieselFileTransferRepository,
+    DieselEntryAvailabilityRepository, DieselEntryResourceReader, DieselFileTransferRepository,
     DieselInboundReceiveCommitRepository, DieselPeerAddressRepository,
     DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository, DieselSpaceSecurityStore,
     DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
@@ -956,6 +956,10 @@ pub async fn wire_dependencies_from_inputs(
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
         clipboard: ClipboardPorts {
+            resource_snapshot: Arc::new(DieselEntryResourceReader::new(
+                infra.db_executor.clone(),
+                blob_cipher.clone(),
+            )),
             history_file_references: Arc::new(
                 uc_infra_storage::db::repositories::DieselHistoryFileReferences::new(
                     infra.db_executor.clone(),

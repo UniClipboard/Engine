@@ -4,6 +4,9 @@
 //! 不提供分步构建、默认值或隐式装配逻辑，因此不是 Builder。
 
 use crate::clipboard::history::clear_history::HistoryDeletionTargetsPort;
+pub use crate::clipboard::history::resource_snapshot::{
+    EntryResourceReadError, EntryResourceSnapshot, ReadEntryResourceSnapshotPort,
+};
 use crate::clipboard::history_tags::{HistoryEntryTagReaderPort, HistoryTagStorePort};
 pub use crate::transfer::receive::retry::{
     BeginReceiveRetryInput, BeginReceiveRetryPort, ReceiveRetryItem, ReceiveRetryItemState,
@@ -215,6 +218,8 @@ pub struct ClipboardRepresentationPorts {
 /// 剪贴板领域端口组。
 #[derive(Clone)]
 pub struct ClipboardPorts {
+    /// 一致读取资源所需的当前选择及认证后表示。
+    pub resource_snapshot: Arc<dyn ReadEntryResourceSnapshotPort>,
     pub history_file_references:
         Arc<dyn crate::facade::clipboard_history::HistoryFileReferencePort>,
     /// 读取平台剪贴板快照的端口。

@@ -5,6 +5,8 @@ mod observation;
 mod redelivery;
 mod save_failure;
 #[cfg(target_os = "linux")]
+mod stream_isolation;
+#[cfg(target_os = "linux")]
 use super::blob_resources::ReceiveResourceBaseline;
 use super::{
     empty_engine_host, mount_engine_rendezvous, next_engine_event_matching,

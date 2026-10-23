@@ -577,5 +577,7 @@ async fn concurrent_settings_updates_are_all_covered_by_notifications() {
         .device_name
         .as_deref()
         .is_some_and(|device_name| device_name.starts_with("device-")));
-    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+    // 此用例验证并发设置通知；清理完整等待，期限合同由独立关闭测试验证。
+    // 整个真实 fixture 仍受 Nextest 外层期限约束。
+    engine.shutdown_until_complete().await.unwrap();
 }

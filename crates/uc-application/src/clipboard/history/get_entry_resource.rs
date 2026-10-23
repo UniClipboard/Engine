@@ -1,21 +1,14 @@
+use crate::clipboard::history::resource_snapshot::ReadEntryResourceSnapshotPort;
 use anyhow::Result;
 use std::sync::Arc;
 use uc_core::{
-    ids::EntryId,
-    ports::clipboard::ResolvedClipboardPayload,
-    ports::clipboard::{
-        GetClipboardEntryPort, GetRepresentationPort, ListRepresentationsForEventPort,
-    },
-    ports::{ClipboardPayloadResolverPort, ClipboardSelectionRepositoryPort},
+    ids::EntryId, ports::clipboard::ResolvedClipboardPayload, ports::ClipboardPayloadResolverPort,
     BlobId,
 };
 
 /// Get clipboard entry resource metadata (blob reference only).
 pub(crate) struct GetEntryResourceUseCase {
-    entry_repo: Arc<dyn GetClipboardEntryPort>,
-    selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-    representation_repo: Arc<dyn GetRepresentationPort>,
-    rep_list_for_event: Arc<dyn ListRepresentationsForEventPort>,
+    snapshot_reader: Arc<dyn ReadEntryResourceSnapshotPort>,
     payload_resolver: Arc<dyn ClipboardPayloadResolverPort>,
 }
 
@@ -30,58 +23,38 @@ pub(crate) struct EntryResourceResult {
 
 impl GetEntryResourceUseCase {
     pub(crate) fn new(
-        entry_repo: Arc<dyn GetClipboardEntryPort>,
-        selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-        representation_repo: Arc<dyn GetRepresentationPort>,
-        rep_list_for_event: Arc<dyn ListRepresentationsForEventPort>,
+        snapshot_reader: Arc<dyn ReadEntryResourceSnapshotPort>,
         payload_resolver: Arc<dyn ClipboardPayloadResolverPort>,
     ) -> Self {
         Self {
-            entry_repo,
-            selection_repo,
-            representation_repo,
-            rep_list_for_event,
+            snapshot_reader,
             payload_resolver,
         }
     }
 
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<EntryResourceResult> {
-        let entry = self
-            .entry_repo
-            .get_entry(entry_id)
+        let snapshot = self
+            .snapshot_reader
+            .read_entry_resource_snapshot(entry_id)
             .await?
             .ok_or(anyhow::anyhow!("Entry not found"))?;
-
-        let selection = self
-            .selection_repo
-            .get_selection(entry_id)
-            .await?
+        let preview = snapshot
+            .preview_representation
             .ok_or(anyhow::anyhow!("Selection not found"))?;
+        // 图像文件的预览选择可能指向 URI 清单，仍优先使用同一快照中的图像表示。
+        let target_rep = snapshot
+            .representations
+            .iter()
+            .find(|rep| rep.mime_type.as_ref().is_some_and(|mime| mime.is_image()))
+            .or_else(|| {
+                snapshot
+                    .representations
+                    .iter()
+                    .find(|rep| rep.id == preview)
+            })
+            .ok_or(anyhow::anyhow!("Preview representation not found"))?;
 
-        // Resolve the representation whose bytes back an image preview. An image
-        // *file* (a copied `.png`, or one inside a multi-file selection) has its
-        // paste/preview rep on the uri-list, not the bitmap, so resolving the
-        // preview rep would hand the caller `text/uri-list` bytes that no `<img>`
-        // can render. Prefer an image representation; fall back to the preview
-        // rep for non-image entries (plain text, plain files), preserving the
-        // prior behavior.
-        let image_rep = self
-            .rep_list_for_event
-            .get_representations_for_event(&entry.event_id)
-            .await?
-            .into_iter()
-            .find(|rep| rep.mime_type.as_ref().is_some_and(|m| m.is_image()));
-
-        let target_rep = match image_rep {
-            Some(rep) => rep,
-            None => self
-                .representation_repo
-                .get_representation(&entry.event_id, &selection.selection.preview_rep_id)
-                .await?
-                .ok_or(anyhow::anyhow!("Preview representation not found"))?,
-        };
-
-        let payload = self.payload_resolver.resolve(&target_rep).await?;
+        let payload = self.payload_resolver.resolve(target_rep).await?;
 
         match payload {
             ResolvedClipboardPayload::Inline { mime, bytes } => Ok(EntryResourceResult {

@@ -13,6 +13,8 @@ use crate::testing::active_pull_publication::{decorate_blob, decorate_preparatio
 use crate::testing::directory_probe;
 #[cfg(all(test, feature = "dev-tools"))]
 use crate::testing::receive_exports;
+#[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+use crate::testing::receive_streams;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -360,6 +362,8 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.fingerprint),
         Arc::clone(&peer_reachability),
     );
+    #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+    let stream_fixture_path = space_setup.iroh_blob_store_dir.clone();
     let BlobHandlers {
         blob_transfer,
         transport: blob_transport,
@@ -368,6 +372,8 @@ pub async fn prepare_sync_session(
         .install_blobs(
             space_setup.iroh_blob_store_dir.clone(),
             move |exchange, lifecycle| {
+                #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+                let exchange = receive_streams::decorate(&stream_fixture_path, exchange);
                 BlobTransport::new(
                     blob_connectivity.backend,
                     blob_connectivity.admission,

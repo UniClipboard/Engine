@@ -38,6 +38,22 @@ Uni 将半流 I/O 与 `StreamWorkLease` 分开交接。本地完成权持有原�
 网络结束不提前归还额度；每个逻辑项独立结算，SDK 同内容共享不转移兄弟项的清理权。
 真实双流测试暂停 A、B，取消 A 后恢复 B，并检查同连接、实际尝试次数及精确内容。
 
+稳定 Engine 入口的[双流测试](../../../crates/uc-engine/src/testing/host_adapter_contract/receive_retry/stream_isolation.rs)
+分别覆盖不同内容与相同内容。普通入站消息循环等待一次完整接收结束，连续两次重发不能构造并行流；
+测试以历史重发和既有主动拉取两个完整意图建立并行，保持原接收及提交负责人。
+屏障只在成员就绪后启用，并在真实 SDK 已校验部分数据后暂停读取；取消后检查原交换结束、
+兄弟流保持原尝试且只提供一次、已交付文件保留、精确内容以及完整关闭后的原生弱句柄归零。
+暂态恢复场景在兄弟流的真实 SDK 校验前缀后注入一次具体 `ConnectionReset` IO 故障，
+由生产分类与恢复流程建立下一条流；检查失败流已停止并结束，恢复后沿原 attempt 精确交付。
+观察对象必须绑定恢复后实际暂停的流，不能把首次失败流当成仍在进行的兄弟流。
+
+真实 Engine 准备还暴露了准入恢复索引的读写边界：新记录的派生摘要尚未建立时，
+扫描会在同一事务中重建摘要。若先建立读快照，再遇其他连接提交，SQLite 无法升级该快照，
+首次维护会以存储暂不可用延期到下一轮。恢复索引能力因此从事务开始取得写资格；
+旧格式迁移、密文与摘要身份核对保持原合同，不让调用方重试配对来补偿。
+真实仓储[并发回归](../../../crates/uc-infra-profile/src/space/admission/repository/tests.rs)
+通过原安全材料读取接缝触发第二个 SQLite 连接写入，核验一次完整加载返回原加入记录并持久化摘要。
+
 实现入口：Application [transport](../../../crates/uc-application/src/transfer/blob/transport/)、
 Infra [blob_exchange](../../../crates/uc-infra-p2p/src/network/iroh/blob_exchange/)。
 停止探针见 [blob_connectivity_feasibility.rs](../../../crates/uc-infra-p2p/tests/blob_connectivity_feasibility.rs)，
@@ -94,6 +110,22 @@ SDK 临时 tag 必须在 actor 仍打开时计数，实际连接以弱句柄观�
 [原子接收提交](../../../crates/uc-infra-storage/src/db/repositories/inbound_receive_commit_repo.rs)、
 [真实来源授权测试](../../../crates/uc-engine/src/runtime/blob_source_authorization.rs)。
 SQLite 读比较后写事务提前取得写权的原因见[Infra 原则](../../design-docs/layers/infrastructure.md)。
+
+## 逐项交付期间的资源读取
+
+逐项交付会在一个事务中替换同一条目的事件、选择和表示。旧资源查询逐次读取这些关联，
+可能把旧事件与新预览拼在一起，导致已经交付的资源短暂返回 NotFound。
+真实 Engine 并发读取捕获了预览表示缺失；真实 SQLite 回归在第一个 SELECT 后由第二连接提交替换，
+无快照事务时确定读到旧事件／新预览，增加只读事务后同一用例保持完整旧代，下一次读取看到完整新代。
+
+Application [资源查询](../../../crates/uc-application/src/clipboard/history/get_entry_resource.rs)
+只请求一次完整关联快照，并保留图像表示优先规则；
+[读取能力](../../../crates/uc-application/src/clipboard/history/resource_snapshot.rs)
+要求同一已提交视图，
+[SQLite 实现与回归](../../../crates/uc-infra-storage/src/db/repositories/entry_resource_reader.rs)
+在事务内复制关联资料，归还连接后按原事件与表示 AAD 认证内联内容。
+查询不重试缺失、不增加持久格式；稳定 Engine 操作和结果保持，Engine 只装配该完整能力。
+此局部红绿证明不替代最终真实 Engine 场景和完整交付门禁。
 
 ## 真实互通与可重复验证
 

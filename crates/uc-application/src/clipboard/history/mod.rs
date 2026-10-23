@@ -14,6 +14,7 @@ pub(crate) mod get_entry_resource;
 pub(crate) mod list_entry_projections;
 pub(crate) mod maintenance_runtime;
 pub(crate) mod reconcile_missing_files;
+pub(crate) mod resource_snapshot;
 pub(crate) mod retention_policy;
 pub(crate) mod toggle_favorite;
 pub(crate) mod views;
