@@ -197,6 +197,10 @@ async fn real_engine_shutdown_waits_for_failed_file_settlement_repair() {
     // Unix DirEntry持有目录FD；仅保留路径，避免把测试自身句柄计为Engine泄漏。
     drop(generation);
     let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    // 控制连接同样等待生产修复事务结束，不能把移除故障注入时的瞬时写锁误当业务失败。
+    diesel::sql_query("PRAGMA busy_timeout = 5000")
+        .execute(&mut connection)
+        .unwrap();
     let failed_id = case.first.items[1].item_id.replace('\'', "''");
     // 首项可正常保存；第二项原始保存与失败事实均被真实SQLite拒绝。
     diesel::sql_query(format!("CREATE TRIGGER reject_pending_save BEFORE INSERT ON clipboard_event WHEN EXISTS (SELECT 1 FROM file_transfer WHERE receive_item_id = '{failed_id}' AND status = 'completed' AND failure_code IS NULL) BEGIN SELECT RAISE(ABORT, 'injected pending save'); END"))

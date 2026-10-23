@@ -41,7 +41,8 @@ Uni 将半流 I/O 与 `StreamWorkLease` 分开交接。本地完成权持有原�
 实现入口：Application [transport](../../../crates/uc-application/src/transfer/blob/transport/)、
 Infra [blob_exchange](../../../crates/uc-infra-p2p/src/network/iroh/blob_exchange/)。
 停止探针见 [blob_connectivity_feasibility.rs](../../../crates/uc-infra-p2p/tests/blob_connectivity_feasibility.rs)，
-同连接与来源授权测试位于 [Iroh connectivity](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/)。
+同连接双流测试见 [managed_tests/isolation.rs](../../../crates/uc-infra-p2p/src/network/iroh/blob_exchange/managed_tests/isolation.rs)，
+真实来源授权测试见 [blob_source_authorization.rs](../../../crates/uc-engine/src/runtime/blob_source_authorization.rs)。
 
 ## 响应结束与错误来源
 

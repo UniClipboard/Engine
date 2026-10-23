@@ -230,6 +230,8 @@ jobs:
         run: bash scripts/testing/run-blob-lifecycle-resources.sh
         env:
           UC_EXPECT_DIAGNOSTIC_STACK: available
+          # 保留连续两轮及原资源断言，仅在轮末记录任务来源，定位 runner 上的瞬时增长。
+          UC_BLOB_TASK_ORIGIN_PROBE: "1"
 
       - name: Keep blob lifecycle resource report
         if: always() && steps.blob_lifecycle_resources.outcome != 'skipped'

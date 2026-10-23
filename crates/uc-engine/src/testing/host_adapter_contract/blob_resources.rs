@@ -1,6 +1,7 @@
 //! 受管Engine的真实大文件流；工件仅含计数，不含内容、身份或路径。
 #![cfg(target_os = "linux")]
 mod receive_lifecycle;
+mod task_origins;
 use super::receive_retry::member_id;
 use super::{
     empty_engine_host, mount_engine_rendezvous, MemoryHostSecureStorage, StaticHostClipboard,
@@ -26,6 +27,8 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, Instant};
+use task_origins::TaskOrigins;
+use tokio::runtime::Builder;
 use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
 use uc_infra_p2p::network::iroh::test_support::blob_native_handle_counts;
@@ -195,16 +198,24 @@ fn verify_file(path: &Path, round: usize) -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and_tasks(
+#[test]
+fn managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and_tasks(
 ) -> Result<()> {
-    run_managed_resources(true).await
+    let mut builder = Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+    let origins = std::env::var_os("UC_BLOB_TASK_ORIGIN_PROBE").map(|_| TaskOrigins::default());
+    if let Some(origins) = &origins {
+        origins.install(&mut builder);
+    }
+    builder
+        .build()?
+        .block_on(run_managed_resources(true, origins))
 }
 
 // 同一真实配对接缝验证关闭后的 SDK 私有线程，不依赖大文件传输。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn managed_engine_pair_shutdown_waits_for_sdk_runtimes() -> Result<()> {
-    run_managed_resources(false).await
+    run_managed_resources(false, None).await
 }
 
 fn thread_groups() -> Result<BTreeMap<&'static str, usize>> {
@@ -238,7 +249,7 @@ fn thread_groups() -> Result<BTreeMap<&'static str, usize>> {
     Ok(groups)
 }
 
-async fn run_managed_resources(transfer_files: bool) -> Result<()> {
+async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins>) -> Result<()> {
     let _guard = ENGINE_TEST_LOCK.lock().await;
     let before_shared_cpu_pool = Resources::read()?;
     // 关闭断点的真实堆栈已确认：未命名 Rayon worker 会继承创建线程的名称。
@@ -318,6 +329,7 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
     }
     let prepared = Resources::read()?;
     let mut rounds = Vec::new();
+    let mut round_task_origins = Vec::new();
     let outcome: Result<()> = timeout(Duration::from_secs(480), async {
         for round in 0..if transfer_files { 2 } else { 0 } {
             let sent = source
@@ -365,12 +377,29 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
             let path = saved_path(&receiver, &entry, receiver_root.path()).await?;
             tokio::task::spawn_blocking(move || verify_file(&path, round)).await??;
             rounds.push(Resources::read()?);
+            round_task_origins.push(origins.as_ref().map(TaskOrigins::snapshot));
             native_handles_per_round.push(blob_native_handle_counts());
         }
         Ok(())
     })
     .await
     .unwrap_or_else(|source| Err(SourceError::new(source).context("large file scenario deadline")));
+    // 只在显式诊断中观察连续两轮之后的自然变化；不插入两轮之间，不改原瞬时资源断言。
+    let mut live_idle_observations = Vec::new();
+    if let Some(origins) = &origins {
+        let started = Instant::now();
+        for second in 0..=45 {
+            live_idle_observations.push(serde_json::json!({
+                "elapsed_ms": started.elapsed().as_millis(),
+                "resources": Resources::read()?,
+                "native_handles": blob_native_handle_counts(),
+                "task_origins": origins.snapshot(),
+            }));
+            if second < 45 {
+                sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
     let native_handles_before_shutdown = blob_native_handle_counts();
     receiver.shutdown_until_complete().await?;
     source.shutdown_until_complete().await?;
@@ -412,7 +441,7 @@ async fn run_managed_resources(transfer_files: bool) -> Result<()> {
     let closed_after_idle = Resources::read()?;
     let _ = stop.send(());
     let peaks = sampler.await??;
-    let evidence = serde_json::json!({ "bytes_per_file": FILE_BYTES, "completed_rounds": rounds.len(), "exact_bytes": transfer_files && outcome.is_ok(), "source_max_chunk_bytes": files.max_returned.load(Ordering::SeqCst), "source_reads": files.reads.load(Ordering::SeqCst), "before_shared_cpu_pool": before_shared_cpu_pool, "shared_cpu_pool_threads": shared_cpu_pool_threads, "initial": initial, "prepared": prepared, "rounds": rounds, "peaks": peaks, "closed": closed, "tags_verified": false, "quota_verified": false, "native_blob_connections_verified": native_handles_verified, "native_handles_initial": native_handles_initial, "native_handles_per_round": native_handles_per_round, "native_handles_before_shutdown": native_handles_before_shutdown, "native_handles_after_idle": native_handles_after_idle, "sampler_included_in_closed_tasks": true, "file_transfer_enabled": transfer_files, "thread_groups_after_idle": thread_groups()?, "thread_return_to_initial_verified": matches!(&idle_settled, Ok(Ok(_))), "tasks_without_sampler_return_to_initial_verified": closed_after_idle.runtime_tasks <= initial.runtime_tasks + 1, "closed_after_idle": closed_after_idle, "idle_settlement_ms": idle_ms });
+    let evidence = serde_json::json!({ "task_origin_probe": origins.is_some(), "round_task_origins": round_task_origins, "live_idle_observations": live_idle_observations, "bytes_per_file": FILE_BYTES, "completed_rounds": rounds.len(), "exact_bytes": transfer_files && outcome.is_ok(), "source_max_chunk_bytes": files.max_returned.load(Ordering::SeqCst), "source_reads": files.reads.load(Ordering::SeqCst), "before_shared_cpu_pool": before_shared_cpu_pool, "shared_cpu_pool_threads": shared_cpu_pool_threads, "initial": initial, "prepared": prepared, "rounds": rounds, "peaks": peaks, "closed": closed, "tags_verified": false, "quota_verified": false, "native_blob_connections_verified": native_handles_verified, "native_handles_initial": native_handles_initial, "native_handles_per_round": native_handles_per_round, "native_handles_before_shutdown": native_handles_before_shutdown, "native_handles_after_idle": native_handles_after_idle, "sampler_included_in_closed_tasks": true, "file_transfer_enabled": transfer_files, "thread_groups_after_idle": thread_groups()?, "thread_return_to_initial_verified": matches!(&idle_settled, Ok(Ok(_))), "tasks_without_sampler_return_to_initial_verified": closed_after_idle.runtime_tasks <= initial.runtime_tasks + 1, "closed_after_idle": closed_after_idle, "idle_settlement_ms": idle_ms });
     let evidence_path = std::env::var_os("UC_MANAGED_BLOB_RESOURCE_EVIDENCE")
         .map(PathBuf::from)
         .or_else(|| {
