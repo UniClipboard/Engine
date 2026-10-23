@@ -11,6 +11,7 @@ use super::reuse::validate_selection;
 use super::{receive_member_totals, ReceiveOutputFailure, ReceivedItem, ReceivedOutput};
 use super::{DirectoryPublication, FileProgressCommitError, ReceiveFailureSettlementError};
 use std::collections::{BTreeMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use uc_core::ports::TrackedFileTransferStatus;
@@ -1392,7 +1393,12 @@ impl FileCacheBlobMaterializer {
             return Err(BlobTransferError::Cancelled.into());
         }
         let (plan, mut publication) = self
-            .open_publication(&receiver_entry_id, batch.as_ref())
+            .open_publication(
+                &receiver_entry_id,
+                &manifest,
+                attempt_id.as_deref(),
+                batch.as_ref(),
+            )
             .await?;
 
         let result: Result<_> = async {
@@ -1445,8 +1451,39 @@ impl FileCacheBlobMaterializer {
     async fn open_publication(
         &self,
         receiver_entry_id: &EntryId,
+        manifest: &InboundFileSetManifest,
+        attempt_id: Option<&str>,
         batch: &ReceiveBatch,
     ) -> Result<(PublishPlan, DirectoryPublication)> {
+        let mut roots = BTreeMap::<u32, (String, bool)>::new();
+        let mut root_member_counts = BTreeMap::<u32, usize>::new();
+        for member in &manifest.members {
+            validate_manifest_member(member)?;
+            *root_member_counts.entry(member.root_index).or_default() += 1;
+            match roots.get(&member.root_index) {
+                Some((existing_name, existing_is_file))
+                    if existing_name != &member.root_name
+                        || *existing_is_file != member.root_is_file =>
+                {
+                    return Err(anyhow!(
+                        "directory root {} has conflicting names",
+                        member.root_index
+                    ));
+                }
+                _ => {
+                    roots.insert(
+                        member.root_index,
+                        (member.root_name.clone(), member.root_is_file),
+                    );
+                }
+            }
+        }
+        for (root_index, (_, root_is_file)) in &roots {
+            if *root_is_file && root_member_counts.get(root_index) != Some(&1) {
+                return Err(anyhow!("top-level file root must have exactly one member"));
+            }
+        }
+
         let staging_name = staging_dir_name(receiver_entry_id);
         let mut candidates = Vec::with_capacity(2);
         if let Some(resolver) = &self.save_dir_resolver {
@@ -1460,21 +1497,89 @@ impl FileCacheBlobMaterializer {
                 .join(sanitize_path_segment(receiver_entry_id.as_ref())),
             PublishMode::IntoFreeName,
         ));
-        for (dest_parent, mode) in candidates {
+        'candidate: for (dest_parent, mode) in candidates {
+            let staging = dest_parent.join(&staging_name);
+            let mut claimed = HashSet::new();
+            let mut plans = Vec::new();
+            for (root_index, (root_name, _)) in &roots {
+                let sanitized_name = sanitize_root_name(root_name);
+                let desired = match resolve_nonconflicting_root_path(
+                    &dest_parent,
+                    &sanitized_name,
+                    &claimed,
+                )
+                .await
+                {
+                    Ok(desired) => desired,
+                    Err(cause)
+                        if mode == PublishMode::NoReplace
+                            && cause.downcast_ref::<io::Error>().is_some() =>
+                    {
+                        // discarded-source[fallback]: 尚未创建产物或写入候选日志，由受管目标继续接收。
+                        uc_warn!(
+                            error_kind = "auto_save_staging_open",
+                            io_error_kind = io_error_kind(cause.as_ref()),
+                            "could not plan auto-save directory output; using managed storage for this directory"
+                        );
+                        continue 'candidate;
+                    }
+                    Err(cause) => return Err(cause),
+                };
+                claimed.insert(desired.clone());
+                plans.push((
+                    *root_index,
+                    staging_root(&staging, *root_index, root_name),
+                    desired,
+                    sanitized_name,
+                ));
+            }
+            // 先保存完整密文映射，再创建或探测；重启不依赖当前保存目录。
+            if let (Some(ports), Some(attempt_id)) = (&self.directory_attempts, attempt_id) {
+                let root_map = plans
+                    .iter()
+                    .map(|(_, source, desired, _)| (source.clone(), desired.clone()))
+                    .collect::<Vec<_>>();
+                ports
+                    .publish_log
+                    .record_phase(
+                        receiver_entry_id.as_ref(),
+                        attempt_id,
+                        PublishPhase::Staging,
+                        &root_map,
+                        ports.clock.now_ms(),
+                    )
+                    .await
+                    .map_err(anyhow::Error::new)?;
+            }
             let plan = PublishPlan {
-                staging: dest_parent.join(&staging_name),
+                staging,
                 dest_parent,
                 mode,
+                roots: roots.clone(),
+                root_plans: plans,
             };
             let mut publication =
                 DirectoryPublication::new(Arc::clone(&self.publisher), plan.staging.clone(), mode);
             let opened = self.open_staging_area(&plan.staging, mode).await;
             let unsupported = matches!(&opened, Ok(false));
             let cause = match opened {
-                Ok(true) => return Ok((plan, publication)),
+                Ok(true) => {
+                    if let (Some(ports), Some(attempt_id)) = (&self.directory_attempts, attempt_id)
+                    {
+                        publication.set_journal(DirectoryRollbackJournal {
+                            record: ports.publish_log.clone(),
+                            clock: ports.clock.clone(),
+                            entry: receiver_entry_id.as_ref().to_owned(),
+                            attempt: attempt_id.to_owned(),
+                        });
+                    }
+                    return Ok((plan, publication));
+                }
                 Ok(false) => anyhow!("directory publication requires no-replace support"),
                 Err(cause) => cause,
             };
+            // 此候选仍是Staging，尚无已发布目标；清理不写部分发布事实。
+            // 旧暂存区实际消失后，新候选才可替换同一恢复日志。
             if let Err(settlement) = publication.rollback().await {
                 batch.retain_directory_rollback(publication);
                 return Err(directory_rollback_failure(cause, settlement));
@@ -1569,78 +1674,14 @@ impl FileCacheBlobMaterializer {
             return Err(BlobTransferError::Cancelled.into());
         }
         let staging_base = plan.staging.as_path();
-        let mut roots = BTreeMap::<u32, (String, bool)>::new();
-        let mut root_member_counts = BTreeMap::<u32, usize>::new();
-        for member in &manifest.members {
-            validate_manifest_member(member)?;
-            *root_member_counts.entry(member.root_index).or_default() += 1;
-            match roots.get(&member.root_index) {
-                Some((existing_name, existing_is_file))
-                    if existing_name != &member.root_name
-                        || *existing_is_file != member.root_is_file =>
-                {
-                    return Err(anyhow!(
-                        "directory root {} has conflicting names",
-                        member.root_index
-                    ));
-                }
-                _ => {
-                    roots.insert(
-                        member.root_index,
-                        (member.root_name.clone(), member.root_is_file),
-                    );
-                }
-            }
-        }
-        for (root_index, (_, root_is_file)) in &roots {
-            if *root_is_file && root_member_counts.get(root_index) != Some(&1) {
-                return Err(anyhow!("top-level file root must have exactly one member"));
-            }
-        }
+        let roots = &plan.roots;
+        let plans = plan.root_plans.clone();
+        let mut claimed = plans
+            .iter()
+            .map(|(_, _, desired, _)| desired.clone())
+            .collect();
 
-        // Resolve and durably record every staged-to-final root before any
-        // member fetch starts. Cancellation and crash recovery can therefore
-        // clean this attempt without reconstructing sender-private names.
-        let mut claimed = HashSet::new();
-        let mut plans = Vec::new();
-        for (root_index, (root_name, _)) in &roots {
-            let sanitized_name = sanitize_root_name(root_name);
-            let desired =
-                resolve_nonconflicting_root_path(&plan.dest_parent, &sanitized_name, &claimed)
-                    .await?;
-            claimed.insert(desired.clone());
-            plans.push((
-                *root_index,
-                staging_root(staging_base, *root_index, root_name),
-                desired,
-                sanitized_name,
-            ));
-        }
-        if let (Some(ports), Some(attempt_id)) = (&self.directory_attempts, attempt_id) {
-            let root_map = plans
-                .iter()
-                .map(|(_, source, desired, _)| (source.clone(), desired.clone()))
-                .collect::<Vec<_>>();
-            ports
-                .publish_log
-                .record_phase(
-                    receiver_entry_id.as_ref(),
-                    attempt_id,
-                    PublishPhase::Staging,
-                    &root_map,
-                    ports.clock.now_ms(),
-                )
-                .await
-                .map_err(anyhow::Error::new)?;
-            publication.set_journal(DirectoryRollbackJournal {
-                record: ports.publish_log.clone(),
-                clock: ports.clock.clone(),
-                entry: receiver_entry_id.as_ref().to_owned(),
-                attempt: attempt_id.to_owned(),
-            });
-        }
-
-        for (root_index, (root_name, root_is_file)) in &roots {
+        for (root_index, (root_name, root_is_file)) in roots {
             if !root_is_file {
                 tokio::fs::create_dir_all(staging_root(staging_base, *root_index, root_name))
                     .await?;
@@ -1861,6 +1902,8 @@ struct PublishPlan {
     staging: PathBuf,
     /// The guarantee `dest_parent` needs, decided by whose files live there.
     mode: PublishMode,
+    roots: BTreeMap<u32, (String, bool)>,
+    root_plans: Vec<(u32, PathBuf, PathBuf, String)>,
 }
 
 async fn publish_gated_root(

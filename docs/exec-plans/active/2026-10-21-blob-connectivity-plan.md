@@ -1306,3 +1306,13 @@ Core红测0.002秒复现目录非终态聚合丢失StorageUnavailable（None／S
 加强版原生用例9.69秒通过，实际导出顺序C／C／B／B／C，B消息的C项确与直接C项共用下载额度；等待C不提前占全局槽。释放原完成权后全部完成，直接输出精确读回并关闭三端。生产调度未修改，整体连接／tag／staging资源矩阵继续未完成。既有屏障回归与最终门禁待复核。
 
 本证据切片最终验证：旧24项真实接收232.76秒通过，CI nextest额度8.363秒／授权13.933秒通过；locked metadata、workspace全目标134.346秒、fmt、style、repository／隐私及diff全通过。生产调度没有改动，完整生命周期、连接／tag／staging总计数及最终head兼容／平台矩阵仍待验收。
+
+
+### 首次 Staging 日志之前强杀的恢复切片
+
+完整负责人仍是 Application 原接收与 readiness／reconciliation；调用方只发起完整接收、设置更新、启动／关闭，不查询内部步骤。先沿既有离线恢复子进程 harness 与 AtomicPublishPort 真实依赖屏障取得红测：子进程实际完成旧目标目录的原生 no-replace 探测后保留返回，把自动保存目录设置改到新位置；父进程强杀该接收进程并关闭发送端，再以原 SQLite／宿主密钥资料重开。启动就绪后，旧目标的 staging 必须已清除，原尝试中断失败且不重新下载；kill 后用户在计划目标重用的同名目录和无关文件均保留。测试仅通过私有 stdin 管道移交既有模拟钥匙串资料，不明文落盘密钥或新增持久格式。原发布 port 的屏障只在 Linux 测试组合根按明确目标目录安装，不新增生产 Engine 入口。先执行真实 kill／restart，证实失败后再调整第一条日志与 staging 创建的顺序，保持既有完整清理责任和回退语义。
+
+
+最终同源验证全部通过：Application库1279项／1跳过（124.31秒），CI nextest真实进程／SDK三项40.744秒；locked metadata、workspace all-targets（3分23秒）、fmt、Rust style、repository preflight（1346隐私站点、隐私自测、Collector、6项OpenMLS可执行验证及架构负例）、diff均退出0。人工审阅核对完整密文映射先于任何创建／探测、首次日志失败无产物／无下载并保留StorageFull源、000／500保存目录回退、原候选实际清理后替换日志、Staging不认领用户复用的final、原attempt中断失败及不恢复旧网络下载；未新增持久版本、字段、队列、预算或公开接口。
+
+最终scope已inactive，核对无活动Cargo／rustc／Engine进程及专用TMPDIR的活动FD，目录仅余本轮验证脚本并已移除；共享target／编译缓存保持。仅此恢复边界完成：完整资源总量、全生命周期、最终head兼容与既有六片／全工作区回归、平台CI／设备及观测验收继续未完成，不用本次三项替代它们。

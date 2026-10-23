@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+#[path = "crash/directory_probe.rs"]
+mod directory_probe;
+
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;

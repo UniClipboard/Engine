@@ -55,8 +55,6 @@ impl CommitInboundReceivePort for RejectNoEntry {
 }
 
 struct RejectStagingLog {
-    permissions: Arc<StagingPermissions>,
-    destination: PathBuf,
     staging: Arc<Mutex<Option<PathBuf>>>,
 }
 #[async_trait]
@@ -71,8 +69,9 @@ impl RecordDirectoryPublishPort for RejectStagingLog {
     ) -> Result<(), PublishLogError> {
         assert_eq!(phase, PublishPhase::Staging);
         let area = root_map[0].0.parent().unwrap().to_owned();
+        assert_eq!(root_map.len(), 2, "首次日志须包含完整根映射");
+        assert!(!area.exists(), "日志落库前不能创建或探测staging");
         *self.staging.lock().unwrap() = Some(area);
-        self.permissions.block(&self.destination);
         Err(PublishLogError::Backend(Box::new(io::Error::from(
             io::ErrorKind::StorageFull,
         ))))
@@ -89,7 +88,7 @@ impl RecordDirectoryPublishPort for RejectStagingLog {
 }
 
 #[tokio::test]
-async fn directory_staging_log_failure_keeps_cleanup_without_assuming_the_record_exists() {
+async fn directory_staging_log_failure_creates_no_output_or_fallback_download() {
     assert_preparation_failure(true, false, false).await;
 }
 
@@ -136,8 +135,6 @@ async fn assert_preparation_failure(fail_log: bool, fail_commit: bool, lose_ack:
     let attempts = AttemptGate::empty();
     let publish_log: Arc<dyn RecordDirectoryPublishPort> = if fail_log {
         Arc::new(RejectStagingLog {
-            permissions: permissions.clone(),
-            destination: destination.path().to_owned(),
             staging: staging.clone(),
         })
     } else {
@@ -206,6 +203,34 @@ async fn assert_preparation_failure(fail_log: bool, fail_commit: bool, lose_ack:
         })
         .unwrap();
     let area = staging.lock().unwrap().clone().unwrap();
+    if fail_log {
+        assert!(!area.exists(), "首次日志失败不留下staging");
+        timeout(Duration::from_secs(5), receiver.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attempts
+                .get_entry_attempt(&entry)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            AttemptState::Failed
+        );
+        let ApplyInboundError::Internal(source) = error else {
+            panic!("原日志来源必须保留")
+        };
+        assert!(source.chain().any(|source| source
+            .downcast_ref::<io::Error>()
+            .is_some_and(|source| source.kind() == io::ErrorKind::StorageFull)));
+        assert_eq!(
+            std::fs::read(destination.path().join("unrelated.txt")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 1);
+        return;
+    }
     let before = attempts.get_entry_attempt(&entry).await.unwrap().unwrap();
     let before_events = events.snapshot();
     let blocked_shutdown = timeout(Duration::from_millis(20), receiver.shutdown()).await;
@@ -515,4 +540,61 @@ async fn directory_probe_cleanup_failure_keeps_original_owner_before_any_fallbac
         b"keep"
     );
     assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn directory_early_journal_preserves_managed_fallback_for_inaccessible_save_directories() {
+    for mode in [0o000, 0o500] {
+        let cache = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        std::fs::write(destination.path().join("unrelated.bin"), b"keep").unwrap();
+        let original = std::fs::metadata(destination.path()).unwrap().permissions();
+        let permissions =
+            StagingPermissions(Mutex::new(Some((destination.path().to_owned(), original))));
+        std::fs::set_permissions(destination.path(), Permissions::from_mode(mode)).unwrap();
+        let attempts = AttemptGate::new(AttemptState::Receiving, None);
+        let materializer = gated_directory_materializer(
+            writing_fetcher(2),
+            cache.path(),
+            destination.path(),
+            Arc::new(FakeAtomicPublisher::default()),
+            attempts.clone(),
+        );
+        let (blob_refs, manifest, snapshot) = two_root_payload();
+        let result = materializer
+            .materialize_plan(ReceiveWorkPlan::new(
+                DeviceId::new("source"),
+                EntryId::from("entry-fallback"),
+                snapshot,
+                blob_refs,
+                Some(manifest),
+                Some("attempt-1".to_owned()),
+                None,
+            ))
+            .await;
+        permissions.restore();
+        let mut result = result.expect("保存目录不可读或不可写时仍应完整交付至受管缓存");
+        result.take_publication().unwrap().commit().await.unwrap();
+        assert_eq!(*attempts.state.lock().unwrap(), AttemptState::Committing);
+        assert_eq!(
+            std::fs::read(destination.path().join("unrelated.bin")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 1);
+        let managed = cache.path().join("iroh-blobs/entry-fallback");
+        assert_eq!(
+            std::fs::read(managed.join("alpha/one.txt")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            std::fs::read(managed.join("beta/two.txt")).unwrap(),
+            b"hello"
+        );
+        let maps = attempts.root_maps.lock().unwrap();
+        assert!(maps
+            .last()
+            .unwrap()
+            .iter()
+            .all(|(staged, target)| staged.starts_with(&managed) && target.starts_with(&managed)));
+    }
 }

@@ -9,6 +9,8 @@ use super::observability::{self, observe_peer_reachability};
 mod outbound_progress;
 #[cfg(all(test, feature = "dev-tools"))]
 use crate::testing::active_pull_publication::{decorate_blob, decorate_preparation};
+#[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+use crate::testing::directory_probe;
 #[cfg(all(test, feature = "dev-tools"))]
 use crate::testing::receive_exports;
 
@@ -557,6 +559,9 @@ pub async fn prepare_sync_session(
     #[cfg(not(feature = "lan-compat"))]
     let mobile_device_repo: Arc<dyn uc_core::ports::FindMobileDeviceByIdPort> =
         Arc::new(UnavailableMobileDeviceLookup);
+    let directory_publisher = FsAtomicPublisher::new();
+    #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+    let directory_publisher = directory_probe::decorate(directory_publisher);
     let clipboard =
         crate::assembly::observability::observe_clipboard(ApplicationClipboardAdapters {
             peer_addresses: Arc::clone(&space_setup.peer_addr_repo),
@@ -567,7 +572,7 @@ pub async fn prepare_sync_session(
             mobile_device_repo,
             active_receiver: active_clipboard_receiver,
             active_dispatch: active_clipboard_dispatch,
-            active_pull_publisher: FsAtomicPublisher::new(),
+            active_pull_publisher: directory_publisher,
             active_pull_target_reserver: FsInboundFileTarget::new(Arc::clone(
                 &space_setup.settings,
             )),

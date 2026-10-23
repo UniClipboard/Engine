@@ -384,3 +384,14 @@
 8. 现有 directory_settlement/preparation.rs RejectStagingLog 用 root_map[0].0.parent 推导区域并阻塞 destination；新顺序下日志失败不应创建 staging，旧 fail_log=true 测试若要求实际 cleanup 被阻塞需改为准确无产物结果，仍验证 StorageFull source、无成员下载／保存及未调用不存在的 record_partial。非日志失败 cleanup 用例继续验证原责任。
 9. 路径规划无需扩大接口。可将 roots 校验和只读 plans 提前，PublishPlan 私有结构持 roots 与 plans；build 阶段沿同一计划创建、获取、验证身份、Publishing、claim commit、rename。旧 publish_gated_root 已在冲突重选时更新 logged_root_map，不要破坏它。空目录以 Directory member 表示，应保留，勿未经证据改变空 manifest 语义。
 10. 所有内容为只读规划，未算完成。h12 quota gate 完成后先提交并回收 h12，再新短磁盘 TMPDIR 开此切片；继续单scope串行、共享 target／缓存和既有5GiB／4GiB上限。用户四处其他 planning 目录不动。C额度当前代码仅测试变更；生产授权修复已在 b14e110d。
+
+
+### 2026-10-23：首次Staging前强杀的实际责任缺口
+
+- 原生kill／restart红测8.87秒：原AtomicPublishPort真实探测结束后暂停、更改auto_save_dir、SIGKILL、关闭发送端、用原SQLite与私有管道钥匙串重开；readiness已ready、attempt已Failed，但旧保存目录残留一个staging。计划目标被用户重用及无关文件均独立读回，不靠当前配置扫目录。
+- 原顺序为创建／探测staging后才记录完整根映射。现将根校验、冲突名称规划和原密文Staging前移，日志落库前不创建staging；原reconciliation可沿既有完整映射清理，不增加版本、字段、Engine能力或任务。
+- 尚在候选打开／探测阶段的回退不写partial=0：Staging从未发布目标，恢复本来就不认领final。只有旧staging实际清理后才允许新候选替换日志，避免遗失旧责任，也避免旧候选零可见根事实污染新候选发布。
+- 提前名称规划遇到原保存目录IO不可访问时，须保留原缓存回退；只针对IO，不把碰撞数量耗尽等业务失败改成回退。完整物化用例以000／500真实权限覆盖提前解析失败和稍后创建失败。
+- 首轮目录相关App63项通过12.19秒；最终源的全量App、真实kill／restart及既有SDK目录／离线恢复、根门禁正在串行验证，未取得结果之前不标完成。
+
+最终实证：首次Staging前强杀恢复11.070秒通过，连同原文件进程恢复和SDK目录终态三项40.744秒全通过；App1279通过／1跳过及全部根门禁通过。最终scope已结束，专用临时目录无活动FD并回收，完整spec剩余矩阵未关闭。

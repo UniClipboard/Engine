@@ -695,3 +695,23 @@ SDK自有公开API回归通过（0.220秒），新增覆盖全部引用自然释
 加强后的五份实际文件用例9.69秒通过：C原消息项与C直接获取、B直接获取的三次SDK导出均保留实际完成权，B另一项能使用第四个活跃槽完成精确读回；第三C持续等待且无输出。放开三项原屏障后，原B消息Completed、直接C两项与B项全部完成，实际导出顺序为C／C／B／B／C，直接输出字节独立匹配固定期望，三Runtime原关闭成功。证明来自B消息的C获取按C计入原下载许可；排队C未提前占据全局活跃槽，且不阻塞另一个提供端。既有生产调度无需修改，没有新增生产计数查询或池。仅将原测试单个pause索引改为明确索引集合，旧调用者仍只暂停其原索引；24项既有接收测试、新两项CI nextest和根门禁待复核，实际连接／tag／staging总资源仍未计通过。
 
 扩大验证及最终门禁全部通过：沿原pause索引语义的24项真实Engine接收测试232.76秒通过；CI nextest中加强额度8.363秒、授权13.933秒，两项全部通过，其余326项未选中。locked metadata、workspace all-targets（134.346秒）、fmt、Rust style、repository preflight与diff均退出0。人工审阅核对原B消息来源、实际C／B发布、三项真实导出完成权、第四槽正向交付、等待C无输出、释放后的实际顺序与字节、原完整关闭、旧测试单索引语义及无锁跨await；没有新增生产池、预算、接口或schema。原4／2许可行为已获此原生接缝证明，不替代连接／tag／staging全计数与完整生命周期。所有本轮构建scope已结束；提交证据并核对无活动FD后回收h12，保留共享target／缓存。完整spec仍active。
+
+
+### 2026-10-23：续接首次Staging前强杀
+
+核对无活动Cargo／验证scope后续接已有未提交的真实kill／restart测试。首轮编译101：crash.rs由path属性加载，子模块须显式指定crash/directory_probe.rs，已修正并串行重跑；不计业务红测。构建沿共享target／缓存、jobs=1及3／5GiB内存、4GiB swap限制，使用磁盘target/blob-probe-tmp避免接近满额的/tmp。源码确认open_publication在Staging日志前创建／探测，现有reconciliation只凭原日志定位旧目录；等待真实结果后前移完整密文映射，保持Staging阶段不认领最终目标的语义。
+
+第二轮真实运行7.37秒：已确认目录探测与SIGKILL，但发送端观察的1253（异步目录暂无同步报告）被测试错误unwrap，尚未到恢复断言，不计目标红测。测试只允许成功或该固定结果，其余失败仍拒绝；真实IncomingPending及探测屏障为已经分发证据。第三轮原源串行运行。
+
+第三轮编译101为新增测试误用EngineError私有code字段，改用既有code()后第四轮8.87秒取得目标红测：真实SIGKILL、旧资料重开与readiness就绪后，旧保存目录staging为1／期望0。原尝试已Failed、当前保存目录已改变；复用用户目标及无关文件均在恢复后独立读回。现将原完整根校验与路径规划前移，先经原RecordDirectoryPublishPort保存密文Staging，之后才创建／探测；候选回退前保留原物理清理责任，不为未发布候选写部分发布事实。首次日志失败改为无文件系统产物、无回退下载并保留StorageFull来源；正在运行目录相关App回归。
+
+
+最终源全量Application库1279项通过／1项跳过（124.31秒），含新增真实000／500权限下完整目录缓存回退；原63项目录过滤回归12.19秒通过。CI nextest原生三项及根门禁仍在同一scope串行继续。人工复核确认首次密文日志失败发生于任何staging创建／探测前，根映射不捏造发布事实；候选清理受阻仍归原batch，清理成功后才替换日志；仅原保存目录IO不可访问可回退，业务碰撞耗尽不回退；无新schema、队列、许可或Engine阶段接口。
+
+
+CI nextest真实原生3项通过（40.744秒）：首次Staging前探测强杀／改保存目录／原资料重开11.070秒，既有独立文件进程中断恢复17.176秒，真实SDK目录成员终态修复12.470秒；其余327项未纳入过滤，不计本次通过。新用例确认旧staging被实际清理、原attempt Failed、当前新保存目录持久保持、用户复用目标和无关文件完整保留，发送端已关闭，不恢复旧网络下载。locked metadata已退出0，workspace与后续根门禁正在同scope继续。
+
+
+最终同源验证全部通过：Application库1279项／1跳过（124.31秒），CI nextest真实进程／SDK三项40.744秒；locked metadata、workspace all-targets（3分23秒）、fmt、Rust style、repository preflight（1346隐私站点、隐私自测、Collector、6项OpenMLS可执行验证及架构负例）、diff均退出0。人工审阅核对完整密文映射先于任何创建／探测、首次日志失败无产物／无下载并保留StorageFull源、000／500保存目录回退、原候选实际清理后替换日志、Staging不认领用户复用的final、原attempt中断失败及不恢复旧网络下载；未新增持久版本、字段、队列、预算或公开接口。
+
+最终scope已inactive，核对无活动Cargo／rustc／Engine进程及专用TMPDIR的活动FD，目录仅余本轮验证脚本并已移除；共享target／编译缓存保持。仅此恢复边界完成：完整资源总量、全生命周期、最终head兼容与既有六片／全工作区回归、平台CI／设备及观测验收继续未完成，不用本次三项替代它们。
