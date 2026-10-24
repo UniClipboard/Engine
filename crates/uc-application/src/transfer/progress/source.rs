@@ -1,6 +1,6 @@
 //! 已接受接收尝试的运行期权威；不持久化来源材料，不按 UUID 大小排序。
-use super::{ProgressSourceTask, ProgressTaskDescriptor};
-use std::collections::HashMap;
+use super::{ProgressClaimRefusal, ProgressSourceTask, ProgressTaskDescriptor};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uc_core::file_transfer::{valid_progress_plan, ProgressIdentity, ProgressItem};
 use uc_core::ids::{DeviceId, EntryId};
@@ -12,6 +12,7 @@ type SourceKey = (DeviceId, ProgressIdentity);
 struct AcceptedTask {
     local_entry: EntryId,
     task: ProgressSourceTask,
+    notified: HashSet<ProgressItem>,
 }
 
 pub(crate) struct ProgressSourceCatalog {
@@ -79,6 +80,7 @@ impl ProgressSourceCatalog {
             key,
             AcceptedTask {
                 local_entry: local_entry.clone(),
+                notified: HashSet::new(),
                 task: ProgressSourceTask {
                     descriptor: ProgressTaskDescriptor {
                         producer: self.producer,
@@ -100,6 +102,29 @@ impl ProgressSourceCatalog {
         self.tasks
             .get(&(*peer, source))
             .map(|entry| entry.task.clone())
+    }
+    /// 对当前尝试的原始逻辑项至多领取一次，缓存淘汰或ACK后也不能重新领取。
+    pub(crate) fn claim_terminal(
+        &mut self,
+        peer: &DeviceId,
+        source: ProgressIdentity,
+        attempt: ProgressIdentity,
+        item: ProgressItem,
+    ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let current = self
+            .tasks
+            .get_mut(&(*peer, source))
+            .ok_or(ProgressClaimRefusal::NotRetained)?;
+        if current.task.descriptor.attempt != attempt {
+            return Err(ProgressClaimRefusal::Superseded);
+        }
+        if !current.task.items.contains(&item) {
+            return Err(ProgressClaimRefusal::InvalidItem);
+        }
+        if !current.notified.insert(item) {
+            return Err(ProgressClaimRefusal::AlreadyObserved);
+        }
+        Ok(current.task.clone())
     }
     pub(crate) fn forget(&mut self, entry: &EntryId) {
         self.tasks.retain(|_, task| task.local_entry != *entry);

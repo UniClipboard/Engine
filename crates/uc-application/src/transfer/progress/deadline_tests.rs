@@ -1,4 +1,4 @@
-use super::{ElapsedClockError, ElapsedClockPort, ProgressExchangeDeadline, ProgressReceiveError};
+use super::{ElapsedClockError, ElapsedClockPort, ProgressExchangeDeadline};
 use std::error::Error;
 use std::io;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

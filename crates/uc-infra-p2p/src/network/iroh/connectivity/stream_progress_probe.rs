@@ -14,7 +14,7 @@ use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectionLease, ConnectivityBackend, ConnectivityError, ConnectivityManager,
-    ConnectivityPolicy, KnownPeerIdentity, MembershipLedgerError, PeerConnection,
+    ConnectivityPolicy, ElapsedClockPort, KnownPeerIdentity, MembershipLedgerError, PeerConnection,
     PeerIdentityDirectoryPort, ProgressExchangeDeadline,
 };
 use uc_core::file_transfer::OutboundProgressStatus;
@@ -28,8 +28,14 @@ use uc_sync_protocol::transfer_progress::{read_frame, write_frame, ProgressFrame
 const BUDGET: Duration = Duration::from_secs(5);
 
 pub(super) fn progress_budget() -> ProgressExchangeDeadline {
-    ProgressExchangeDeadline::new(Arc::new(SystemElapsedClock), BUDGET)
-        .expect("native progress budget")
+    ProgressExchangeDeadline::new(
+        Arc::new(SystemElapsedClock),
+        SystemElapsedClock
+            .elapsed()
+            .expect("native clock")
+            .saturating_add(BUDGET),
+    )
+    .expect("native progress budget")
 }
 
 struct Backend(Arc<dyn PeerConnection>);
@@ -89,6 +95,20 @@ impl Fixture {
         inbound_capacity: usize,
         alpn: &[u8],
     ) -> anyhow::Result<Self> {
+        Self::new_as(
+            DeviceId::new("progress-source"),
+            outbound_capacity,
+            inbound_capacity,
+            alpn,
+        )
+        .await
+    }
+    pub(super) async fn new_as(
+        peer: DeviceId,
+        outbound_capacity: usize,
+        inbound_capacity: usize,
+        alpn: &[u8],
+    ) -> anyhow::Result<Self> {
         let server = Endpoint::builder(iroh::endpoint::presets::N0)
             .relay_mode(RelayMode::Disabled)
             .alpns(vec![alpn.to_vec(), BLOBS_ALPN.to_vec()])
@@ -98,7 +118,15 @@ impl Fixture {
             .relay_mode(RelayMode::Disabled)
             .bind()
             .await?;
-        Self::connect(client, server, outbound_capacity, inbound_capacity, alpn).await
+        Self::connect_as(
+            client,
+            server,
+            outbound_capacity,
+            inbound_capacity,
+            alpn,
+            peer,
+        )
+        .await
     }
 
     pub(super) async fn connect(
@@ -107,6 +135,24 @@ impl Fixture {
         outbound_capacity: usize,
         inbound_capacity: usize,
         alpn: &[u8],
+    ) -> anyhow::Result<Self> {
+        Self::connect_as(
+            client,
+            server,
+            outbound_capacity,
+            inbound_capacity,
+            alpn,
+            DeviceId::new("progress-source"),
+        )
+        .await
+    }
+    pub(super) async fn connect_as(
+        client: Endpoint,
+        server: Endpoint,
+        outbound_capacity: usize,
+        inbound_capacity: usize,
+        alpn: &[u8],
+        peer: DeviceId,
     ) -> anyhow::Result<Self> {
         timeout(BUDGET, async {
             while server.addr().ip_addrs().next().is_none() {
@@ -125,7 +171,7 @@ impl Fixture {
         let fingerprint = Arc::new(Sha256IdentityFingerprintFactory);
         let membership = Arc::new(Members {
             identity: KnownPeerIdentity {
-                device_id: DeviceId::new("progress-source"),
+                device_id: peer,
                 identity_fingerprint: fingerprint.from_public_key(server.id().as_bytes())?,
             },
             admitted: AtomicBool::new(true),
@@ -183,7 +229,7 @@ impl Fixture {
             policy,
         );
         let sending = outbound
-            .request(DeviceId::new("progress-source"))
+            .request(peer)
             .connect(Instant::now() + BUDGET, &CancellationToken::new())
             .await?;
         let receiving = inbound.accept(receiving).await?;

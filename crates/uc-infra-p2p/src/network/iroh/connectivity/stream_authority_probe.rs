@@ -17,9 +17,11 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    CurrentProgressTaskPort, ProgressBound, ProgressReceiveError, ProgressReceiverPort,
-    ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    TransferProgressProducer, TransferProgressReceiver,
+    CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline,
+    ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask, ProgressSubmission,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalDelivery,
+    ProgressTerminalNotice, ProgressTerminalRoundPort, TransferProgressProducer,
+    TransferProgressReceiver,
 };
 use uc_core::file_transfer::{
     ProgressFailureReason, ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal,
@@ -119,44 +121,70 @@ impl Authority {
         Ok(serde_json::from_str(&response)?)
     }
 }
+fn decode_task(value: Value) -> Option<ProgressSourceTask> {
+    if value.is_null() {
+        return None;
+    }
+    let id =
+        |field: &str| ProgressIdentity::new(serde_json::from_value(value[field].clone()).unwrap());
+    Some(ProgressSourceTask {
+        descriptor: ProgressTaskDescriptor {
+            producer: id("producer"),
+            revision: value["revision"].as_u64().unwrap(),
+            source: id("source"),
+            attempt: id("attempt"),
+            item_count: value["item_count"].as_u64().unwrap() as u16,
+        },
+        items: value["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| ProgressItem {
+                kind: match item["kind"].as_str().unwrap() {
+                    "file" => ProgressItemKind::File,
+                    "representation" => ProgressItemKind::Representation,
+                    "directory" => ProgressItemKind::DirectoryUnit,
+                    _ => panic!("invalid fixture kind"),
+                },
+                index: item["index"].as_u64().unwrap() as u16,
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    })
+}
 impl ProgressTaskAuthorityPort for Authority {
     fn current_task(
         &self,
         peer: &DeviceId,
         source: ProgressIdentity,
     ) -> Option<ProgressSourceTask> {
-        let value = self
-            .request(json!({"op":"current","peer":peer.as_str(),"source":source.bytes()}))
-            .expect("live fixture supplies actual authority");
-        if value.is_null() {
-            return None;
-        }
-        let id = |field: &str| {
-            ProgressIdentity::new(serde_json::from_value(value[field].clone()).unwrap())
+        decode_task(
+            self.request(json!({"op":"current","peer":peer.as_str(),"source":source.bytes()}))
+                .unwrap(),
+        )
+    }
+    fn claim_terminal(
+        &self,
+        peer: &DeviceId,
+        source: ProgressIdentity,
+        attempt: ProgressIdentity,
+        item: ProgressItem,
+    ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let kind = match item.kind {
+            ProgressItemKind::File => "file",
+            ProgressItemKind::Representation => "representation",
+            ProgressItemKind::DirectoryUnit => "directory",
         };
-        Some(ProgressSourceTask {
-            descriptor: ProgressTaskDescriptor {
-                producer: id("producer"),
-                revision: value["revision"].as_u64().unwrap(),
-                source: id("source"),
-                attempt: id("attempt"),
-                item_count: value["item_count"].as_u64().unwrap() as u16,
-            },
-            items: value["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|item| ProgressItem {
-                    kind: match item["kind"].as_str().unwrap() {
-                        "file" => ProgressItemKind::File,
-                        "representation" => ProgressItemKind::Representation,
-                        "directory" => ProgressItemKind::DirectoryUnit,
-                        _ => panic!("unexpected fixture kind"),
-                    },
-                    index: item["index"].as_u64().unwrap() as u16,
-                })
-                .collect::<Vec<_>>()
-                .into(),
+        let reply=self.request(json!({"op":"claim","peer":peer.as_str(),"source":source.bytes(),"attempt":attempt.bytes(),"kind":kind,"index":item.index})).unwrap();
+        if !reply["task"].is_null() {
+            return Ok(decode_task(reply["task"].clone()).unwrap());
+        }
+        Err(match reply["refusal"].as_str().unwrap() {
+            "AlreadyObserved" => ProgressClaimRefusal::AlreadyObserved,
+            "Superseded" => ProgressClaimRefusal::Superseded,
+            "InvalidItem" => ProgressClaimRefusal::InvalidItem,
+            "NotRetained" => ProgressClaimRefusal::NotRetained,
+            _ => panic!("invalid synthetic claim outcome"),
         })
     }
 }
@@ -604,6 +632,28 @@ async fn fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again(
     .await?
 }
 
+struct AcknowledgedRound {
+    producer: Arc<TransferProgressProducer>,
+    acknowledged: Arc<Notify>,
+}
+#[async_trait]
+impl ProgressTerminalRoundPort for AcknowledgedRound {
+    async fn report_settled(
+        &self,
+        peer: &DeviceId,
+        expected: ProgressTaskDescriptor,
+        result: ProgressTerminal,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        self.producer
+            .report_settled(peer, expected, result, deadline, cancel)
+            .await?;
+        self.acknowledged.notify_one();
+        Ok(())
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "由run-progress-registration-proof提供当前Application fixture二进制"]
 async fn live_receive_attempt_reports_its_failed_materialization_through_the_complete_action(
@@ -644,14 +694,29 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
             }
             anyhow::Ok(())
         };
-        let (reported, served) = tokio::join!(
-            client.report_settled(&peer, SOURCE, accepted.descriptor.attempt, result, &stop),
-            receive
+        let acknowledged = Arc::new(Notify::new());
+        let (delivery, supervisor) = ProgressTerminalDelivery::new(
+            Arc::new(SystemElapsedClock),
+            worker.authority.clone(),
+            Arc::new(AcknowledgedRound {
+                producer: client,
+                acknowledged: acknowledged.clone(),
+            }),
         );
+        assert_eq!(
+            delivery.submit_settled(peer, SOURCE, accepted.descriptor.attempt, result)?,
+            ProgressSubmission::Retained
+        );
+        let supervise_stop = CancellationToken::new();
+        let supervised = tokio::spawn(supervisor.run(supervise_stop.clone()));
+        let ((), served) = tokio::join!(acknowledged.notified(), receive);
         served?;
-        let reported = reported?;
-        assert_eq!(reported.attempt, accepted.descriptor.attempt);
-        assert_eq!(reported.result, result);
+        assert_eq!(
+            delivery.submit_settled(peer, SOURCE, accepted.descriptor.attempt, result)?,
+            ProgressSubmission::Refused(ProgressClaimRefusal::AlreadyObserved)
+        );
+        supervise_stop.cancel();
+        supervised.await?;
         assert_eq!(owner.snapshot().items[0].1, Some(result));
         fixture.close().await?;
         anyhow::Ok(())

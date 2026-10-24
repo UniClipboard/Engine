@@ -1,6 +1,8 @@
 //! 原接收负责人交接已接受的源身份与原始位置；不包含provider或文件路径。
 use super::{ReceiveSource, ReceiveWorkRegistry, RegistryState};
-use crate::transfer::progress::{ProgressSourceTask, ProgressTaskAuthorityPort};
+use crate::transfer::progress::{
+    ProgressClaimRefusal, ProgressSourceTask, ProgressTaskAuthorityPort,
+};
 use std::sync::PoisonError;
 use uc_core::file_transfer::{
     ProgressIdentity, ProgressItem, ProgressItemKind, MAX_PROGRESS_ITEMS,
@@ -93,5 +95,21 @@ impl ProgressTaskAuthorityPort for ReceiveWorkRegistry {
             return None;
         }
         state.progress_catalog.current(peer, source)
+    }
+
+    fn claim_terminal(
+        &self,
+        peer: &DeviceId,
+        source: ProgressIdentity,
+        attempt: ProgressIdentity,
+        item: ProgressItem,
+    ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.accepting || state.clearing || state.clear_failed {
+            return Err(ProgressClaimRefusal::NotRetained);
+        }
+        state
+            .progress_catalog
+            .claim_terminal(peer, source, attempt, item)
     }
 }

@@ -21,7 +21,8 @@ pub enum RetransmitStop {
 /// 唯一状态输入；网络工作实际结束后才提交 RoundFinished。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetransmitInput {
-    Poll(Option<Duration>),
+    Check(Option<Duration>),
+    Start(Option<Duration>),
     RoundFinished,
     NetworkRecovered,
     Acknowledged,
@@ -29,6 +30,8 @@ pub enum RetransmitInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetransmitEffect {
+    /// 已到发送资格，尚未消费轮次或时点。
+    Ready,
     /// 已更新规则状态，没有启动网络的资格。
     Idle,
     /// 启动新一轮；`deadline` 是本轮的绝对截止（经过时间读数）。
@@ -76,7 +79,8 @@ impl TerminalRetransmit {
             return RetransmitEffect::Stopped(stop);
         }
         match input {
-            RetransmitInput::Poll(now) => self.evaluate(now),
+            RetransmitInput::Check(now) => self.evaluate(now, false),
+            RetransmitInput::Start(now) => self.evaluate(now, true),
             RetransmitInput::RoundFinished => {
                 self.in_flight = false;
                 RetransmitEffect::Idle
@@ -89,7 +93,7 @@ impl TerminalRetransmit {
         }
     }
 
-    fn evaluate(&mut self, now: Option<Duration>) -> RetransmitEffect {
+    fn evaluate(&mut self, now: Option<Duration>, start: bool) -> RetransmitEffect {
         if let Some(stop) = self.stopped {
             return RetransmitEffect::Stopped(stop);
         }
@@ -117,6 +121,9 @@ impl TerminalRetransmit {
             return RetransmitEffect::WaitUntil(wake.min(generated + TERMINAL_RETENTION));
         }
 
+        if !start {
+            return RetransmitEffect::Ready;
+        }
         let before = self.next_slot;
         while SLOT_OFFSETS_SECS
             .get(self.next_slot)
