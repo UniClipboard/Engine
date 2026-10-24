@@ -26,7 +26,7 @@ members = [
   "tests/uc-testkit",
   "tests/upgrade-matrix",
 ]
-exclude = ["third_party/swarm-discovery", "third_party/iroh-mdns-address-lookup"]
+exclude = ["third_party/iroh", "third_party/swarm-discovery", "third_party/iroh-mdns-address-lookup"]
 resolver = "2"
 
 [workspace.package]
@@ -35,6 +35,11 @@ license = "Apache-2.0"
 
 # 生产与验证共用不可变上游密码依赖；下游消费 Engine 时同样生效。
 [workspace.dependencies]
+# 网络栈以真实路径依赖传递给宿主；来源由 submodule gitlink 固定。
+iroh = { path = "third_party/iroh/iroh", version = "1.3.0" }
+iroh-relay = { path = "third_party/iroh/iroh-relay", version = "=1.3.0" }
+iroh-blobs = { path = "third_party/iroh/iroh-blobs", version = "0.103.0" }
+iroh-tickets = { path = "third_party/iroh/iroh-tickets", version = "1.0.0" }
 openmls = { git = "https://github.com/openmls/openmls", rev = "e0b21a70a55a9014b8de2772b36bf3d638adad51", features = ["fork-resolution"] }
 openmls_basic_credential = { git = "https://github.com/openmls/openmls", rev = "e0b21a70a55a9014b8de2772b36bf3d638adad51" }
 openmls_memory_storage = { git = "https://github.com/openmls/openmls", rev = "e0b21a70a55a9014b8de2772b36bf3d638adad51", features = ["test-utils"] }
@@ -50,16 +55,6 @@ dbg_macro = "warn"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
-
-# 根补丁只在最终构建工作区生效；宿主同步本段，见 ADR-034。
-# UniClipboard fork 保留上游 43e232f 的路径队列修复，仅固定经过修复的 DNS 依赖链。
-# 四个包同时覆盖，避免 iroh-tickets / iroh-util 引入第二份 iroh-base。
-# 上游完整发布路径队列与 EDNS 修复后退出 fork；iroh-blobs 和 mDNS 来源不变。
-[patch.crates-io]
-iroh = { git = "https://github.com/UniClipboard/iroh.git", rev = "c8efae061e3daa0afc6aa6db856cfcf8576da97b" }
-iroh-base = { git = "https://github.com/UniClipboard/iroh.git", rev = "c8efae061e3daa0afc6aa6db856cfcf8576da97b" }
-iroh-dns = { git = "https://github.com/UniClipboard/iroh.git", rev = "c8efae061e3daa0afc6aa6db856cfcf8576da97b" }
-iroh-relay = { git = "https://github.com/UniClipboard/iroh.git", rev = "c8efae061e3daa0afc6aa6db856cfcf8576da97b" }
 
 [profile.dev]
 debug = "line-tables-only"

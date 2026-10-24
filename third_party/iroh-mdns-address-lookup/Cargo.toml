@@ -58,10 +58,12 @@ features = ["debug"]
 version = "0.3"
 
 [dependencies.iroh]
+path = "../iroh/iroh"
 version = "1.0.0"
 default-features = false
 
 [dependencies.iroh-base]
+path = "../iroh/iroh-base"
 version = "1.0.0"
 features = ["key"]
 default-features = false

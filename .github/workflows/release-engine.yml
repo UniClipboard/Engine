@@ -53,6 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Prepare local MBX cache
@@ -131,6 +132,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Prepare local MBX cache
@@ -142,6 +144,7 @@ jobs:
       - name: Check out immutable release source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
@@ -193,6 +196,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Prepare local MBX cache
@@ -204,6 +208,7 @@ jobs:
       - name: Check out immutable release source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
@@ -255,6 +260,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Prepare local MBX cache
@@ -266,6 +272,7 @@ jobs:
       - name: Check out immutable release source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 
@@ -319,6 +326,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Prepare local MBX cache
@@ -330,6 +338,7 @@ jobs:
       - name: Check out immutable release source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
 

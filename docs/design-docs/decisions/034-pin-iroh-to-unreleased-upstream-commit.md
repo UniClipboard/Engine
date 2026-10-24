@@ -82,3 +82,24 @@ Engine 的回归入口为 `just cargo test -p uc-infra-p2p --test dns_edns_respo
 本地 Linux aarch64 上，库测试 176 项、Engine UDP 回归、网络日志来源 4 项、完整 workspace/all-targets 编译及根交付门禁全部通过。
 Windows 中继恢复、连接数大于零、重新生成邀请和 Windows → Linux 配对尚未实机验证；全部标为跳过。
 本次解析缺陷已确认，配对恢复仍需两端使用最终修复来源重新构建后验收，不能由离线报文成功推断。
+
+## 2026-10-24 补充：单一网络栈 submodule（取代根补丁例外）
+
+实际 desktop 只更新 Engine 后仍使用 registry DNS 链，证明要求宿主重复根补丁会泄露实现知识。
+当前决策取代本 ADR 之前的根补丁交付方式，并恢复 ADR-031 的“补丁不依赖下游”原则。
+
+Engine 以 `third_party/iroh` 单一 Git submodule 固定 UniClipboard/iroh 网络栈 fork；
+iroh-blobs、iroh-tickets、iroh-util 的源码和许可证集中在该 fork，来源记录见其
+`UNICLIPBOARD_PATCH.md`。全部内部 iroh 依赖使用路径声明；Engine 自身及现有 mDNS vendor
+同样指向这些路径。DNS resolver/parser 保持已修复的不可变 Git 依赖。
+
+完整负责人是 Engine 构建集成，调用方唯一动作是依赖 `uc-engine`。成功构建包含唯一网络栈来源；
+缺少 submodule 或来源不符时构建门禁失败，维护者更新 checkout 后重试。运行期 API、失败与恢复责任不变。
+
+CI checkout 递归初始化 submodule。更新网络栈必须审查调用点并同步来源门禁；本次 iroh Rust 源码
+相对 EDNS fork 未变化，仅调整包布局与依赖。网络日志识别固定 submodule 路径，来源门禁核对
+已审查提交、gitlink、实际 checkout 与干净状态。
+
+验收必须包含无 `[patch]`、仅依赖 `uc-engine` 的独立 Git 消费者；仅检查 Engine 根构建不够。
+宿主迁移到包含本决策的 Engine 提交时应删除历史四个 iroh 根补丁。上游完整修复可用后整体评估退出，
+不能单独恢复某一个包的 registry 来源而造成类型分裂。

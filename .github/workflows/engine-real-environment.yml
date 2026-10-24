@@ -66,6 +66,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install network test tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
@@ -135,6 +136,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install network test tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
@@ -209,6 +211,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
@@ -281,6 +285,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
@@ -352,6 +358,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
@@ -411,6 +418,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
@@ -473,6 +481,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Download matrix shards
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
