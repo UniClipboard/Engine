@@ -232,11 +232,24 @@ bash scripts/testing/run-progress-legacy-baseline.sh
 协议全集76项通过；旧旧4格通过。CI 在原必需 blob matrix job 中先执行此入口，
 `target/progress-legacy-evidence/runs/` 的 JSON／文本／日志随原 artifact 上传。远端新候选 CI 尚待执行。
 
+## 补发调度与容量规则的极限输入
+
+`uc-core::file_transfer::progress_delivery` 提供纯规则：`TerminalRetransmit`（0／2／10／30／60／120／300／540 秒串行补发，
+单轮截止 `min(start+5s, t0+600s)`，挂起恢复合并已过时点且不延长保留，网络恢复至多提前消费一个时点）、
+`TerminalLedger`（全局 256／每端 64，先淘汰同端最早，再淘汰全局最早，重复键不占容量）、
+`ExchangeQueue`（在途全局 4／每端 1，等待全局 64／每端 16，按对端轮转）。时间读数由调用方注入，读数不可用或倒退按过期处理。
+10 项逻辑测试覆盖：1024 项清单只保留同端最新 64 项且不影响他端、5×64 全局超额淘汰最早、一个永不结束的对端只占自己的在途额度与队列、
+挂起跳过 5 个时点只补一轮、恰好过期、8 次耗尽、恢复机会合并。
+
+协议侧最大合法页、帧上限和 1024 项描述沿用 `transfer_progress_v2` 既有用例，没有新增线上字节。
+这些只是纯规则与注入时间的证据，**未**接入 Application 调度，也**未**用真实消息／文件负载、真实网络或资源采样验证；
+spec §5.6 的起始策略因此仍是起始值，不记为冻结。
+
 ## 尚未证明的范围
 
 - 当前权威与真实双端登记的组合已完成；Engine／SQLite profile 重开及生产 Router 的完整迁移仍未完成。
 - 输出后 Application 采用／ACK 的最小主机链路已有证据；生产接收输出／SQLite 结算交接、有限补发和状态核对尚未接线。
-- 最大负载、分页、终态淘汰、公平调度及新旧双角色 Direct／Relay 尚未执行。
+- 新旧双角色 Direct／Relay、真实消息与文件负载下的资源占用尚未执行。
 - 包含挂起的经过时间：`uc-core` 的 `ElapsedClockPort` 与 `ElapsedBudget` 固定预算不可重置、起点或当前读数不可用以及读数倒退一律按耗尽处理；
   `uc-infra-local::SystemElapsedClock` 在 Linux／Android／HarmonyOS 读 `CLOCK_BOOTTIME`，macOS／iOS 读 `CLOCK_MONOTONIC`（手册规定睡眠期间继续递增），
   Windows 读 `GetTickCount64`，其余平台不可用。预算用模拟挂起跳变的读数测试，Linux 真实时钟的非递减与睡眠推进已运行；
