@@ -17,6 +17,7 @@ use crate::transfer::receive::retry::{
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashSet;
+use std::io::{Error as IoError, ErrorKind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, Semaphore};
@@ -34,11 +35,15 @@ use uc_core::ports::{
     GetEntryReceiveProgressPort, ListNonTerminalAttemptsPort,
 };
 use uc_core::{BlobId, SystemClipboardSnapshot};
+use uc_observability_contract::diagnostics::connectivity::{
+    ClipboardReceiveFailure, ClipboardReceiveObservation, ClipboardRetryOutcome,
+};
 
 struct Stored {
     snapshot: SystemClipboardSnapshot,
     attempts: Arc<AttemptGate>,
     lost: AtomicBool,
+    query_failure: Mutex<Option<ErrorKind>>,
     slow: AtomicBool,
     entered: Notify,
     release: Semaphore,
@@ -115,6 +120,11 @@ impl GetEntryReceiveProgressPort for Stored {
         &self,
         entry: &str,
     ) -> Result<Option<EntryReceiveProgress>, FileTransferProjectionError> {
+        if let Some(kind) = *self.query_failure.lock().unwrap() {
+            return Err(FileTransferProjectionError::Backend(Box::new(
+                IoError::new(kind, "PRIVATE_RETRY_PROGRESS_READ"),
+            )));
+        }
         Ok(Some(EntryReceiveProgress {
             entry_id: entry.into(),
             attempt_id: self.attempts.attempt_id.lock().unwrap().clone(),
@@ -144,6 +154,7 @@ fn owner(fixture: &Fixture) -> (Arc<RetryEntryReceiveUseCase>, Arc<Stored>, Arc<
         snapshot: fixture.snapshot.clone(),
         attempts: fixture.attempts.clone(),
         lost: AtomicBool::new(false),
+        query_failure: Mutex::new(None),
         slow: AtomicBool::new(false),
         entered: Notify::new(),
         release: Semaphore::new(0),
@@ -492,4 +503,54 @@ async fn ordinary_inline_redelivery_upgrades_without_requiring_blob_retry_materi
         fixture.begin.plans.lock().unwrap().is_empty(),
         "纯inline修复不能创建blob重试集合"
     );
+}
+
+/// 原完整重试在准入前失败时，完成记录保留同一source的固定存储分类。
+#[tokio::test]
+async fn retry_preflight_completion_preserves_each_storage_source_without_accepting_work() {
+    for (kind, expected) in [
+        (
+            ErrorKind::PermissionDenied,
+            ClipboardReceiveFailure::ApplyPermissionDenied,
+        ),
+        (
+            ErrorKind::StorageFull,
+            ClipboardReceiveFailure::ApplyStorageFull,
+        ),
+        (
+            ErrorKind::ReadOnlyFilesystem,
+            ClipboardReceiveFailure::ApplyReadOnly,
+        ),
+        (ErrorKind::Other, ClipboardReceiveFailure::ApplyIoFailed),
+    ] {
+        let fixture = Fixture::new(0).await;
+        let (owner, stored, _) = owner(&fixture);
+        *stored.query_failure.lock().unwrap() = Some(kind);
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let recorded = outcomes.clone();
+        let observation = ClipboardReceiveObservation::with_retry_completion(move |outcome| {
+            recorded.lock().unwrap().push(outcome);
+        });
+        let error = observation
+            .scope(owner.execute(EntryId::from("receiver"), "old".into(), item(1)))
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:?}").contains("PRIVATE_RETRY_PROGRESS_READ"));
+        let RetryEntryReceiveError::Source(source) = error else {
+            panic!("真实进度读取失败必须保留原Source分类")
+        };
+        assert!(source.chain().any(|source| source
+            .downcast_ref::<IoError>()
+            .is_some_and(|source| source.kind() == kind)));
+        assert!(owner.requests.lock().unwrap().is_empty());
+        assert_eq!(fixture.attempts.retry_calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.capture.snapshots.lock().unwrap().is_empty());
+        assert!(outcomes.lock().unwrap().is_empty());
+        drop(observation);
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![ClipboardRetryOutcome::Failed(expected)],
+            "准入未交接的完成记录也必须保留原固定失败类别",
+        );
+    }
 }

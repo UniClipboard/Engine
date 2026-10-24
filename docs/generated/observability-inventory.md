@@ -726,7 +726,7 @@
 | `<module>` | `crates/uc-application/src/transfer/receive/reconciliation.rs:422` | `error` | message-body |
 | `<module>` | `crates/uc-application/src/transfer/receive/reconciliation.rs:429` | `info` | message-body |
 | `<module>` | `crates/uc-application/src/transfer/receive/retry/owner.rs:90` | `warn` | message-body |
-| `<module>` | `crates/uc-application/src/transfer/receive/retry/preparation.rs:232` | `warn` | message-body |
+| `<module>` | `crates/uc-application/src/transfer/receive/retry/preparation.rs:235` | `warn` | message-body |
 | `bootstrap.network` | `crates/uc-engine/src/assembly/facade.rs:84` | `warn` | message-body |
 | `<module>` | `crates/uc-engine/src/assembly/host.rs:227` | `warn` | raw-error, message-body |
 | `<module>` | `crates/uc-engine/src/assembly/host.rs:287` | `warn` | raw-error, message-body |

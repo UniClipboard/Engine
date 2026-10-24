@@ -39,7 +39,7 @@ impl Drop for ReceiveFacts {
         // 任务异常退出或准入未交接时仍结束在线记录，不能留下永远运行的root。
         if let Some(completion) = self.retry_completion.take() {
             completion(ClipboardRetryOutcome::Failed(
-                ClipboardReceiveFailure::ApplyFailed,
+                self.failure.unwrap_or(ClipboardReceiveFailure::ApplyFailed),
             ));
         }
     }

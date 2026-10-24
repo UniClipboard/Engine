@@ -3,6 +3,7 @@ use super::{
     BeginReceiveRetryPort, PreparedReceiveRetry, ReceiveCancellationBarrier,
     RetryEntryReceiveError, RetryEntryReceiveOutcome, RetrySnapshotReader,
 };
+use crate::clipboard::sync::apply_inbound::classify_apply_failure;
 use crate::space::{CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort};
 use crate::transfer::receive::materialization::{validate_selection, ReceiveSelection};
 use crate::transfer::receive::query::ReceiveProgressQuery;
@@ -11,6 +12,7 @@ use anyhow::anyhow;
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{AttemptState, TrackedFileTransferStatus};
+use uc_observability_contract::diagnostics::connectivity::describe_clipboard_receive_failure;
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 /// 保存准入拒绝的实际业务结果，公开错误文本不含条目或尝试身份。
@@ -229,6 +231,7 @@ impl ReceiveRetryPreparation {
 }
 
 fn preflight_failure(source: RetryEntryReceiveError) -> RetryEntryReceiveError {
+    describe_clipboard_receive_failure(classify_apply_failure(&source));
     uc_warn!(
         error_kind = "receive_retry_preflight",
         io_error_kind = io_error_kind(&source),
