@@ -46,6 +46,7 @@ async fn stopped_receiver_waits_for_the_started_os_write_and_register_update() {
     let store = Arc::new(StoreSpy {
         entry_id: entry_id.clone(),
         seen_envelope: Mutex::new(None),
+        seen_source: Mutex::new(None),
     });
     let mut harness = pull_harness(Some(PullClientSpy::new(Ok(vec![1]))), Some(store), entry_id);
     let (release, blocked) = oneshot::channel();

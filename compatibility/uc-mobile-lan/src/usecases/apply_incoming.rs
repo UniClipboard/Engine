@@ -958,6 +958,7 @@ impl ApplyIncomingMobileClipUseCase {
             )
         };
         let input = InboundClipboardApplyInput {
+            source_entry: None,
             from_device: pseudo_from.to_string(),
             snapshot_hash: snapshot_hash.clone(),
             plaintext,

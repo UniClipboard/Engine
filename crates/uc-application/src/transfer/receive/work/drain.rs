@@ -110,6 +110,7 @@ impl Drop for ReceiveDrainScope {
         state.clear_failed = !self.complete;
         if self.complete {
             state.receipts.clear();
+            state.progress_catalog.clear();
         }
         self.registry.changed.notify_waiters();
     }

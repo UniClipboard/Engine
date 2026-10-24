@@ -258,6 +258,7 @@ async fn real_partial_materialization_query_only_completes_files_that_were_actua
         });
         let result = receiver
             .execute(ApplyInboundInput {
+                source_entry: None,
                 from_device: DeviceId::new("PRIVATE_DEVICE"),
                 snapshot_hash: hash,
                 plaintext: wire,

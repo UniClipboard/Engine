@@ -674,7 +674,7 @@ impl ApplyInboundClipboardUseCase {
         match outcome {
             BeginReceiveOutcome::Begun => {
                 if let Some(source) = source {
-                    action.retain_source(source);
+                    action.accept_source(source);
                 }
                 Ok(Some(attempt_id))
             }
@@ -1050,6 +1050,7 @@ impl ApplyInboundClipboardUseCase {
         retry: PreparedReceiveRetry,
     ) -> Result<ApplyOutcome, ApplyInboundError> {
         let input = ApplyInboundInput {
+            source_entry: retry.source.source_entry.clone(),
             from_device: retry.source.from_device,
             snapshot_hash: retry.source.expected_hash.clone(),
             plaintext: Bytes::new(),
@@ -1265,6 +1266,7 @@ impl ApplyInboundClipboardUseCase {
         } else {
             let source =
                 (!blob_refs.is_empty() || file_set_manifest.is_some()).then(|| ReceiveSource {
+                    source_entry: input.source_entry.clone(),
                     from_device: input.from_device,
                     expected_hash: input.snapshot_hash.clone(),
                     blob_refs: blob_refs.clone(),
@@ -1284,7 +1286,7 @@ impl ApplyInboundClipboardUseCase {
                 .await?
         };
         if let Some(prepared) = retry.as_mut() {
-            receive_action.retain_source(prepared.source.clone());
+            receive_action.accept_source(prepared.source.clone());
             if let Some(selection) = &prepared.selection {
                 receive_action.inherit_results(selection);
             }

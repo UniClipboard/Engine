@@ -145,6 +145,7 @@ async fn directory_commit_winner_finishes_durable_save_when_generation_closes_af
     let (plaintext, snapshot_hash) = two_root_wire_payload();
     let outcome = receiver
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("source"),
             snapshot_hash,
             plaintext,

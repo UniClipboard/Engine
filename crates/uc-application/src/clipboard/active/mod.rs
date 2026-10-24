@@ -389,6 +389,7 @@ impl InboundPulledContentStore for PulledContentStore {
         &self,
         from_device: &DeviceId,
         snapshot_hash: &str,
+        source_entry: &EntryId,
         transfer_envelope: Vec<u8>,
         receive_permit: &crate::clipboard::sync::receive_gate::MemberReceivePermit,
     ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
@@ -417,6 +418,7 @@ impl InboundPulledContentStore for PulledContentStore {
         let outcome = self
             .apply
             .apply(InboundClipboardApplyInput {
+                source_entry: Some(source_entry.clone()),
                 from_device: from_device.as_str().to_string(),
                 snapshot_hash: snapshot_hash.to_string(),
                 plaintext: plaintext.into(),
@@ -580,6 +582,7 @@ mod pull_store_tests {
             .store(
                 &peer,
                 &snapshot_hash,
+                &EntryId::from("sender-entry"),
                 b"encrypted-envelope".to_vec(),
                 &receive_permit,
             )

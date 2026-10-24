@@ -98,6 +98,7 @@ async fn discarded_partial_redelivery_preserves_original_saved_recipe_for_manual
         let (wire, _) = encode_snapshot_with_blob_refs_to_v3_bytes(&incoming, &refs).unwrap();
         let result = redelivery
             .execute(ApplyInboundInput {
+                source_entry: None,
                 from_device: DeviceId::new("different-sender"),
                 plaintext: wire,
                 snapshot_hash: "original-hash".into(),
@@ -509,7 +510,8 @@ impl Fixture {
         original
             .register(&EntryId::from("receiver"), "old")
             .unwrap();
-        original.retain_source(ReceiveSource {
+        original.accept_source(ReceiveSource {
+            source_entry: None,
             from_device: DeviceId::new("source"),
             expected_hash: "original-hash".into(),
             blob_refs: (0..items)

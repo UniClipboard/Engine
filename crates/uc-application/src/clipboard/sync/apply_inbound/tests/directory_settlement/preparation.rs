@@ -184,6 +184,7 @@ async fn assert_preparation_failure(fail_log: bool, fail_commit: bool, lose_ack:
     let (plaintext, snapshot_hash) = two_root_wire_payload();
     let error = receiver
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("source"),
             snapshot_hash,
             plaintext,
@@ -355,6 +356,7 @@ async fn directory_saved_output_keeps_original_cleanup_until_permissions_recover
     let (plaintext, snapshot_hash) = two_root_wire_payload();
     let outcome = receiver
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("source"),
             snapshot_hash,
             plaintext,
@@ -497,6 +499,7 @@ async fn directory_probe_cleanup_failure_keeps_original_owner_before_any_fallbac
     let (plaintext, snapshot_hash) = two_root_wire_payload();
     let outcome = receiver
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("source"),
             snapshot_hash,
             plaintext,
