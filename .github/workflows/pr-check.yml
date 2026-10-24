@@ -43,6 +43,12 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # 独立 Git consumer 检查通过 just cargo 运行，先显式准备该工具。
+      - name: Install just
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
