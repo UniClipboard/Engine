@@ -1,174 +1,21 @@
-//! `ApplyInboundClipboardUseCase` — daemon-side inbound clipboard
-//! processing pipeline (Slice 2 Phase 3 · T4).
-//!
-//! ## Flow
-//!
-//! 1. **Dedup short-circuit**: if `snapshot_hash` already exists in the
-//!    local `clipboard_event` table as a *fully-held* entry, the payload is
-//!    already ours — skip the download and the duplicate row, but still
-//!    **re-activate** it (`Resurfaced`): rebuild the snapshot from the local
-//!    entry, write it to the OS clipboard, advance the register, and bump it
-//!    to the top of history. "This content exists in history" is not the same
-//!    claim as "the OS clipboard currently holds it": a peer re-copying an
-//!    older clip (A → B → A) must still land on the user's pasteboard.
-//!    Genuinely redundant deliveries — a re-push inside the sub-second
-//!    [`timing`] windows, or a partial superseding a partial — stay
-//!    `DuplicateSkipped` (no OS write).
-//! 2. **Envelope decode**: V3 → `SystemClipboardSnapshot`. Decode failure
-//!    is non-fatal (`DecodeFailed` outcome) — corrupted payloads from a
-//!    misbehaving peer don't crash the daemon's ingest loop.
-//! 3. **Capture pipeline**: reuse `CaptureClipboardUseCase` with origin
-//!    `RemotePush` so the entry, event, normalised representations,
-//!    cache, spool, and (optional) search index all match the local
-//!    capture path's schema (D5 decision).
-//! 4. **OS clipboard write**: via `ClipboardWriteCoordinator` with
-//!    `RemotePush` intent — arms a self-write echo record (a content hash
-//!    guard plus a one-shot next-origin override, under the coordinator's echo
-//!    budget) so the daemon's own clipboard watcher doesn't re-dispatch the
-//!    just-written content (write-back loop defence; distinct from the inbound
-//!    idempotency dedup in [`timing`]).
-//!    The **full** snapshot (every V3-decoded representation) is handed
-//!    to the coordinator; the platform layer internally decides whether
-//!    to atomically write multiple formats (Windows today) or to narrow
-//!    to the paste-priority rep via `SelectRepresentationPolicyV1`
-//!    (macOS / Linux fallback today).
-//!
-//! Step ordering (3 → 4) matters: capture commits the event before the
-//! OS write fires, so when the watcher consumes the origin guard it
-//! already sees the persisted row.
-//!
-//! ## 模块拆分
-//!
-//! 这个模块按职责再细分到三个子文件,顶层 `mod.rs` 只持有公共类型
-//! (`ApplyInboundInput` / `ApplyOutcome` / `ApplyInboundError`) 与 re-export:
-//!
-//! * [`ports`] — `InboundCapture` / `InboundWrite` 抽象 + 它们对
-//!   `CaptureClipboardUseCase` / `ClipboardWriteCoordinator` 的 blanket impl,
-//!   保持 use case 在测试里可 mock。
-//! * [`crate::transfer::receive::materialization`] — `InboundBlobMaterializer` / `InboundBlobFetcher`
-//!   抽象 + `FileCacheBlobMaterializer` 默认实现,负责把入站 blob refs 拉到
-//!   本机缓存 / 写回 representation。
-//! * [`usecase`] — `ApplyInboundClipboardUseCase` 主流程,只负责编排:
-//!   dedup → V3 解码 → emit IncomingPending → materialize → capture → OS write。
-//!
-//! ## Testability
-//!
-//! `CaptureClipboardUseCase` and `ClipboardWriteCoordinator` are
-//! concrete structs with 7+2 port dependencies. Holding them as
-//! `Arc<dyn Trait>` via two thin internal abstractions
-//! ([`InboundCapture`] / [`InboundWrite`]) keeps the use case mockable
-//! without requiring tests to construct full real implementations.
-//! Production wires the concrete types via the blanket impls in
-//! [`ports`].
+//! 入站剪贴板处理入口；数据模型、错误、专属能力与完整流程按职责组织。
+//! 完整接收仍交给原 transfer/receive 负责人，调用方不编排逐项网络和结算步骤。
 
-use anyhow::Error as SourceError;
-use bytes::Bytes;
-use std::fmt;
-use thiserror::Error;
-use uc_core::ids::{DeviceId, EntryId};
-
-use crate::clipboard::write::ClipboardWriteIntent;
-
-pub(crate) mod ports;
-
-pub use ports::InboundSnapshotRebuild;
+mod error;
+mod model;
 mod observation;
-pub(crate) use observation::classify_apply_failure;
+pub(crate) mod ports;
 mod timing;
 mod usecase;
 
 #[cfg(test)]
 mod tests;
 
-pub use ports::{InboundCapture, InboundWrite};
+pub use error::ApplyInboundError;
+pub use model::{ApplyInboundInput, ApplyOutcome, InboundActivationOwner};
+pub(crate) use observation::classify_apply_failure;
+pub use ports::{InboundCapture, InboundSnapshotRebuild, InboundWrite};
 pub use usecase::ApplyInboundClipboardUseCase;
 pub(crate) use usecase::{
     InboundApplyCommonDeps, InboundReceiveAttemptDeps, InteractiveReceiveDeps, StoreOnlyPullDeps,
 };
-
-/// 一次入站落地由哪个流程负责登记激活；不影响内容存储和系统写入。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InboundActivationOwner {
-    /// P2P 等入站流程登记发送者的激活。
-    Inbound,
-    /// 移动兼容流程在落地后登记并传播本机激活。
-    Caller,
-}
-
-/// Caller-supplied input mapped from the facade's public `InboundNotice`.
-///
-/// Keeping this struct separate from `crate::facade::clipboard::InboundNotice`
-/// avoids the use case importing from the facade layer (§11.4 keeps the
-/// arrow `facade → use case`, never the reverse).
-#[derive(Debug, Clone)]
-pub struct ApplyInboundInput {
-    pub from_device: DeviceId,
-    pub snapshot_hash: String,
-    pub plaintext: Bytes,
-    /// Write intent for the [`ApplyOutcome::Resurfaced`] branch only — the
-    /// fresh-content branch always writes as `RemotePush`.
-    ///
-    /// P2P 和移动兼容入站均抑制系统写入回声。移动兼容层负责
-    /// 显式传播本地激活，不依赖 watcher 再次捕获。
-    ///
-    /// [`ClipboardWriteIntent`]: crate::clipboard::write::ClipboardWriteIntent
-    pub resurface_intent: ClipboardWriteIntent,
-    pub activation_owner: InboundActivationOwner,
-}
-
-/// Result of one `execute` call. Daemon's worker maps each variant to a
-/// distinct telemetry path (WS event for `Applied` / `Resurfaced`, debug log
-/// for `DuplicateSkipped`, warn log for `DecodeFailed`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApplyOutcome {
-    /// New content — persisted + OS clipboard written. WS event fires.
-    Applied { entry_id: EntryId },
-    /// `snapshot_hash` matched a fully-held local entry: no download and no
-    /// new row, but the entry was re-activated — OS clipboard written under
-    /// [`ApplyInboundInput::resurface_intent`], register advanced, entry
-    /// bumped to the top of history. WS event fires.
-    Resurfaced {
-        snapshot_hash: String,
-        existing_entry_id: EntryId,
-        /// Whether the OS clipboard write succeeded. `false` means the content
-        /// is still held locally and still surfaced in history, but the
-        /// pasteboard was left untouched — so the register was **not** advanced
-        /// either. Callers that converge peers off this activation must treat
-        /// `false` as "do not propagate": broadcasting it would pin peers to an
-        /// activation this device does not actually hold.
-        os_write_succeeded: bool,
-    },
-    /// Delivery carried nothing to act on — a re-push inside the sub-second
-    /// dedup windows, or a partial superseding an existing partial. No persist,
-    /// no OS write, no WS event.
-    ///
-    /// This is **not** the "peer re-copied an older clip" case; that resolves
-    /// to [`Self::Resurfaced`].
-    DuplicateSkipped {
-        snapshot_hash: String,
-        existing_entry_id: EntryId,
-    },
-    /// V3 envelope was malformed. Frame dropped silently except for a
-    /// warning log; receiver loop keeps running.
-    DecodeFailed { reason: String },
-}
-
-#[derive(Error)]
-pub enum ApplyInboundError {
-    #[error("clipboard receive stopped")]
-    Stopped,
-    #[error("clipboard receive worker failed")]
-    WorkFailed(#[source] SourceError),
-    #[error("dedup query failed")]
-    DedupQuery(#[source] SourceError),
-    #[error("capture pipeline failed")]
-    Capture(#[source] SourceError),
-    #[error("clipboard receive failed internally")]
-    Internal(#[source] SourceError),
-}
-
-impl fmt::Debug for ApplyInboundError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, formatter)
-    }
-}
