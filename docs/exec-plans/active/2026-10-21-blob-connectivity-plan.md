@@ -115,6 +115,7 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 ## 当前验收边界
 
 - 2026-10-24：补齐 Core／Application 的原生 Iroh 生产依赖与源码门禁，真实包名检查覆盖重命名依赖；完整检查先由新增反例触发失败，再通过七个新增反例与测试依赖／Infra bridge 正例。
+- 真实 SQLite 回归证实接收 pending 登记的延迟事务会在无关并发提交后返回 busy；改为状态读取前取得写资格，新增与已有 pending 两种登记及密文结果验证通过，相关仓储组 10/10。此项不作为原 Engine 间歇失败已定位或已修复的结论，仍须完整流程复验。
 
 - SDK 正式依赖固定为同一 fork 的 `152c42a`；停止、协议、旧新资料与资源须以该修订验证。
 - 前一候选的完整 Engine job、资源验收、升级回归及平台编译已有通过结果，仍不能替代交付候选全部门禁。

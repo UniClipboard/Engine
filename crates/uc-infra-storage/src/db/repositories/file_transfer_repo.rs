@@ -34,6 +34,9 @@ use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
 use uc_core::ports::ReceiveFileFailure;
 use uc_infra_security::ContentProtection;
+#[cfg(test)]
+#[path = "file_transfer_repo/concurrency_tests.rs"]
+mod concurrency_tests;
 mod retry;
 use uc_observability_contract::{
     log_fields::{log_id, log_vocab},
@@ -153,7 +156,8 @@ impl<E: DbExecutor> RecordReceiverTransferPort for DieselFileTransferRepository<
                 // 防止重试 seed 把已 transferring / completed / failed /
                 // cancelled 的终止态行覆盖回 pending。包在 transaction 里
                 // 保证 SELECT-then-INSERT 原子。
-                conn.transaction::<_, diesel::result::Error, _>(|conn| {
+                // 先取得写资格，避免状态读取后被另一连接提交，使只读快照无法升级为写事务。
+                conn.immediate_transaction::<_, diesel::result::Error, _>(|conn| {
                     let existing_status: Option<String> = file_transfer::table
                         .filter(file_transfer::transfer_id.eq(&row.transfer_id))
                         .select(file_transfer::status)

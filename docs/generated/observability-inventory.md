@@ -1293,8 +1293,8 @@
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/entry_file_set_repo.rs:525` | `instrument` | - |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/entry_file_set_repo.rs:557` | `instrument` | - |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/entry_replace_repo.rs:177` | `instrument` | - |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/file_transfer_repo.rs:114` | `debug_span` | sensitive-field |
-| `<module>` | `crates/uc-infra-storage/src/db/repositories/file_transfer_repo.rs:164` | `debug` | sensitive-field, message-body |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/file_transfer_repo.rs:117` | `debug_span` | sensitive-field |
+| `<module>` | `crates/uc-infra-storage/src/db/repositories/file_transfer_repo.rs:168` | `debug` | sensitive-field, message-body |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/history_tag_repo.rs:133` | `warn` | message-body |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/history_tag_repo.rs:171` | `warn` | sensitive-field, message-body |
 | `<module>` | `crates/uc-infra-storage/src/db/repositories/migration_repo.rs:49` | `debug_span` | - |
