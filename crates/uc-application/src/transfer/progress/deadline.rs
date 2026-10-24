@@ -6,7 +6,7 @@ use std::pin::pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{interval_at, timeout_at, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{BudgetStatus, ElapsedBudget};
 
@@ -69,10 +69,19 @@ impl ProgressExchangeDeadline {
             }
             work.as_mut().poll(cx)
         });
-        let result = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(ConnectivityError::Stopped.into()),
-            result = timeout_at(self.instant, guarded) => result,
+        let mut guarded = pin!(guarded);
+        // socket可能一直不唤醒；有界唤醒保证恢复后重新观察包含挂起的原预算。
+        let pulse = Duration::from_millis(100);
+        let mut recheck = interval_at(Instant::now() + pulse, pulse);
+        recheck.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let result = loop {
+            self.check(cancel)?;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(ConnectivityError::Stopped.into()),
+                _ = recheck.tick() => continue,
+                result = timeout_at(self.instant, guarded.as_mut()) => break result,
+            }
         };
         // discarded-source[timeout]: 原交换截止已经表达全部超时事实。
         let result = result.map_err(|_| ConnectivityError::DeadlineExpired)??;

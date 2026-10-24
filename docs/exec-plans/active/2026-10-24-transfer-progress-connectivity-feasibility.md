@@ -426,3 +426,48 @@ Router以`/2`优先注册，双版本端选择`/2`，旧单版本端仍交换原
 验证器拒绝缺失或非`transfer_progress`的报告，不能退回Clipboard fixture仍记本项通过。
 原预算、帧上限、计划身份和内容断言未放宽；没有新增blob／V3格式、持久化outbox或生产旁路。
 各平台经过时间能力和阶段0结论仍单列未完成，物理设备未执行不能记通过。
+
+
+### 各平台经过时间审计与物理挂起入口
+
+`SystemElapsedClock` 的原生选择保持不变。以下为源码／官方语义核对，不能代替平台编译或设备执行：
+
+| 目标 | 包含挂起的读取 | 探针排除挂起的对照 | 本轮执行边界 |
+| --- | --- | --- | --- |
+| Linux | `CLOCK_BOOTTIME` | `CLOCK_MONOTONIC` | 原生时钟及普通线程等待检查；物理挂起跳过 |
+| Android | `CLOCK_BOOTTIME` | `CLOCK_MONOTONIC` | Rust cfg 选择核对；目标编译／真机跳过 |
+| HarmonyOS | `CLOCK_BOOTTIME` | `CLOCK_MONOTONIC` | `aarch64-unknown-linux-ohos` 为 `target_os=linux,target_env=ohos`；目标编译／真机跳过 |
+| macOS／iOS | `CLOCK_MONOTONIC` | `CLOCK_UPTIME_RAW` | 官方睡眠语义核对；目标编译／实机跳过 |
+| Windows | `GetTickCount64` | `QueryUnbiasedInterruptTime` | GNU目标检查；本机执行／物理挂起跳过 |
+
+依据：[Linux kernel 时钟语义](https://docs.kernel.org/core-api/timekeeping.html)、
+[Apple Libc 时钟手册](https://github.com/apple-oss-distributions/Libc/blob/main/gen/clock_gettime.3)、
+[Windows tick](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-gettickcount64)及
+[排除睡眠的 interrupt time](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryunbiasedinterrupttime)。
+Apple 的 `CLOCK_MONOTONIC` 在系统睡眠期间仍递增，不能套用 Linux 同名时钟的语义。
+[OpenHarmony musl 头文件](https://github.com/openharmony/third_party_musl/blob/master/include/time.h)声明 `CLOCK_BOOTTIME=7`，
+[实现](https://github.com/openharmony/third_party_musl/blob/master/src/time/clock_gettime.c)传递 clock ID；这不证明所交付设备内核支持，读取失败仍保留原始来源且拒绝继续旧预算。
+
+本轮新增回归证实：如果 socket 不再唤醒、Tokio 时间仅推进100毫秒、原生经过时间已从0跳到6秒，旧版五秒网络等待不会结束。
+`ProgressExchangeDeadline::network` 现以100毫秒有界唤醒重新检查同一原生预算；到期先于下一次网络 poll，不重新创建预算。
+该唤醒只包围可中断网络 IO，不改变本机读取／采用必须监督至实际结束的责任；不增加后台执行承诺。
+五秒交换、60秒投影与600秒终态保留使用包含挂起的读数；投影／补发 worker 同样在活动时以100毫秒重新观察。
+通用 `ConnectivityManager` 的空闲30秒仍使用 Tokio `Instant`，目前只证明清醒状态下回收；其挂起行为须在生产生命周期接线前单独闭合。
+
+人工物理挂起复跑（不会自动挂起系统）：
+
+```bash
+node scripts/testing/run-progress-suspend-proof.mjs --physical
+```
+
+看到测试开始后，由操作者使系统实际挂起至少10秒再恢复。探针用“包含睡眠时钟差值减去清醒时钟差值”的保守下界识别挂起，
+采样窗口只降低该下界；线程等待、进程暂停和人工声明不能直接记为系统挂起。
+180秒清醒时间内没有观察到至少10秒挂起则失败；原生读取失败、回退也失败。
+记录原始差值、原5／60／600秒预算结果、源码状态、lockfile和测试二进制指纹于 `target/test-artifacts/ci/progress-suspend/`。
+仅挂起10秒不证明60／600秒已经到期，报告分别保留其实际结果；需要相应时长的实机用例才能证明跨越这些边界。
+此入口直接执行桌面当前测试二进制；移动设备仍须将同一原生时钟与实际 progress owner 接入平台验收宿主，不能将该脚本称为移动真机入口。
+普通CI默认跳过人工测试，不接受旧报告；本轮未执行人工挂起，因此阶段0经过时间整项继续未勾选。
+
+阶段0当前结论：登记、字节、输出后采用、旧流和资源策略已取得所列主机证据；
+包含挂起的原生能力有源码依据与逻辑边界证明，物理挂起、移动目标编译和技术空闲恢复尚未闭合。
+阶段0整体仍未完成，不能据此开始生产迁移或标记设备矩阵通过；无需改变blob／V3格式或扩大持久化边界。
