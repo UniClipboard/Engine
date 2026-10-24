@@ -43,3 +43,9 @@ pub use model::ProgressUpdateNotice;
 pub use ports::ProgressLiveRoundPort;
 
 pub use model::ProgressContactNotice;
+
+mod projection;
+pub use projection::{
+    ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
+    ProgressProjectionRegistry, ProgressProjectionWorker,
+};
