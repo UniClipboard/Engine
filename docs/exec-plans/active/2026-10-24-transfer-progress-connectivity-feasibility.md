@@ -31,10 +31,31 @@
 记录跨5秒／60秒／600秒的各自结果及原预算不重置；未执行的平台继续列为跳过。
 时钟不可读或回退的保守路径已验证，不能用它替代正常平台的挂起能力证明。
 
-实现提交的[跨平台CI](https://github.com/UniClipboard/Engine/actions/runs/40136018862)已启动；
-截至本结论已核对[HarmonyOS真实SDK编译步骤](https://github.com/UniClipboard/Engine/actions/runs/40136018862/job/120997584844)通过；整体运行未结束时没有整体通过结论。
-移动绑定编译成功只证明编译，不证明实机睡眠／前后台。
-该运行对应上述实现提交，不能声称验证了后续不同源码候选。
+实现提交的[跨平台CI](https://github.com/UniClipboard/Engine/actions/runs/40136018862)已结束，结论为失败：13个作业中10个成功、3个失败。
+它验证的是上述实现提交，不能声称验证了后续修复或文档head。
+
+| 实际CI结果 | 结论与范围 |
+| --- | --- |
+| iOS／Android／HarmonyOS绑定编译 | 成功；已核对实际构建步骤，只有编译证据，不代替设备运行／系统挂起 |
+| Direct／Relay／Legacy／Known-peer连接恢复四组 | 成功；是现有连接能力回归，不代替新进度生产接线或完整角色矩阵 |
+| 必需Blob网络与升级矩阵、presence矩阵、升级smoke | 成功；保持各自原文件、路径与资源断言，不将旧端回归推广为新版进度验收 |
+| Engine tests作业 | 失败；workspace实际4747项中4746通过、1超时、37跳过。超时是31秒活动＋30秒空闲证明被Nextest20秒终止线打断 |
+| Rust coverage作业 | 失败；实际4747项中4746通过、同一个用例超时、35跳过；未完成coverage交付，不能把通过用例数当覆盖率通过 |
+| Engine repository checks作业 | 失败；macOS全目标编译、独立Engine Git消费者及前置仓库检查成功，依赖审计命中RUSTSEC-2026-0387，之后的检查未执行 |
+
+长测试预算漏配已在提交 `38cbafb8f375eb79af459d2ad2513532113b4186`（PR #258）修复：
+原用例先本地复现20.008秒超时，随后在Nextest `ci`／`default` 分别61.034／61.040秒通过。
+仅为精确用例登记120秒runner预算；测试内部90秒、产品30秒、全局默认20秒和零重试不变。
+该修复的六项本地门禁通过，不能冒充上述旧实现CI已经重新通过。
+
+Engine workspace失败后仍实际完成必需Blob生命周期资源8项、testkit证据18项、成员smoke16项及隔离网络配对smoke。
+失败导致实际接收权威登记组合、relay历史复用、Direct／Relay完整活跃内容验证等后续步骤跳过；跳过不记通过。
+
+依赖审计仍是未解决的交付阻塞：[RustSec公告](https://github.com/RustSec/advisory-db/blob/main/crates/crypto-bigint/RUSTSEC-2026-0387.md)
+要求 `crypto-bigint >=0.7.6`，旧0.5.5由OPAQUE／VOPRF的elliptic-curve0.13依赖链引入。
+当前可用上游版本和兼容更新dry-run尚未提供直接修复路径；处理需保持现有密码协议与持久资料兼容。
+[仓库规则](../../design-docs/engine-repository-checks.md)禁止忽略漏洞／unsound公告，当前没有新增例外或放宽门禁。
+本结论不擅自批准维护额外密码依赖实现分支；处理范围尚待用户选择，旧CI失败保留为失败。
 
 仍未执行或尚未接线的范围包括：生产Router／旧reporter切换、实际下载状态／SQLite结算交接、
 逐项手动重试与批次汇总、稳定Rust／移动宿主视图、完整状态核对与生命周期、
