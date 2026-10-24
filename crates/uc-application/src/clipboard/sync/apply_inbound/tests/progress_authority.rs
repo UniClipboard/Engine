@@ -257,6 +257,7 @@ fn registration_authority_worker() {
         let encode = |task: crate::transfer::progress::ProgressSourceTask| {
             json!({
                 "producer":task.descriptor.producer.bytes(),"revision":task.descriptor.revision,"source":task.descriptor.source.bytes(),"attempt":task.descriptor.attempt.bytes(),"item_count":task.descriptor.item_count,
+                "closed":task.items.iter().enumerate().filter(|(_,item)|task.notification_closed.contains(item)).map(|(index,_)|index).collect::<Vec<_>>(),
                 "items":task.items.iter().map(|item| json!({"kind":match item.kind { ProgressItemKind::File=>"file",ProgressItemKind::Representation=>"representation",ProgressItemKind::DirectoryUnit=>"directory" },"index":item.index})).collect::<Vec<_>>()
             })
         };

@@ -1,5 +1,5 @@
 use super::io::{invalid, Exchange};
-use super::mapping::{ack, bound, descriptor, identity, terminal};
+use super::mapping::{ack, bound, descriptor, identity, terminal, update};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
@@ -31,7 +31,7 @@ impl TransferProgressInbound {
                         &mut exchange,
                     )
                     .await?;
-                bound(registered)
+                Some(bound(registered))
             }
             Message::Terminal {
                 binding,
@@ -47,11 +47,29 @@ impl TransferProgressInbound {
                 if adopted != notice {
                     return Err(invalid());
                 }
-                ack(adopted)
+                Some(ack(adopted))
+            }
+            Message::Update {
+                binding,
+                scope,
+                owner_revision,
+                progress,
+            } => {
+                exchange.end_request().await?;
+                owner
+                    .adopt_update(
+                        &connection.peer(),
+                        generation,
+                        update(binding, scope, owner_revision, progress),
+                    )
+                    .await?;
+                None
             }
             _ => return Err(invalid()),
         };
-        exchange.write(response).await?;
+        if let Some(response) = response {
+            exchange.write(response).await?;
+        }
         exchange.finish_send().await?;
         Ok(())
     }

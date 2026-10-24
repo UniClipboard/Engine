@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{
-    ProgressIdentity, ProgressItem, ProgressTerminal, TerminalRetransmit,
+    ProgressActive, ProgressIdentity, ProgressItem, ProgressTerminal, TerminalRetransmit,
 };
 use uc_core::ids::DeviceId;
 /// 多个同时核对者共享同一不可变结果及完整错误来源，不复制整份快照。
@@ -21,6 +21,16 @@ pub(super) struct Key {
     pub revision: u64,
 }
 impl Key {
+    pub fn live(peer: DeviceId, task: ProgressTaskDescriptor, item: ProgressItem) -> Self {
+        Self {
+            peer,
+            source: task.source,
+            attempt: task.attempt,
+            item,
+            producer: task.producer,
+            revision: task.revision,
+        }
+    }
     pub fn new(peer: DeviceId, task: ProgressTaskDescriptor, result: ProgressTerminal) -> Self {
         Self {
             peer,
@@ -66,17 +76,22 @@ impl QueryKey {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Work {
     Terminal(Key),
+    Live(Key),
     Snapshot(QueryKey),
 }
 impl Work {
     pub fn peer(self) -> DeviceId {
         match self {
-            Self::Terminal(key) => key.peer,
+            Self::Terminal(key) | Self::Live(key) => key.peer,
             Self::Snapshot(key) => key.peer,
         }
     }
 }
 pub(super) enum Action {
+    Live {
+        descriptor: ProgressTaskDescriptor,
+        value: ProgressActive,
+    },
     Terminal {
         descriptor: ProgressTaskDescriptor,
         result: ProgressTerminal,
@@ -91,6 +106,7 @@ pub(super) struct Job {
     pub action: Action,
 }
 pub(super) enum Completion {
+    Live(ProgressActive, Result<(), ProgressReceiveError>),
     Terminal(Result<(), ProgressReceiveError>),
     Snapshot(Result<ProgressSnapshotRead, ProgressReceiveError>),
 }

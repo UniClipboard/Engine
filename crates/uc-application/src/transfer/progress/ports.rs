@@ -1,12 +1,13 @@
 use super::{
     ElapsedClockError, ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline,
     ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressUpdateNotice,
 };
 use crate::connectivity::{ConnectionLease, StreamLease};
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressTerminal};
+use uc_core::file_transfer::{ProgressActive, ProgressIdentity, ProgressItem, ProgressTerminal};
 use uc_core::ids::DeviceId;
 
 /// 一次完整的当前任务确认；实现负责有界编解码、截止时间及请求结束检查。
@@ -23,6 +24,12 @@ pub trait CurrentProgressTaskPort: Send {
 /// 调用方只有在该能力成功返回之后才允许写 Bound 或精确 TerminalAck。
 #[async_trait]
 pub trait ProgressReceiverPort: Send + Sync {
+    async fn adopt_update(
+        &self,
+        peer: &DeviceId,
+        generation: u64,
+        notice: ProgressUpdateNotice,
+    ) -> Result<(), ProgressReceiveError>;
     async fn register(
         &self,
         peer: &DeviceId,
@@ -39,7 +46,8 @@ pub trait ProgressReceiverPort: Send + Sync {
     ) -> Result<ProgressTerminalNotice, ProgressReceiveError>;
 }
 
-/// 只查询已接受的当前接收尝试；每次新挑战都重新读取，不捕获旧任务快照。
+/// 只查询已接受的当前接收尝试；原始计划在接受时已完整核验且同一描述下不可变。
+/// 每次新挑战都重新读取，不捕获旧任务快照。
 /// None只表示本运行期未保留可授权关联，不推断任务失败或文件缺失。
 pub trait ProgressTaskAuthorityPort: Send + Sync {
     fn current_task(&self, peer: &DeviceId, source: ProgressIdentity)
@@ -58,6 +66,14 @@ pub trait ProgressTaskAuthorityPort: Send + Sync {
 /// 借用流，原负责人持许可至后置权威检查及实际连接保留读取结束。
 #[async_trait]
 pub trait ProgressWirePort: Send + Sync {
+    async fn update(
+        &self,
+        stream: &mut StreamLease,
+        connection: &ConnectionLease,
+        notice: ProgressUpdateNotice,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError>;
     async fn register(
         &self,
         stream: &mut StreamLease,
@@ -91,6 +107,19 @@ pub trait ProgressTerminalRoundPort: Send + Sync {
         peer: &DeviceId,
         expected: ProgressTaskDescriptor,
         result: ProgressTerminal,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError>;
+}
+
+/// 已获得统一交换额度的一轮普通活动通知，不产生业务ACK或文件成功结论。
+#[async_trait]
+pub trait ProgressLiveRoundPort: Send + Sync {
+    async fn report_live(
+        &self,
+        peer: &DeviceId,
+        expected: ProgressTaskDescriptor,
+        update: ProgressActive,
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<(), ProgressReceiveError>;

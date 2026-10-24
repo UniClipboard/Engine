@@ -82,6 +82,7 @@ impl ElapsedClockPort for Clock {
 }
 fn task() -> ProgressSourceTask {
     ProgressSourceTask {
+        notification_closed: Default::default(),
         descriptor: ProgressTaskDescriptor {
             producer: ProgressIdentity::new([2; 16]),
             revision: 4,
