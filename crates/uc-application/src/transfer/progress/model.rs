@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use uc_core::file_transfer::{
     ProgressIdentity, ProgressItem, ProgressTerminal, RegistrationDescriptor,
 };
@@ -22,4 +23,11 @@ pub struct ProgressProjectionSnapshot {
     pub version: u64,
     pub bound: Option<ProgressBound>,
     pub items: Vec<(ProgressItem, Option<ProgressTerminal>)>,
+}
+
+/// 当前接收负责人的不可变计划快照；仅身份、位置和单调修订，不包含内容或路径。
+#[derive(Clone)]
+pub struct ProgressSourceTask {
+    pub descriptor: ProgressTaskDescriptor,
+    pub items: Arc<[ProgressItem]>,
 }

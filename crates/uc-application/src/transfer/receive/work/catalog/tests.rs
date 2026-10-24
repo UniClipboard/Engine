@@ -21,6 +21,7 @@ use uc_core::{ObservedClipboardRepresentation, SystemClipboardSnapshot};
 
 fn source() -> ReceiveSource {
     ReceiveSource {
+        source_entry: None,
         from_device: DeviceId::new("PRIVATE_DEVICE"),
         expected_hash: "PRIVATE_HASH".into(),
         original_wire: Some(Bytes::from_static(b"PRIVATE_ORIGINAL_WIRE")),
@@ -59,7 +60,7 @@ fn query_includes_unstarted_items_and_requires_real_persistence_for_completed_do
         action
             .register(&EntryId::from("receiver"), "attempt")
             .unwrap();
-        action.retain_source(source());
+        action.accept_source(source());
         action.batch.plan(3, 21);
         action.batch.item_result(
             "receiver:attempt:attempt:member:0",
@@ -140,13 +141,13 @@ async fn delete_seals_late_actions_and_notifies_all_existing_actions_before_wait
     let b = registry.action();
     a.register(&entry, "a").unwrap();
     b.register(&entry, "b").unwrap();
-    a.retain_source(source());
+    a.accept_source(source());
     let owner = registry.clone();
     let deleting = tokio::spawn(async move { owner.delete_scope(&entry).await });
     a.cancellation().cancelled().await;
     assert!(b.cancellation().is_cancelled());
     assert!(!deleting.is_finished());
-    a.retain_source(source());
+    a.accept_source(source());
     assert!(registry.state.lock().unwrap().receipts.is_empty());
     a.finish(Ok(()));
     b.finish(Ok(()));
@@ -154,12 +155,12 @@ async fn delete_seals_late_actions_and_notifies_all_existing_actions_before_wait
     assert!(late.register(&EntryId::from("receiver"), "late").is_err());
     let fresh = registry.action();
     fresh.register(&EntryId::from("receiver"), "fresh").unwrap();
-    fresh.retain_source(source());
+    fresh.accept_source(source());
     assert_eq!(registry.state.lock().unwrap().receipts.len(), 1);
     registry.close();
     let generation = registry.generation();
     assert!(registry.open(&generation));
-    fresh.retain_source(source());
+    fresh.accept_source(source());
     assert!(registry.state.lock().unwrap().receipts.is_empty());
     fresh.finish(Ok(()));
 }
@@ -174,7 +175,7 @@ fn ordinary_cancel_keeps_original_source_but_full_success_releases_it() {
     registry
         .stop(&EntryId::from("receiver"), "attempt")
         .unwrap();
-    action.retain_source(source());
+    action.accept_source(source());
     assert_eq!(registry.state.lock().unwrap().receipts.len(), 1);
     action.persisted(true, &[]);
     assert!(registry.state.lock().unwrap().receipts.is_empty());
@@ -188,7 +189,7 @@ fn only_the_explicitly_committed_item_proof_can_turn_download_completion_into_su
     action
         .register(&EntryId::from("receiver"), "attempt")
         .unwrap();
-    action.retain_source(source());
+    action.accept_source(source());
     for index in 0..2 {
         action.batch.item_result(
             &format!("receiver:attempt:attempt:member:{index}"),
@@ -227,7 +228,7 @@ fn saved_registry() -> Arc<ReceiveWorkRegistry> {
     saved
         .register(&EntryId::from("receiver"), "attempt")
         .unwrap();
-    saved.retain_source(source());
+    saved.accept_source(source());
     saved.batch.item_result(
         "receiver:attempt:attempt:member:2",
         0,
@@ -265,7 +266,7 @@ fn successive_uncommitted_sources_keep_original_item_identity_and_saved_results(
         let mut new_source = source();
         new_source.from_device = DeviceId::new("different");
         new_source.blob_refs.truncate(1);
-        incoming.retain_source(new_source);
+        incoming.accept_source(new_source);
         incoming.finish(Ok(()));
         // 重复完成通知不能把回退后的保存事实替换为已丢弃的新下载事实。
         incoming.finish(Ok(()));
@@ -309,7 +310,7 @@ fn actual_persistence_replaces_previous_recipe_and_full_success_releases_both_so
         let mut new_source = source();
         new_source.from_device = DeviceId::new("different");
         new_source.blob_refs.truncate(2);
-        incoming.retain_source(new_source);
+        incoming.accept_source(new_source);
         let new_saved = ReceivedItem {
             blob_index: 1,
             plaintext_hash: [2; 32],
@@ -344,7 +345,7 @@ async fn close_and_delete_discard_saved_backup_before_late_completion() {
         let incoming = registry.action();
         let entry = EntryId::from("receiver");
         incoming.register(&entry, "second").unwrap();
-        incoming.retain_source(source());
+        incoming.accept_source(source());
         if deleting {
             let owner = registry.clone();
             let deleting = tokio::spawn(async move { owner.delete_scope(&entry).await });
@@ -369,7 +370,7 @@ fn query_uses_original_plan_totals_before_any_download_rows_exist() {
     action
         .register(&EntryId::from("receiver"), "attempt")
         .unwrap();
-    action.retain_source(source());
+    action.accept_source(source());
     let mut current = progress(AttemptState::Receiving);
     current.items_total = 0;
     current.total_bytes = 0;
@@ -405,7 +406,7 @@ fn directory_query_keeps_member_totals_but_completes_only_the_whole_unit() {
             })
             .collect(),
     });
-    action.retain_source(original);
+    action.accept_source(original);
     for state in [
         AttemptState::Receiving,
         AttemptState::Committing,
@@ -450,7 +451,7 @@ fn out_of_range_plan_bytes_are_reported_with_source_instead_of_clamping() {
         .unwrap();
     let mut original = source();
     original.blob_refs[0].size_bytes = u64::MAX;
-    action.retain_source(original);
+    action.accept_source(original);
     let mut current = progress(AttemptState::Receiving);
     let error = registry.merge_progress(&mut current).unwrap_err();
     assert!(error.chain().any(|source| source.is::<TryFromIntError>()));
@@ -521,4 +522,287 @@ fn unchanged_v3_preserves_source_and_original_logical_positions_across_attempts(
     let directory = original.planned(&EntryId::from("receiver-a"), "third");
     assert_eq!(directory.len(), 1);
     assert_eq!(directory[0].kind, ReceiveItemKind::DirectoryUnit);
+}
+
+#[test]
+fn accepted_progress_is_current_idempotent_and_late_finished_actions_cannot_restore_old_attempt() {
+    use crate::transfer::progress::ProgressTaskAuthorityPort;
+    use uc_core::file_transfer::{ProgressIdentity, ProgressItemKind};
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let peer = DeviceId::new("PRIVATE_DEVICE");
+    let entry = EntryId::from("local");
+    let mut original = source();
+    original.source_entry = Some(EntryId::from("00000000-0000-4000-8000-000000000001"));
+    original.blob_refs[0].representation_index = Some(2);
+    let source_id = ProgressIdentity::new(
+        *uuid::Uuid::parse_str(original.source_entry.as_ref().unwrap().as_ref())
+            .unwrap()
+            .as_bytes(),
+    );
+    let first = registry.action();
+    first
+        .register(&entry, "00000000-0000-4000-8000-000000000009")
+        .unwrap();
+    first.prepare_plan(&original);
+    assert!(registry.current_task(&peer, source_id).is_none());
+    first.accept_source(original.clone());
+    let accepted = registry.current_task(&peer, source_id).unwrap();
+    assert_eq!(accepted.items[0].kind, ProgressItemKind::Representation);
+    assert_eq!(accepted.items[0].index, 2);
+    assert_eq!(accepted.items[1].index, 0);
+    assert_eq!(accepted.items[2].index, 1);
+    first.accept_source(original.clone());
+    assert_eq!(
+        registry
+            .current_task(&peer, source_id)
+            .unwrap()
+            .descriptor
+            .revision,
+        accepted.descriptor.revision
+    );
+    first.finish(Ok(()));
+    let next = registry.action();
+    next.register(&entry, "00000000-0000-4000-8000-000000000002")
+        .unwrap();
+    next.accept_source(original.clone());
+    let current = registry.current_task(&peer, source_id).unwrap();
+    first.accept_source(original);
+    assert_eq!(
+        registry
+            .current_task(&peer, source_id)
+            .unwrap()
+            .descriptor
+            .attempt,
+        current.descriptor.attempt
+    );
+    assert!(current.descriptor.revision > accepted.descriptor.revision);
+    assert_eq!(current.descriptor.producer, accepted.descriptor.producer);
+    next.finish(Ok(()));
+}
+
+#[tokio::test]
+async fn empty_directory_uses_authenticated_source_hint_and_delete_retires_its_mapping() {
+    use crate::transfer::progress::ProgressTaskAuthorityPort;
+    use uc_core::file_transfer::{ProgressIdentity, ProgressItemKind};
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let peer = DeviceId::new("PRIVATE_DEVICE");
+    let mut original = source();
+    original.source_entry = Some(EntryId::from("00000000-0000-4000-8000-000000000001"));
+    original.blob_refs.clear();
+    original.manifest = Some(InboundFileSetManifest {
+        members: vec![InboundFileSetMember {
+            root_index: 0,
+            root_name: "folder".into(),
+            root_is_file: false,
+            relative_path: String::new(),
+            kind: FileSetMemberKind::EmptyDirectory,
+            blob_ref_index: None,
+        }],
+    });
+    let mut bytes = [0; 16];
+    bytes[6] = 0x40;
+    bytes[8] = 0x80;
+    bytes[15] = 1;
+    let source_id = ProgressIdentity::new(bytes);
+    let entry = EntryId::from("local");
+    let action = registry.action();
+    action
+        .register(&entry, "00000000-0000-4000-8000-000000000002")
+        .unwrap();
+    action.accept_source(original.clone());
+    let accepted = registry.current_task(&peer, source_id).unwrap();
+    assert_eq!(accepted.items.len(), 1);
+    assert_eq!(accepted.items[0].kind, ProgressItemKind::DirectoryUnit);
+    action.persisted(true, &[]);
+    assert!(registry.current_task(&peer, source_id).is_some());
+    action.finish(Ok(()));
+    let deleted = registry.delete_scope(&entry).await.unwrap();
+    action.accept_source(original);
+    assert!(registry.current_task(&peer, source_id).is_none());
+    drop(deleted);
+}
+
+#[test]
+fn actual_process_restart_creates_new_producer_and_does_not_restore_old_source_associations() {
+    use crate::transfer::progress::ProgressTaskAuthorityPort;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+    use uc_core::file_transfer::ProgressIdentity;
+    const CHILD_MARKER: &str = "UC_PROGRESS_INCARNATION_FIXTURE";
+    let source_id = ProgressIdentity::new(
+        *uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001")
+            .unwrap()
+            .as_bytes(),
+    );
+    if let Some(marker) = std::env::var_os(CHILD_MARKER) {
+        let registry = Arc::new(ReceiveWorkRegistry::default());
+        let peer = DeviceId::new("PRIVATE_DEVICE");
+        assert!(registry.current_task(&peer, source_id).is_none());
+        let action = registry.action();
+        action
+            .register(
+                &EntryId::from("local"),
+                "00000000-0000-4000-8000-000000000002",
+            )
+            .unwrap();
+        let mut original = source();
+        original.source_entry = Some(EntryId::from("00000000-0000-4000-8000-000000000001"));
+        action.accept_source(original);
+        let current = registry.current_task(&peer, source_id).unwrap();
+        let mut observation = current.descriptor.producer.bytes().to_vec();
+        observation.push(1); // 新进程首次读取确为未保留；文件只承载本测试的合成运行身份。
+        std::fs::write(marker, observation).unwrap();
+        loop {
+            std::thread::park();
+        } // 父进程真正终止进程，不以重新构造对象代替重启。
+    }
+    struct Process(Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("synthetic-progress-incarnation");
+    let mut producers = Vec::new();
+    for _ in 0..2 {
+        let mut process = Process(Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "transfer::receive::work::catalog::tests::actual_process_restart_creates_new_producer_and_does_not_restore_old_source_associations", "--nocapture"])
+            .env(CHILD_MARKER, &marker).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let observation = loop {
+            if let Ok(observation) = std::fs::read(&marker) {
+                if observation.len() == 17 {
+                    break observation;
+                }
+            }
+            assert!(
+                process.0.try_wait().unwrap().is_none(),
+                "child must remain alive until terminated"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "child must publish accepted source state"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(observation[16], 1);
+        producers.push(observation[..16].to_vec());
+        process.0.kill().unwrap();
+        process.0.wait().unwrap();
+        std::fs::remove_file(&marker).unwrap();
+    }
+    assert_ne!(producers[0], producers[1]);
+}
+
+#[test]
+fn invalid_new_association_retires_old_progress_without_discarding_receive_source() {
+    use crate::transfer::progress::ProgressTaskAuthorityPort;
+    use uc_core::file_transfer::ProgressIdentity;
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let peer = DeviceId::new("PRIVATE_DEVICE");
+    let entry = EntryId::from("local");
+    let source_id = ProgressIdentity::new(
+        *uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001")
+            .unwrap()
+            .as_bytes(),
+    );
+    let mut original = source();
+    original.source_entry = Some(EntryId::from("00000000-0000-4000-8000-000000000001"));
+    let first = registry.action();
+    first
+        .register(&entry, "00000000-0000-4000-8000-000000000002")
+        .unwrap();
+    first.accept_source(original.clone());
+    first.finish(Ok(()));
+    assert!(registry.current_task(&peer, source_id).is_some());
+    let second = registry.action();
+    second
+        .register(&entry, "00000000-0000-4000-8000-000000000003")
+        .unwrap();
+    original.source_entry = Some(EntryId::from("unrepresentable-legacy-source"));
+    second.accept_source(original);
+    assert!(registry.current_task(&peer, source_id).is_none());
+    assert!(registry
+        .retry_material(&entry, "00000000-0000-4000-8000-000000000003")
+        .is_some());
+    second.finish(Ok(()));
+}
+
+#[test]
+fn repeated_handoff_from_older_live_entry_cannot_replace_newer_source_attempt() {
+    use crate::transfer::progress::ProgressTaskAuthorityPort;
+    use uc_core::file_transfer::ProgressIdentity;
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let peer = DeviceId::new("PRIVATE_DEVICE");
+    let source_id = ProgressIdentity::new(
+        *uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001")
+            .unwrap()
+            .as_bytes(),
+    );
+    let mut original = source();
+    original.source_entry = Some(EntryId::from("00000000-0000-4000-8000-000000000001"));
+    let first = registry.action();
+    first
+        .register(
+            &EntryId::from("older-local"),
+            "00000000-0000-4000-8000-000000000009",
+        )
+        .unwrap();
+    first.accept_source(original.clone());
+    let second = registry.action();
+    second
+        .register(
+            &EntryId::from("newer-local"),
+            "00000000-0000-4000-8000-000000000002",
+        )
+        .unwrap();
+    second.accept_source(original.clone());
+    let current = registry.current_task(&peer, source_id).unwrap();
+    first.accept_source(original);
+    let after = registry.current_task(&peer, source_id).unwrap();
+    assert_eq!(after.descriptor.attempt, current.descriptor.attempt);
+    assert_eq!(after.descriptor.revision, current.descriptor.revision);
+    first.finish(Ok(()));
+    second.finish(Ok(()));
+}
+
+#[test]
+fn legacy_blob_identity_requires_one_unambiguous_source_and_never_guesses_by_hash() {
+    use crate::transfer::progress::ProgressTaskAuthorityPort;
+    use uc_core::file_transfer::ProgressIdentity;
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let peer = DeviceId::new("PRIVATE_DEVICE");
+    let entry = EntryId::from("local");
+    let origin = EntryId::from("00000000-0000-4000-8000-000000000001");
+    let source_id =
+        ProgressIdentity::new(*uuid::Uuid::parse_str(origin.as_ref()).unwrap().as_bytes());
+    let mut original = source();
+    for blob in &mut original.blob_refs {
+        blob.entry_id = origin.clone();
+    }
+    let first = registry.action();
+    first
+        .register(&entry, "00000000-0000-4000-8000-000000000002")
+        .unwrap();
+    first.accept_source(original.clone());
+    first.finish(Ok(()));
+    assert_eq!(
+        registry.current_task(&peer, source_id).unwrap().items.len(),
+        3
+    );
+    original.blob_refs[1].entry_id = EntryId::from("00000000-0000-4000-8000-000000000009");
+    let second = registry.action();
+    second
+        .register(&entry, "00000000-0000-4000-8000-000000000003")
+        .unwrap();
+    second.accept_source(original);
+    assert!(registry.current_task(&peer, source_id).is_none());
+    assert!(registry
+        .retry_material(&entry, "00000000-0000-4000-8000-000000000003")
+        .is_some());
+    second.finish(Ok(()));
 }

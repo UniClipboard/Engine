@@ -1,4 +1,7 @@
-use super::{ProgressBound, ProgressReceiveError, ProgressTaskDescriptor, ProgressTerminalNotice};
+use super::{
+    ProgressBound, ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor,
+    ProgressTerminalNotice,
+};
 use async_trait::async_trait;
 use uc_core::file_transfer::ProgressIdentity;
 use uc_core::ids::DeviceId;
@@ -31,4 +34,11 @@ pub trait ProgressReceiverPort: Send + Sync {
         generation: u64,
         notice: ProgressTerminalNotice,
     ) -> Result<ProgressTerminalNotice, ProgressReceiveError>;
+}
+
+/// 只查询已接受的当前接收尝试；每次新挑战都重新读取，不捕获旧任务快照。
+/// None只表示本运行期未保留可授权关联，不推断任务失败或文件缺失。
+pub trait ProgressTaskAuthorityPort: Send + Sync {
+    fn current_task(&self, peer: &DeviceId, source: ProgressIdentity)
+        -> Option<ProgressSourceTask>;
 }

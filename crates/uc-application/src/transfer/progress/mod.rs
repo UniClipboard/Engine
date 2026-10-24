@@ -3,12 +3,18 @@ mod error;
 mod model;
 mod ports;
 mod receiver;
+mod source;
 pub use error::ProgressReceiveError;
 pub use model::{
-    ProgressBound, ProgressProjectionSnapshot, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressBound, ProgressProjectionSnapshot, ProgressSourceTask, ProgressTaskDescriptor,
+    ProgressTerminalNotice,
 };
-pub use ports::{CurrentProgressTaskPort, ProgressReceiverPort};
+pub use ports::{CurrentProgressTaskPort, ProgressReceiverPort, ProgressTaskAuthorityPort};
 pub use receiver::TransferProgressReceiver;
+pub(crate) use source::ProgressSourceCatalog;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod source_tests;
