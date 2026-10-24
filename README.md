@@ -29,6 +29,18 @@ UniClipboardEngine 是 UniClipboard 在 macOS、Windows、Linux、iOS、Android 
 
 LAN HTTP 同步位于 `compatibility/`，拥有独立版本和 `uc-mobile-v*` 发布线。它只能由用户明确选择，P2P 失败时不会自动切换到 LAN。
 
+## 源码构建
+
+首次克隆使用 `git clone --recurse-submodules`；已有工作区在切换或更新 Engine 提交后执行：
+
+```bash
+git submodule update --init --recursive
+```
+
+`third_party/iroh` 固定整个网络栈 fork，内部使用真实路径依赖。Rust 宿主只依赖 `uc-engine`；
+Cargo 获取 Engine Git 依赖时会获取 submodule，宿主不需要 iroh 根补丁。
+GitHub 自动生成的源码压缩包不包含 submodule 内容，源码构建应使用完整 Git checkout。
+
 ## 工作方式
 
 ```text

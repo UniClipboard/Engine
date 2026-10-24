@@ -34,6 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       # 与 PR 检查及移动端发布使用同一 Apple 工具链。

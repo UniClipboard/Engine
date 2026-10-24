@@ -21,6 +21,12 @@ const REPOSITORY_ROOT = realpathSync(resolve(SCRIPT_DIR, '../..'))
 
 // 随仓库发布的第三方源码副本：只允许 uc-infra-p2p 以 third_party 下的路径依赖引用，
 // 这样依赖 Engine 的仓库不需要重复任何 [patch]。
+const NETWORK_STACK_CONSUMERS = {
+  'uc-infra-p2p': ['iroh', 'iroh-relay', 'iroh-blobs', 'iroh-tickets'],
+  'uc-infra-profile': ['iroh'],
+  'uc-infra-storage': ['iroh'],
+  'uc-connectivity-relay': ['iroh-relay'],
+}
 const VENDORED_THIRD_PARTY_PACKAGES = ['iroh-mdns-address-lookup', 'swarm-discovery']
 
 const EXPECTED_PACKAGES = [
@@ -352,6 +358,13 @@ function checkLocalDependencies(metadata) {
           'dependency firewall',
           `${packageMetadata.name} depends on desktop-owned package ${dependency.name}`
         )
+      }
+      const networkPackages = NETWORK_STACK_CONSUMERS[packageMetadata.name] ?? []
+      if (networkPackages.includes(dependency.name)) {
+        if (!dependency.path || resolve(dependency.path) !== join(REPOSITORY_ROOT, 'third_party', 'iroh', dependency.name)) {
+          addProblem(problems, 'network stack', `${packageMetadata.name} must use the vendored ${dependency.name}`)
+        }
+        continue
       }
       if (!dependency.path) continue
       if (!pathIsInsideRepository(dependency.path)) {
@@ -2442,6 +2455,16 @@ function expectRejected(name, mutate, metadata, sources) {
 }
 
 function runNegativeFixtures(metadata, sources) {
+  for (const [consumer, names] of Object.entries(NETWORK_STACK_CONSUMERS)) {
+    for (const name of names) {
+      expectRejected(`${consumer} registry network dependency ${name}`, changed => {
+        const dependency = packageByName(changed, consumer).dependencies.find(dep => dep.name === name)
+        delete dependency.path
+        dependency.source = 'registry+https://github.com/rust-lang/crates.io-index'
+      }, metadata, sources)
+    }
+  }
+
   // 原生 bridge 的源码保留在实际基线；业务层的显式测试依赖也仍可用于测试夹具。
   const fixtureMetadata = clone(metadata)
   for (const owner of ['uc-core', 'uc-application']) {
@@ -2662,6 +2685,7 @@ function main() {
   if (realpathSync(process.cwd()) !== REPOSITORY_ROOT) {
     throw new Error(`run from repository root: ${REPOSITORY_ROOT}`)
   }
+  execFileSync('node', ['scripts/architecture/check-network-stack.mjs'], { cwd: REPOSITORY_ROOT, stdio: 'inherit' })
   runCargoBuildStorageCheck()
   runRustStyleCheck()
   const metadata = cargoMetadata()

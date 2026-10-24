@@ -37,6 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          submodules: recursive
           fetch-depth: 0
           persist-credentials: false
       - name: Require protected main publication
