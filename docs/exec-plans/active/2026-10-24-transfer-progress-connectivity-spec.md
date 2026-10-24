@@ -135,7 +135,7 @@ Engine／绑定只给稳定分类、可重试标记与安全 DTO，错误来源�
 能力由实际 ALPN 协商确定；只有明确不支持新版时使用旧版，不因超时、损坏或授权失败静默降级。
 
 新版至少包含以下消息语义。阶段 0 已完成[精确线上合同与向量](../../design-docs/transfer-progress-protocol.md)，
-登记围栏已有真实双端主机原型；生产接收权威交接与业务采用仍需完成，证据边界见[阶段 0 记录](2026-10-24-transfer-progress-connectivity-feasibility.md)：
+登记围栏已有真实双端主机原型；生产接收权威交接与完整业务接线仍需完成，证据边界见[阶段 0 记录](2026-10-24-transfer-progress-connectivity-feasibility.md)：
 
 | 消息 | 契约 |
 | --- | --- |

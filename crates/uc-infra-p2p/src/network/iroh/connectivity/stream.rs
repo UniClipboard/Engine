@@ -114,3 +114,7 @@ mod progress_probe;
 #[cfg(test)]
 #[path = "stream_registration_probe.rs"]
 mod registration_probe;
+
+#[cfg(test)]
+#[path = "stream_terminal_probe.rs"]
+mod terminal_probe;
