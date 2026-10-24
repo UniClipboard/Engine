@@ -7,12 +7,13 @@ use super::{
     empty_engine_host, mount_engine_rendezvous, MemoryHostSecureStorage, StaticHostClipboard,
     ENGINE_TEST_LOCK,
 };
+use crate::testing::receive_completion::{ReceiveCompletion, ReleaseCompletionOnDrop};
 use crate::{
     BlobResourceInput, CreateSpaceInput, Engine, EngineConfig, EngineEvent,
-    EntryReceiveProgressInput, HistoryEntryInput, HostCapabilities, HostCapabilityError,
-    HostCapabilityErrorCategory, HostClipboardSnapshot, HostDirectories, HostFileAccess,
-    HostFileHandle, HostFileMetadata, JoinSpaceInput, Operation, OperationResult, SecretString,
-    SendFilesInput, SettingsPatch, SyncSettingsPatch,
+    EntryDeliveryStatusSummary, EntryReceiveProgressInput, HistoryEntryInput, HostCapabilities,
+    HostCapabilityError, HostCapabilityErrorCategory, HostClipboardSnapshot, HostDirectories,
+    HostFileAccess, HostFileHandle, HostFileMetadata, InboundNoticeActionSummary, JoinSpaceInput,
+    Operation, OperationResult, SecretString, SendFilesInput, SettingsPatch, SyncSettingsPatch,
 };
 use anyhow::{anyhow, Context, Error as SourceError, Result};
 use rayon::current_num_threads;
@@ -38,8 +39,8 @@ use wiremock::MockServer;
 const FILE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_CHUNK: usize = 128 * 1024;
 
-#[derive(Default)]
 struct GeneratedFiles {
+    size_bytes: u64,
     max_returned: AtomicUsize,
     reads: AtomicUsize,
 }
@@ -50,7 +51,7 @@ impl HostFileAccess for Arc<GeneratedFiles> {
     ) -> std::result::Result<HostFileMetadata, HostCapabilityError> {
         Ok(HostFileMetadata {
             display_name: "resource-fixture.bin".into(),
-            size_bytes: FILE_BYTES,
+            size_bytes: self.size_bytes,
             mime_type: Some("application/octet-stream".into()),
         })
     }
@@ -65,8 +66,11 @@ impl HostFileAccess for Arc<GeneratedFiles> {
             "1" => [0xc2, 0x5d],
             _ => return Err(unavailable()),
         };
-        let len =
-            (FILE_BYTES.saturating_sub(offset).min(u64::from(max_bytes)) as usize).min(MAX_CHUNK);
+        let len = (self
+            .size_bytes
+            .saturating_sub(offset)
+            .min(u64::from(max_bytes)) as usize)
+            .min(MAX_CHUNK);
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.max_returned.fetch_max(len, Ordering::SeqCst);
         let pair = if offset % 2 == 0 {
@@ -178,16 +182,16 @@ async fn saved_path(receiver: &Engine, entry: &str, root: &Path) -> Result<PathB
     assert!(path.starts_with(root.canonicalize()?));
     Ok(path)
 }
-fn verify_file(path: &Path, round: usize) -> Result<()> {
+fn verify_file(path: &Path, round: usize, file_bytes: u64) -> Result<()> {
     let mut file = File::open(path)?;
-    assert_eq!(file.metadata()?.len(), FILE_BYTES);
+    assert_eq!(file.metadata()?.len(), file_bytes);
     // 独立的固定期望字节；不调用Host生成实现，也不读取整份大文件。
     let expected = match round {
         0 => [0x36, 0xa9].repeat(32 * 1024),
         _ => [0xc2, 0x5d].repeat(32 * 1024),
     };
     let mut bytes = [0; 64 * 1024];
-    for offset in (0..FILE_BYTES).step_by(bytes.len()) {
+    for offset in (0..file_bytes).step_by(bytes.len()) {
         file.read_exact(&mut bytes)?;
         assert!(
             bytes.as_slice() == expected.as_slice(),
@@ -209,13 +213,13 @@ fn managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and
     }
     builder
         .build()?
-        .block_on(run_managed_resources(true, origins))
+        .block_on(run_managed_resources(true, origins, FILE_BYTES, None))
 }
 
 // 同一真实配对接缝验证关闭后的 SDK 私有线程，不依赖大文件传输。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn managed_engine_pair_shutdown_waits_for_sdk_runtimes() -> Result<()> {
-    run_managed_resources(false, None).await
+    run_managed_resources(false, None, FILE_BYTES, None).await
 }
 
 fn thread_groups() -> Result<BTreeMap<&'static str, usize>> {
@@ -249,7 +253,12 @@ fn thread_groups() -> Result<BTreeMap<&'static str, usize>> {
     Ok(groups)
 }
 
-async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins>) -> Result<()> {
+async fn run_managed_resources(
+    transfer_files: bool,
+    origins: Option<TaskOrigins>,
+    file_bytes: u64,
+    completion: Option<Arc<ReceiveCompletion>>,
+) -> Result<()> {
     let _guard = ENGINE_TEST_LOCK.lock().await;
     let before_shared_cpu_pool = Resources::read()?;
     // 关闭断点的真实堆栈已确认：未命名 Rayon worker 会继承创建线程的名称。
@@ -270,7 +279,14 @@ async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins
     });
     let source_root = tempfile::tempdir()?;
     let receiver_root = tempfile::tempdir()?;
-    let files = Arc::new(GeneratedFiles::default());
+    if let Some(completion) = &completion {
+        completion.install(receiver_root.path());
+    }
+    let files = Arc::new(GeneratedFiles {
+        size_bytes: file_bytes,
+        max_returned: AtomicUsize::new(0),
+        reads: AtomicUsize::new(0),
+    });
     let host = HostCapabilities::new(
         HostDirectories::new(
             source_root.path().join("private"),
@@ -330,6 +346,7 @@ async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins
     }
     let prepared = Resources::read()?;
     let mut rounds = Vec::new();
+    let mut completed_exchange_rounds = 0usize;
     let mut round_task_origins = Vec::new();
     let outcome: Result<()> = timeout(Duration::from_secs(480), async {
         for round in 0..if transfer_files { 2 } else { 0 } {
@@ -339,7 +356,9 @@ async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins
                     target_devices: vec![receiver_id.clone()],
                 }))
                 .await?;
-            assert!(matches!(sent, OperationResult::EntrySent(_)));
+            let OperationResult::EntrySent(sent) = sent else {
+                return Err(anyhow!("file send returned an unexpected result"));
+            };
             let entry = timeout(Duration::from_secs(180), async {
                 loop {
                     match events.next().await {
@@ -376,8 +395,58 @@ async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins
             })
             .await??;
             let path = saved_path(&receiver, &entry, receiver_root.path()).await?;
-            tokio::task::spawn_blocking(move || verify_file(&path, round)).await??;
+            tokio::task::spawn_blocking(move || verify_file(&path, round, file_bytes)).await??;
+            if round == 1 {
+                if let Some(completion) = &completion {
+                    completion.before_second_sample().await?;
+                }
+            }
+            // 持久完成可先于索引、完整入站返回与ACK；按同一轮真实交换结束再比较资源。
+            timeout(Duration::from_secs(180), async {
+                loop {
+                    match events.next().await {
+                        Some(EngineEvent::InboundNotice(notice))
+                            if notice.snapshot_hash == sent.snapshot_hash
+                                && notice.action == InboundNoticeActionSummary::NewEntry =>
+                        {
+                            break;
+                        }
+                        Some(_) => {}
+                        None => return Err(anyhow!("receive result stream closed")),
+                    }
+                }
+                loop {
+                    let OperationResult::EntryDelivery(delivery) = source
+                        .execute(Operation::QueryEntryDelivery(HistoryEntryInput {
+                            entry_id: sent.entry_id.clone(),
+                        }))
+                        .await?
+                    else {
+                        return Err(anyhow!("delivery query returned an unexpected result"));
+                    };
+                    match delivery
+                        .deliveries
+                        .into_iter()
+                        .find(|target| target.target_device_id == receiver_id)
+                        .map(|target| target.status)
+                    {
+                        Some(EntryDeliveryStatusSummary::Delivered) => {
+                            break Ok::<_, anyhow::Error>(())
+                        }
+                        None | Some(EntryDeliveryStatusSummary::Pending) => {}
+                        Some(_) => return Err(anyhow!("file round delivery did not complete")),
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await??;
+            completed_exchange_rounds += 1;
             rounds.push(Resources::read()?);
+            if round == 1 {
+                if let Some(completion) = &completion {
+                    completion.record_second_sample();
+                }
+            }
             round_task_origins.push(origins.as_ref().map(TaskOrigins::snapshot));
             native_handles_per_round.push(blob_native_handle_counts());
         }
@@ -437,7 +506,13 @@ async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins
     let closed_after_idle = Resources::read()?;
     let _ = stop.send(());
     let peaks = sampler.await??;
-    let evidence = serde_json::json!({ "task_origin_probe": origins.is_some(), "round_task_origins": round_task_origins, "live_idle_observations": live_idle_observations, "bytes_per_file": FILE_BYTES, "completed_rounds": rounds.len(), "exact_bytes": transfer_files && outcome.is_ok(), "source_max_chunk_bytes": files.max_returned.load(Ordering::SeqCst), "source_reads": files.reads.load(Ordering::SeqCst), "before_shared_cpu_pool": before_shared_cpu_pool, "shared_cpu_pool_threads": shared_cpu_pool_threads, "initial": initial, "prepared": prepared, "rounds": rounds, "peaks": peaks, "closed": closed, "tags_verified": false, "quota_verified": false, "native_blob_connections_verified": native_handles_verified, "native_handles_initial": native_handles_initial, "native_handles_per_round": native_handles_per_round, "native_handles_before_shutdown": native_handles_before_shutdown, "native_handles_after_idle": native_handles_after_idle, "sampler_included_in_closed_tasks": true, "file_transfer_enabled": transfer_files, "thread_groups_after_idle": thread_groups()?, "thread_return_to_initial_verified": matches!(&idle_settled, Ok(Ok(_))), "tasks_without_sampler_return_to_initial_verified": closed_after_idle.runtime_tasks <= initial.runtime_tasks + 1, "closed_after_idle": closed_after_idle, "idle_settlement_ms": idle_ms });
+    let mut evidence = serde_json::json!({ "task_origin_probe": origins.is_some(), "round_task_origins": round_task_origins, "live_idle_observations": live_idle_observations, "bytes_per_file": file_bytes, "completed_rounds": rounds.len(), "completed_exchange_rounds": completed_exchange_rounds, "exact_bytes": transfer_files && outcome.is_ok(), "source_max_chunk_bytes": files.max_returned.load(Ordering::SeqCst), "source_reads": files.reads.load(Ordering::SeqCst), "before_shared_cpu_pool": before_shared_cpu_pool, "shared_cpu_pool_threads": shared_cpu_pool_threads, "initial": initial, "prepared": prepared, "rounds": rounds, "peaks": peaks, "closed": closed, "tags_verified": false, "quota_verified": false, "native_blob_connections_verified": native_handles_verified, "native_handles_initial": native_handles_initial, "native_handles_per_round": native_handles_per_round, "native_handles_before_shutdown": native_handles_before_shutdown, "native_handles_after_idle": native_handles_after_idle, "sampler_included_in_closed_tasks": true, "file_transfer_enabled": transfer_files, "thread_groups_after_idle": thread_groups()?, "thread_return_to_initial_verified": matches!(&idle_settled, Ok(Ok(_))), "tasks_without_sampler_return_to_initial_verified": closed_after_idle.runtime_tasks <= initial.runtime_tasks + 1, "closed_after_idle": closed_after_idle, "idle_settlement_ms": idle_ms });
+    if let Some(completion) = &completion {
+        evidence["completion_sampling_probe"] = serde_json::json!({
+            "sampled_while_held": completion.sampled_while_held.load(Ordering::SeqCst),
+            "gate_timed_out": completion.gate_timed_out.load(Ordering::SeqCst),
+        });
+    }
     let evidence_path = std::env::var_os("UC_MANAGED_BLOB_RESOURCE_EVIDENCE")
         .map(PathBuf::from)
         .or_else(|| {
@@ -448,6 +523,13 @@ async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins
                     "blob-resources/managed-engine-shutdown.json"
                 })
             })
+        })
+        .map(|path| {
+            if completion.is_some() {
+                path.with_file_name("managed-engine-completion-boundary.json")
+            } else {
+                path
+            }
         });
     if let Some(path) = evidence_path {
         assert!(
@@ -483,5 +565,37 @@ async fn run_managed_resources(transfer_files: bool, origins: Option<TaskOrigins
         assert!(rounds[1].rss_kib <= rounds[0].rss_kib + 64 * 1024);
     }
     assert!(files.max_returned.load(Ordering::SeqCst) <= MAX_CHUNK);
+    Ok(())
+}
+
+/// 小文件仅验证采样边界；原2×1GiB验收保持原负载、预算和资源阈值。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_engine_resource_sample_waits_for_the_complete_inbound_exchange() -> Result<()> {
+    let completion = ReceiveCompletion::new();
+    let _release = ReleaseCompletionOnDrop(completion.clone());
+    let control = async {
+        let checkpoint = timeout(Duration::from_secs(40), completion.checkpoint.notified()).await;
+        let sampled_before_release = if checkpoint.is_ok() {
+            timeout(Duration::from_millis(100), completion.sampled.notified())
+                .await
+                .is_ok()
+        } else {
+            false
+        };
+        completion.release();
+        (checkpoint.is_ok(), sampled_before_release)
+    };
+    let (result, (checkpoint, sampled_before_release)) = tokio::join!(
+        run_managed_resources(true, None, 64 * 1024, Some(completion.clone())),
+        control,
+    );
+    // 先释放屏障并完成原fixture关闭，再判断原采样是否越过尚未返回的真实能力。
+    result?;
+    assert!(checkpoint, "必须实际到达持久保存后、索引返回前的受控边界");
+    assert!(!completion.gate_timed_out.load(Ordering::SeqCst));
+    assert!(
+        !sampled_before_release && !completion.sampled_while_held.load(Ordering::SeqCst),
+        "资源采样不能把接收completed误当作完整入站交换已结束"
+    );
     Ok(())
 }

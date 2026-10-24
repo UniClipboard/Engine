@@ -757,8 +757,8 @@
 | `<module>` | `crates/uc-engine/src/assembly/sync_engine.rs:146` | `instrument` | - |
 | `<module>` | `crates/uc-engine/src/assembly/sync_engine.rs:706` | `info` | message-body |
 | `<module>` | `crates/uc-engine/src/assembly/sync_engine/outbound_progress.rs:196` | `warn` | message-body |
-| `<module>` | `crates/uc-engine/src/assembly/wire/mod.rs:385` | `info` | message-body |
-| `<module>` | `crates/uc-engine/src/assembly/wire/mod.rs:416` | `info` | message-body |
+| `<module>` | `crates/uc-engine/src/assembly/wire/mod.rs:387` | `info` | message-body |
+| `<module>` | `crates/uc-engine/src/assembly/wire/mod.rs:418` | `info` | message-body |
 | `uc_engine::observability` | `crates/uc-engine/src/contract/observability.rs:69` | `info` | message-body |
 | `uc_engine::observability` | `crates/uc-engine/src/contract/observability.rs:75` | `warn` | message-body |
 | `<module>` | `crates/uc-engine/src/dev/space_work.rs:123` | `record` | - |

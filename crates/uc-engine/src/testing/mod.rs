@@ -17,3 +17,6 @@ pub(crate) mod receive_streams;
 
 #[cfg(all(feature = "dev-tools", target_os = "linux"))]
 pub(crate) mod directory_probe;
+
+#[cfg(all(feature = "dev-tools", target_os = "linux"))]
+pub(crate) mod receive_completion;

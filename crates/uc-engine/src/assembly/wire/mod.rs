@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::assembly::facade::build_relay_diagnostic;
+#[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+use crate::testing::receive_completion;
 use tokio::sync::mpsc;
 use uc_application::deps::{
     ApplicationDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
@@ -941,6 +943,9 @@ pub async fn wire_dependencies_from_inputs(
             Arc::clone(&infra.thumbnail_generator),
         ),
     );
+
+    #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+    let search_pipeline = receive_completion::decorate(search_pipeline);
 
     let mut deps = ApplicationDeps {
         paths: paths.clone(),

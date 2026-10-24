@@ -38,6 +38,7 @@ assert len(tags)>=12, 'SDK store shutdown observations missing'
 assert all(report['store_open_during_count'] and report['sdk_temp_tags']==0 for report in tags)
 large=json.loads((root/'managed-engine-large.json').read_text())
 assert large['bytes_per_file']>=1024**3 and large['completed_rounds']==2 and large['exact_bytes']
+assert large['completed_exchange_rounds']==2, 'both rounds must finish the real inbound result and sender acknowledgement before sampling'
 assert large['native_blob_connections_verified'] and large['thread_return_to_initial_verified']
 assert large['tasks_without_sampler_return_to_initial_verified']
 assert large['closed_after_idle']['fds']<=large['initial']['fds']
