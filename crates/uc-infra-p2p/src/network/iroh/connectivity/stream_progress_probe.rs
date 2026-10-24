@@ -66,27 +66,41 @@ impl PeerAdmissionPort for Members {
     }
 }
 
-struct Fixture {
-    client: Endpoint,
-    server: Endpoint,
+pub(super) struct Fixture {
+    pub(super) client: Endpoint,
+    pub(super) server: Endpoint,
     outbound: ConnectivityManager,
     inbound: ConnectivityManager,
-    sending: ConnectionLease,
-    receiving: ConnectionLease,
+    pub(super) sending: ConnectionLease,
+    pub(super) receiving: ConnectionLease,
     membership: Arc<Members>,
 }
 
 impl Fixture {
-    async fn new(outbound_capacity: usize, inbound_capacity: usize) -> anyhow::Result<Self> {
+    pub(super) async fn new(
+        outbound_capacity: usize,
+        inbound_capacity: usize,
+        alpn: &[u8],
+    ) -> anyhow::Result<Self> {
         let server = Endpoint::builder(iroh::endpoint::presets::N0)
             .relay_mode(RelayMode::Disabled)
-            .alpns(vec![TRANSFER_PROGRESS_ALPN.to_vec()])
+            .alpns(vec![alpn.to_vec()])
             .bind()
             .await?;
         let client = Endpoint::builder(iroh::endpoint::presets::N0)
             .relay_mode(RelayMode::Disabled)
             .bind()
             .await?;
+        Self::connect(client, server, outbound_capacity, inbound_capacity, alpn).await
+    }
+
+    pub(super) async fn connect(
+        client: Endpoint,
+        server: Endpoint,
+        outbound_capacity: usize,
+        inbound_capacity: usize,
+        alpn: &[u8],
+    ) -> anyhow::Result<Self> {
         timeout(BUDGET, async {
             while server.addr().ip_addrs().next().is_none() {
                 tokio::task::yield_now().await;
@@ -94,10 +108,9 @@ impl Fixture {
         })
         .await?;
         let (sending, receiving) = timeout(BUDGET, async {
-            tokio::join!(
-                client.connect(server.addr(), TRANSFER_PROGRESS_ALPN),
-                async { server.accept().await.expect("accepted connection").await }
-            )
+            tokio::join!(client.connect(server.addr(), alpn), async {
+                server.accept().await.expect("accepted connection").await
+            })
         })
         .await?;
         let sending = IrohPeerConnection::wrap(sending?);
@@ -173,7 +186,7 @@ impl Fixture {
         })
     }
 
-    async fn close(self) -> anyhow::Result<()> {
+    pub(super) async fn close(self) -> anyhow::Result<()> {
         drop(self.sending);
         drop(self.receiving);
         self.outbound.shutdown().await?;
@@ -186,7 +199,7 @@ impl Fixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_progress_uni_stop_preserves_sibling_and_work_capacity() -> anyhow::Result<()> {
-    let fixture = Fixture::new(2, 2).await?;
+    let fixture = Fixture::new(2, 2, TRANSFER_PROGRESS_ALPN).await?;
     let cancel = CancellationToken::new();
     let mut first = fixture
         .sending
@@ -243,7 +256,7 @@ async fn legacy_progress_uni_stop_preserves_sibling_and_work_capacity() -> anyho
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_progress_uni_rechecks_current_membership_before_open() -> anyhow::Result<()> {
-    let fixture = Fixture::new(1, 1).await?;
+    let fixture = Fixture::new(1, 1, TRANSFER_PROGRESS_ALPN).await?;
     fixture.membership.admitted.store(false, Ordering::SeqCst);
     assert!(matches!(
         fixture
@@ -257,7 +270,7 @@ async fn legacy_progress_uni_rechecks_current_membership_before_open() -> anyhow
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_progress_uni_cancelled_waiter_opens_no_stream() -> anyhow::Result<()> {
-    let fixture = Fixture::new(1, 1).await?;
+    let fixture = Fixture::new(1, 1, TRANSFER_PROGRESS_ALPN).await?;
     let cancel = CancellationToken::new();
     cancel.cancel();
     assert!(matches!(
@@ -280,7 +293,7 @@ async fn legacy_progress_uni_cancelled_waiter_opens_no_stream() -> anyhow::Resul
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_progress_uni_cancel_waits_for_actual_admission_read() -> anyhow::Result<()> {
-    let fixture = Fixture::new(1, 1).await?;
+    let fixture = Fixture::new(1, 1, TRANSFER_PROGRESS_ALPN).await?;
     fixture
         .membership
         .read_gate
@@ -323,7 +336,7 @@ async fn legacy_progress_uni_cancel_waits_for_actual_admission_read() -> anyhow:
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_progress_uni_excess_inbound_stops_only_excess_stream() -> anyhow::Result<()> {
-    let fixture = Fixture::new(2, 1).await?;
+    let fixture = Fixture::new(2, 1, TRANSFER_PROGRESS_ALPN).await?;
     let cancel = CancellationToken::new();
     let mut first = fixture
         .sending

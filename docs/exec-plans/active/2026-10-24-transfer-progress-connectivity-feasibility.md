@@ -1,6 +1,6 @@
-# 第八片阶段 0：受管流接缝与线上合同证明
+# 第八片阶段 0：受管流、线上合同与登记围栏证明
 
-状态：**单向流最小接缝及新版字节合同已证明，阶段 0 整体尚未完成**（2026-10-24）。
+状态：**单向流接缝、字节合同及登记围栏主机原型已证明，阶段 0 整体尚未完成**（2026-10-24）。
 需求见[实现规格](2026-10-24-transfer-progress-connectivity-spec.md)，推进见[执行计划](2026-10-24-transfer-progress-connectivity-plan.md)。
 开工基线为 `5cbca8fc24a278fa7b01ae611bf4b925914bef13`；本记录描述该基线上的候选变更，
 不将主机探针当作完整生产迁移、独立进程网络矩阵或真机验收。
@@ -60,9 +60,44 @@ workspace 检查有既有未使用导入／测试字段告警，没有新增告�
 非法选项、最大合法页、伪造计数、重复项、错误来源和身份／载体 Debug 脱敏。
 原60项保持，最终协议全集75／75及固定错误分类检查通过，六根门禁通过。未接入生产 Router，没有更改旧 `/1` 字节、blob 或 V3 格式。
 
+## 登记围栏的真实双端原型
+
+Core `file_transfer/progress_registration.rs` 保存私有登记状态，通过唯一 `apply` 入口返回稳定效果；
+无网络、时钟、随机数或持久化，状态空间固定，不保留无界的历史挑战或 producer 列表。
+Infra 原生连接已识别 `/2` 为多流协议，仍未把新版注册到生产 Router，也未迁移旧 reporter。
+
+`stream_registration_probe.rs` 使用真实双端 Iroh、当前字节 codec、受管双向流及同一 Core 规则。
+复用旧探针的真实成员／身份准入 fixture，按探针用途继续使用 Clipboard admission profile；进度专属 profile 未接线。
+以保留旧流并推迟写入／读取控制乱序，不依赖睡眠概率：
+
+| 场景 | 主机结果 |
+| --- | --- |
+| 新 attempt 先登记，旧描述随后到达 | 当前挑战绑定成功；旧挑战拒收；旧 attempt 的进度及终态均不能匹配新绑定 |
+| 同两个 Endpoint 物理重连，保持认证身份 | 复用同一 Core 围栏，较低修订拒收，原修订可重新绑定 |
+| 同一连接自报新 producer | 拒收，不能按较小／较大 UUID 推断新旧 |
+| 同身份的新运行实例模拟 | 在第三条真实连接完成新挑战，允许新 producer 的较小起始修订；保留旧连接实际送达的旧登记和终态均拒收 |
+
+Core 另验证同修订描述冲突、错误源条目、空计划、旧 binding／attempt／修订及重复描述拒收。
+Application catalog 测试通过既有 V3 编解码及真实 `ReceiveSource::planned`，核对混合表示／文件的原始位置、
+同名同 ticket 项不合并、不同本地接收条目／attempt 隔离及目录只生成完整单元；未改 V3 字节或 blob ticket。
+
+验证入口：
+
+```bash
+just cargo test -p uc-core --lib progress_registration --locked
+just cargo test -p uc-application --lib 'transfer::receive::work::catalog::tests::' --locked
+just cargo test -p uc-infra-p2p --lib 'network::iroh::connectivity::stream::' --locked
+```
+
+本层相关回归23／23通过：Core 围栏3项、Application catalog 11项、真实流9项（含2个新登记探针及7个原流回归）。
+metadata、workspace 全目标 check、fmt、Rust style、repository 与 diff 六根门禁通过。
+`ReceiverAuthority` 是测试注入的当前描述，不是生产接收 attempt 数据源；运行实例重启通过替换 producer 模拟，
+没有实际杀进程。V3 计划关联和网络登记分别验证，尚未组成生产接收 owner→登记的完整链路。
+因此阶段 0 对应登记任务仍未勾选，不能将本原型冒充生产迁移或完整 AC02。
+
 ## 尚未证明的范围
 
-- 新版任务登记、producer 切换及旧消息隔离尚未完成真实双端证明；编码能够承载这些字段不等于顺序规则已被证明。
+- 登记围栏已取得真实双端主机原型证据；生产接收 attempt 权威交接、完整源条目→逻辑项网络链路及真实进程重启仍未完成。
 - 完整接收输出后的 Application 终态采用与新 ACK、有限补发和状态核对尚未接线。
 - 最大负载、分页、终态淘汰、公平调度及新旧双角色 Direct／Relay 尚未执行。
 - Linux 当前头文件合同及 BOOTTIME syscall 已核对；真实系统挂起和其他平台尚未验证，不记跨平台经过时间证明通过。
