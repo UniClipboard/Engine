@@ -1,6 +1,6 @@
 # ADR-034：iroh 固定到包含路径队列修复的上游提交
 
-- **状态**：已采纳；退出条件见下
+- **状态**：已采纳；2026-10-24 DNS 来源补充取代下文初始“不 fork”决定；退出条件见下
 - **日期**：2026-10-15
 - **范围**：根 `Cargo.toml` 的 `[patch.crates-io]`、`uc-observability-runtime` 网络库日志的路径匹配；不改变任何业务接口
 - **部分取代**：[ADR-031](031-product-owned-builtin-relay-list.md) 的补充“依赖补丁不依赖下游 `[patch]`”，仅对 iroh 例外；iroh-blobs 与 swarm-discovery 的处理方式不变
@@ -37,4 +37,48 @@ iroh 1.3.0（当前最新发布版）的 `RemoteStateActor` 在连接停留于 `
 
 ## 退出条件
 
-iroh 发布包含 `43e232fb` 的版本后，删除根清单的 `[patch]` 与 `PINNED_IROH_REVS`，规则改回注册表目录匹配，并通知下游删除重复段。
+iroh 发布的完整依赖链同时包含 `43e232fb` 路径队列修复与下文 EDNS 修复后，删除根清单的 `[patch]` 与
+`PINNED_IROH_REVS`，规则改回注册表目录匹配，并通知下游删除重复段。仅发布其中一个修复不足以退出。
+
+
+## 2026-10-24：EDNS 解析修复来源补充
+
+### 问题与责任
+
+Windows 诊断捕获的公开中继 A 响应在 DNS header 中为成功，OPT TTL 为 `0x00000001`，
+但 `simple-dns 0.12.0` 把低位保留标志解释为扩展 RCODE，返回 BADVERS。相同报文清除该位后成功。
+[RFC 6891 §6.1.3–6.1.4](https://www.rfc-editor.org/rfc/rfc6891.html#section-6.1.3) 规定扩展 RCODE 位于 TTL 最高 8 位，
+版本位于接下来 8 位，低 16 位为标志；保留标志接收时必须忽略。原库版本字段及写入也使用了错误布局。
+
+DNS 库负责完整报文读写；Engine 保持既有解析调用、错误分类及网络恢复责任，不新增忽略 DNS 错误的业务分支，
+不修改 TUN、overlay、P2P 或 LAN 策略。调用方仍执行既有网络动作；正常响应返回解析结果，真实 DNS 失败继续向上传递。
+
+### 决定与来源
+
+用户授权创建 UniClipboard fork。保留本 ADR 原有的四包根补丁例外，改为以下不可变来源；
+DNS 修复沿实际依赖传递，不要求宿主另建 simple-dns 或 n0-dns-resolver 补丁。
+
+| 包 | 固定来源 | 相对基线的改动 |
+| --- | --- | --- |
+| iroh、iroh-base、iroh-dns、iroh-relay | [UniClipboard/iroh c8efae06](https://github.com/UniClipboard/iroh/commit/c8efae061e3daa0afc6aa6db856cfcf8576da97b) | 基于原 `43e232fb`，只修改 DNS 依赖清单与来源说明，Rust 源码不变 |
+| n0-dns-resolver 0.1.0 | [UniClipboard/n0-dns-resolver b15fdb6a](https://github.com/UniClipboard/n0-dns-resolver/commit/b15fdb6abd50714fd551b4fd93a9b5728457442d) | 基于发布来源 `16a791ce`，只固定 simple-dns 来源 |
+| simple-dns 0.12.0 | [UniClipboard/simple-dns efdb13b9](https://github.com/UniClipboard/simple-dns/commit/efdb13b9473131f7172b790b4e8497825aff2890) | 基于上游 `58e2ed41`，修正 OPT 掩码、读写位移和文档报文，新增 wire 回归；移除可选 bind9 子模块以免消费者构建下载它 |
+
+上游 HEAD 的 OPT 实现与 0.12.0 一致。未扩展该库把未知 RCODE 折叠为 `Reserved` 的既有 API。
+维护来源增至三个 fork，是确保根 iroh 补丁能沿真实依赖带入修复的代价；不能用只更新锁文件代替这些声明。
+
+iroh Rust 源码与调用点行号相对 `43e232fb` 完全不变；网络日志允许列表及测试改为新提交前缀 `c8efae0`。
+规则字段、采样、事件和关联方式不变。宿主必须同步根清单现有四个 iroh 补丁的 URL 和完整 rev；
+只更新 Engine Git 引用仍可能链接旧 DNS。核验应在最终构建工作区运行 `cargo tree --locked -i simple-dns`，
+确认查询路径经过上述修复来源，并检查没有第二份旧来源。Engine 的锁文件不能证明宿主锁文件正确。
+
+### 验证与边界
+
+simple-dns 的 `tests/edns_wire.rs` 覆盖原始捕获响应、保留标志、DNSSEC DO、真实 BADVERS、版本字节、
+扩展 RCODE 固定 wire 编码及无 OPT 报文；同时运行该库既有单元、集成、文档测试及 alloc 编译。
+Engine 的回归入口为 `just cargo test -p uc-infra-p2p --test dns_edns_response --locked`，通过本机 UDP
+服务重放响应，驱动 Engine 实际使用的 iroh → resolver → parser，避免只测试孤立库而遗漏依赖接入。
+
+本地 Linux aarch64 上，库测试 176 项、Engine UDP 回归、网络日志来源 4 项、完整 workspace/all-targets 编译及根交付门禁全部通过。
+Windows 中继恢复、连接数大于零、重新生成邀请和 Windows → Linux 配对尚未实机验证；全部标为跳过。
+本次解析缺陷已确认，配对恢复仍需两端使用最终修复来源重新构建后验收，不能由离线报文成功推断。
