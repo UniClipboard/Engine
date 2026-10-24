@@ -22,11 +22,12 @@ use uuid::Uuid;
 pub struct TransferProgressReceiver {
     peer: DeviceId,
     source: ProgressIdentity,
-    plan: Vec<ProgressItem>,
     state: Mutex<State>,
     clock: Arc<Clock>,
 }
 struct State {
+    closed: bool,
+    plan: Vec<ProgressItem>,
     generation: u64,
     registration: ProgressRegistration<ProgressIdentity>,
     bound: Option<ProgressBound>,
@@ -60,8 +61,9 @@ impl TransferProgressReceiver {
             clock,
             peer,
             source,
-            plan,
             state: Mutex::new(State {
+                plan,
+                closed: false,
                 generation: 0,
                 registration: ProgressRegistration::new(source),
                 bound: None,
@@ -74,14 +76,38 @@ impl TransferProgressReceiver {
             }),
         })
     }
+    pub(super) fn matches_plan(&self, plan: &[ProgressItem]) -> bool {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        !state.closed && state.plan == plan
+    }
+    pub(super) fn retire(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.closed = true;
+        state.plan.clear();
+        state.plan.shrink_to_fit();
+        state.items.clear();
+        state.items.shrink_to_fit();
+        state.bound = None;
+        state
+            .freshness
+            .apply(ProgressFreshnessInput::ContinuityLost);
+    }
+    pub(super) fn needs_tick(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        !state.closed
+            && matches!(
+                state.view,
+                ProgressFreshnessView::Waiting | ProgressFreshnessView::Live
+            )
+    }
+    pub(super) fn revision(&self) -> u64 {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        refresh_view(&self.clock, &mut state);
+        state.version
+    }
     pub fn snapshot(&self) -> ProgressProjectionSnapshot {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let now = read_clock(&self.clock, &mut state);
-        let view = state.freshness.view(now);
-        if state.view != view {
-            state.view = view;
-            state.version = state.version.saturating_add(1);
-        }
+        let view = refresh_view(&self.clock, &mut state);
         let freshness = if view == ProgressFreshnessView::Settled {
             Ok(view)
         } else {
@@ -94,7 +120,7 @@ impl TransferProgressReceiver {
             freshness,
             version: state.version,
             bound: state.bound,
-            items: self
+            items: state
                 .plan
                 .iter()
                 .map(|item| {
@@ -122,6 +148,9 @@ impl ProgressReceiverPort for TransferProgressReceiver {
             return Err(ProgressReceiveError::UnknownTask);
         }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.closed {
+            return Err(ProgressReceiveError::UnknownTask);
+        }
         if state.registration.apply(RegistrationInput::Notification {
             generation,
             binding: notice.binding,
@@ -166,7 +195,10 @@ impl ProgressReceiverPort for TransferProgressReceiver {
             return Err(ProgressReceiveError::UnknownTask);
         }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if !self.plan.contains(&notice.update.item) {
+        if state.closed {
+            return Err(ProgressReceiveError::UnknownTask);
+        }
+        if !state.plan.contains(&notice.update.item) {
             return Err(ProgressReceiveError::InvalidPlan);
         }
         if state.registration.apply(RegistrationInput::Notification {
@@ -209,6 +241,9 @@ impl ProgressReceiverPort for TransferProgressReceiver {
         let nonce = ProgressIdentity::new(*Uuid::new_v4().as_bytes());
         {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.closed {
+                return Err(ProgressReceiveError::UnknownTask);
+            }
             if generation > state.generation {
                 if state
                     .registration
@@ -235,7 +270,10 @@ impl ProgressReceiverPort for TransferProgressReceiver {
             descriptor,
         };
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if usize::from(descriptor.item_count) != self.plan.len() {
+        if state.closed {
+            return Err(ProgressReceiveError::UnknownTask);
+        }
+        if usize::from(descriptor.item_count) != state.plan.len() {
             return Err(ProgressReceiveError::InvalidPlan);
         }
         if state.registration.apply(RegistrationInput::Describe {
@@ -274,7 +312,10 @@ impl ProgressReceiverPort for TransferProgressReceiver {
             return Err(ProgressReceiveError::UnknownTask);
         }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if !self.plan.contains(&notice.result.item) {
+        if state.closed {
+            return Err(ProgressReceiveError::UnknownTask);
+        }
+        if !state.plan.contains(&notice.result.item) {
             return Err(ProgressReceiveError::InvalidPlan);
         }
         if state.registration.apply(RegistrationInput::Notification {
@@ -291,7 +332,7 @@ impl ProgressReceiverPort for TransferProgressReceiver {
         match item.apply(ProgressItemInput::Terminal(notice.result)) {
             ProgressItemEffect::Adopted => {
                 fresh_notification(&self.clock, &mut state);
-                if state.items.len() == self.plan.len()
+                if state.items.len() == state.plan.len()
                     && state
                         .items
                         .values()
@@ -339,4 +380,17 @@ fn fresh_notification(clock: &Clock, state: &mut State) {
         state.clock_fault = None;
         state.view = state.freshness.view(Some(now));
     }
+}
+
+fn refresh_view(clock: &Clock, state: &mut State) -> ProgressFreshnessView {
+    if state.freshness.view(None) == ProgressFreshnessView::Settled {
+        return ProgressFreshnessView::Settled;
+    }
+    let now = read_clock(clock, state);
+    let view = state.freshness.view(now);
+    if view != state.view {
+        state.view = view;
+        state.version = state.version.saturating_add(1);
+    }
+    view
 }

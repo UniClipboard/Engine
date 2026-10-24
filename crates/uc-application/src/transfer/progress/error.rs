@@ -6,6 +6,8 @@ use uc_core::file_transfer::ProgressSnapshotRefusal;
 
 #[derive(thiserror::Error)]
 pub enum ProgressReceiveError {
+    #[error("progress projection registration busy")]
+    Busy,
     #[error("progress snapshot incomplete or inconsistent")]
     Snapshot(#[from] ProgressSnapshotRefusal),
     #[error("progress clock unavailable")]
@@ -30,6 +32,7 @@ pub enum ProgressReceiveError {
 impl ErrorClass for ProgressReceiveError {
     fn class(&self) -> &'static str {
         match self {
+            Self::Busy => "progress_registration_busy",
             Self::Snapshot(_) => "progress_snapshot_invalid",
             Self::Clock(source) => source.class(),
             Self::Connection(source) => source.class(),
