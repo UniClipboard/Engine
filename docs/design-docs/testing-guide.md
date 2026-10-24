@@ -96,6 +96,11 @@ async fn run_scenario() {
 
 nextest 仍是测试进程的最终超时负责人。场景预算应短于 nextest override，给 JSON/摘要写入和清理留出时间。
 
+进度连接的真实空闲回收用例 `actual_work_leases_survive_thirty_seconds_then_real_idle_timer_closes_the_connection`
+必须先保留实际工作31秒，再等待原30秒空闲回收；默认20秒终止线无法完成该证明。
+`.config/nextest.toml` 为该精确用例在 `default`／`ci` 配置120秒外层期限，并归入 `real-network` 组。
+测试自身90秒截止、产品30秒策略、实际等待断言和零重试均保持不变；不能把这个外层预算泛化到其他用例。
+
 ## 6. 分组与本地运行
 
 统一入口：
