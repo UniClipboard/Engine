@@ -14,5 +14,6 @@ pub use exchange::{
 };
 pub use ledger::{TerminalLedger, TERMINAL_GLOBAL_CAPACITY, TERMINAL_PEER_CAPACITY};
 pub use retransmit::{
-    RetransmitPoll, RetransmitStop, TerminalRetransmit, TERMINAL_RETENTION, TERMINAL_ROUND_LIMIT,
+    RetransmitEffect, RetransmitInput, RetransmitStop, TerminalRetransmit, TERMINAL_RETENTION,
+    TERMINAL_ROUND_LIMIT,
 };
