@@ -1,6 +1,7 @@
 use super::super::ProgressExchangeService;
 use super::*;
 use crate::connectivity::ConnectivityError;
+use crate::transfer::progress::clock::Clock as SharedClock;
 use crate::transfer::progress::ProgressLiveRoundPort;
 use crate::transfer::progress::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
@@ -486,7 +487,7 @@ async fn round_timeout_cancels_only_that_round_and_next_slot_keeps_original_resu
 #[test]
 fn fault_observed_inside_one_round_invalidates_all_old_clock_leases_after_recovery() {
     let raw = Arc::new(Clock(AtomicU64::new(0)));
-    let shared = Arc::new(super::super::clock::Clock::new(
+    let shared = Arc::new(SharedClock::new(
         raw.clone(),
         Arc::new(tokio::sync::Notify::new()),
     ));
@@ -581,6 +582,16 @@ mod query_tests;
 struct UnusedLive;
 #[async_trait]
 impl ProgressLiveRoundPort for UnusedLive {
+    async fn report_contact(
+        &self,
+        _: &DeviceId,
+        _: ProgressTaskDescriptor,
+        _: u64,
+        _: &ProgressExchangeDeadline,
+        _: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        panic!("fixture does not report contact")
+    }
     async fn report_live(
         &self,
         _: &DeviceId,

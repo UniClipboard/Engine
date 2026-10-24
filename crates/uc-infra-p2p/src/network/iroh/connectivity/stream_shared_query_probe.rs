@@ -25,6 +25,7 @@ use uc_core::file_transfer::{
     ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
 };
 use uc_core::ids::DeviceId;
+use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::{
     read_frame, write_frame, ActiveProgress, Envelope, ItemKind, ItemState, LogicalItem, Message,
     Phase, ProducerDescriptor, QueryResult, SnapshotPage, TaskScope, WireId,
@@ -220,6 +221,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
         second.receiving.peer(),
         SOURCE,
         task().items.to_vec(),
+        Arc::new(SystemElapsedClock),
     )?);
     let stop = CancellationToken::new();
     let running = tokio::spawn(worker.run(stop.clone()));

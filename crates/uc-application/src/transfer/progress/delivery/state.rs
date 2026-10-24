@@ -1,5 +1,5 @@
+use super::super::clock::Sample;
 use super::super::{ElapsedClockError, ProgressTaskDescriptor};
-use super::clock::Sample;
 use super::live::{LiveEntry, LiveTask};
 use super::model::{Action, Entry, Job, Key, QueryKey, Work};
 use super::query::QueryRecord;
@@ -168,10 +168,19 @@ impl State {
             }
         }
         self.enqueue_live(sample);
+        self.enqueue_contacts(sample);
         let mut jobs = Vec::new();
         while let Some((peer, work)) = self.queue.next_ready() {
             let key = match work {
                 Work::Terminal(key) => key,
+                Work::Contact(key) => {
+                    if let Some(job) = self.start_contact(key, sample) {
+                        jobs.push(job);
+                    } else {
+                        self.queue.complete(&peer);
+                    }
+                    continue;
+                }
                 Work::Live(key) => {
                     if let Some(job) = self.start_live(key, sample) {
                         jobs.push(job);

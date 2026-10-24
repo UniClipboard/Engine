@@ -1,7 +1,7 @@
+use super::super::clock::Sample;
 use super::super::{
     ElapsedClockError, ProgressReceiveError, ProgressSnapshotRead, ProgressSourceTask,
 };
-use super::clock::Sample;
 use super::model::{clock_failure, Action, Job, ProgressQueryResult, QueryKey, Work};
 use super::state::State;
 use crate::connectivity::ConnectivityError;

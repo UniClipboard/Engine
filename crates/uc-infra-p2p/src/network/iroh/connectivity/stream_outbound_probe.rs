@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangePort, BlobReadStorePort, BlobValidatedProgress, ConnectionLease,
     ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressBound, ProgressClaimRefusal,
-    ProgressExchangeDeadline, ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask,
-    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressContactNotice, ProgressExchangeDeadline, ProgressReceiveError, ProgressReceiverPort,
+    ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
     ProgressTerminalRoundPort, ProgressUpdateNotice, ProgressWirePort, StreamLease,
     TransferProgressProducer, TransferProgressReceiver,
 };
@@ -124,6 +124,7 @@ fn owner(fixture: &Fixture) -> anyhow::Result<TransferProgressReceiver> {
         fixture.receiving.peer(),
         SOURCE,
         vec![item()],
+        Arc::new(SystemElapsedClock),
     )?)
 }
 async fn serve_registration(
@@ -379,6 +380,18 @@ struct ConsumedBudget {
 }
 #[async_trait]
 impl ProgressWirePort for ConsumedBudget {
+    async fn contact(
+        &self,
+        stream: &mut StreamLease,
+        connection: &ConnectionLease,
+        notice: ProgressContactNotice,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        TransferProgressWire
+            .contact(stream, connection, notice, deadline, cancel)
+            .await
+    }
     async fn update(
         &self,
         stream: &mut StreamLease,

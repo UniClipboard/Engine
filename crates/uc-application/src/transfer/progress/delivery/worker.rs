@@ -57,6 +57,27 @@ impl ProgressExchangeWorker {
                 running.push(Box::pin(async move {
                     let clock = inner.clock.lease(job.epoch);
                     let result = match job.action {
+                        Action::Contact {
+                            descriptor,
+                            sequence,
+                        } => Completion::Contact(
+                            job.epoch,
+                            match ProgressExchangeDeadline::new(clock, job.deadline) {
+                                Ok(deadline) => {
+                                    inner
+                                        .live
+                                        .report_contact(
+                                            &job.work.peer(),
+                                            descriptor,
+                                            sequence,
+                                            &deadline,
+                                            &job.cancel,
+                                        )
+                                        .await
+                                }
+                                Err(source) => Err(source),
+                            },
+                        ),
                         Action::Terminal { descriptor, result } => Completion::Terminal(
                             match ProgressExchangeDeadline::new(clock, job.deadline) {
                                 Ok(deadline) => {
@@ -75,6 +96,7 @@ impl ProgressExchangeWorker {
                             },
                         ),
                         Action::Live { descriptor, value } => Completion::Live(
+                            job.epoch,
                             value,
                             match ProgressExchangeDeadline::new(clock, job.deadline) {
                                 Ok(deadline) => {
@@ -140,13 +162,21 @@ impl ProgressExchangeWorker {
                 _=cancel.cancelled(),if !closed=>{},
                 Some((work,result))=running.next(),if !running.is_empty()=>{
                     match result {
-                        Completion::Live(sent,result)=>{
+                        Completion::Contact(epoch_started,result)=>{
+                            let permanent=result.as_ref().err().is_some_and(|source|matches!(retry_class(source),RetryClass::Stop));
+                            if let Err(source)=&result {if !closed {uc_debug!(error_class=source.class(),error=source as &dyn Error,"progress contact round ended without verified delivery");}}
+                            let sample=self.inner.clock.sample(); let epoch=self.inner.clock.epoch();
+                            let mut state=self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
+                            let completed=match sample {Ok(sample)=>{state.refresh(Some(sample));Some(sample)},Err(source)=>{state.retire_before(epoch,Some(Arc::new(source)));None}};
+                            if let Work::Contact(key)=work {state.finish_contact(key,epoch_started,permanent,completed);}
+                        },
+                        Completion::Live(epoch_started,sent,result)=>{
                             let permanent=result.as_ref().err().is_some_and(|source|matches!(retry_class(source),RetryClass::Stop));
                             if let Err(source)=&result {if !closed {uc_debug!(error_class=source.class(),error=source as &dyn Error,"progress activity notification round ended without confirmed delivery");}}
                             let sample=self.inner.clock.sample();let epoch=self.inner.clock.epoch();
                             let mut state=self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
                             let completed=match sample {Ok(sample)=>{state.refresh(Some(sample));Some(sample)},Err(source)=>{state.retire_before(epoch,Some(Arc::new(source)));None}};
-                            if let Work::Live(key)=work {state.finish_live(key,sent,permanent,completed);}
+                            if let Work::Live(key)=work {state.finish_live(key,sent,epoch_started,permanent,completed);}
                         },
                         Completion::Terminal(result)=>{
                             let class=match &result {Ok(())=>RetryClass::Stop,Err(source)=>retry_class(source)};

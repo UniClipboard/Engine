@@ -434,6 +434,16 @@ async fn legacy_progress_uni_excess_inbound_stops_only_excess_stream() -> anyhow
 pub(super) struct UnusedLive;
 #[async_trait]
 impl ProgressLiveRoundPort for UnusedLive {
+    async fn report_contact(
+        &self,
+        _: &DeviceId,
+        _: ProgressTaskDescriptor,
+        _: u64,
+        _: &ProgressExchangeDeadline,
+        _: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        panic!("fixture does not report contact")
+    }
     async fn report_live(
         &self,
         _: &DeviceId,

@@ -1,6 +1,6 @@
 //! 最新中间值独立有界保留；任务节流和已见序号不随缓存淘汰重置。
+use super::super::clock::Sample;
 use super::super::{ProgressClaimRefusal, ProgressSubmission, ProgressTaskDescriptor};
-use super::clock::Sample;
 use super::model::{Action, Job, Key, QueryKey, Work};
 use super::state::State;
 use std::collections::HashMap;
@@ -8,7 +8,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{
     ExchangePriority, ProgressActive, ProgressItem, ProgressItemEffect, ProgressItemInput,
-    ProgressItemProjection, ProgressTerminal, TERMINAL_ROUND_LIMIT,
+    ProgressItemProjection, ProgressItemState, ProgressTerminal, PROGRESS_CONTACT_GAP,
+    TERMINAL_ROUND_LIMIT,
 };
 use uc_core::ids::DeviceId;
 
@@ -17,8 +18,12 @@ const LIVE_PEER: usize = 64;
 const LIVE_GAP: Duration = Duration::from_millis(200);
 pub(super) struct LiveTask {
     pub descriptor: ProgressTaskDescriptor,
-    epoch: u64,
-    next: Duration,
+    pub epoch: u64,
+    pub next: Duration,
+    pub contact_due: Option<Duration>,
+    pub contact_sequence: u64,
+    pub contact_queued: bool,
+    pub cancel: CancellationToken,
     seen: HashMap<ProgressItem, ProgressItemProjection>,
 }
 pub(super) struct LiveEntry {
@@ -30,6 +35,60 @@ pub(super) struct LiveEntry {
     cancel: CancellationToken,
 }
 impl State {
+    pub fn track_live(
+        &mut self,
+        peer: DeviceId,
+        descriptor: ProgressTaskDescriptor,
+        sample: Sample,
+    ) -> bool {
+        let current = self.latest(sample);
+        if self.closed || current.epoch != sample.epoch {
+            return false;
+        }
+        let scope = QueryKey::new(peer, descriptor);
+        if !self.live_tasks.contains_key(&scope) {
+            if self.live_tasks.len() >= LIVE_GLOBAL
+                || self
+                    .live_tasks
+                    .keys()
+                    .filter(|key| key.peer == peer)
+                    .count()
+                    >= LIVE_PEER
+            {
+                return false;
+            }
+            self.live_tasks.insert(
+                scope,
+                LiveTask {
+                    descriptor,
+                    epoch: sample.epoch,
+                    next: current.now,
+                    contact_due: Some(current.now.saturating_add(PROGRESS_CONTACT_GAP)),
+                    contact_sequence: 0,
+                    contact_queued: false,
+                    cancel: CancellationToken::new(),
+                    seen: HashMap::new(),
+                },
+            );
+        }
+        if let Some(task) = self.live_tasks.get_mut(&scope) {
+            if task.epoch != sample.epoch {
+                task.cancel.cancel();
+                task.cancel = CancellationToken::new();
+                task.epoch = sample.epoch;
+                task.next = sample.now.saturating_add(LIVE_GAP);
+                task.contact_due = Some(sample.now.saturating_add(PROGRESS_CONTACT_GAP));
+            }
+        }
+        if let Some(task) = self.live_tasks.get_mut(&scope) {
+            if task.contact_due.is_none() {
+                task.cancel = CancellationToken::new();
+                task.contact_due = Some(current.now.saturating_add(PROGRESS_CONTACT_GAP));
+            }
+        }
+        true
+    }
+
     pub fn live_prune_candidates(
         &self,
         peer: DeviceId,
@@ -63,7 +122,7 @@ impl State {
             for item in removed {
                 self.remove_live(item);
             }
-            self.live_tasks.remove(key);
+            self.remove_contact_task(*key);
         }
     }
     pub fn admit_live(
@@ -81,34 +140,12 @@ impl State {
             return ProgressSubmission::NotRetained;
         }
         let scope = QueryKey::new(peer, descriptor);
-        if !self.live_tasks.contains_key(&scope) {
-            if self.live_tasks.len() >= LIVE_GLOBAL
-                || self
-                    .live_tasks
-                    .keys()
-                    .filter(|key| key.peer == peer)
-                    .count()
-                    >= LIVE_PEER
-            {
-                return ProgressSubmission::NotRetained;
-            }
-            self.live_tasks.insert(
-                scope,
-                LiveTask {
-                    descriptor,
-                    epoch: sample.epoch,
-                    next: current.now,
-                    seen: HashMap::new(),
-                },
-            );
+        if !self.track_live(peer, descriptor, sample) {
+            return ProgressSubmission::NotRetained;
         }
         let Some(task) = self.live_tasks.get_mut(&scope) else {
             return ProgressSubmission::NotRetained;
         };
-        if task.epoch != sample.epoch {
-            task.epoch = sample.epoch;
-            task.next = current.now.saturating_add(LIVE_GAP);
-        }
         match task
             .seen
             .entry(value.item)
@@ -243,6 +280,7 @@ impl State {
         }
         let deadline = sample.now.checked_add(TERMINAL_ROUND_LIMIT)?;
         task.next = sample.now.saturating_add(LIVE_GAP);
+        task.contact_due = Some(sample.now.saturating_add(PROGRESS_CONTACT_GAP));
         entry.dirty = false;
         let cancel = entry.cancel.child_token();
         self.active
@@ -262,6 +300,7 @@ impl State {
         &mut self,
         key: Key,
         sent: ProgressActive,
+        epoch: u64,
         permanent: bool,
         sample: Option<Sample>,
     ) {
@@ -279,10 +318,18 @@ impl State {
             if let Some(task) = self.live_tasks.iter_mut().find_map(|(scope, task)| {
                 (Key::live(scope.peer, task.descriptor, sent.item) == key).then_some(task)
             }) {
-                if task.epoch == sample.epoch {
+                if task.epoch == epoch && task.epoch == sample.epoch {
                     task.next = task.next.max(sample.now.saturating_add(LIVE_GAP));
+                    task.contact_due = Some(sample.now.saturating_add(PROGRESS_CONTACT_GAP));
                 }
             }
+        }
+        if self
+            .live
+            .get(&key)
+            .is_some_and(|entry| entry.epoch != epoch)
+        {
+            return;
         }
         if permanent {
             self.remove_live(key);
@@ -304,6 +351,16 @@ impl State {
                 .entry(result.item)
                 .or_default()
                 .apply(ProgressItemInput::Terminal(result));
+            if task
+                .seen
+                .values()
+                .filter(|item| matches!(item.state(), Some(ProgressItemState::Terminal(_))))
+                .count()
+                == usize::from(descriptor.item_count)
+            {
+                task.contact_due = None;
+                task.cancel.cancel();
+            }
         }
         self.remove_live(Key::live(peer, descriptor, result.item));
     }
@@ -312,7 +369,10 @@ impl State {
         for key in keys {
             self.remove_live(key);
         }
-        self.live_tasks.clear();
+        let scopes: Vec<_> = self.live_tasks.keys().copied().collect();
+        for scope in scopes {
+            self.remove_contact_task(scope);
+        }
     }
     pub fn recover_live(&mut self, peer: Option<DeviceId>) {
         for (key, entry) in &mut self.live {
@@ -323,6 +383,10 @@ impl State {
     }
     pub fn pending_live(&self) -> bool {
         self.live.values().any(|entry| entry.dirty)
+            || self
+                .live_tasks
+                .values()
+                .any(|task| task.contact_due.is_some())
     }
     fn remove_live(&mut self, key: Key) {
         if let Some(entry) = self.live.remove(&key) {

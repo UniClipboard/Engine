@@ -1,5 +1,5 @@
 use super::io::{invalid, Exchange};
-use super::mapping::{ack, bound, descriptor, identity, terminal, update};
+use super::mapping::{ack, bound, contact, descriptor, identity, terminal, update};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
@@ -48,6 +48,22 @@ impl TransferProgressInbound {
                     return Err(invalid());
                 }
                 Some(ack(adopted))
+            }
+            Message::Contact {
+                binding,
+                scope,
+                owner_revision,
+                sequence,
+            } => {
+                exchange.end_request().await?;
+                owner
+                    .adopt_contact(
+                        &connection.peer(),
+                        generation,
+                        contact(binding, scope, owner_revision, sequence),
+                    )
+                    .await?;
+                None
             }
             Message::Update {
                 binding,

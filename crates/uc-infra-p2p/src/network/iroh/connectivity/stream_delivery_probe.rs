@@ -12,10 +12,11 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectionLease, CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal,
-    ProgressExchangeDeadline, ProgressExchangeService, ProgressReceiveError, ProgressReceiverPort,
-    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
-    ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressUpdateNotice,
-    TransferProgressProducer, TransferProgressReceiver, TransferProgressSnapshotReader,
+    ProgressContactNotice, ProgressExchangeDeadline, ProgressExchangeService, ProgressReceiveError,
+    ProgressReceiverPort, ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort,
+    ProgressTaskDescriptor, ProgressTerminalNotice, ProgressTerminalRoundPort,
+    ProgressUpdateNotice, TransferProgressProducer, TransferProgressReceiver,
+    TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
@@ -93,6 +94,14 @@ struct Paused {
 }
 #[async_trait]
 impl ProgressReceiverPort for Paused {
+    async fn adopt_contact(
+        &self,
+        peer: &DeviceId,
+        generation: u64,
+        notice: ProgressContactNotice,
+    ) -> Result<(), ProgressReceiveError> {
+        self.owner.adopt_contact(peer, generation, notice).await
+    }
     async fn adopt_update(
         &self,
         peer: &DeviceId,
@@ -213,6 +222,7 @@ async fn blocked_authenticated_peer_does_not_hold_up_another_peers_actual_termin
                 first.receiving.peer(),
                 SOURCE,
                 vec![item()],
+                Arc::new(SystemElapsedClock),
             )?),
             entered: Notify::new(),
             release: Semaphore::new(0),
@@ -221,6 +231,7 @@ async fn blocked_authenticated_peer_does_not_hold_up_another_peers_actual_termin
             second.receiving.peer(),
             SOURCE,
             vec![item()],
+            Arc::new(SystemElapsedClock),
         )?);
         let server_stop = CancellationToken::new();
         let slow_task = tokio::spawn(serve_pair(

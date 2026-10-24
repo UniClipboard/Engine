@@ -350,4 +350,19 @@ Core统一活动／终态序号规则，Application统一按任务5Hz资格、�
 Infra实现Update编码、完整流结束和认证后采用，不增加业务ACK。
 验证入口为Application `transfer::progress::delivery::live::tests` 与原生
 `stream::outbound_probe::live_probe`；真实状态载荷为合成值，不声称这些字节来自实际文件接收回调。
-Contact、失联显示、生产Router及实际下载hook仍未接线，不能据此勾选阶段0完整资源证明或生产迁移项。
+Contact及失联判断另见下节；生产Router及实际下载hook仍未接线，不能据此勾选阶段0完整资源证明或生产迁移项。
+
+
+### Contact与有效联系视图的边界
+
+Application原任务接受后可跟踪等待状态，Contact在10秒无其他通知时由既有唯一worker调度，
+不新增心跳循环、队列或活动额度。任务级联系序号独立于单项进度，全部终态后停止联系。
+接收完整快照以原发送意图建立首次60秒期限，只有当前身份内有效的新通知续期。
+Core承担纯时间／序号规则；连续性时钟能力由Application统一消费，不可读保留完整错误来源且不复活旧联系。
+
+验证入口为Application `transfer::progress::tests`、`delivery::live::tests::contact_tests`，
+以及真实受管Iroh的 `stream::outbound_probe::live_probe`。
+新增证明覆盖等待任务Contact、延迟实际结束、重复跟踪／帧不续期、60秒未知、新联系恢复及终态不重开。
+时钟回退后的旧轮次迟到结束不得清除新世代状态，独立序号还按producer寿命隔离。
+中间状态和联系均为合成fixture，不声称已迁移生产回调、发送侧全局投影注册表或宿主显示；
+平台物理挂起矩阵和阶段0完整资源结论仍待后续任务闭合。
