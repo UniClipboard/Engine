@@ -83,10 +83,10 @@ impl AuthorityProcess {
         );
         Ok(process)
     }
-    fn accept(&self, directory: bool) -> anyhow::Result<ProgressSourceTask> {
+    fn accept(&self, directory: bool, items: u16) -> anyhow::Result<ProgressSourceTask> {
         ensure!(
             self.authority
-                .request(json!({"op":"accept","directory":directory}))?["accepted"]
+                .request(json!({"op":"accept","directory":directory,"items":items}))?["accepted"]
                 == true,
             "actual receive fixture must accept"
         );
@@ -349,7 +349,7 @@ async fn current_receive_authority_binds_over_real_iroh_and_old_descriptors_cann
     timeout(Duration::from_secs(30), async {
         for directory in [false, true] {
             let worker = AuthorityProcess::start()?;
-            let first = worker.accept(directory)?;
+            let first = worker.accept(directory, 1)?;
             let fixture = Fixture::new(4, 4, TRANSFER_PROGRESS_ALPN).await?;
             let client = producer(&fixture, worker.authority.clone());
             let owner = Arc::new(TransferProgressReceiver::new(
@@ -388,7 +388,7 @@ async fn current_receive_authority_binds_over_real_iroh_and_old_descriptors_cann
                 .await
             });
             timeout(BUDGET, gate.entered.notified()).await?;
-            let next = worker.accept(directory)?;
+            let next = worker.accept(directory, 1)?;
             ensure!(
                 next.descriptor.attempt != first.descriptor.attempt
                     && next.descriptor.revision > first.descriptor.revision,
@@ -428,8 +428,8 @@ async fn actual_receiver_restart_new_connection_retires_old_producer_and_pending
 ) -> anyhow::Result<()> {
     timeout(Duration::from_secs(30), async {
         let mut worker = AuthorityProcess::start()?;
-        worker.accept(false)?;
-        let first = worker.accept(false)?;
+        worker.accept(false, 1)?;
+        let first = worker.accept(false, 1)?;
         let original = Fixture::new(4, 4, TRANSFER_PROGRESS_ALPN).await?;
         let client = producer(&original, worker.authority.clone());
         let owner = Arc::new(TransferProgressReceiver::new(
@@ -470,7 +470,7 @@ async fn actual_receiver_restart_new_connection_retires_old_producer_and_pending
         timeout(BUDGET, gate.entered.notified()).await?;
         worker.stop()?;
         let restarted = AuthorityProcess::start()?;
-        let next = restarted.accept(false)?;
+        let next = restarted.accept(false, 1)?;
         ensure!(
             next.descriptor.producer != first.descriptor.producer
                 && next.descriptor.revision == 1
@@ -517,7 +517,7 @@ async fn actual_receiver_restart_new_connection_retires_old_producer_and_pending
 async fn explicit_legacy_is_unsupported_but_corrupt_current_frame_keeps_exchange_failure(
 ) -> anyhow::Result<()> {
     let worker = AuthorityProcess::start()?;
-    worker.accept(false)?;
+    worker.accept(false, 1)?;
     let legacy = Fixture::new(2, 2, LEGACY_TRANSFER_PROGRESS_ALPN).await?;
     let client = producer(&legacy, worker.authority.clone());
     ensure!(
@@ -568,7 +568,7 @@ async fn fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again(
     timeout(Duration::from_secs(30), async {
         for before in [true, false] {
             let worker = AuthorityProcess::start()?;
-            let first = worker.accept(false)?;
+            let first = worker.accept(false, 1)?;
             let fixture = Fixture::new(4, 4, TRANSFER_PROGRESS_ALPN).await?;
             let client = producer(&fixture, worker.authority.clone());
             let owner = Arc::new(TransferProgressReceiver::new(
@@ -605,7 +605,7 @@ async fn fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again(
                 .await
             });
             timeout(BUDGET, gate.entered.notified()).await?;
-            let next = worker.accept(false)?;
+            let next = worker.accept(false, 1)?;
             gate.release.add_permits(1);
             timeout(BUDGET, serving).await???;
             let registered = timeout(BUDGET, call).await??;
@@ -661,7 +661,7 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
     timeout(Duration::from_secs(30), async {
         let worker = AuthorityProcess::start()?;
         // 子进程真实use case在CAS后交接来源，再在受控materializer处返回IO失败。
-        let accepted = worker.accept(false)?;
+        let accepted = worker.accept(false, 1)?;
         let fixture = Fixture::new(4, 4, TRANSFER_PROGRESS_ALPN).await?;
         let client = producer(&fixture, worker.authority.clone());
         let owner = TransferProgressReceiver::new(
@@ -724,3 +724,6 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
     .await??;
     Ok(())
 }
+
+#[path = "stream_snapshot_probe.rs"]
+mod snapshot_probe;

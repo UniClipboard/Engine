@@ -49,41 +49,7 @@ pub(super) fn terminal(
         source: identity(scope.source_entry),
         attempt: identity(scope.attempt),
         revision,
-        result: ProgressTerminal {
-            item: ProgressItem {
-                kind: match value.item.kind {
-                    ItemKind::File => ProgressItemKind::File,
-                    ItemKind::Representation => ProgressItemKind::Representation,
-                    ItemKind::DirectoryUnit => ProgressItemKind::DirectoryUnit,
-                },
-                index: value.item.index,
-            },
-            round: value.round,
-            sequence: value.sequence,
-            result_revision: value.result_revision,
-            bytes: value.bytes,
-            total: value.total,
-            outcome: match value.outcome {
-                TerminalOutcome::Completed => Outcome::Completed,
-                TerminalOutcome::Failed(reason) => Outcome::Failed(match reason {
-                    FailureReason::NetworkUnavailable => Failure::NetworkUnavailable,
-                    FailureReason::TimedOut => Failure::TimedOut,
-                    FailureReason::AccessDenied => Failure::AccessDenied,
-                    FailureReason::StorageUnavailable => Failure::StorageUnavailable,
-                    FailureReason::IntegrityCheckFailed => Failure::IntegrityCheckFailed,
-                    FailureReason::Interrupted => Failure::Interrupted,
-                    FailureReason::Unknown => Failure::Unknown,
-                }),
-                TerminalOutcome::Cancelled(reason) => Outcome::Cancelled(match reason {
-                    CancelReason::LocalUser => Cancel::LocalUser,
-                    CancelReason::RemotePeer => Cancel::RemotePeer,
-                    CancelReason::Replaced => Cancel::Replaced,
-                    CancelReason::Timeout => Cancel::Timeout,
-                    CancelReason::ConnectivityRecovery => Cancel::ConnectivityRecovery,
-                    CancelReason::Unknown => Cancel::Unknown,
-                }),
-            },
-        },
+        result: terminal_result(value),
     }
 }
 pub(super) fn ack(value: ProgressTerminalNotice) -> Message {
@@ -148,6 +114,48 @@ fn wire_terminal(value: ProgressTerminalNotice) -> (WireId, TaskScope, u64, Term
             },
         },
     )
+}
+
+pub(super) fn terminal_result(value: TerminalResult) -> ProgressTerminal {
+    ProgressTerminal {
+        item: item(value.item),
+        round: value.round,
+        sequence: value.sequence,
+        result_revision: value.result_revision,
+        bytes: value.bytes,
+        total: value.total,
+        outcome: match value.outcome {
+            TerminalOutcome::Completed => Outcome::Completed,
+            TerminalOutcome::Failed(reason) => Outcome::Failed(match reason {
+                FailureReason::NetworkUnavailable => Failure::NetworkUnavailable,
+                FailureReason::TimedOut => Failure::TimedOut,
+                FailureReason::AccessDenied => Failure::AccessDenied,
+                FailureReason::StorageUnavailable => Failure::StorageUnavailable,
+                FailureReason::IntegrityCheckFailed => Failure::IntegrityCheckFailed,
+                FailureReason::Interrupted => Failure::Interrupted,
+                FailureReason::Unknown => Failure::Unknown,
+            }),
+            TerminalOutcome::Cancelled(reason) => Outcome::Cancelled(match reason {
+                CancelReason::LocalUser => Cancel::LocalUser,
+                CancelReason::RemotePeer => Cancel::RemotePeer,
+                CancelReason::Replaced => Cancel::Replaced,
+                CancelReason::Timeout => Cancel::Timeout,
+                CancelReason::ConnectivityRecovery => Cancel::ConnectivityRecovery,
+                CancelReason::Unknown => Cancel::Unknown,
+            }),
+        },
+    }
+}
+
+pub(super) fn item(value: LogicalItem) -> ProgressItem {
+    ProgressItem {
+        kind: match value.kind {
+            ItemKind::File => ProgressItemKind::File,
+            ItemKind::Representation => ProgressItemKind::Representation,
+            ItemKind::DirectoryUnit => ProgressItemKind::DirectoryUnit,
+        },
+        index: value.index,
+    }
 }
 
 #[cfg(test)]
