@@ -14,13 +14,14 @@ use tokio::time::{sleep_until, timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangePort, BlobReadStorePort, BlobValidatedProgress,
-    CurrentProgressTaskPort, ProgressBound, ProgressReceiveError, ProgressReceiverPort,
-    ProgressTaskDescriptor, ProgressTerminalNotice, ProgressUpdateNotice, StreamLease,
-    TransferProgressReceiver,
+    CurrentProgressTaskPort, ProgressBound, ProgressContactNotice, ProgressReceiveError,
+    ProgressReceiverPort, ProgressTaskDescriptor, ProgressTerminalNotice, ProgressUpdateNotice,
+    StreamLease, TransferProgressReceiver,
 };
 use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressItemKind};
 use uc_core::ids::DeviceId;
 use uc_core::ports::blob::BlobDigest;
+use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::{
     read_frame, write_frame, Envelope, ItemKind, LogicalItem, Message, ProducerDescriptor,
     TaskScope, TerminalOutcome, TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
@@ -41,6 +42,14 @@ struct PausedAdoption {
 }
 #[async_trait]
 impl ProgressReceiverPort for PausedAdoption {
+    async fn adopt_contact(
+        &self,
+        peer: &DeviceId,
+        generation: u64,
+        notice: ProgressContactNotice,
+    ) -> Result<(), ProgressReceiveError> {
+        self.owner.adopt_contact(peer, generation, notice).await
+    }
     async fn adopt_update(
         &self,
         peer: &DeviceId,
@@ -268,6 +277,7 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
             kind: ProgressItemKind::File,
             index: 0,
         }],
+        Arc::new(SystemElapsedClock),
     )?);
     let gate = Arc::new(PausedAdoption {
         owner: owner.clone(),

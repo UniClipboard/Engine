@@ -1,4 +1,5 @@
-//! 反向进度的完整业务负责人；原始发送意图授权，登记及终态采用共享同一投影。
+//! 反向进度的完整业务负责人；原始发送意图授权，登记、活动、联系及终态采用共享同一投影。
+mod clock;
 mod delivery;
 pub use delivery::{ProgressExchangeService, ProgressExchangeWorker, ProgressQueryResult};
 mod deadline;
@@ -40,3 +41,5 @@ pub use snapshot::{
 
 pub use model::ProgressUpdateNotice;
 pub use ports::ProgressLiveRoundPort;
+
+pub use model::ProgressContactNotice;

@@ -44,6 +44,16 @@ struct Round {
 }
 #[async_trait]
 impl ProgressLiveRoundPort for Round {
+    async fn report_contact(
+        &self,
+        _: &DeviceId,
+        _: ProgressTaskDescriptor,
+        _: u64,
+        _: &ProgressExchangeDeadline,
+        _: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        panic!("fixture does not reach contact interval")
+    }
     async fn report_live(
         &self,
         peer: &DeviceId,
@@ -343,3 +353,6 @@ impl ProgressSnapshotRoundPort for UnusedSnapshot {
         panic!("activity fixture does not query")
     }
 }
+
+#[path = "contact_tests.rs"]
+mod contact_tests;

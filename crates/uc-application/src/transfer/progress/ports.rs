@@ -1,7 +1,7 @@
 use super::{
-    ElapsedClockError, ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline,
-    ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressUpdateNotice,
+    ElapsedClockError, ProgressBound, ProgressClaimRefusal, ProgressContactNotice,
+    ProgressExchangeDeadline, ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor,
+    ProgressTerminalNotice, ProgressUpdateNotice,
 };
 use crate::connectivity::{ConnectionLease, StreamLease};
 use async_trait::async_trait;
@@ -24,6 +24,12 @@ pub trait CurrentProgressTaskPort: Send {
 /// 调用方只有在该能力成功返回之后才允许写 Bound 或精确 TerminalAck。
 #[async_trait]
 pub trait ProgressReceiverPort: Send + Sync {
+    async fn adopt_contact(
+        &self,
+        peer: &DeviceId,
+        generation: u64,
+        notice: ProgressContactNotice,
+    ) -> Result<(), ProgressReceiveError>;
     async fn adopt_update(
         &self,
         peer: &DeviceId,
@@ -66,6 +72,14 @@ pub trait ProgressTaskAuthorityPort: Send + Sync {
 /// 借用流，原负责人持许可至后置权威检查及实际连接保留读取结束。
 #[async_trait]
 pub trait ProgressWirePort: Send + Sync {
+    async fn contact(
+        &self,
+        stream: &mut StreamLease,
+        connection: &ConnectionLease,
+        notice: ProgressContactNotice,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError>;
     async fn update(
         &self,
         stream: &mut StreamLease,
@@ -112,9 +126,17 @@ pub trait ProgressTerminalRoundPort: Send + Sync {
     ) -> Result<(), ProgressReceiveError>;
 }
 
-/// 已获得统一交换额度的一轮普通活动通知，不产生业务ACK或文件成功结论。
+/// 已获得统一交换额度的一轮普通活动或联系通知，不产生业务ACK或文件成功结论。
 #[async_trait]
 pub trait ProgressLiveRoundPort: Send + Sync {
+    async fn report_contact(
+        &self,
+        peer: &DeviceId,
+        expected: ProgressTaskDescriptor,
+        sequence: u64,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError>;
     async fn report_live(
         &self,
         peer: &DeviceId,
