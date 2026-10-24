@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 uc-core = { path = "../uc-core" }
+# 包含挂起的经过时间能力由Application progress消费。
+uc-application = { path = "../uc-application" }
 
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"

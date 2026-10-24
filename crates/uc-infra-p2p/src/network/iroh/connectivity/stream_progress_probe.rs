@@ -15,16 +15,22 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectionLease, ConnectivityBackend, ConnectivityError, ConnectivityManager,
     ConnectivityPolicy, KnownPeerIdentity, MembershipLedgerError, PeerConnection,
-    PeerIdentityDirectoryPort,
+    PeerIdentityDirectoryPort, ProgressExchangeDeadline,
 };
 use uc_core::file_transfer::OutboundProgressStatus;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
+use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::{read_frame, write_frame, ProgressFrame};
 
 const BUDGET: Duration = Duration::from_secs(5);
+
+pub(super) fn progress_budget() -> ProgressExchangeDeadline {
+    ProgressExchangeDeadline::new(Arc::new(SystemElapsedClock), BUDGET)
+        .expect("native progress budget")
+}
 
 struct Backend(Arc<dyn PeerConnection>);
 #[async_trait]

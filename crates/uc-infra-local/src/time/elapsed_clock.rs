@@ -6,8 +6,8 @@ use std::io;
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 
 #[cfg(not(windows))]
-use uc_core::ports::ElapsedClockRefusal;
-use uc_core::ports::{ElapsedClockError, ElapsedClockPort};
+use uc_application::deps::ElapsedClockRefusal;
+use uc_application::deps::{ElapsedClockError, ElapsedClockPort};
 
 /// 读取操作系统包含挂起时间的单调计数。
 ///

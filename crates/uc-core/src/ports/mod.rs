@@ -29,7 +29,6 @@ pub mod config_migration;
 pub mod connection_channel;
 pub mod device_identity;
 pub mod directory_publish_log;
-mod elapsed_clock;
 pub mod engine_version;
 pub mod entry_receive_attempt;
 pub mod errors;
@@ -57,9 +56,6 @@ pub use app_version::{AppVersionStateError, AppVersionStatePort};
 pub use cache_fs::{CacheFsPort, DirEntry as CacheFsDirEntry};
 pub use clipboard_event::*;
 pub use clock::*;
-pub use elapsed_clock::{
-    BudgetStatus, ElapsedBudget, ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal,
-};
 pub use engine_version::{EngineVersionStateError, EngineVersionStatePort};
 pub use first_sync_state::{FirstSyncStateError, FirstSyncStatePort};
 pub use hash::*;

@@ -14,6 +14,7 @@ const required = [
   'actual_receiver_restart_new_connection_retires_old_producer_and_pending_stream',
   'fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again',
   'explicit_legacy_is_unsupported_but_corrupt_current_frame_keeps_exchange_failure',
+  'live_receive_attempt_reports_its_failed_materialization_through_the_complete_action',
 ].map(name => prefix + name)
 function binary(packageName, targetName) {
   const built = spawnSync('just', ['cargo', 'test', '-p', packageName, '--lib', '--no-run', '--locked', '--message-format=json'], {

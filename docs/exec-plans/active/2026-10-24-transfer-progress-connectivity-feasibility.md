@@ -174,7 +174,7 @@ Application 等实际连接保留读取结束后再次检查当前 attempt／pro
 借用的 StreamLease 由 Application 持有至这些实际工作结束，取消或期限到达后不提前归还原额度。
 
 组合入口为 `scripts/testing/run-progress-registration-proof.mjs`。它串行构建当前 Application 与 Infra 测试二进制，
-从 Cargo JSON 精确取得产物路径，先核对四个必需用例均存在，再显式执行，避免零用例退出成功。
+从 Cargo JSON 精确取得产物路径，先核对必需用例均存在，再显式执行，避免零用例退出成功。
 报告记录源码提交／工作区状态、两个二进制 SHA-256 和必需用例清单，位于
 `target/test-artifacts/ci/progress-registration/report.json`；CI 的 Engine tests job 必需执行此入口。
 
@@ -246,16 +246,44 @@ bash scripts/testing/run-progress-legacy-baseline.sh
 这些只是纯规则与注入时间的证据，**未**接入 Application 调度，也**未**用真实消息／文件负载、真实网络或资源采样验证；
 spec §5.6 的起始策略因此仍是起始值，不记为冻结。
 
+## 完整单轮终态通知与原预算
+
+Application `TransferProgressProducer::report_settled` 接收认证目标、源条目、产生结果的原 attempt 及已结算结果。
+它统一负责连接、实时登记、终态与精确 ACK；不能只接收源条目后给旧结果重新选择一个新 attempt。
+登记前、Bound 后、终态开流后及 ACK 后均核对当前权威，逻辑项必须属于原计划；
+收到的 ACK 必须完整回显输入终态并精确结束，错误回显或尾随字节不报告成功。
+通知失败不回滚实际文件输出；本动作只执行一轮，不自建重试或持久化 outbox。
+
+`ProgressExchangeDeadline` 将包含挂起的经过时间与原受管等待截止组合；两条流共用同一对象，登记不会为终态重建五秒。
+原生字节 IO 每次重新 poll 前检查预算，并在返回后再检查；准入及保留读取仍 await 到实际结束，
+同一流在本机工作及后置检查结束前持有许可。系统时钟 port 和错误随消费者归入 Application progress，
+纯 `ElapsedBudget` 归入 Core 进度规则；Infra-local 实现该能力，没有新 Engine 查询／步骤接口。
+
+新增真实 Iroh 双端覆盖：
+
+- 实际 BAO 接收 256KiB 内容、导出并精确读回后，由一个 Application 动作完成两条流与采用后的 ACK；最终快照和本地文件一致。
+- 旧 attempt 在开流前拒收；预检后、Challenge 期间切到新 attempt，当前绑定保留新描述，旧结果不发送。
+- 对端真实采用后，故意返回改过结果修订的 ACK 或带额外字节的 ACK，本动作拒绝成功且不回滚已经采用的事实。
+- 注入登记消耗4秒、终态前到第6秒：原预算返回过期，未收到合法终态帧且未采用。已经打开后被重置的空流不当作业务终态。
+
+App 的逻辑时间跳变测试验证 pending 网络 future 再次被 poll 前先拒绝旧预算；不可读时保留错误来源，之后读数恢复仍不能复活该预算。
+这些注入读数不证明物理系统挂起；暂停／恢复的生产生命周期和设备矩阵仍按后续阶段分别验收。
+原独立 Application 接收 fixture 组合入口增加必需第五项：真实 use case／CAS 后的当前 attempt 通过完整动作上报受控物化失败，
+发送侧采用后才返回精确 ACK。该 fixture 使用受控存储 port，不冒充真实 SQLite 提交或完整 Engine 结算。
+
+复跑沿用本记录的 Application progress、真实流及协议入口，并运行
+`scripts/testing/run-progress-registration-proof.mjs`。完整有限补发、公平资源调度、生产 Router 与实际接收结算接线仍未完成。
+
 ## 尚未证明的范围
 
 - 当前权威与真实双端登记的组合已完成；Engine／SQLite profile 重开及生产 Router 的完整迁移仍未完成。
 - 输出后 Application 采用／ACK 的最小主机链路已有证据；生产接收输出／SQLite 结算交接、有限补发和状态核对尚未接线。
 - 新旧双角色 Direct／Relay、真实消息与文件负载下的资源占用尚未执行。
-- 包含挂起的经过时间：`uc-core` 的 `ElapsedClockPort` 与 `ElapsedBudget` 固定预算不可重置；每次观察通过 `apply` 推进，起点／当前读数不可用、相邻观察回退、已到期或截止溢出后永久按耗尽处理；
+- 包含挂起的经过时间：Application progress 的 `ElapsedClockPort` 与 Core `ElapsedBudget` 固定预算不可重置；每次观察通过 `apply` 推进，起点／当前读数不可用、相邻观察回退、已到期或截止溢出后永久按耗尽处理；
   `uc-infra-local::SystemElapsedClock` 在 Linux／Android／HarmonyOS 读 `CLOCK_BOOTTIME`，macOS／iOS 读 `CLOCK_MONOTONIC`（手册规定睡眠期间继续递增），
   Windows 读 `GetTickCount64`，其余平台返回明确不支持的来源错误。时钟 port 的 `Result` 保留系统调用、整数转换或非法计数的具体来源，不将读取失败降成无来源的 `None`。
   预算用模拟挂起跳变的读数测试，Linux 真实时钟的非递减与线程等待推进已运行；
   `x86_64-pc-windows-gnu` 与 `aarch64-unknown-linux-gnu` 仅通过编译检查。
   真实系统挂起、Apple、Android、HarmonyOS 及 Windows 运行时尚未验证，不记通过。Core 当前全集356项及 Linux 时钟4项通过，后者包含真实无效 clock ID 的 errno／source 校验；Windows GNU lib 编译通过。
-  预算尚未接入等待超时与终态补发调度，该接线属后续任务。
+  单轮原生收发已接入同一经过时间预算；60 秒投影等待与10分钟终态补发调度的完整接线仍属后续任务。
 - 完整 workspace 行为回归、平台编译与设备矩阵仍按正式计划执行；本片尚未整体完成。

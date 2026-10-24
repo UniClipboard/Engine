@@ -1,0 +1,77 @@
+//! 同一交换共享原绝对经过时间预算；网络每次poll先检查，实际本机工作由原负责人监督。
+use super::{ElapsedClockPort, ProgressReceiveError};
+use crate::connectivity::ConnectivityError;
+use std::future::{poll_fn, Future};
+use std::pin::pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::Poll;
+use std::time::Duration;
+use tokio::time::{timeout_at, Instant};
+use tokio_util::sync::CancellationToken;
+use uc_core::file_transfer::{BudgetStatus, ElapsedBudget};
+
+pub struct ProgressExchangeDeadline {
+    clock: Arc<dyn ElapsedClockPort>,
+    budget: Mutex<ElapsedBudget>,
+    instant: Instant,
+}
+impl ProgressExchangeDeadline {
+    pub fn new(
+        clock: Arc<dyn ElapsedClockPort>,
+        limit: Duration,
+    ) -> Result<Self, ProgressReceiveError> {
+        let instant = Instant::now()
+            .checked_add(limit)
+            .ok_or(ConnectivityError::DeadlineExpired)?;
+        let origin = clock.elapsed()?;
+        Ok(Self {
+            clock,
+            budget: Mutex::new(ElapsedBudget::start(Some(origin), limit)),
+            instant,
+        })
+    }
+    /// 仅供既有受管连接等待使用；每次实际网络poll仍须检查经过时间预算。
+    pub fn instant(&self) -> Instant {
+        self.instant
+    }
+    pub fn check(&self, cancel: &CancellationToken) -> Result<(), ProgressReceiveError> {
+        if cancel.is_cancelled() {
+            return Err(ConnectivityError::Stopped.into());
+        }
+        let mut budget = self.budget.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = match self.clock.elapsed() {
+            Ok(now) => now,
+            Err(source) => {
+                budget.apply(None);
+                return Err(source.into());
+            }
+        };
+        if budget.apply(Some(now)) == BudgetStatus::Expired || Instant::now() >= self.instant {
+            return Err(ConnectivityError::DeadlineExpired.into());
+        }
+        Ok(())
+    }
+    /// 只用于可安全中断的网络IO，不包装需要监督至实际结束的本机能力。
+    pub async fn network<T>(
+        &self,
+        work: impl Future<Output = Result<T, ProgressReceiveError>>,
+        cancel: &CancellationToken,
+    ) -> Result<T, ProgressReceiveError> {
+        let mut work = pin!(work);
+        let guarded = poll_fn(|cx| {
+            if let Err(error) = self.check(cancel) {
+                return Poll::Ready(Err(error));
+            }
+            work.as_mut().poll(cx)
+        });
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ConnectivityError::Stopped.into()),
+            result = timeout_at(self.instant, guarded) => result,
+        };
+        // discarded-source[timeout]: 原交换截止已经表达全部超时事实。
+        let result = result.map_err(|_| ConnectivityError::DeadlineExpired)??;
+        self.check(cancel)?;
+        Ok(result)
+    }
+}

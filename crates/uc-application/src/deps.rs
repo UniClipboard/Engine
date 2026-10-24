@@ -631,8 +631,8 @@ pub use crate::space::{
 };
 
 pub use crate::transfer::progress::{
-    CurrentProgressTaskPort, ProgressBound, ProgressProjectionSnapshot, ProgressReceiveError,
-    ProgressReceiverPort, ProgressRegistrationWirePort, ProgressSourceTask,
-    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    TransferProgressProducer, TransferProgressReceiver,
+    CurrentProgressTaskPort, ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal,
+    ProgressBound, ProgressExchangeDeadline, ProgressProjectionSnapshot, ProgressReceiveError,
+    ProgressReceiverPort, ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalNotice, ProgressWirePort, TransferProgressProducer, TransferProgressReceiver,
 };

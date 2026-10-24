@@ -1,22 +1,23 @@
 use std::error::Error;
 use std::io::{self, ErrorKind};
 use tokio::io::AsyncReadExt;
-use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
-use uc_application::deps::{ConnectionLease, ProgressReceiveError, StreamLease};
+use uc_application::deps::{
+    ConnectionLease, ProgressExchangeDeadline, ProgressReceiveError, StreamLease,
+};
 use uc_sync_protocol::transfer_progress::v2::{read_frame, write_frame, Envelope, Message};
 
 pub(super) struct Exchange<'a> {
     stream: &'a mut StreamLease,
     connection: &'a ConnectionLease,
-    deadline: Instant,
+    deadline: &'a ProgressExchangeDeadline,
     cancel: &'a CancellationToken,
 }
 impl<'a> Exchange<'a> {
     pub(super) fn new(
         stream: &'a mut StreamLease,
         connection: &'a ConnectionLease,
-        deadline: Instant,
+        deadline: &'a ProgressExchangeDeadline,
         cancel: &'a CancellationToken,
     ) -> Self {
         Self {
@@ -30,28 +31,24 @@ impl<'a> Exchange<'a> {
         self.authorize().await?;
         self.stream.send.finish().map_err(failed)
     }
-
     async fn authorize(&mut self) -> Result<(), ProgressReceiveError> {
-        // 准入读取监督至真实结束；期限和取消只禁止后续网络，不丢弃读取工作。
+        // 准入读取监督至真实结束；原经过时间预算随后禁止过期网络，不丢弃实际本机工作。
         self.connection.check_current().await.map_err(failed)?;
-        if self.cancel.is_cancelled() {
-            return Err(stopped());
-        }
-        if Instant::now() >= self.deadline {
-            return Err(failed(io::Error::new(
-                ErrorKind::TimedOut,
-                "progress exchange deadline elapsed",
-            )));
-        }
-        Ok(())
+        self.deadline.check(self.cancel)
     }
     pub(super) async fn read(&mut self) -> Result<Message, ProgressReceiveError> {
         self.authorize().await?;
-        tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => Err(stopped()),
-            result = timeout_at(self.deadline, read_frame(&mut self.stream.receive)) => Ok(result.map_err(failed)?.map_err(failed)?.message),
-        }
+        self.deadline
+            .network(
+                async {
+                    Ok(read_frame(&mut self.stream.receive)
+                        .await
+                        .map_err(failed)?
+                        .message)
+                },
+                self.cancel,
+            )
+            .await
     }
     pub(super) async fn write(&mut self, message: Message) -> Result<(), ProgressReceiveError> {
         self.authorize().await?;
@@ -59,23 +56,31 @@ impl<'a> Exchange<'a> {
             message,
             trace_context: None,
         };
-        tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => Err(stopped()),
-            result = timeout_at(self.deadline, write_frame(&mut self.stream.send, &envelope)) => result.map_err(failed)?.map_err(failed),
-        }
+        self.deadline
+            .network(
+                async {
+                    write_frame(&mut self.stream.send, &envelope)
+                        .await
+                        .map_err(failed)
+                },
+                self.cancel,
+            )
+            .await
     }
     pub(super) async fn end_request(&mut self) -> Result<(), ProgressReceiveError> {
         self.authorize().await?;
-        tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => Err(stopped()),
-            result = timeout_at(self.deadline, self.stream.receive.read_u8()) => match result.map_err(failed)? {
-                Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(()),
-                Err(source) => Err(failed(source)),
-                Ok(_) => Err(invalid()),
-            },
-        }
+        self.deadline
+            .network(
+                async {
+                    match self.stream.receive.read_u8().await {
+                        Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(()),
+                        Err(source) => Err(failed(source)),
+                        Ok(_) => Err(invalid()),
+                    }
+                },
+                self.cancel,
+            )
+            .await
     }
 }
 pub(super) fn failed(source: impl Error + Send + Sync + 'static) -> ProgressReceiveError {
@@ -85,11 +90,5 @@ pub(super) fn invalid() -> ProgressReceiveError {
     failed(io::Error::new(
         ErrorKind::InvalidData,
         "progress exchange message order invalid",
-    ))
-}
-fn stopped() -> ProgressReceiveError {
-    failed(io::Error::new(
-        ErrorKind::Interrupted,
-        "progress exchange stopped",
     ))
 }

@@ -122,3 +122,7 @@ mod terminal_probe;
 #[cfg(test)]
 #[path = "stream_authority_probe.rs"]
 mod authority_probe;
+
+#[cfg(test)]
+#[path = "stream_outbound_probe.rs"]
+mod outbound_probe;

@@ -1,11 +1,10 @@
 use super::io::{invalid, Exchange};
 use super::mapping::{ack, bound, descriptor, identity, terminal};
 use async_trait::async_trait;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    ConnectionLease, CurrentProgressTaskPort, ProgressReceiveError, ProgressReceiverPort,
-    ProgressTaskDescriptor, StreamLease,
+    ConnectionLease, CurrentProgressTaskPort, ProgressExchangeDeadline, ProgressReceiveError,
+    ProgressReceiverPort, ProgressTaskDescriptor, StreamLease,
 };
 use uc_core::file_transfer::ProgressIdentity;
 use uc_sync_protocol::transfer_progress::v2::{Message, WireId};
@@ -17,11 +16,11 @@ impl TransferProgressInbound {
         mut stream: StreamLease,
         connection: &ConnectionLease,
         generation: u64,
-        deadline: Instant,
+        deadline: ProgressExchangeDeadline,
         cancel: &CancellationToken,
         owner: &dyn ProgressReceiverPort,
     ) -> Result<(), ProgressReceiveError> {
-        let mut exchange = Exchange::new(&mut stream, connection, deadline, cancel);
+        let mut exchange = Exchange::new(&mut stream, connection, &deadline, cancel);
         let response = match exchange.read().await? {
             Message::Register { source_entry } => {
                 let registered = owner
