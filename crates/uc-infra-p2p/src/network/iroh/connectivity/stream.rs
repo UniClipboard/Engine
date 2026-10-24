@@ -12,13 +12,16 @@ struct SendHalf {
 }
 struct ReceiveHalf(RecvStream);
 pub(super) fn wrap(send: SendStream, receive: RecvStream) -> StreamPair {
-    (
-        Box::new(SendHalf {
-            native: send,
-            finished: false,
-        }),
-        Box::new(ReceiveHalf(receive)),
-    )
+    (wrap_send(send), wrap_receive(receive))
+}
+pub(super) fn wrap_send(send: SendStream) -> Box<dyn PeerSendStream> {
+    Box::new(SendHalf {
+        native: send,
+        finished: false,
+    })
+}
+pub(super) fn wrap_receive(receive: RecvStream) -> Box<dyn PeerReceiveStream> {
+    Box::new(ReceiveHalf(receive))
 }
 impl AsyncWrite for SendHalf {
     fn poll_write(
@@ -103,3 +106,7 @@ impl Drop for ReceiveHalf {
 #[cfg(test)]
 #[path = "stream_blob_probe.rs"]
 mod blob_probe;
+
+#[cfg(test)]
+#[path = "stream_progress_probe.rs"]
+mod progress_probe;
