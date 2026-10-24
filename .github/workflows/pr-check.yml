@@ -42,6 +42,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check apt download cache boundaries
+        run: python3 scripts/ci/apt-download-cache.test.py
+
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
@@ -118,7 +121,9 @@ jobs:
           fetch-depth: 0
 
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
+        uses: ./.github/actions/apt-download-cache
+        with:
+          packages: clang libclang-dev cmake
 
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
@@ -196,7 +201,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Install network test tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
+        uses: ./.github/actions/apt-download-cache
+        with:
+          packages: iproute2 nftables iputils-ping file clang libclang-dev cmake
 
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
@@ -310,7 +317,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install mandatory network and build tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake ripgrep
+        uses: ./.github/actions/apt-download-cache
+        with:
+          packages: iproute2 nftables iputils-ping file clang libclang-dev cmake ripgrep
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
@@ -350,7 +359,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install mandatory network and build tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake ripgrep
+        uses: ./.github/actions/apt-download-cache
+        with:
+          packages: iproute2 nftables iputils-ping file clang libclang-dev cmake ripgrep
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
@@ -532,7 +543,9 @@ jobs:
           fetch-depth: 0
 
       - name: Install network test tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
+        uses: ./.github/actions/apt-download-cache
+        with:
+          packages: iproute2 nftables iputils-ping file clang libclang-dev cmake
 
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
