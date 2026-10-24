@@ -2,14 +2,19 @@
 mod error;
 mod model;
 mod ports;
+mod producer;
 mod receiver;
+pub use producer::TransferProgressProducer;
 mod source;
 pub use error::ProgressReceiveError;
 pub use model::{
     ProgressBound, ProgressProjectionSnapshot, ProgressSourceTask, ProgressTaskDescriptor,
     ProgressTerminalNotice,
 };
-pub use ports::{CurrentProgressTaskPort, ProgressReceiverPort, ProgressTaskAuthorityPort};
+pub use ports::{
+    CurrentProgressTaskPort, ProgressReceiverPort, ProgressRegistrationWirePort,
+    ProgressTaskAuthorityPort,
+};
 pub use receiver::TransferProgressReceiver;
 pub(crate) use source::ProgressSourceCatalog;
 
