@@ -51,6 +51,18 @@ max-threads = 2
 [test-groups.upgrade-matrix]
 max-threads = 4
 
+# 进度连接验证真实31秒活动与随后30秒空闲回收；保留测试内部90秒截止与产品30秒策略。
+# 外层120秒容纳完整场景及清理，仅匹配该用例，默认20秒终止线与零重试保持不变。
+[[profile.default.overrides]]
+filter = "package(uc-infra-p2p) & kind(lib) & test(=network::iroh::connectivity::stream::profile_probe::limits_probe::actual_work_leases_survive_thirty_seconds_then_real_idle_timer_closes_the_connection)"
+test-group = "real-network"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-infra-p2p) & kind(lib) & test(=network::iroh::connectivity::stream::profile_probe::limits_probe::actual_work_leases_survive_thirty_seconds_then_real_idle_timer_closes_the_connection)"
+test-group = "real-network"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 [[profile.default.overrides]]
 filter = "package(uc-testkit)"
 test-group = "fast"
