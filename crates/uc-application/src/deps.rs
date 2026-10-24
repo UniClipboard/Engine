@@ -588,10 +588,11 @@ pub use crate::space::{
 pub use crate::connectivity::{
     AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionProtocol,
     ConnectionRequest, ConnectivityBackend, ConnectivityError, ConnectivityManager,
-    ConnectivityPolicy, IdleRetentionPolicy, InboundAdmissionFence, InboundAdmissionPolicy,
-    InboundConnectionError, InboundIdentityReservation, PeerConnection, PeerReceiveStream,
-    PeerSendStream, PeerUnidirectionalConnection, PendingInboundLease,
-    SessionConnectionAdmissionPort, StreamLease, StreamPair, StreamWorkLease, UniStreamLease,
+    ConnectivityPolicy, ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal,
+    IdleRetentionPolicy, InboundAdmissionFence, InboundAdmissionPolicy, InboundConnectionError,
+    InboundIdentityReservation, PeerConnection, PeerReceiveStream, PeerSendStream,
+    PeerUnidirectionalConnection, PendingInboundLease, SessionConnectionAdmissionPort, StreamLease,
+    StreamPair, StreamWorkLease, UniStreamLease,
 };
 
 // 测试装配参数只经被动依赖入口公开，不进入业务门面白名单。
@@ -631,11 +632,11 @@ pub use crate::space::{
 };
 
 pub use crate::transfer::progress::{
-    CurrentProgressTaskPort, ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal,
-    ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline, ProgressExchangeService,
-    ProgressExchangeWorker, ProgressProjectionSnapshot, ProgressReceiveError, ProgressReceiverPort,
-    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
-    ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressWirePort, TransferProgressProducer,
+    CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline,
+    ProgressExchangeService, ProgressExchangeWorker, ProgressProjectionSnapshot,
+    ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask, ProgressSubmission,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressTerminalRoundPort, ProgressWirePort, TransferProgressProducer,
     TransferProgressReceiver,
 };
 

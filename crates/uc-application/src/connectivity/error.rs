@@ -1,10 +1,14 @@
+use super::ElapsedClockError;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 use uc_core::error_class::ErrorClass;
 
 /// 固定公开分类；底层失败保留完整来源，不格式化身份或地址。
 #[derive(thiserror::Error)]
 pub enum ConnectivityError {
+    #[error("connection retention clock unavailable")]
+    Clock(#[source] Arc<ElapsedClockError>),
     #[error("peer has no known address")]
     AddressMissing,
     #[error("peer has no usable connection")]
@@ -98,6 +102,7 @@ impl ConnectivityError {
 impl ErrorClass for ConnectivityError {
     fn class(&self) -> &'static str {
         match self {
+            Self::Clock(source) => source.class(),
             Self::AddressMissing => "connection_address_missing",
             Self::Offline => "connection_offline",
             Self::Busy(_) => "connection_busy",

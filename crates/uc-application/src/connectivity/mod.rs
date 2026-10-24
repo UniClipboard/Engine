@@ -4,6 +4,7 @@ mod admission;
 mod backend;
 mod checks;
 mod connection;
+mod elapsed_clock;
 mod error;
 mod inbound;
 mod lifetime;
@@ -23,6 +24,7 @@ pub use backend::{
     PeerUnidirectionalConnection,
 };
 pub use connection::ConnectionLease;
+pub use elapsed_clock::{ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal};
 pub use error::{ConnectivityError, StreamCapabilityRefusal};
 pub use inbound::InboundAdmissionPolicy;
 pub use manager::{ConnectivityManager, ConnectivityPolicy};

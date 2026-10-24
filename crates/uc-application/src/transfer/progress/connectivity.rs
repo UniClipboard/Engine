@@ -1,12 +1,17 @@
 //! 进度专属连接策略；只组装既有受管连接能力，不拥有第二套拨号或发送流程。
-use crate::connectivity::{ConnectivityPolicy, IdleRetentionPolicy, InboundAdmissionPolicy};
+use crate::connectivity::{
+    ConnectivityPolicy, ElapsedClockPort, IdleRetentionPolicy, InboundAdmissionPolicy,
+};
+use std::sync::Arc;
 use uc_core::file_transfer::{
     EXCHANGE_GLOBAL_ACTIVE, EXCHANGE_GLOBAL_QUEUED, EXCHANGE_PEER_QUEUED, PROGRESS_IDLE_RETENTION,
     PROGRESS_RETAINED_CONNECTIONS, TERMINAL_ROUND_LIMIT,
 };
 use uc_observability_contract::diagnostics::DiagnosticTaskKind;
 
-pub fn transfer_progress_connectivity_policy() -> ConnectivityPolicy {
+pub fn transfer_progress_connectivity_policy(
+    clock: Arc<dyn ElapsedClockPort>,
+) -> ConnectivityPolicy {
     ConnectivityPolicy {
         supervise_local_work: true,
         connections_per_peer_direction: Some(1),
@@ -22,6 +27,7 @@ pub fn transfer_progress_connectivity_policy() -> ConnectivityPolicy {
             timeout: TERMINAL_ROUND_LIMIT,
         }),
         idle_retention: Some(IdleRetentionPolicy {
+            elapsed_clock: Some(clock),
             timeout: PROGRESS_IDLE_RETENTION,
             capacity: PROGRESS_RETAINED_CONNECTIONS,
         }),
