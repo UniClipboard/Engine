@@ -37,7 +37,16 @@ Cargo 输入、固定 MBX 入口、工作流、SDK 选择及场景；场景区�
 原生 MBX 对每次编译继续验证完整输入，快照键不是编译正确性的替代物。
 
 每个场景只由相应可信 main push/nightly job 在编译及测试成功后发布一次，不由每个消费者
-post-save。发布脚本同时检查真实 main、protected 标志、允许的事件、指定 writer 及当前源码 SHA；
+post-save。nightly 升级矩阵由 `upgrade-anchors` 唯一发布：先构建全部 anchor，再编译当前
+`uc-connectivity-host` 和全部 `uc-upgrade-matrix` 测试二进制；d1–d4 只读同一快照并继续实际
+运行各维度测试。PR Check 的四种 connection-recovery 模式由 `direct` 唯一发布，它额外编译
+relay 宿主组合以覆盖其他模式的编译图；其余模式不重复打包。nightly 网络四模式本来就
+编译同一 host/relay 组合，现在共享 `engine-real-environment-network` 场景，只由 direct
+发布；手动网络验收只读同一场景，不再保留永远不会执行的发布步骤。已有 anchor-host 缓存命中时
+不强制重编旧宿主，快照仍是可失效的动作种子，不承诺每个动作命中。
+`check-snapshot-routing.py` 展开矩阵并按 OS/架构/场景保守检查唯一 writer，拒绝本次五个
+升级 writer 及四个网络 writer 的回归；新矩阵语法必须扩展校验，不能静默跳过。
+发布脚本同时检查真实 main、protected 标志、允许的事件、指定 writer 及当前源码 SHA；
 workflow 继续使用限定 main 的 `engine-build-cache-writer`。PR/合并队列/其他分支只用 reader，
 fork/Dependabot 无凭据时只在本地运行；HarmonyOS 的 fork 禁止在 self-hosted 执行的规则不变。
 R2 桶级令牌仍是实际权限边界，不能把前缀当作独立授权。三项凭据仅注入快照传输步骤，不写入

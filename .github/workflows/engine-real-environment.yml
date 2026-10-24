@@ -56,7 +56,7 @@ jobs:
     # fork 与 Dependabot 拿不到任何 secret，只进行本地冷编译。
     # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/033-unified-mbx-rust-builds.md。
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: ${{ github.ref == 'refs/heads/main' && matrix.mode == 'direct' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     timeout-minutes: 40
     strategy:
@@ -72,7 +72,7 @@ jobs:
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
-          cache-key: engine-real-environment-${{ matrix.mode }}
+          cache-key: engine-real-environment-network
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -110,17 +110,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: engine-real-environment-${{ matrix.mode }}
+          name: engine-real-environment-network
           path: target/connection-recovery-evidence
           if-no-files-found: warn
           retention-days: 14
 
       - name: Publish scenario CAS snapshot
-        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        if: success() && matrix.mode == 'direct' && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
         uses: ./.github/actions/mbx-snapshot
         with:
           operation: save
-          scene: engine-real-environment-${{ matrix.mode }}
+          scene: engine-real-environment-network
           endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -138,7 +138,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade' && inputs.mode != 'membership-e2e' && inputs.mode != 'upgrade-matrix'
     runs-on: ubuntu-24.04
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: engine-build-cache-reader
       deployment: false
     timeout-minutes: 40
     steps:
@@ -150,7 +150,7 @@ jobs:
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
-          cache-key: engine-real-environment-${{ inputs.mode }}
+          cache-key: engine-real-environment-network
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -194,20 +194,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: engine-real-environment-${{ inputs.mode }}-${{ github.run_attempt }}
+          name: engine-real-environment-network-${{ github.run_attempt }}
           path: target/connection-recovery-evidence
           if-no-files-found: warn
           retention-days: 14
-
-      - name: Publish scenario CAS snapshot
-        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
-        uses: ./.github/actions/mbx-snapshot
-        with:
-          operation: save
-          scene: engine-real-environment-${{ inputs.mode }}
-          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
-          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain MBX compiler evidence
         if: always()
@@ -412,6 +402,17 @@ jobs:
           started_at=$(date +%s)
           bash scripts/testing/build-upgrade-anchors.sh --all
           echo "- anchor host build wall time: $(( $(date +%s) - started_at ))s" >> "$GITHUB_STEP_SUMMARY"
+      # 唯一生产者覆盖所有 shard 的共同编译图；dimension 只筛选运行的测试。
+      # 不在此运行矩阵测试，d1-d4 仍分别执行全部既有验证。
+      - name: Install cargo-nextest for shared matrix compilation
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145
+      - name: Compile shared upgrade matrix actions
+        run: |
+          cargo build --locked -p uc-connectivity-host
+          cargo nextest run --profile ci --locked -p uc-upgrade-matrix -E 'package(uc-upgrade-matrix)' --no-run
+
       - name: Retain anchor build records
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -446,7 +447,7 @@ jobs:
     needs: upgrade-anchors
     runs-on: ubuntu-24.04
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: engine-build-cache-reader
       deployment: false
     timeout-minutes: 240
     strategy:
@@ -500,16 +501,6 @@ jobs:
             target/test-artifacts/ci/upgrade-matrix
           if-no-files-found: error
           retention-days: 14
-
-      - name: Publish scenario CAS snapshot
-        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
-        uses: ./.github/actions/mbx-snapshot
-        with:
-          operation: save
-          scene: engine-real-environment-upgrade-matrix
-          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
-          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain MBX compiler evidence
         if: always()

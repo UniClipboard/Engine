@@ -2,6 +2,141 @@
 from pathlib import Path
 import re
 
+# 静态矩阵按当前仓库使用的 YAML 子集展开；遇到动态/新语法必须显式扩展检查，不能静默略过。
+def matrix_rows(job):
+    import itertools
+    match = re.search(r'^      matrix:\n((?: {8,}[^\n]*\n|\n)*)', job, re.M)
+    if not match:
+        assert not re.search(r'^      matrix:', job, re.M), 'Dynamic snapshot writer matrix is unsupported'
+        return [{}]
+    axes, included, excluded = {}, [], []
+    section = None
+    for line in match[1].splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        axis = re.fullmatch(r'        ([\w-]+): \[([^\]]+)\]', line)
+        if axis:
+            axes[axis[1]] = [v.strip().strip("\"'") for v in axis[2].split(',')]
+            continue
+        if line in ('        include:', '        exclude:'):
+            section = included if 'include' in line else excluded
+            continue
+        # include/exclude 的首字段缩进为 10，后续字段缩进为 12。
+        first = re.fullmatch(r'          - ([\w-]+): (.+)', line)
+        rest = re.fullmatch(r'            ([\w-]+): (.+)', line)
+        assert section is not None and (first or rest), f'Unsupported writer matrix line: {line}'
+        if first:
+            section.append({})
+        field = first or rest
+        assert section, 'Matrix field without row'
+        section[-1][field[1]] = field[2].strip("\"'")
+    rows = [dict(zip(axes, values)) for values in itertools.product(*axes.values())] if axes else []
+    rows = [row for row in rows if not any(all(row.get(k) == v for k, v in item.items()) for item in excluded)]
+    for item in included:
+        compatible = [row for row in rows if all(row.get(k) == v for k, v in item.items() if k in axes)] if axes else []
+        if compatible:
+            for row in compatible:
+                row.update(item)
+        else:
+            rows.append(item.copy())
+    return rows
+
+
+def expand_matrix(value, row):
+    result = re.sub(r'\$\{\{\s*matrix\.([\w-]+)\s*\}\}', lambda m: row[m[1]], value)
+    assert '${{' not in result, f'Unresolved snapshot routing expression: {result}'
+    return result
+
+
+def writer_inventory(documents):
+    writers = {}
+    for filename, text in documents.items():
+        for job in re.split(r'(?=^  [\w-]+:\n)', text, flags=re.M):
+            saves = [step for step in re.split(r'(?=^      - )', job, flags=re.M)
+                     if re.search(r"^          operation: ['\"]?save['\"]?$", step, re.M)]
+            if not saves:
+                continue
+            name = job.splitlines()[0].strip().rstrip(':')
+            runner = re.search(r'^    runs-on: (.+)$', job, re.M)[1]
+            for row in matrix_rows(job):
+                host = expand_matrix(runner, row)
+                # 保守地忽略镜像版本：同 OS/架构/scene 只能有一个负责人，不能借镜像漂移隐藏重复写入。
+                if host.startswith('ubuntu-'):
+                    platform = ('Linux', 'ARM64' if host.endswith('-arm') else 'X64')
+                elif host == 'macos-15' or host == '[self-hosted, macOS, ARM64, deveco]':
+                    platform = ('macOS', 'ARM64')
+                elif host in ('windows-2025', 'windows-11-arm'):
+                    platform = ('Windows', 'ARM64' if host.endswith('-arm') else 'X64')
+                else:
+                    raise AssertionError(f'Unclassified snapshot writer host: {host}')
+                for step in saves:
+                    condition = re.search(r'^        if: (.+)$', step, re.M)
+                    condition = condition[1] if condition else ''
+                    selectors = re.findall(r"matrix\.([\w-]+) == '([^']+)'", condition)
+                    remaining = re.sub(r"matrix\.[\w-]+ == '[^']+'", 'true', condition)
+                    assert 'matrix.' not in remaining, f'Unsupported writer selector: {condition}'
+                    for field, value in selectors:
+                        selector = re.escape(f"matrix.{field} == '{value}'")
+                        assert re.search(r'(?:^|&& )' + selector + r'(?: &&|$)', condition), 'Matrix writer selectors must be conjunctive'
+                    if any(row[k] != value for k, value in selectors):
+                        continue
+                    scene = expand_matrix(re.search(r'^          scene: (.+)$', step, re.M)[1].strip("\"'"), row)
+                    key = (*platform, scene)
+                    writers.setdefault(key, []).append(f'{filename}:{name}:{row}')
+    return writers
+
+
+def unique_writers(documents):
+    writers = writer_inventory(documents)
+    duplicates = {key: owners for key, owners in writers.items() if len(owners) != 1}
+    assert not duplicates, f'Duplicate snapshot writers: {duplicates}'
+    return writers
+
+
+def writer_regressions(documents):
+    # 重建本次真实错误：anchor 和四个 shard 同时向同 key 发布，必须识别五个 writer。
+    nightly = documents['engine-real-environment.yml']
+    end = nightly.index('  upgrade-matrix-report:\n')
+    save = '''      - name: Regression duplicate writer
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: engine-real-environment-upgrade-matrix
+'''
+    broken = dict(documents, **{'engine-real-environment.yml': nightly[:end] + save + nightly[end:]})
+    inventory = writer_inventory(broken)
+    assert len(inventory[('Linux', 'X64', 'engine-real-environment-upgrade-matrix')]) == 5
+    for candidate in (broken, dict(documents, **{'pr-check.yml': documents['pr-check.yml'].replace("matrix.mode == 'direct' && ", '')}),
+                      dict(documents, **{'engine-real-environment.yml': nightly.replace("matrix.mode == 'direct' && ", '')})):
+        try:
+            unique_writers(candidate)
+        except AssertionError as error:
+            assert 'Duplicate snapshot writers' in str(error)
+        else:
+            raise AssertionError('Duplicate writer regression was not rejected')
+    # 检查所有维度的笛卡尔积，以及 Windows/mobile include 的架构路由。
+    fixture = '      matrix:\n        os: [a, b]\n        mode: [c, d]\n'
+    assert len(matrix_rows(fixture)) == 4
+    extended = fixture + '        exclude:\n          - os: a\n            mode: c\n        include:\n          - os: e\n            mode: f\n'
+    assert len(matrix_rows(extended)) == 4
+    assert {'os': 'e', 'mode': 'f'} in matrix_rows(extended)
+    assert {'os': 'a', 'mode': 'c'} not in matrix_rows(extended)
+    assert set(row['arch'] for row in matrix_rows(documents['windows-build.yml'])) == {'x64', 'arm64'}
+    assert len(matrix_rows(documents['mobile-target-cache.yml'])) == 3
+    shard = nightly[nightly.index('  upgrade-matrix:\n'):nightly.index('  upgrade-matrix-report:\n')]
+    assert {row['dimension'] for row in matrix_rows(shard)} == {'d1', 'd2', 'd3', 'd4'}
+    assert 'run-test-group.sh upgrade-matrix --dimension ${{ matrix.dimension }}' in shard
+    assert 'operation: save' not in shard and 'name: engine-build-cache-reader' in shard
+    producer = nightly[nightly.index('  upgrade-anchors:\n'):nightly.index('  upgrade-matrix:\n')]
+    assert 'build-upgrade-anchors.sh --all' in producer
+    assert 'cargo build --locked -p uc-connectivity-host' in producer
+    assert "cargo nextest run --profile ci --locked -p uc-upgrade-matrix -E 'package(uc-upgrade-matrix)' --no-run" in producer
+    network = documents['pr-check.yml'].split('  connection-recovery:\n')[1]
+    assert {row['mode'] for row in matrix_rows(network)} == {'direct', 'known-peer', 'relay', 'legacy'}
+    assert 'run-connection-recovery-e2e.sh --suite network --repeat 1 --mode "${{ matrix.mode }}"' in network
+    assert 'cargo build -p uc-connectivity-host -p uc-connectivity-relay --locked' in network
+
+
 root = Path(__file__).resolve().parents[2]
 workflows = list((root/'.github/workflows').glob('*.yml'))
 for path in workflows:
@@ -29,3 +164,8 @@ for name in ('release-engine.yml', 'release-lan-compat.yml'):
     text = (root/'.github/workflows'/name).read_text()
     assert 'secrets.BUILD_CACHE_R2_' not in text and 'operation: save' not in text
 print(f'Snapshot-only routing passed for {len(workflows)} workflows')
+
+documents = {path.name: path.read_text() for path in workflows}
+writers = unique_writers(documents)
+writer_regressions(documents)
+print(f'Matrix-expanded writer uniqueness passed for {len(writers)} platform/architecture/scenario keys; duplicate regressions rejected')

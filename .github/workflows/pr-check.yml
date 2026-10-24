@@ -598,7 +598,7 @@ jobs:
       && (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     runs-on: ubuntu-24.04
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: ${{ github.ref == 'refs/heads/main' && matrix.mode == 'direct' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     timeout-minutes: 45
     strategy:
@@ -632,8 +632,13 @@ jobs:
           path: target/connection-recovery-evidence
           if-no-files-found: warn
 
+      # direct 负责共同宿主和 relay 变体的完整编译图；四种模式仍执行实际网络验证。
+      - name: Compile remaining shared network host actions
+        if: matrix.mode == 'direct'
+        run: cargo build -p uc-connectivity-host -p uc-connectivity-relay --locked
+      # 仅 direct 发布，其他 shard 不重复归档和覆盖索引。
       - name: Publish scenario CAS snapshot
-        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        if: success() && matrix.mode == 'direct' && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
         uses: ./.github/actions/mbx-snapshot
         with:
           operation: save
