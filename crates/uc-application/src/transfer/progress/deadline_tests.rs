@@ -1,8 +1,10 @@
 use super::{ElapsedClockError, ElapsedClockPort, ProgressExchangeDeadline};
 use std::error::Error;
+use std::future::poll_fn;
 use std::io;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -59,4 +61,40 @@ fn unreadable_clock_keeps_source_and_original_budget_stays_retired() {
     assert!(error.source().unwrap().source().unwrap().is::<io::Error>());
     clock.0.store(1, Ordering::SeqCst);
     assert!(deadline.check(&CancellationToken::new()).is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn suspend_expiry_is_observed_without_a_network_wakeup() {
+    let clock = Arc::new(Clock(AtomicU64::new(0)));
+    let deadline = ProgressExchangeDeadline::new(clock.clone(), Duration::from_secs(5)).unwrap();
+    let entered = Arc::new(Notify::new());
+    let polls = Arc::new(AtomicUsize::new(0));
+    let work = {
+        let entered = entered.clone();
+        let polls = polls.clone();
+        poll_fn(move |_| {
+            polls.fetch_add(1, Ordering::SeqCst);
+            entered.notify_one();
+            Poll::<Result<(), _>>::Pending
+        })
+    };
+    let task = tokio::spawn(async move { deadline.network(work, &CancellationToken::new()).await });
+    entered.notified().await;
+    // 模拟原生经过时间跨越挂起，Tokio仅推进100毫秒；socket永不唤醒。
+    clock.0.store(6, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_millis(100)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let finished = task.is_finished();
+    if !finished {
+        task.abort();
+    }
+    let result = task.await;
+    assert!(
+        finished,
+        "original budget must expire without a socket wakeup"
+    );
+    assert_eq!(result.unwrap().unwrap_err().class(), "connection_timeout");
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
 }

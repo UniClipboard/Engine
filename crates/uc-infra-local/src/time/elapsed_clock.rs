@@ -15,6 +15,10 @@ use uc_application::deps::{ElapsedClockError, ElapsedClockPort};
 /// Windows 使用 GetTickCount64。读取错误保留来源，不使用墙钟或普通 Instant 兜底。
 pub struct SystemElapsedClock;
 
+#[cfg(test)]
+#[path = "suspend_probe.rs"]
+mod suspend_probe;
+
 impl ElapsedClockPort for SystemElapsedClock {
     fn elapsed(&self) -> Result<Duration, ElapsedClockError> {
         read_elapsed()
