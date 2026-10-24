@@ -18,8 +18,19 @@ pub enum RetransmitStop {
     Exhausted,
 }
 
+/// 唯一状态输入；网络工作实际结束后才提交 RoundFinished。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RetransmitPoll {
+pub enum RetransmitInput {
+    Poll(Option<Duration>),
+    RoundFinished,
+    NetworkRecovered,
+    Acknowledged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetransmitEffect {
+    /// 已更新规则状态，没有启动网络的资格。
+    Idle,
     /// 启动新一轮；`deadline` 是本轮的绝对截止（经过时间读数）。
     Start {
         deadline: Duration,
@@ -60,19 +71,36 @@ impl TerminalRetransmit {
         }
     }
 
-    pub fn poll(&mut self, now: Option<Duration>) -> RetransmitPoll {
+    pub fn apply(&mut self, input: RetransmitInput) -> RetransmitEffect {
         if let Some(stop) = self.stopped {
-            return RetransmitPoll::Stopped(stop);
+            return RetransmitEffect::Stopped(stop);
+        }
+        match input {
+            RetransmitInput::Poll(now) => self.evaluate(now),
+            RetransmitInput::RoundFinished => {
+                self.in_flight = false;
+                RetransmitEffect::Idle
+            }
+            RetransmitInput::NetworkRecovered => {
+                self.early_pending = true;
+                RetransmitEffect::Idle
+            }
+            RetransmitInput::Acknowledged => self.stop(RetransmitStop::Acknowledged),
+        }
+    }
+
+    fn evaluate(&mut self, now: Option<Duration>) -> RetransmitEffect {
+        if let Some(stop) = self.stopped {
+            return RetransmitEffect::Stopped(stop);
         }
         let (Some(generated), Some(now)) = (self.generated, now) else {
             return self.stop(RetransmitStop::Expired);
         };
-        let regressed = self.last_start.is_some_and(|start| now < start);
-        if regressed || self.budget.status(Some(now)) == BudgetStatus::Expired {
+        if self.budget.apply(Some(now)) == BudgetStatus::Expired {
             return self.stop(RetransmitStop::Expired);
         }
         if self.in_flight {
-            return RetransmitPoll::Busy;
+            return RetransmitEffect::Busy;
         }
         let Some(offset) = SLOT_OFFSETS_SECS.get(self.next_slot) else {
             return self.stop(RetransmitStop::Exhausted);
@@ -80,13 +108,13 @@ impl TerminalRetransmit {
         let slot_at = generated + Duration::from_secs(*offset);
         let early_at = self
             .early_pending
-            .then(|| self.last_start.map(|start| start + EARLY_GAP))
+            .then(|| self.last_start.map(|start| start.saturating_add(EARLY_GAP)))
             .flatten();
         let due = slot_at <= now;
         let early = early_at.is_some_and(|at| at <= now);
         if !(due || early) {
             let wake = early_at.map_or(slot_at, |at| at.min(slot_at));
-            return RetransmitPoll::WaitUntil(wake.min(generated + TERMINAL_RETENTION));
+            return RetransmitEffect::WaitUntil(wake.min(generated + TERMINAL_RETENTION));
         }
 
         let before = self.next_slot;
@@ -102,27 +130,13 @@ impl TerminalRetransmit {
         self.early_pending = false;
         self.last_start = Some(now);
         self.in_flight = true;
-        RetransmitPoll::Start {
-            deadline: (now + TERMINAL_ROUND_LIMIT).min(generated + TERMINAL_RETENTION),
+        RetransmitEffect::Start {
+            deadline: (now.saturating_add(TERMINAL_ROUND_LIMIT))
+                .min(generated + TERMINAL_RETENTION),
         }
     }
 
-    /// 本轮结束（成功发送未获 ACK、超时或失败均同样结束，不关闭其他任务使用的连接）。
-    pub fn finish_round(&mut self) {
-        self.in_flight = false;
-    }
-
-    /// 收到精确匹配的 ACK 后永久停止。
-    pub fn acknowledge(&mut self) {
-        self.stopped.get_or_insert(RetransmitStop::Acknowledged);
-    }
-
-    /// 网络恢复机会；多次恢复合并为至多一个提前时点。
-    pub fn network_recovered(&mut self) {
-        self.early_pending = true;
-    }
-
-    fn stop(&mut self, reason: RetransmitStop) -> RetransmitPoll {
-        RetransmitPoll::Stopped(*self.stopped.get_or_insert(reason))
+    fn stop(&mut self, reason: RetransmitStop) -> RetransmitEffect {
+        RetransmitEffect::Stopped(*self.stopped.get_or_insert(reason))
     }
 }

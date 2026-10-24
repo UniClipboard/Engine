@@ -237,9 +237,10 @@ bash scripts/testing/run-progress-legacy-baseline.sh
 `uc-core::file_transfer::progress_delivery` 提供纯规则：`TerminalRetransmit`（0／2／10／30／60／120／300／540 秒串行补发，
 单轮截止 `min(start+5s, t0+600s)`，挂起恢复合并已过时点且不延长保留，网络恢复至多提前消费一个时点）、
 `TerminalLedger`（全局 256／每端 64，先淘汰同端最早，再淘汰全局最早，重复键不占容量）、
-`ExchangeQueue`（在途全局 4／每端 1，等待全局 64／每端 16，按对端轮转）。时间读数由调用方注入，读数不可用或倒退按过期处理。
-10 项逻辑测试覆盖：1024 项清单只保留同端最新 64 项且不影响他端、5×64 全局超额淘汰最早、一个永不结束的对端只占自己的在途额度与队列、
-挂起跳过 5 个时点只补一轮、恰好过期、8 次耗尽、恢复机会合并。
+`ExchangeQueue`（在途全局 4／每端 1，等待全局 64／每端 16，按对端轮转）。时间读数由调用方注入；补发状态只通过 `RetransmitInput` → `apply` 推进，返回 `RetransmitEffect`。
+预算逐次核对观察读数，不可用、任一次倒退或已到期后永久退休；重新获得有效读数不能复活旧预算。
+12 项逻辑测试覆盖：1024 项清单只保留同端最新 64 项且不影响他端、5×64 全局超额淘汰最早、一个永不结束的对端只占自己的在途额度与队列、
+挂起跳过 5 个时点只补一轮、恰好过期、8 次耗尽、恢复机会合并，以及等待期间观察回退和不可表示的绝对截止。
 
 协议侧最大合法页、帧上限和 1024 项描述沿用 `transfer_progress_v2` 既有用例，没有新增线上字节。
 这些只是纯规则与注入时间的证据，**未**接入 Application 调度，也**未**用真实消息／文件负载、真实网络或资源采样验证；
@@ -250,9 +251,11 @@ spec §5.6 的起始策略因此仍是起始值，不记为冻结。
 - 当前权威与真实双端登记的组合已完成；Engine／SQLite profile 重开及生产 Router 的完整迁移仍未完成。
 - 输出后 Application 采用／ACK 的最小主机链路已有证据；生产接收输出／SQLite 结算交接、有限补发和状态核对尚未接线。
 - 新旧双角色 Direct／Relay、真实消息与文件负载下的资源占用尚未执行。
-- 包含挂起的经过时间：`uc-core` 的 `ElapsedClockPort` 与 `ElapsedBudget` 固定预算不可重置、起点或当前读数不可用以及读数倒退一律按耗尽处理；
+- 包含挂起的经过时间：`uc-core` 的 `ElapsedClockPort` 与 `ElapsedBudget` 固定预算不可重置；每次观察通过 `apply` 推进，起点／当前读数不可用、相邻观察回退、已到期或截止溢出后永久按耗尽处理；
   `uc-infra-local::SystemElapsedClock` 在 Linux／Android／HarmonyOS 读 `CLOCK_BOOTTIME`，macOS／iOS 读 `CLOCK_MONOTONIC`（手册规定睡眠期间继续递增），
-  Windows 读 `GetTickCount64`，其余平台不可用。预算用模拟挂起跳变的读数测试，Linux 真实时钟的非递减与睡眠推进已运行；
+  Windows 读 `GetTickCount64`，其余平台返回明确不支持的来源错误。时钟 port 的 `Result` 保留系统调用、整数转换或非法计数的具体来源，不将读取失败降成无来源的 `None`。
+  预算用模拟挂起跳变的读数测试，Linux 真实时钟的非递减与线程等待推进已运行；
   `x86_64-pc-windows-gnu` 与 `aarch64-unknown-linux-gnu` 仅通过编译检查。
-  真实系统挂起、Apple、Android、HarmonyOS 及 Windows 运行时尚未验证，不记通过。预算尚未接入等待超时与终态补发调度，该接线属后续任务。
+  真实系统挂起、Apple、Android、HarmonyOS 及 Windows 运行时尚未验证，不记通过。Core 当前全集356项及 Linux 时钟4项通过，后者包含真实无效 clock ID 的 errno／source 校验；Windows GNU lib 编译通过。
+  预算尚未接入等待超时与终态补发调度，该接线属后续任务。
 - 完整 workspace 行为回归、平台编译与设备矩阵仍按正式计划执行；本片尚未整体完成。
