@@ -3,7 +3,7 @@
 状态：**单向流、字节合同、登记围栏及输出后采用／ACK 主机链路已证明，阶段 0 整体尚未完成**（2026-10-24）。
 需求见[实现规格](2026-10-24-transfer-progress-connectivity-spec.md)，推进见[执行计划](2026-10-24-transfer-progress-connectivity-plan.md)。
 开工基线为 `5cbca8fc24a278fa7b01ae611bf4b925914bef13`；本记录描述该基线上的候选变更，
-不将主机探针当作完整生产迁移、独立进程网络矩阵或真机验收。
+各节分别说明主机探针与固定旧端独立进程基线的证据，不将它们当作完整生产迁移或真机验收。
 
 ## 能力缺口及最小改动
 
@@ -196,6 +196,41 @@ Application 等实际连接保留读取结束后再次检查当前 attempt／pro
 
 该组合闭合阶段 0 的登记顺序与原始项／attempt 关联可行性，覆盖真实进程寿命及迟到旧流。
 它没有证明真实 SQLite 提交／profile 重开、完整 Engine 生产 Router、Relay、三端或设备矩阵；这些仍按后续阶段验收。
+
+## 固定旧端旧旧文件与旧进度向量
+
+切片 8 的开工前 main 固定为 `5cbca8fc24a278fa7b01ae611bf4b925914bef13`；历史锚点沿用
+`a07`，Engine `f6f305d9689e4e79e7ab6d0e4921061f9416e4a6`。后续把开发 stack 接到新 main，
+不改变这两个兼容基线。两个修订的旧进度 codec 源文件逐字节相同，SHA-256 为
+`4f8130692441496a436be085f09691cd60236b9c3cc509803a56c504c6d61d0b`。
+`transfer_progress_legacy_vectors` 在当前协议 crate 上双向验证 9 种状态 × 已知／未知总量的
+18 条字面 golden 向量；原 `/1` 帧、blob、V3 与 ticket 字节没有修改。
+
+从仓库根目录运行：
+
+```bash
+just cargo test -p uc-sync-protocol --tests --locked
+bash scripts/testing/run-progress-legacy-baseline.sh
+```
+
+无 sudo 的 Linux 可使用既有 `UC_NETWORK_UNPRIVILEGED=1` 用户／网络 namespace 入口。
+驱动复用固定 main 与历史锚点构建器，只替换测试宿主，不补丁旧 Engine 库；显式复用仓库 target。
+每次运行创建独立工件目录，保留固定源／源码 tree／锁文件及驱动输入摘要、宿主构建输入、二进制摘要和原始用例报告。
+既有网络 harness 的 `--old-pair-only` 要求同一个固定旧宿主用于两端，旧库完成正常配对、关闭重开和
+双向文本／文件读回后结束，不进入单端升级。不会用新端能力补齐旧端结果。
+
+| 固定两端 | Direct | 强制 Relay |
+| --- | --- | --- |
+| 开工前 main × 同一 main | 通过 | 通过 |
+| a07 × 同一 a07 | 通过 | 通过 |
+
+四格均实际重开旧资料、保持原传输身份并逐字节读回双向文件，报告核对两端真实宿主修订和 selected path。
+两格 Relay 在两端实际命中 IPv4／IPv6 UDP 丢弃规则；资料明文探针及网络／进程清理通过。
+该基线没有执行新版进度协议、终态 ACK 或查询，不声明历史端具备新版 ALPN 观测能力；
+新旧双角色和新新完整进度矩阵仍留在阶段 5。
+
+协议全集76项通过；旧旧4格通过。CI 在原必需 blob matrix job 中先执行此入口，
+`target/progress-legacy-evidence/runs/` 的 JSON／文本／日志随原 artifact 上传。远端新候选 CI 尚待执行。
 
 ## 尚未证明的范围
 

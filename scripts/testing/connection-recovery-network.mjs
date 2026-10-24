@@ -49,7 +49,9 @@ const peerSide = Number(options.get('--peer-side') ?? 1)
 // P00 前置只使用旧库正常配对产生的资料；每次运行重新配对并复制，不写入人工资格。
 const prepairedHost = options.get('--prepaired-host')
 const blobBaseline = options.get('--blob-baseline') === '1'
+const oldPairOnly = options.get('--old-pair-only') === '1'
 assert(!blobBaseline || prepairedHost)
+assert(!oldPairOnly || (blobBaseline && resolve(prepairedHost) === binary))
 const upgradeSide = Number(options.get('--upgrade-side'))
 const presenceRole = options.get('--presence-role') ?? (upgradeSide === 0 ? 'receive' : 'initiate')
 assert(['receive', 'initiate'].includes(presenceRole))
@@ -758,8 +760,10 @@ async function prepairedUpgrade() {
     await online(nodes, 20_000)
     await transfer(nodes[0], nodes[1], 'old-paired-baseline')
     if (blobBaseline) await transferFile(nodes[0], nodes[1], 'old-paired-blob-baseline')
-    return { old_pairing: true, old_profile_reopen: true, exact_bidirectional_content: true, ...(blobBaseline ? { exact_bidirectional_files: true } : {}), paths: await selectedPaths() }
+    return { old_pairing: true, old_profile_reopen: true, exact_bidirectional_content: true, ...(blobBaseline ? { exact_bidirectional_files: true } : {}), hosts: nodes.map(node => node.hostIdentity), paths: await selectedPaths() }
   })
+  // 固定旧端基线在旧旧真实读回后结束，不执行单端升级或借用新端的协议观测。
+  if (oldPairOnly) return
   const before = await Promise.all(nodes.map(node => node.call('observe')))
   const endpoints = await Promise.all(nodes.map(node => node.call('network_endpoint')))
   for (const node of nodes) await node.stop()
@@ -1222,7 +1226,7 @@ finally {
   rmSync(root, { recursive: true, force: true })
   const binaries = [binary, prepairedHost, legacyBinary, peerBinary, relayBinary, relayBinaryB, restartBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
-  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}${blobBaseline ? ' --blob-baseline' : ''}${prepairedHost ? ` --prepaired-host ${prepairedHost} --upgrade-side ${upgradeSide} --presence-role ${presenceRole} --presence-protocol ${options.get('--presence-protocol') ?? 'peer_reachability_v1'}` : ''}${peerBinary ? ` --peer-host ${peerBinary} --peer-side ${peerSide}` : ''}`
+  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --prebuilt --host ${binary} --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}${blobBaseline ? ' --blob-baseline' : ''}${oldPairOnly ? ' --old-pair-only' : ''}${prepairedHost ? ` --prepaired-host ${prepairedHost} --upgrade-side ${upgradeSide} --presence-role ${presenceRole} --presence-protocol ${options.get('--presence-protocol') ?? 'peer_reachability_v1'}` : ''}${peerBinary ? ` --peer-host ${peerBinary} --peer-side ${peerSide}` : ''}`
   const timingCompletedAt = performance.now()
   const scenarioStartedAt = firstScenarioStartedAt ?? cleanupStartedAt
   const timings = {
@@ -1231,6 +1235,6 @@ finally {
     cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
     total_ms: Math.round(timingCompletedAt - timingStartedAt),
   }
-  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0
