@@ -126,3 +126,7 @@ mod authority_probe;
 #[cfg(test)]
 #[path = "stream_outbound_probe.rs"]
 mod outbound_probe;
+
+#[cfg(test)]
+#[path = "stream_delivery_probe.rs"]
+mod delivery_probe;

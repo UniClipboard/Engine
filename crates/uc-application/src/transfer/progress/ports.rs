@@ -1,12 +1,12 @@
 use super::{
-    ElapsedClockError, ProgressBound, ProgressExchangeDeadline, ProgressReceiveError,
-    ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ElapsedClockError, ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline,
+    ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminalNotice,
 };
 use crate::connectivity::{ConnectionLease, StreamLease};
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use uc_core::file_transfer::ProgressIdentity;
+use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressTerminal};
 use uc_core::ids::DeviceId;
 
 /// 一次完整的当前任务确认；实现负责有界编解码、截止时间及请求结束检查。
@@ -44,6 +44,14 @@ pub trait ProgressReceiverPort: Send + Sync {
 pub trait ProgressTaskAuthorityPort: Send + Sync {
     fn current_task(&self, peer: &DeviceId, source: ProgressIdentity)
         -> Option<ProgressSourceTask>;
+    /// 原结算之后领取当前项的通知意图；同一当前尝试/项至多成功一次。
+    fn claim_terminal(
+        &self,
+        peer: &DeviceId,
+        source: ProgressIdentity,
+        attempt: ProgressIdentity,
+        item: ProgressItem,
+    ) -> Result<ProgressSourceTask, ProgressClaimRefusal>;
 }
 
 /// 一次已准入连接上的完整登记交换；新挑战必须实时读取authority，不使用调用前捕获的attempt。
@@ -73,4 +81,17 @@ pub trait ProgressWirePort: Send + Sync {
 /// 包含系统挂起时间的单调读数，实际消费及失败处理由progress负责人统一承担。
 pub trait ElapsedClockPort: Send + Sync {
     fn elapsed(&self) -> Result<Duration, ElapsedClockError>;
+}
+
+/// 一轮完整终态通知；原绝对截止由完整监督负责人创建，不得在实现里重建五秒。
+#[async_trait]
+pub trait ProgressTerminalRoundPort: Send + Sync {
+    async fn report_settled(
+        &self,
+        peer: &DeviceId,
+        expected: ProgressTaskDescriptor,
+        result: ProgressTerminal,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError>;
 }

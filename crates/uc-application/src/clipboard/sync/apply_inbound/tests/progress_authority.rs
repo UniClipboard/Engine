@@ -236,13 +236,38 @@ fn registration_authority_worker() {
             });
             assert!(runtime.block_on(owner.execute(input)).is_err());
         }
-        let response = if request["op"] == "current" {
-            let peer = DeviceId::new(request["peer"].as_str().unwrap());
-            let source: [u8; 16] = serde_json::from_value(request["source"].clone()).unwrap();
-            registry.current_task(&peer,ProgressIdentity::new(source)).map(|task|json!({
+        let encode = |task: crate::transfer::progress::ProgressSourceTask| {
+            json!({
                 "producer":task.descriptor.producer.bytes(),"revision":task.descriptor.revision,"source":task.descriptor.source.bytes(),"attempt":task.descriptor.attempt.bytes(),"item_count":task.descriptor.item_count,
                 "items":task.items.iter().map(|item| json!({"kind":match item.kind { ProgressItemKind::File=>"file",ProgressItemKind::Representation=>"representation",ProgressItemKind::DirectoryUnit=>"directory" },"index":item.index})).collect::<Vec<_>>()
-            })).unwrap_or(Value::Null)
+            })
+        };
+        let response = if request["op"] == "claim" {
+            let peer = DeviceId::new(request["peer"].as_str().unwrap());
+            let source =
+                ProgressIdentity::new(serde_json::from_value(request["source"].clone()).unwrap());
+            let attempt =
+                ProgressIdentity::new(serde_json::from_value(request["attempt"].clone()).unwrap());
+            let item = uc_core::file_transfer::ProgressItem {
+                kind: match request["kind"].as_str().unwrap() {
+                    "file" => ProgressItemKind::File,
+                    "representation" => ProgressItemKind::Representation,
+                    "directory" => ProgressItemKind::DirectoryUnit,
+                    _ => panic!("invalid fixture kind"),
+                },
+                index: request["index"].as_u64().unwrap() as u16,
+            };
+            match registry.claim_terminal(&peer, source, attempt, item) {
+                Ok(task) => json!({"task":encode(task)}),
+                Err(reason) => json!({"refusal":format!("{reason:?}")}),
+            }
+        } else if request["op"] == "current" {
+            let peer = DeviceId::new(request["peer"].as_str().unwrap());
+            let source: [u8; 16] = serde_json::from_value(request["source"].clone()).unwrap();
+            registry
+                .current_task(&peer, ProgressIdentity::new(source))
+                .map(encode)
+                .unwrap_or(Value::Null)
         } else {
             json!({"accepted":true})
         };
