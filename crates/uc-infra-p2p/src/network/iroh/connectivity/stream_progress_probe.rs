@@ -15,9 +15,10 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectionLease, ConnectivityBackend, ConnectivityError, ConnectivityManager,
     ConnectivityPolicy, ElapsedClockPort, KnownPeerIdentity, MembershipLedgerError, PeerConnection,
-    PeerIdentityDirectoryPort, ProgressExchangeDeadline,
+    PeerIdentityDirectoryPort, ProgressExchangeDeadline, ProgressLiveRoundPort,
+    ProgressReceiveError, ProgressTaskDescriptor,
 };
-use uc_core::file_transfer::OutboundProgressStatus;
+use uc_core::file_transfer::{OutboundProgressStatus, ProgressActive};
 use uc_core::ids::DeviceId;
 use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
@@ -428,4 +429,19 @@ async fn legacy_progress_uni_excess_inbound_stops_only_excess_stream() -> anyhow
     drop(excess);
     drop(incoming_first);
     fixture.close().await
+}
+
+pub(super) struct UnusedLive;
+#[async_trait]
+impl ProgressLiveRoundPort for UnusedLive {
+    async fn report_live(
+        &self,
+        _: &DeviceId,
+        _: ProgressTaskDescriptor,
+        _: ProgressActive,
+        _: &ProgressExchangeDeadline,
+        _: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        panic!("terminal/query fixture cannot publish live progress")
+    }
 }

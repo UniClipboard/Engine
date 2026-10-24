@@ -1,10 +1,10 @@
 use super::super::{
-    ElapsedClockError, ElapsedClockPort, ProgressExchangeDeadline, ProgressQueryResult,
-    ProgressReceiveError, ProgressSnapshotRoundPort, ProgressSourceTask, ProgressSubmission,
-    ProgressTaskAuthorityPort, ProgressTerminalRoundPort,
+    ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
+    ProgressLiveRoundPort, ProgressQueryResult, ProgressReceiveError, ProgressSnapshotRoundPort,
+    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTerminalRoundPort,
 };
 use super::clock::Clock;
-use super::model::{clock_failure, Key};
+use super::model::{clock_failure, Key, QueryKey};
 use super::query::QUERY_LIMIT;
 use super::state::State;
 use super::worker::ProgressExchangeWorker;
@@ -14,7 +14,8 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{
-    valid_progress_plan, ProgressIdentity, ProgressSnapshotRefusal, ProgressTerminal,
+    valid_progress_plan, ProgressActive, ProgressIdentity, ProgressSnapshotRefusal,
+    ProgressTerminal, MAX_PROGRESS_ITEMS,
 };
 use uc_core::ids::DeviceId;
 pub(super) struct Inner {
@@ -24,8 +25,9 @@ pub(super) struct Inner {
     pub authority: Arc<dyn ProgressTaskAuthorityPort>,
     pub round: Arc<dyn ProgressTerminalRoundPort>,
     pub snapshot: Arc<dyn ProgressSnapshotRoundPort>,
+    pub live: Arc<dyn ProgressLiveRoundPort>,
 }
-/// 完整结算后的非网络等待提交能力；不持久化队列，不改变本地实际结果。
+/// 活动与结算通知的非网络等待提交能力及完整快照查询；不改变本地实际结果。
 #[derive(Clone)]
 pub struct ProgressExchangeService {
     pub(super) inner: Arc<Inner>,
@@ -36,6 +38,7 @@ impl ProgressExchangeService {
         authority: Arc<dyn ProgressTaskAuthorityPort>,
         round: Arc<dyn ProgressTerminalRoundPort>,
         snapshot: Arc<dyn ProgressSnapshotRoundPort>,
+        live: Arc<dyn ProgressLiveRoundPort>,
     ) -> (Self, ProgressExchangeWorker) {
         let wake = Arc::new(Notify::new());
         let inner = Arc::new(Inner {
@@ -45,6 +48,7 @@ impl ProgressExchangeService {
             authority,
             round,
             snapshot,
+            live,
         });
         (
             Self {
@@ -209,5 +213,96 @@ impl ProgressExchangeService {
                 _=tokio::time::sleep(Duration::from_millis(100))=>{},
             }
         }
+    }
+}
+
+impl ProgressExchangeService {
+    /// 只提交本地最新活动值；不等待网络或交换额度，终态封口后拒绝后续活动值。
+    pub fn submit_live(
+        &self,
+        peer: DeviceId,
+        source: ProgressIdentity,
+        attempt: ProgressIdentity,
+        value: ProgressActive,
+    ) -> Result<ProgressSubmission, ProgressReceiveError> {
+        if self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .closed
+        {
+            return Ok(ProgressSubmission::Closed);
+        }
+        let Some(task) = self.inner.authority.current_task(&peer, source) else {
+            return Ok(ProgressSubmission::Refused(
+                ProgressClaimRefusal::NotRetained,
+            ));
+        };
+        if task.descriptor.source != source || task.descriptor.attempt != attempt {
+            return Ok(ProgressSubmission::Refused(
+                ProgressClaimRefusal::Superseded,
+            ));
+        }
+        if task.items.is_empty()
+            || task.items.len() > MAX_PROGRESS_ITEMS
+            || usize::from(task.descriptor.item_count) != task.items.len()
+        {
+            return Err(ProgressReceiveError::InvalidPlan);
+        }
+        if !task.items.contains(&value.item) {
+            return Ok(ProgressSubmission::Refused(
+                ProgressClaimRefusal::InvalidItem,
+            ));
+        }
+        if task.notification_closed.contains(&value.item) {
+            return Ok(ProgressSubmission::Refused(
+                ProgressClaimRefusal::AlreadyObserved,
+            ));
+        }
+        let sample = match self.inner.clock.sample() {
+            Ok(sample) => sample,
+            Err(source) => {
+                let source = Arc::new(source);
+                let epoch = self.inner.clock.epoch();
+                self.inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retire_before(epoch, Some(source.clone()));
+                self.inner.wake.notify_one();
+                return Err(ElapsedClockError {
+                    source: Box::new(source),
+                }
+                .into());
+            }
+        };
+        let candidates = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .live_prune_candidates(peer, task.descriptor);
+        // 只在元数据额度需要回收时核对已退休scope；不持状态锁调用权威能力。
+        let obsolete: Vec<_> = candidates
+            .into_iter()
+            .filter(|(key, descriptor)| {
+                self.inner
+                    .authority
+                    .current_task(&key.peer, descriptor.source)
+                    .is_none_or(|current| QueryKey::new(key.peer, current.descriptor) != *key)
+            })
+            .map(|(key, _)| key)
+            .collect();
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.prune_live_tasks(&obsolete);
+        state.refresh(Some(sample));
+        let submitted = state.admit_live(peer, task.descriptor, value, sample);
+        self.inner.wake.notify_one();
+        Ok(submitted)
     }
 }

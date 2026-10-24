@@ -1,6 +1,7 @@
 use super::super::ProgressExchangeService;
 use super::*;
 use crate::connectivity::ConnectivityError;
+use crate::transfer::progress::ProgressLiveRoundPort;
 use crate::transfer::progress::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
     ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSourceCatalog,
@@ -13,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::{timeout, Duration};
+use uc_core::file_transfer::ProgressActive;
 use uc_core::file_transfer::{
     ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
 };
@@ -141,6 +143,7 @@ fn thousand_item_actual_admission_is_bounded_and_evicted_results_cannot_reenter(
         source,
         Arc::new(Offline(tx)),
         Arc::new(UnusedSnapshot),
+        Arc::new(UnusedLive),
     );
     assert_eq!(submit(&delivery, 2, 0), ProgressSubmission::Retained);
     for n in 0..1024 {
@@ -173,6 +176,7 @@ fn global_actual_retention_releases_oldest_without_unbounded_history() {
         source,
         Arc::new(Offline(tx)),
         Arc::new(UnusedSnapshot),
+        Arc::new(UnusedLive),
     );
     for p in 1..=5 {
         for n in 0..64 {
@@ -195,6 +199,7 @@ async fn actual_rounds_follow_all_eight_original_slots_and_duplicate_never_resta
         source,
         Arc::new(Offline(tx)),
         Arc::new(UnusedSnapshot),
+        Arc::new(UnusedLive),
     );
     submit(&delivery, 1, 0);
     let stop = CancellationToken::new();
@@ -239,6 +244,7 @@ async fn eviction_and_close_hold_all_actual_work_slots_until_real_completion() {
             gates: gates.clone(),
         }),
         Arc::new(UnusedSnapshot),
+        Arc::new(UnusedLive),
     );
     for p in 1..=4 {
         submit(&delivery, p, 0);
@@ -302,6 +308,7 @@ async fn clock_fault_retires_all_old_intents_and_recovery_cannot_readmit_them() 
             gates: gates.clone(),
         }),
         Arc::new(UnusedSnapshot),
+        Arc::new(UnusedLive),
     );
     submit(&delivery, 1, 0);
     submit(&delivery, 1, 1);
@@ -446,6 +453,7 @@ async fn round_timeout_cancels_only_that_round_and_next_slot_keeps_original_resu
         authority(&[(1, 1)]),
         Arc::new(UntilCancelled(tx)),
         Arc::new(UnusedSnapshot),
+        Arc::new(UnusedLive),
     );
     submit(&delivery, 1, 0);
     let stop = CancellationToken::new();
@@ -513,6 +521,7 @@ async fn many_actual_eligible_peers_keep_exchange_queue_and_live_futures_bounded
             gates: gates.clone(),
         }),
         Arc::new(UnusedSnapshot),
+        Arc::new(UnusedLive),
     );
     for p in 1..=100 {
         assert_eq!(submit(&delivery, p, 0), ProgressSubmission::Retained);
@@ -568,3 +577,18 @@ impl ProgressSnapshotRoundPort for UnusedSnapshot {
 
 #[path = "query_tests.rs"]
 mod query_tests;
+
+struct UnusedLive;
+#[async_trait]
+impl ProgressLiveRoundPort for UnusedLive {
+    async fn report_live(
+        &self,
+        _: &DeviceId,
+        _: ProgressTaskDescriptor,
+        _: ProgressActive,
+        _: &ProgressExchangeDeadline,
+        _: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        panic!("terminal/query fixture cannot publish live progress")
+    }
+}

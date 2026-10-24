@@ -646,3 +646,5 @@ pub use crate::transfer::progress::{
 };
 
 pub use crate::transfer::progress::ProgressQueryResult;
+
+pub use crate::transfer::progress::{ProgressLiveRoundPort, ProgressUpdateNotice};

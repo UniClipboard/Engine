@@ -74,6 +74,24 @@ impl ProgressExchangeWorker {
                                 Err(source) => Err(source),
                             },
                         ),
+                        Action::Live { descriptor, value } => Completion::Live(
+                            value,
+                            match ProgressExchangeDeadline::new(clock, job.deadline) {
+                                Ok(deadline) => {
+                                    inner
+                                        .live
+                                        .report_live(
+                                            &job.work.peer(),
+                                            descriptor,
+                                            value,
+                                            &deadline,
+                                            &job.cancel,
+                                        )
+                                        .await
+                                }
+                                Err(source) => Err(source),
+                            },
+                        ),
                         Action::Snapshot(expected) => {
                             let interested = match job.work {
                                 Work::Snapshot(key) => inner
@@ -122,6 +140,14 @@ impl ProgressExchangeWorker {
                 _=cancel.cancelled(),if !closed=>{},
                 Some((work,result))=running.next(),if !running.is_empty()=>{
                     match result {
+                        Completion::Live(sent,result)=>{
+                            let permanent=result.as_ref().err().is_some_and(|source|matches!(retry_class(source),RetryClass::Stop));
+                            if let Err(source)=&result {if !closed {uc_debug!(error_class=source.class(),error=source as &dyn Error,"progress activity notification round ended without confirmed delivery");}}
+                            let sample=self.inner.clock.sample();let epoch=self.inner.clock.epoch();
+                            let mut state=self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
+                            let completed=match sample {Ok(sample)=>{state.refresh(Some(sample));Some(sample)},Err(source)=>{state.retire_before(epoch,Some(Arc::new(source)));None}};
+                            if let Work::Live(key)=work {state.finish_live(key,sent,permanent,completed);}
+                        },
                         Completion::Terminal(result)=>{
                             let class=match &result {Ok(())=>RetryClass::Stop,Err(source)=>retry_class(source)};
                             if let Err(source)=&result {if !closed {uc_debug!(error_class=source.class(),error=source as &dyn Error,"progress terminal notification round ended without acknowledgment");}}

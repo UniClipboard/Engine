@@ -1,4 +1,5 @@
 use super::super::super::ProgressQueryResult;
+use super::UnusedLive;
 use super::{authority, id, peer, submit, Clock};
 use super::{
     CancellationToken, DeviceId, Ordering, ProgressExchangeDeadline, ProgressExchangeService,
@@ -93,6 +94,7 @@ fn task(p: u8, n: u16) -> ProgressSourceTask {
     let mut source = [p; 16];
     source[0..2].copy_from_slice(&n.to_be_bytes());
     ProgressSourceTask {
+        notification_closed: Default::default(),
         descriptor: ProgressTaskDescriptor {
             producer: id(90),
             revision: 1,
@@ -143,6 +145,7 @@ async fn mixed_actual_work_shares_four_slots_duplicates_share_one_read_and_cance
         authority(&[(1, 1), (2, 1), (5, 1)]),
         round.clone(),
         round.clone(),
+        Arc::new(UnusedLive),
     );
     submit(&service, 1, 0);
     submit(&service, 2, 0);
@@ -233,6 +236,7 @@ async fn queries_use_exactly_the_existing_global_and_peer_waiting_capacity_witho
         authority(&[(1, 1), (2, 1), (3, 1), (4, 1), (10, 1)]),
         round.clone(),
         round.clone(),
+        Arc::new(UnusedLive),
     );
     for p in 1..=4 {
         submit(&service, p, 0);
@@ -313,6 +317,7 @@ async fn duplicate_query_does_not_restart_five_seconds_while_waiting_for_shared_
         authority(&[(1, 1), (2, 1), (3, 1), (4, 1)]),
         round.clone(),
         round.clone(),
+        Arc::new(UnusedLive),
     );
     for p in 1..=4 {
         submit(&service, p, 0);
@@ -367,8 +372,13 @@ async fn duplicate_query_does_not_restart_five_seconds_while_waiting_for_shared_
 async fn clock_error_keeps_its_source_and_active_query_cannot_be_revived_or_publish_late_success() {
     let (round, mut rx) = held();
     let clock = Arc::new(Clock(AtomicU64::new(0)));
-    let (service, worker) =
-        ProgressExchangeService::new(clock.clone(), authority(&[]), round.clone(), round.clone());
+    let (service, worker) = ProgressExchangeService::new(
+        clock.clone(),
+        authority(&[]),
+        round.clone(),
+        round.clone(),
+        Arc::new(UnusedLive),
+    );
     let started = Arc::new(AtomicUsize::new(0));
     let first = query(&service, 1, 0, CancellationToken::new(), started.clone());
     let stop = CancellationToken::new();
@@ -411,8 +421,13 @@ async fn clock_error_keeps_its_source_and_active_query_cannot_be_revived_or_publ
 async fn queued_terminal_has_priority_over_same_peer_queries_after_actual_work_ends() {
     let (round, mut rx) = held();
     let clock = Arc::new(Clock(AtomicU64::new(0)));
-    let (service, worker) =
-        ProgressExchangeService::new(clock, authority(&[(1, 1)]), round.clone(), round.clone());
+    let (service, worker) = ProgressExchangeService::new(
+        clock,
+        authority(&[(1, 1)]),
+        round.clone(),
+        round.clone(),
+        Arc::new(UnusedLive),
+    );
     let started = Arc::new(AtomicUsize::new(0));
     let first = query(&service, 1, 0, CancellationToken::new(), started.clone());
     let stop = CancellationToken::new();
@@ -478,8 +493,13 @@ async fn a_delayed_earlier_observer_cannot_borrow_the_later_admissions_remaining
     });
     let _release_on_failure = ReleaseClock(clock.clone());
     let (round, mut rx) = held();
-    let (service, worker) =
-        ProgressExchangeService::new(clock.clone(), authority(&[]), round.clone(), round.clone());
+    let (service, worker) = ProgressExchangeService::new(
+        clock.clone(),
+        authority(&[]),
+        round.clone(),
+        round.clone(),
+        Arc::new(UnusedLive),
+    );
     let original = {
         let service = service.clone();
         tokio::spawn(async move {

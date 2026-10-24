@@ -1,14 +1,14 @@
-//! 单个发送意图的完整登记与终态采用负责人；网络等待不持有投影锁。
+//! 单个发送意图的完整登记、活动与终态采用负责人；网络等待不持有投影锁。
 use super::{
     CurrentProgressTaskPort, ProgressBound, ProgressProjectionSnapshot, ProgressReceiveError,
-    ProgressReceiverPort, ProgressTerminalNotice,
+    ProgressReceiverPort, ProgressTerminalNotice, ProgressUpdateNotice,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use uc_core::file_transfer::{
-    valid_progress_plan, ProgressIdentity, ProgressItem, ProgressRegistration,
-    ProgressTerminalEffect, ProgressTerminalSettlement, RegistrationEffect, RegistrationInput,
+    valid_progress_plan, ProgressIdentity, ProgressItem, ProgressItemEffect, ProgressItemInput,
+    ProgressItemProjection, ProgressRegistration, RegistrationEffect, RegistrationInput,
 };
 use uc_core::ids::DeviceId;
 use uuid::Uuid;
@@ -23,7 +23,7 @@ struct State {
     generation: u64,
     registration: ProgressRegistration<ProgressIdentity>,
     bound: Option<ProgressBound>,
-    items: HashMap<ProgressItem, ProgressTerminalSettlement>,
+    items: HashMap<ProgressItem, ProgressItemProjection>,
     version: u64,
 }
 impl TransferProgressReceiver {
@@ -63,7 +63,7 @@ impl TransferProgressReceiver {
                         state
                             .items
                             .get(item)
-                            .and_then(ProgressTerminalSettlement::terminal),
+                            .and_then(ProgressItemProjection::state),
                     )
                 })
                 .collect(),
@@ -72,6 +72,43 @@ impl TransferProgressReceiver {
 }
 #[async_trait]
 impl ProgressReceiverPort for TransferProgressReceiver {
+    async fn adopt_update(
+        &self,
+        peer: &DeviceId,
+        generation: u64,
+        notice: ProgressUpdateNotice,
+    ) -> Result<(), ProgressReceiveError> {
+        if peer != &self.peer || notice.source != self.source {
+            return Err(ProgressReceiveError::UnknownTask);
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.plan.contains(&notice.update.item) {
+            return Err(ProgressReceiveError::InvalidPlan);
+        }
+        if state.registration.apply(RegistrationInput::Notification {
+            generation,
+            binding: notice.binding,
+            source: notice.source,
+            attempt: notice.attempt,
+            revision: notice.revision,
+        }) != RegistrationEffect::CheckNotification
+        {
+            return Err(ProgressReceiveError::Stale);
+        }
+        match state
+            .items
+            .entry(notice.update.item)
+            .or_default()
+            .apply(ProgressItemInput::Update(notice.update))
+        {
+            ProgressItemEffect::Adopted => state.version = state.version.saturating_add(1),
+            ProgressItemEffect::Duplicate => {}
+            ProgressItemEffect::Stale => return Err(ProgressReceiveError::Stale),
+            ProgressItemEffect::Conflict => return Err(ProgressReceiveError::Conflict),
+            ProgressItemEffect::Invalid => return Err(ProgressReceiveError::InvalidPlan),
+        }
+        Ok(())
+    }
     async fn register(
         &self,
         peer: &DeviceId,
@@ -157,12 +194,14 @@ impl ProgressReceiverPort for TransferProgressReceiver {
             return Err(ProgressReceiveError::Stale);
         }
         let item = state.items.entry(notice.result.item).or_default();
-        match item.apply(notice.result) {
-            ProgressTerminalEffect::Adopted => {
+        match item.apply(ProgressItemInput::Terminal(notice.result)) {
+            ProgressItemEffect::Adopted => {
                 state.version = state.version.saturating_add(1);
             }
-            ProgressTerminalEffect::Duplicate => {}
-            ProgressTerminalEffect::Conflict => return Err(ProgressReceiveError::Conflict),
+            ProgressItemEffect::Duplicate => {}
+            ProgressItemEffect::Conflict => return Err(ProgressReceiveError::Conflict),
+            ProgressItemEffect::Stale => return Err(ProgressReceiveError::Stale),
+            ProgressItemEffect::Invalid => return Err(ProgressReceiveError::InvalidPlan),
         }
         Ok(notice)
     }

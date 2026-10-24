@@ -1,5 +1,5 @@
 //! 同一接收设备、两个真实已认证来源；一个终态采用卡住时另端仍获得精确ACK。
-use super::progress_probe::{progress_budget, Fixture};
+use super::progress_probe::{progress_budget, Fixture, UnusedLive};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
 use iroh::{Endpoint, RelayMode};
@@ -14,9 +14,10 @@ use uc_application::deps::{
     ConnectionLease, CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal,
     ProgressExchangeDeadline, ProgressExchangeService, ProgressReceiveError, ProgressReceiverPort,
     ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
-    ProgressTerminalNotice, ProgressTerminalRoundPort, TransferProgressProducer,
-    TransferProgressReceiver, TransferProgressSnapshotReader,
+    ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressUpdateNotice,
+    TransferProgressProducer, TransferProgressReceiver, TransferProgressSnapshotReader,
 };
+use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
     ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
 };
@@ -53,9 +54,15 @@ impl ProgressTaskAuthorityPort for Authority {
         peer: &DeviceId,
         source: ProgressIdentity,
     ) -> Option<ProgressSourceTask> {
-        (source == SOURCE)
-            .then(|| self.tasks.get(peer).cloned())
-            .flatten()
+        if source != SOURCE {
+            return None;
+        }
+        self.tasks.get(peer).cloned().map(|mut task| {
+            if self.claimed.lock().unwrap().contains(peer) {
+                task.notification_closed = Arc::new(task.items.iter().copied().collect());
+            }
+            task
+        })
     }
     fn claim_terminal(
         &self,
@@ -86,6 +93,14 @@ struct Paused {
 }
 #[async_trait]
 impl ProgressReceiverPort for Paused {
+    async fn adopt_update(
+        &self,
+        peer: &DeviceId,
+        generation: u64,
+        notice: ProgressUpdateNotice,
+    ) -> Result<(), ProgressReceiveError> {
+        self.owner.adopt_update(peer, generation, notice).await
+    }
     async fn register(
         &self,
         peer: &DeviceId,
@@ -179,6 +194,7 @@ async fn blocked_authenticated_peer_does_not_hold_up_another_peers_actual_termin
         )
         .await?;
         let task = ProgressSourceTask {
+            notification_closed: Default::default(),
             descriptor: ProgressTaskDescriptor {
                 producer: ProgressIdentity::new([2; 16]),
                 revision: 1,
@@ -252,6 +268,7 @@ async fn blocked_authenticated_peer_does_not_hold_up_another_peers_actual_termin
                 first.outbound.clone(),
                 Arc::new(TransferProgressWire),
             )),
+            Arc::new(UnusedLive),
         );
         let stop = CancellationToken::new();
         let running = tokio::spawn(worker.run(stop.clone()));
@@ -268,7 +285,10 @@ async fn blocked_authenticated_peer_does_not_hold_up_another_peers_actual_termin
             timeout(Duration::from_secs(3), events.recv()).await?,
             Some((b, true))
         );
-        assert_eq!(fast.snapshot().items[0].1, Some(result()));
+        assert_eq!(
+            fast.snapshot().items[0].1,
+            Some(ProgressItemState::Terminal(result()))
+        );
         assert!(paused.owner.snapshot().items[0].1.is_none());
         assert!(rounds.peak.load(Ordering::SeqCst) <= 4);
         stop.cancel();
@@ -280,7 +300,10 @@ async fn blocked_authenticated_peer_does_not_hold_up_another_peers_actual_termin
         paused.release.add_permits(1);
         assert!(timeout(Duration::from_secs(5), slow_task).await??.is_err());
         timeout(Duration::from_secs(5), fast_task).await???;
-        assert_eq!(paused.owner.snapshot().items[0].1, Some(result()));
+        assert_eq!(
+            paused.owner.snapshot().items[0].1,
+            Some(ProgressItemState::Terminal(result()))
+        );
         first.close().await?;
         second.close().await?;
         anyhow::Ok(())

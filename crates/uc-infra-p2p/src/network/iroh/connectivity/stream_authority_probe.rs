@@ -1,5 +1,5 @@
 //! 同一组合测试中读取实际接收use case进程的当前权威，再通过真实Iroh流登记。
-use super::progress_probe::{progress_budget, Fixture};
+use super::progress_probe::{progress_budget, Fixture, UnusedLive};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use anyhow::ensure;
 use async_trait::async_trait;
@@ -20,9 +20,10 @@ use uc_application::deps::{
     CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline,
     ProgressExchangeService, ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask,
     ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, TransferProgressProducer, TransferProgressReceiver,
-    TransferProgressSnapshotReader,
+    ProgressTerminalRoundPort, ProgressUpdateNotice, TransferProgressProducer,
+    TransferProgressReceiver, TransferProgressSnapshotReader,
 };
+use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
     ProgressFailureReason, ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal,
     ProgressTerminalOutcome,
@@ -121,6 +122,17 @@ impl Authority {
         Ok(serde_json::from_str(&response)?)
     }
 }
+fn decode_item(item: &Value) -> ProgressItem {
+    ProgressItem {
+        kind: match item["kind"].as_str().unwrap() {
+            "file" => ProgressItemKind::File,
+            "representation" => ProgressItemKind::Representation,
+            "directory" => ProgressItemKind::DirectoryUnit,
+            _ => panic!("invalid fixture kind"),
+        },
+        index: item["index"].as_u64().unwrap() as u16,
+    }
+}
 fn decode_task(value: Value) -> Option<ProgressSourceTask> {
     if value.is_null() {
         return None;
@@ -128,6 +140,14 @@ fn decode_task(value: Value) -> Option<ProgressSourceTask> {
     let id =
         |field: &str| ProgressIdentity::new(serde_json::from_value(value[field].clone()).unwrap());
     Some(ProgressSourceTask {
+        notification_closed: Arc::new(
+            value["closed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|position| decode_item(&value["items"][position.as_u64().unwrap() as usize]))
+                .collect(),
+        ),
         descriptor: ProgressTaskDescriptor {
             producer: id("producer"),
             revision: value["revision"].as_u64().unwrap(),
@@ -139,15 +159,7 @@ fn decode_task(value: Value) -> Option<ProgressSourceTask> {
             .as_array()
             .unwrap()
             .iter()
-            .map(|item| ProgressItem {
-                kind: match item["kind"].as_str().unwrap() {
-                    "file" => ProgressItemKind::File,
-                    "representation" => ProgressItemKind::Representation,
-                    "directory" => ProgressItemKind::DirectoryUnit,
-                    _ => panic!("invalid fixture kind"),
-                },
-                index: item["index"].as_u64().unwrap() as u16,
-            })
+            .map(decode_item)
             .collect::<Vec<_>>()
             .into(),
     })
@@ -219,6 +231,14 @@ impl CurrentProgressTaskPort for HeldDescriptor<'_> {
 }
 #[async_trait]
 impl ProgressReceiverPort for Gate {
+    async fn adopt_update(
+        &self,
+        peer: &DeviceId,
+        generation: u64,
+        notice: ProgressUpdateNotice,
+    ) -> Result<(), ProgressReceiveError> {
+        self.owner.adopt_update(peer, generation, notice).await
+    }
     async fn register(
         &self,
         peer: &DeviceId,
@@ -706,6 +726,7 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
                 fixture.outbound.clone(),
                 Arc::new(TransferProgressWire),
             )),
+            Arc::new(UnusedLive),
         );
         assert_eq!(
             delivery.submit_settled(peer, SOURCE, accepted.descriptor.attempt, result)?,
@@ -721,7 +742,10 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
         );
         supervise_stop.cancel();
         supervised.await?;
-        assert_eq!(owner.snapshot().items[0].1, Some(result));
+        assert_eq!(
+            owner.snapshot().items[0].1,
+            Some(ProgressItemState::Terminal(result))
+        );
         fixture.close().await?;
         anyhow::Ok(())
     })
