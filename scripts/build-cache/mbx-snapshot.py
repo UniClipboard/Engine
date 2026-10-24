@@ -29,7 +29,10 @@ ROOT = Path(os.environ.get("UC_MBX_SNAPSHOT_SOURCE_ROOT", Path(__file__).resolve
 
 def digest_file(file):
     with open(file, "rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
+        digest = hashlib.sha256()
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+        return digest.hexdigest()
 
 
 def scene_key(scene):

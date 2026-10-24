@@ -22,9 +22,14 @@ inputs:
 runs:
   using: composite
   steps:
+    # 自托管机器使用既有 Python，不安装到 hosted runner 的固定系统路径。
     - uses: actions/setup-python@v5
+      if: runner.environment == 'github-hosted'
       with:
         python-version: '3.12'
+    - name: Check snapshot Python runtime
+      shell: bash
+      run: python3 -c "import sys; assert sys.version_info >= (3, 9), 'Snapshot transport requires Python 3.9+'"
     - name: Install snapshot transport SDK
       continue-on-error: true
       if: inputs.endpoint != '' && inputs.access-key-id != '' && inputs.secret-access-key != ''
