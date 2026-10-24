@@ -82,5 +82,15 @@ just cargo test -p uc-sync-protocol --tests --locked
 额外字节、页计数、精确帧大小边界、最大合法页、未知／零总量、原因映射、变体级固定错误分类及完整来源、载体界限。
 旧协议测试和旧 golden 向量继续执行。
 
-这些结果只证明字节合同和有界编解码。真实任务登记、生产终态采用、ACK 时点、补发、成员撤销、Router 迁移、
+Core 的 `ProgressRegistration` 现在提供单个已授权设备／源条目的纯登记围栏。
+连接世代是完整负责人从实际连接分配的本地单调值，不能取自帧；替换连接保留最近描述但退休原 binding 和挑战。
+同连接固定 producer；同 producer 重连仍检查 owner revision，较低修订拒收，同修订的不同 attempt／计划也拒收。
+新 producer 必须换连接并响应新挑战，不能按 UUID 大小或跨进程 revision 排序。
+挑战单次消费，新挑战淘汰先前未完成挑战；通知还须精确匹配世代、binding、源条目、attempt 和登记修订。
+规则只返回身份判定，不代替逻辑项／轮次／序号校验、终态采用和 ACK。
+完整负责人必须按 Space 世代／认证设备隔离实例、生成不复用的挑战及 binding，并将迟到交换保留在原连接世代；
+不能因帧晚到而重新激活旧连接，也不能在普通重连时重建规则丢失修订。
+
+真实双端登记原型和未覆盖边界见[阶段 0 证明](../exec-plans/active/2026-10-24-transfer-progress-connectivity-feasibility.md)。
+生产接收 attempt 交接、生产终态采用、ACK 时点、补发、成员撤销、Router 迁移、
 独立进程网络及平台矩阵继续以第八片执行计划为准。

@@ -29,6 +29,7 @@ fn version(protocol: ConnectionProtocol) -> Result<GroupUpdateVersion, Connectiv
         | ConnectionProtocol::PeerReachabilityV2
         | ConnectionProtocol::Blob
         | ConnectionProtocol::TransferProgressV1
+        | ConnectionProtocol::TransferProgressV2
         | ConnectionProtocol::Unsupported => Err(ConnectivityError::Denied),
     }
 }

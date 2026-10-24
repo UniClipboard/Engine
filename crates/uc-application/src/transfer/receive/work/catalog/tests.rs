@@ -1,5 +1,8 @@
 use super::{ReceiveSource, ReceiveWorkRegistry};
-use crate::clipboard::sync::payload_codec::V3BlobRef;
+use crate::clipboard::sync::payload_codec::{
+    decode_v3_bytes_to_snapshot_and_blob_refs, encode_snapshot_with_blob_refs_to_v3_bytes,
+    V3BlobRef,
+};
 use crate::transfer::receive::materialization::{
     InboundFileSetManifest, InboundFileSetMember, ReceivedItem, ReceivedOutput,
 };
@@ -8,12 +11,13 @@ use std::num::TryFromIntError;
 use std::sync::Arc;
 use uc_core::clipboard::FileSetMemberKind;
 use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
-use uc_core::ids::{DeviceId, EntryId};
+use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::blob::BlobTicket;
 use uc_core::ports::{
     AttemptState, EntryReceiveProgress, ReceiveItemKind, TrackedFileTransferStatus,
 };
 use uc_core::ports::{ReceiveArtifact, ReceiveArtifactOwnership};
+use uc_core::{ObservedClipboardRepresentation, SystemClipboardSnapshot};
 
 fn source() -> ReceiveSource {
     ReceiveSource {
@@ -452,4 +456,69 @@ fn out_of_range_plan_bytes_are_reported_with_source_instead_of_clamping() {
     assert!(error.chain().any(|source| source.is::<TryFromIntError>()));
     assert!(!format!("{error:?}").contains("PRIVATE"));
     action.finish(Ok(()));
+}
+
+#[test]
+fn unchanged_v3_preserves_source_and_original_logical_positions_across_attempts() {
+    let mut original = source();
+    original.blob_refs.resize(4, original.blob_refs[0].clone());
+    original.blob_refs[0].representation_index = Some(2);
+    original.blob_refs[2].representation_index = Some(0);
+    let snapshot = SystemClipboardSnapshot {
+        ts_ms: 0,
+        representations: (0..3)
+            .map(|_| {
+                ObservedClipboardRepresentation::new(
+                    RepresentationId::new(),
+                    FormatId::from("text"),
+                    None,
+                    Vec::new(),
+                )
+            })
+            .collect(),
+        file_content_digests: Vec::new(),
+        file_set_v1_component: None,
+    };
+    let (wire, _) =
+        encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &original.blob_refs).unwrap();
+    let (_, decoded) = decode_v3_bytes_to_snapshot_and_blob_refs(&wire).unwrap();
+    assert_eq!(decoded, original.blob_refs);
+    assert!(decoded
+        .iter()
+        .all(|blob| blob.entry_id == EntryId::from("PRIVATE_SOURCE")));
+    original.blob_refs = decoded;
+    let mut observed = Vec::new();
+    for (entry, attempt) in [
+        ("receiver-a", "first"),
+        ("receiver-a", "second"),
+        ("receiver-b", "first"),
+    ] {
+        let planned = original.planned(&EntryId::from(entry), attempt);
+        assert_eq!(planned.len(), 4); // 相同名称、ticket、大小不合并逻辑项。
+        for (position, (kind, suffix)) in [
+            (ReceiveItemKind::Representation, "representation:2"),
+            (ReceiveItemKind::File, "member:0"),
+            (ReceiveItemKind::Representation, "representation:0"),
+            (ReceiveItemKind::File, "member:1"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(planned[position].blob_index, position);
+            assert_eq!(planned[position].kind, kind);
+            assert_eq!(
+                planned[position].id,
+                format!("{entry}:attempt:{attempt}:{suffix}")
+            );
+        }
+        observed.push(planned.into_iter().map(|item| item.id).collect::<Vec<_>>());
+    }
+    assert_ne!(observed[0], observed[1]);
+    assert_ne!(observed[0], observed[2]);
+    original.manifest = Some(InboundFileSetManifest {
+        members: Vec::new(),
+    });
+    let directory = original.planned(&EntryId::from("receiver-a"), "third");
+    assert_eq!(directory.len(), 1);
+    assert_eq!(directory[0].kind, ReceiveItemKind::DirectoryUnit);
 }

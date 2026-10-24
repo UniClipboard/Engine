@@ -19,3 +19,9 @@ pub use receive_recovery::{
     receive_failure_recovery_action, receive_no_entry_confirmation, ReceiveFailureRecoveryAction,
     ReceiveFailureRecoveryRefusal,
 };
+
+mod progress_registration;
+pub use progress_registration::{
+    ProgressRegistration, RegistrationDescriptor, RegistrationEffect, RegistrationInput,
+    RegistrationRefusal,
+};

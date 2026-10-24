@@ -27,6 +27,7 @@ use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
+use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
 use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
 pub(crate) struct IrohPeerConnection {
@@ -116,6 +117,7 @@ impl PeerConnection for IrohPeerConnection {
                 | PEER_REACHABILITY_ALPN
                 | BLOBS_ALPN
                 | LEGACY_TRANSFER_PROGRESS_ALPN
+                | TRANSFER_PROGRESS_ALPN
         ) {
             ConnectionMode::Multiplexed
         } else if self.native.alpn() == LEGACY_PEER_REACHABILITY_ALPN {
@@ -128,6 +130,7 @@ impl PeerConnection for IrohPeerConnection {
         match self.native.alpn() {
             BLOBS_ALPN => ConnectionProtocol::Blob,
             LEGACY_TRANSFER_PROGRESS_ALPN => ConnectionProtocol::TransferProgressV1,
+            TRANSFER_PROGRESS_ALPN => ConnectionProtocol::TransferProgressV2,
             PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV2,
             LEGACY_PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV1,
             MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,
