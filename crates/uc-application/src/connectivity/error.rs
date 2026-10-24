@@ -23,6 +23,8 @@ pub enum ConnectivityError {
     Task(#[source] std::sync::Arc<tokio::task::JoinError>),
     #[error("single-exchange connection already used")]
     ExchangeAlreadyUsed,
+    #[error("connection stream capability unavailable")]
+    Capability(#[source] StreamCapabilityRefusal),
     #[error("peer admission denied")]
     Denied,
     #[error("connection operation deadline expired")]
@@ -49,6 +51,12 @@ pub enum ConnectivityError {
         primary: Box<ConnectivityError>,
         additional: Box<ConnectivityError>,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StreamCapabilityRefusal {
+    #[error("unidirectional streams unavailable")]
+    UnidirectionalUnavailable,
 }
 
 impl fmt::Debug for ConnectivityError {
@@ -99,6 +107,7 @@ impl ErrorClass for ConnectivityError {
             Self::InboundResultClosed(_) => "inbound_connection_result_closed",
             Self::Task(_) => "connection_task_failed",
             Self::ExchangeAlreadyUsed => "connection_exchange_already_used",
+            Self::Capability(_) => "connection_stream_capability_unavailable",
             Self::Denied => "connection_admission_denied",
             Self::DeadlineExpired | Self::TimedOut(_) => "connection_timeout",
             Self::AdmissionTimedOut(_) | Self::AdmissionDeadlineExpired => {

@@ -9,7 +9,7 @@ use super::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
@@ -105,7 +105,7 @@ impl ConnectionLease {
         }
         self.record.grant.check_current().await
     }
-    fn claim_exchange(&self) -> Result<(), ConnectivityError> {
+    pub(super) fn claim_exchange(&self) -> Result<(), ConnectivityError> {
         if matches!(
             self.mode(),
             ConnectionMode::SingleExchange | ConnectionMode::RetainedSingleExchange
@@ -125,6 +125,20 @@ impl ConnectionLease {
         deadline: Instant,
         cancel: &CancellationToken,
     ) -> Result<StreamLease, ConnectivityError> {
+        let permit = self.reserve_outbound(deadline, cancel).await?;
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
+            result = timeout_at(deadline, self.record.connection.open_bi()) => result.map_err(ConnectivityError::TimedOut)??,
+        };
+        StreamLease::new(result, self.record.clone(), vec![permit])
+    }
+
+    pub(super) async fn reserve_outbound(
+        &self,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<OwnedSemaphorePermit, ConnectivityError> {
         if Instant::now() >= deadline {
             return Err(ConnectivityError::DeadlineExpired);
         }
@@ -143,6 +157,7 @@ impl ConnectionLease {
             .map_err(ConnectivityError::Busy)?;
         let permit = tokio::select! {
             biased;
+            _ = self.record.stop.cancelled() => return Err(ConnectivityError::Stopped),
             _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
             result = timeout_at(deadline, self.record.peer.outbound.clone().acquire_owned()) => result.map_err(ConnectivityError::TimedOut)?.map_err(ConnectivityError::ResourceClosed)?,
         };
@@ -163,12 +178,7 @@ impl ConnectionLease {
                 ConnectivityError::DeadlineExpired
             });
         }
-        let result = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
-            result = timeout_at(deadline, self.record.connection.open_bi()) => result.map_err(ConnectivityError::TimedOut)??,
-        };
-        StreamLease::new(result, self.record.clone(), vec![permit])
+        Ok(permit)
     }
     pub async fn accept_bi(&self) -> Result<StreamLease, ConnectivityError> {
         if self.protocol() == ConnectionProtocol::PeerReachabilityV2 {

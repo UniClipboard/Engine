@@ -55,7 +55,7 @@ use uc_sync_protocol::transfer_progress::{
 /// ALPN identifier for the reverse-direction transfer progress protocol.
 /// Disjoint from the forward clipboard / peer_reachability / blobs ALPNs so the
 /// shared Router multiplexes correctly.
-pub const TRANSFER_PROGRESS_ALPN: &[u8] = b"uniclipboard/transfer-progress/1";
+pub use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN as TRANSFER_PROGRESS_ALPN;
 
 /// Capacity of the inbound progress broadcast. Sized for typical fan-in:
 /// even a 10-peer space rarely produces more than a few in-flight transfers

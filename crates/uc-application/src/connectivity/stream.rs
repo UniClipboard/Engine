@@ -35,10 +35,25 @@ pub struct StreamLease {
 }
 
 /// 已开始本地工作的资源使用权；网络取消后仍计入同一容量，不登记第二套任务。
+#[derive(Clone)]
 pub struct StreamWorkLease {
     _connection: Arc<ConnectionRecord>,
     _permits: Arc<Vec<OwnedSemaphorePermit>>,
     _activity: Arc<ActivityGuard>,
+}
+
+impl StreamWorkLease {
+    pub(super) fn new(
+        connection: Arc<ConnectionRecord>,
+        permits: Vec<OwnedSemaphorePermit>,
+    ) -> Result<Self, ConnectivityError> {
+        let activity = connection.activity.acquire()?;
+        Ok(Self {
+            _connection: connection,
+            _permits: Arc::new(permits),
+            _activity: activity,
+        })
+    }
 }
 
 impl StreamLease {
