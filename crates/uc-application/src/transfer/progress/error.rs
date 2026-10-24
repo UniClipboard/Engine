@@ -1,4 +1,4 @@
-use crate::connectivity::ConnectivityError;
+use crate::connectivity::{ConnectivityError, ElapsedClockError};
 use std::error::Error;
 use std::fmt;
 use uc_core::error_class::ErrorClass;
@@ -51,33 +51,4 @@ impl fmt::Debug for ProgressReceiveError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, formatter)
     }
-}
-
-#[derive(thiserror::Error)]
-#[error("elapsed clock unavailable")]
-pub struct ElapsedClockError {
-    #[source]
-    pub source: Box<dyn Error + Send + Sync>,
-}
-impl fmt::Debug for ElapsedClockError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, formatter)
-    }
-}
-impl ErrorClass for ElapsedClockError {
-    fn class(&self) -> &'static str {
-        "elapsed_clock_unavailable"
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ElapsedClockRefusal {
-    #[error("elapsed clock continuity lost")]
-    ContinuityLost,
-    #[error("elapsed clock reading regressed")]
-    NonMonotonicReading,
-    #[error("platform has no suspend-inclusive clock")]
-    UnsupportedPlatform,
-    #[error("native elapsed clock count is invalid")]
-    InvalidNativeCount,
 }

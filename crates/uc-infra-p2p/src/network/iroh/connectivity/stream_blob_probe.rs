@@ -212,6 +212,7 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
             outbound_per_peer: 2,
             connections_per_peer_direction: Some(1),
             idle_retention: Some(IdleRetentionPolicy {
+                elapsed_clock: None,
                 timeout: Duration::from_secs(30),
                 capacity: 16,
             }),
@@ -225,6 +226,7 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
             inbound_per_connection: 2,
             connections_per_peer_direction: Some(1),
             idle_retention: Some(IdleRetentionPolicy {
+                elapsed_clock: None,
                 timeout: Duration::from_secs(30),
                 capacity: 16,
             }),

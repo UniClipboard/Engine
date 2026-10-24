@@ -32,7 +32,7 @@
 * [x] 用真实双端及可控消息延迟证明源条目→接收逻辑项／attempt 的关联，新旧 producer／登记乱序不能回退；连接重建不重置修订，进程重启退休旧关联。普通文件／空目录、挑战前后替换、迟到 Bound、真实接收 fixture kill／relaunch 与新 QUIC 连接组合通过；受控存储 port 的边界见[组合证明](2026-10-24-transfer-progress-connectivity-feasibility.md#实际当前权威与真实登记的组合)，不冒充后续 Engine／SQLite 或设备矩阵。
 * [x] 用真实 Uni 双向流完成一个输出后的终态采用与 ACK，证明 FIN 仅为传输事实，不是 Application 采用。实际 BAO 接收／文件导出、采用前暂停、精确重复／冲突、取消／期限到达及尾随字节证据见[输出后采用证明](2026-10-24-transfer-progress-connectivity-feasibility.md#真实输出后的-application-采用与-ack)；生产接收 attempt／SQLite 交接及完整阶段 3 尚未完成。
 * [x] 用真实旧 `/1` 验证最小受管单向流接缝，两个交换共用连接，停止一项不打断另一项；记录活动许可、当前准入及关闭寿命。主机证明范围见[接缝记录](2026-10-24-transfer-progress-connectivity-feasibility.md)，生产 Router 迁移不据此记完成。
-* [ ] 核对各目标平台经过时间能力，证明系统挂起消耗期限；逻辑模拟、主机睡眠与物理设备分别登记，不把未测平台记通过。源码审计、无socket唤醒期限回归及人工物理挂起入口见[平台审计](2026-10-24-transfer-progress-connectivity-feasibility.md#各平台经过时间审计与物理挂起入口)；物理测试与技术空闲恢复尚未闭合，保持未完成。
+* [ ] 核对各目标平台经过时间能力，证明系统挂起消耗期限；逻辑模拟、主机睡眠与物理设备分别登记，不把未测平台记通过。源码审计、无socket唤醒期限回归及人工物理挂起入口见[平台审计](2026-10-24-transfer-progress-connectivity-feasibility.md#各平台经过时间审计与物理挂起入口)；进度空闲预算与原子复用已取得[主机证明](2026-10-24-transfer-progress-connectivity-feasibility.md#进度连接空闲期限证明)，物理测试仍未闭合，保持未完成。
 * [x] 以最大原始清单、分页、终态超额及一个卡住的对端验证 spec §5.6 起始技术策略，冻结最终策略和调度算法。能力及证据边界见[资源覆盖表](2026-10-24-transfer-progress-connectivity-feasibility.md#阶段0资源策略覆盖与冻结)；最大CAS清单强制通过真实专属profile读取16页，主机连接保留含真实31秒工作／30秒回收。平台挂起、生产迁移和阶段5实机矩阵不据此记完成。
 * [ ] 输出阶段 0 结论，逐项为已证明／阻塞／未执行；任何必须更改 blob／V3 格式、扩大持久化或弱化登记隔离的结果先修订设计，不直接生产迁移。
 

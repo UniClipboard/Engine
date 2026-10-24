@@ -47,7 +47,9 @@ impl StreamWorkLease {
         connection: Arc<ConnectionRecord>,
         permits: Vec<OwnedSemaphorePermit>,
     ) -> Result<Self, ConnectivityError> {
-        let activity = connection.activity.acquire()?;
+        let activity = connection
+            .activity
+            .acquire(connection.connection.as_ref())?;
         Ok(Self {
             _connection: connection,
             _permits: Arc::new(permits),
@@ -96,7 +98,9 @@ impl StreamLease {
         connection: Arc<ConnectionRecord>,
         permits: Vec<OwnedSemaphorePermit>,
     ) -> Result<Self, ConnectivityError> {
-        let activity = connection.activity.acquire()?;
+        let activity = connection
+            .activity
+            .acquire(connection.connection.as_ref())?;
         Ok(Self {
             send: pair.0,
             receive: pair.1,

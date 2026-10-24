@@ -983,6 +983,7 @@ async fn idle_retention_reuses_across_requests_and_expires_after_last_activity()
         ConnectionMode::Multiplexed,
         ConnectivityPolicy {
             idle_retention: Some(super::IdleRetentionPolicy {
+                elapsed_clock: None,
                 timeout: Duration::from_secs(30),
                 capacity: 16,
             }),
@@ -1058,6 +1059,7 @@ async fn retention_capacity_does_not_evict_active_requests() {
         ConnectionMode::Multiplexed,
         ConnectivityPolicy {
             idle_retention: Some(super::IdleRetentionPolicy {
+                elapsed_clock: None,
                 timeout: Duration::from_secs(30),
                 capacity: 1,
             }),
@@ -1225,6 +1227,7 @@ async fn evicting_reuse_keeps_a_brother_stream_until_its_own_completion() {
         ConnectionMode::Multiplexed,
         ConnectivityPolicy {
             idle_retention: Some(super::IdleRetentionPolicy {
+                elapsed_clock: None,
                 timeout: Duration::from_secs(30),
                 capacity: 16,
             }),
@@ -1701,3 +1704,6 @@ async fn identity_lookup_scope_cannot_gain_a_fresh_grant_after_revocation_or_ses
     );
     manager.shutdown().await.expect("shutdown");
 }
+
+#[path = "retention_tests.rs"]
+mod retention_tests;

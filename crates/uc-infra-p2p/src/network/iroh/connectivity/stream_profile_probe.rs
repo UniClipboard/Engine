@@ -119,7 +119,7 @@ fn manager(
             ledger,
             ConnectivityProfile::TransferProgress,
         )),
-        transfer_progress_connectivity_policy(),
+        transfer_progress_connectivity_policy(Arc::new(SystemElapsedClock)),
     )
 }
 type Incoming = (ConnectionLease, Arc<dyn PeerConnection>);

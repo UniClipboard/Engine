@@ -34,7 +34,8 @@ fn connection_retry(source: &ConnectivityError) -> RetryClass {
         | ConnectivityError::Stream(_) => RetryClass::Retry,
         ConnectivityError::Stopped => RetryClass::Cancelled,
         ConnectivityError::Shared(source) => connection_retry(source),
-        ConnectivityError::ResourceClosed(_)
+        ConnectivityError::Clock(_)
+        | ConnectivityError::ResourceClosed(_)
         | ConnectivityError::ResultClosed(_)
         | ConnectivityError::InboundResultClosed(_)
         | ConnectivityError::Task(_)

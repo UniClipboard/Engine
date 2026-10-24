@@ -101,7 +101,7 @@ impl Acquisition {
         Ok(Arc::new(ConnectionRecord {
             connection,
             address_hint: self.address_hint.clone(),
-            activity: Arc::new(ConnectionActivity::default()),
+            activity: Arc::new(ConnectionActivity::new(self.policy.idle_retention.as_ref())),
             stop: self.stop.clone(),
             cache_cancel: CancellationToken::new(),
             supervise_local_work: self.policy.wait_for_local_work(),

@@ -216,7 +216,7 @@ impl Fixture {
                 AdmittedConnections::default(),
                 profile,
             )),
-            policy,
+            policy.clone(),
         );
         let inbound = ConnectivityManager::new(
             Arc::new(Backend(receiving.clone())),

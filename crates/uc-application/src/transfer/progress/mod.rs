@@ -1,4 +1,5 @@
 //! 反向进度的完整业务负责人；原始发送意图授权，登记、活动、联系及终态采用共享同一投影。
+use crate::connectivity::{ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal};
 mod clock;
 mod delivery;
 pub use delivery::{ProgressExchangeService, ProgressExchangeWorker, ProgressQueryResult};
@@ -11,13 +12,13 @@ mod producer;
 mod receiver;
 pub use producer::TransferProgressProducer;
 mod source;
-pub use error::{ElapsedClockError, ElapsedClockRefusal, ProgressReceiveError};
+pub use error::ProgressReceiveError;
 pub use model::{
     ProgressBound, ProgressClaimRefusal, ProgressProjectionSnapshot, ProgressSourceTask,
     ProgressSubmission, ProgressTaskDescriptor, ProgressTerminalNotice,
 };
 pub use ports::{
-    CurrentProgressTaskPort, ElapsedClockPort, ProgressReceiverPort, ProgressTaskAuthorityPort,
+    CurrentProgressTaskPort, ProgressReceiverPort, ProgressTaskAuthorityPort,
     ProgressTerminalRoundPort, ProgressWirePort,
 };
 pub use receiver::TransferProgressReceiver;

@@ -1,8 +1,11 @@
 use super::*;
+use std::sync::atomic::AtomicU64;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use uc_application::deps::ConnectivityPolicy;
+use uc_application::deps::{ElapsedClockError, ElapsedClockPort};
 use uc_core::file_transfer::OutboundProgressStatus;
+use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::clipboard::MULTIPLEXED_CLIPBOARD_ALPN;
 use uc_sync_protocol::transfer_progress::{self, ProgressFrame, LEGACY_TRANSFER_PROGRESS_ALPN};
 
@@ -395,7 +398,7 @@ async fn direction_capacity_and_progress_retirement_are_isolated_but_member_revo
                 client_ledger.clone(),
                 ConnectivityProfile::TransferProgress,
             )),
-            transfer_progress_connectivity_policy(),
+            transfer_progress_connectivity_policy(Arc::new(SystemElapsedClock)),
         );
         let attempt = wrong.clone();
         let attempt_stop = stop.clone();
@@ -427,6 +430,92 @@ async fn direction_capacity_and_progress_retirement_are_isolated_but_member_revo
         inbound.shutdown().await?;
         clipboard.shutdown().await?;
         remote_clip.shutdown().await?;
+        router.shutdown().await?;
+        client.close().await;
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+struct SuspendClock(AtomicU64);
+impl ElapsedClockPort for SuspendClock {
+    fn elapsed(&self) -> Result<Duration, ElapsedClockError> {
+        Ok(Duration::from_secs(self.0.load(Ordering::SeqCst)))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn elapsed_jump_retires_real_idle_connection_after_actual_work_finishes() -> anyhow::Result<()>
+{
+    timeout(BUDGET, async {
+        let clock = Arc::new(SuspendClock(AtomicU64::new(0)));
+        let client = endpoint().await?;
+        let server = endpoint().await?;
+        let peer = DeviceId::new("server");
+        let directory = Arc::new(Directory {
+            peers: vec![
+                (peer, server.addr()),
+                (DeviceId::new("client"), client.addr()),
+            ],
+            allowed: AtomicBool::new(true),
+        });
+        let outbound = ConnectivityManager::new(
+            Arc::new(IrohConnectivityBackend::new(
+                client.clone(),
+                directory.clone(),
+                None,
+                ConnectivityProfile::TransferProgress,
+            )),
+            Arc::new(IrohConnectionAdmission::new(
+                directory.clone(),
+                directory.clone(),
+                Arc::new(Sha256IdentityFingerprintFactory),
+                AdmittedConnections::default(),
+                ConnectivityProfile::TransferProgress,
+            )),
+            transfer_progress_connectivity_policy(clock.clone()),
+        );
+        let inbound = manager(server.clone(), directory, AdmittedConnections::default());
+        let (tx, mut rx) = mpsc::channel(8);
+        let router = Router::builder((*server).clone())
+            .accept(
+                TRANSFER_PROGRESS_ALPN,
+                Capture {
+                    manager: inbound.clone(),
+                    events: tx,
+                },
+            )
+            .spawn();
+        let lease = outbound
+            .request(peer)
+            .connect(Instant::now() + BUDGET, &CancellationToken::new())
+            .await?;
+        let (remote, raw) = incoming(&mut rx).await;
+        let mut stream = lease.open_bi(Instant::now() + BUDGET).await?;
+        stream.send.write_all(&[7]).await?;
+        let mut accepted = remote.accept_bi().await?;
+        let mut byte = [0];
+        accepted.receive.read_exact(&mut byte).await?;
+        assert_eq!(byte, [7]);
+        assert!(outbound.retain(&lease).await?);
+        let (io, work) = stream.into_parts();
+        drop(io);
+        drop(accepted);
+        drop(lease);
+        drop(remote);
+        // 真实流和真实工作租约，经过时间跳变为注入值；不声称物理系统睡眠。
+        clock.0.store(120, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!raw.is_closed());
+        drop(work);
+        clock.0.store(149, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!raw.is_closed());
+        clock.0.store(150, Ordering::SeqCst);
+        timeout(Duration::from_secs(2), raw.closed()).await?;
+        outbound.shutdown().await?;
+        inbound.shutdown().await?;
         router.shutdown().await?;
         client.close().await;
         anyhow::Ok(())
