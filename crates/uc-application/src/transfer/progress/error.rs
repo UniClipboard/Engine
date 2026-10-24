@@ -2,9 +2,12 @@ use crate::connectivity::ConnectivityError;
 use std::error::Error;
 use std::fmt;
 use uc_core::error_class::ErrorClass;
+use uc_core::file_transfer::ProgressSnapshotRefusal;
 
 #[derive(thiserror::Error)]
 pub enum ProgressReceiveError {
+    #[error("progress snapshot incomplete or inconsistent")]
+    Snapshot(#[from] ProgressSnapshotRefusal),
     #[error("progress clock unavailable")]
     Clock(#[from] ElapsedClockError),
     #[error("progress connection failed")]
@@ -27,6 +30,7 @@ pub enum ProgressReceiveError {
 impl ErrorClass for ProgressReceiveError {
     fn class(&self) -> &'static str {
         match self {
+            Self::Snapshot(_) => "progress_snapshot_invalid",
             Self::Clock(source) => source.class(),
             Self::Connection(source) => source.class(),
             Self::Unsupported => "progress_protocol_unsupported",

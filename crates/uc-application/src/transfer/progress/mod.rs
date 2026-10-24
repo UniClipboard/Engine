@@ -30,3 +30,10 @@ mod source_tests;
 
 #[cfg(test)]
 mod deadline_tests;
+
+mod snapshot;
+pub use snapshot::{
+    ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotPage,
+    ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotWirePort,
+    TransferProgressSnapshotReader,
+};

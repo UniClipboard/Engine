@@ -232,7 +232,8 @@ fn retry_class(source: &ProgressReceiveError) -> RetryClass {
     match source {
         ProgressReceiveError::Connection(source) => connection_retry(source),
         ProgressReceiveError::Exchange(_) => RetryClass::Retry,
-        ProgressReceiveError::Clock(_)
+        ProgressReceiveError::Snapshot(_)
+        | ProgressReceiveError::Clock(_)
         | ProgressReceiveError::Unsupported
         | ProgressReceiveError::Protocol
         | ProgressReceiveError::UnknownTask
