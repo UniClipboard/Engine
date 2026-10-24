@@ -20,19 +20,22 @@ pub(super) fn descriptor(value: ProducerDescriptor) -> ProgressTaskDescriptor {
         item_count: value.item_count,
     }
 }
+pub(super) fn wire_descriptor(value: ProgressTaskDescriptor) -> ProducerDescriptor {
+    ProducerDescriptor {
+        producer: WireId(value.producer.bytes()),
+        owner_revision: value.revision,
+        scope: TaskScope {
+            source_entry: WireId(value.source.bytes()),
+            attempt: WireId(value.attempt.bytes()),
+        },
+        item_count: value.item_count,
+    }
+}
 pub(super) fn bound(value: ProgressBound) -> Message {
     Message::Bound {
         challenge: WireId(value.challenge.bytes()),
         binding: WireId(value.binding.bytes()),
-        descriptor: ProducerDescriptor {
-            producer: WireId(value.descriptor.producer.bytes()),
-            owner_revision: value.descriptor.revision,
-            scope: TaskScope {
-                source_entry: WireId(value.descriptor.source.bytes()),
-                attempt: WireId(value.descriptor.attempt.bytes()),
-            },
-            item_count: value.descriptor.item_count,
-        },
+        descriptor: wire_descriptor(value.descriptor),
     }
 }
 pub(super) fn terminal(

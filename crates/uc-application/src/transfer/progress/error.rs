@@ -1,9 +1,16 @@
+use crate::connectivity::ConnectivityError;
 use std::error::Error;
 use std::fmt;
 use uc_core::error_class::ErrorClass;
 
 #[derive(thiserror::Error)]
 pub enum ProgressReceiveError {
+    #[error("progress connection failed")]
+    Connection(#[from] ConnectivityError),
+    #[error("peer does not support current progress protocol")]
+    Unsupported,
+    #[error("unexpected progress protocol")]
+    Protocol,
     #[error("progress task is not authorized")]
     UnknownTask,
     #[error("progress logical plan is invalid")]
@@ -18,6 +25,9 @@ pub enum ProgressReceiveError {
 impl ErrorClass for ProgressReceiveError {
     fn class(&self) -> &'static str {
         match self {
+            Self::Connection(source) => source.class(),
+            Self::Unsupported => "progress_protocol_unsupported",
+            Self::Protocol => "progress_protocol_invalid",
             Self::UnknownTask => "progress_task_not_authorized",
             Self::InvalidPlan => "progress_plan_invalid",
             Self::Stale => "progress_binding_stale",

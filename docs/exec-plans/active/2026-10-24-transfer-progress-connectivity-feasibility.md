@@ -93,7 +93,7 @@ just cargo test -p uc-infra-p2p --lib 'network::iroh::connectivity::stream::' --
 metadata、workspace 全目标 check、fmt、Rust style、repository 与 diff 六根门禁通过。
 `ReceiverAuthority` 是测试注入的当前描述，不是生产接收 attempt 数据源；运行实例重启通过替换 producer 模拟，
 没有实际杀进程。V3 计划关联和网络登记分别验证，尚未组成生产接收 owner→登记的完整链路。
-因此阶段 0 对应登记任务仍未勾选，不能将本原型冒充生产迁移或完整 AC02。
+这层单独原型不能证明接收权威已连接；后续组合证明见下文，不能将主机结果冒充生产迁移或完整 AC02。
 
 ## 真实输出后的 Application 采用与 ACK
 
@@ -163,12 +163,43 @@ V3／blob 字节、ticket 和既有持久化字段不变。
 真实流12项与协议75项回归通过；metadata、workspace 全目标 check、fmt、Rust style、repository 与 diff 六根门禁通过。
 
 该进程证据证明 Application 登记资料的寿命，不冒充完整 Engine／SQLite profile 重开矩阵。
-真实 Iroh 乱序探针与此权威交接目前仍是分开的证据；新协议实际读取该当前权威的完整组合尚未闭合，
-因此阶段 0 登记任务继续保持未验收。
+该层完成接收交接和进程寿命的独立证明；它们与 Iroh 的组合由下文独立入口验证。
+
+## 实际当前权威与真实登记的组合
+
+Application `TransferProgressProducer::register_current` 负责原五秒期限内的准入连接、开流与完整登记。
+明确协商旧 `/1` 才返回 Unsupported；新协议损坏、网络或当前准入失败保留原错误，不转换成能力不支持。
+Infra 在新 Challenge 到达后实时读取 `ProgressTaskAuthorityPort`；收到 Bound 时核对完整挑战与描述，
+Application 等实际连接保留读取结束后再次检查当前 attempt／producer／revision，迟到 Bound 不直接激活旧任务。
+借用的 StreamLease 由 Application 持有至这些实际工作结束，取消或期限到达后不提前归还原额度。
+
+组合入口为 `scripts/testing/run-progress-registration-proof.mjs`。它串行构建当前 Application 与 Infra 测试二进制，
+从 Cargo JSON 精确取得产物路径，先核对四个必需用例均存在，再显式执行，避免零用例退出成功。
+报告记录源码提交／工作区状态、两个二进制 SHA-256 和必需用例清单，位于
+`target/test-artifacts/ci/progress-registration/report.json`；CI 的 Engine tests job 必需执行此入口。
+
+真实 Iroh 双端每次新挑战通过测试 IPC 读取独立 Application fixture 进程里的实际接收权威。
+该 fixture 执行真实接收 use case 与 CAS 后交接，存储 port 受控；IPC 只传递合成身份、位置及控制数据，
+没有另建静态 descriptor 来替代原接收负责人。
+
+| 必需场景 | 组合结果 |
+| --- | --- |
+| 普通文件及无 blob 的空目录 | 线上 Bound 与实际接受的 attempt／原始逻辑计划一致 |
+| 预检后、Challenge 前替换 attempt | Challenge 实时读取后来接受的描述，不使用拨号前快照 |
+| 描述发出后、Bound 返回前替换 attempt | Application 后置检查返回 Stale，不激活旧绑定 |
+| 保留旧流描述，新 attempt 先完成登记 | 旧描述拒收，当前投影保留新绑定；旧终态没有 ACK |
+| 真正 kill／wait 接收 fixture 并重启，重建实际 QUIC 连接 | 新 producer 可从修订1开始，旧连接未完成描述和旧 producer 终态均退休 |
+| 明确旧 ALPN 与损坏的新帧 | 前者 Unsupported；后者保留 Exchange 错误及 source，不降级 |
+
+最终候选组合证明4／4通过；Application progress 8项、原流12项、映射1项及协议75项回归通过，合计100项。
+原流测试中的4个专用ignore用例由driver另行显式执行，不将ignore本身记为通过；六项仓库交付门禁通过。
+
+该组合闭合阶段 0 的登记顺序与原始项／attempt 关联可行性，覆盖真实进程寿命及迟到旧流。
+它没有证明真实 SQLite 提交／profile 重开、完整 Engine 生产 Router、Relay、三端或设备矩阵；这些仍按后续阶段验收。
 
 ## 尚未证明的范围
 
-- 登记围栏、接收 CAS 后交接及 Application 真实进程寿命已有证据；新权威与真实双端登记的完整组合、Engine／SQLite 重启矩阵仍未完成。
+- 当前权威与真实双端登记的组合已完成；Engine／SQLite profile 重开及生产 Router 的完整迁移仍未完成。
 - 输出后 Application 采用／ACK 的最小主机链路已有证据；生产接收输出／SQLite 结算交接、有限补发和状态核对尚未接线。
 - 最大负载、分页、终态淘汰、公平调度及新旧双角色 Direct／Relay 尚未执行。
 - Linux 当前头文件合同及 BOOTTIME syscall 已核对；真实系统挂起和其他平台尚未验证，不记跨平台经过时间证明通过。
