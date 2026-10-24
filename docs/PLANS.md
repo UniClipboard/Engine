@@ -31,4 +31,4 @@
 - Issue #34 第三切片：[组更新收发与主动恢复执行计划](exec-plans/completed/2026-10-11-group-update-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-11-group-update-connectivity-spec.md)。状态为完成；完整 Uni 收发、统一应用与 /4 主动逐页恢复落地，最终 workspace、成员、真实 SQLite/MLS 强杀断点、独立宿主和固定 main 双方向互通通过；物理设备与跨网络矩阵跳过，不新增批量协议，不关闭整个 #34。
 - Issue #34 第二切片：[普通剪贴板连接边界执行计划](exec-plans/completed/2026-10-11-clipboard-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-11-clipboard-connectivity-spec.md)。状态为完成；切片验收及根门禁通过，完整 workspace 的成员 G2 一项失败与隔离通过均保留记录，原因待查；平台与历史发布矩阵明确跳过。
 
-- [网络栈 submodule 交付](exec-plans/active/2026-10-24-network-stack-submodule.md)
+- [网络栈 submodule 交付](exec-plans/completed/2026-10-24-network-stack-submodule.md)

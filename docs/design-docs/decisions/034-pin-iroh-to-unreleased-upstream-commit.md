@@ -1,9 +1,9 @@
 # ADR-034：iroh 固定到包含路径队列修复的上游提交
 
-- **状态**：已采纳；2026-10-24 DNS 来源补充取代下文初始“不 fork”决定；退出条件见下
+- **状态**：已采纳；2026-10-24 DNS 来源补充取代初始“不 fork”决定，最新 submodule 补充取代根补丁交付；退出条件见下
 - **日期**：2026-10-15
-- **范围**：根 `Cargo.toml` 的 `[patch.crates-io]`、`uc-observability-runtime` 网络库日志的路径匹配；不改变任何业务接口
-- **部分取代**：[ADR-031](031-product-owned-builtin-relay-list.md) 的补充“依赖补丁不依赖下游 `[patch]`”，仅对 iroh 例外；iroh-blobs 与 swarm-discovery 的处理方式不变
+- **范围**：网络栈依赖来源与 `uc-observability-runtime` 网络库日志路径匹配；不改变任何业务接口
+- **历史例外（已被本页 submodule 补充取代）**：[ADR-031](031-product-owned-builtin-relay-list.md) 的补充“依赖补丁不依赖下游 `[patch]`”，仅对 iroh 例外；iroh-blobs 与 swarm-discovery 的处理方式不变
 - **来源**：[Engine #214](https://github.com/UniClipboard/Engine/issues/214) 的诊断
 
 ## 背景
