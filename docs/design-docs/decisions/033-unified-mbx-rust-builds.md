@@ -42,7 +42,9 @@ post-save。nightly 升级矩阵由 `upgrade-anchors` 唯一发布：先构建�
 运行各维度测试。PR Check 的四种 connection-recovery 模式由 `direct` 唯一发布，它额外编译
 relay 宿主组合以覆盖其他模式的编译图；其余模式不重复打包。nightly 网络四模式本来就
 编译同一 host/relay 组合，现在共享 `engine-real-environment-network` 场景，只由 direct
-发布；手动网络验收只读同一场景，不再保留永远不会执行的发布步骤。已有 anchor-host 缓存命中时
+发布；手动网络验收只读同一场景，不再保留永远不会执行的发布步骤。共享缓存场景不共享
+证据名称：nightly artifact 保留 matrix.mode，手动证据保留 inputs.mode；矩阵 artifact
+唯一性由独立于 writer 的展开检查验证，禁止多个执行实例覆盖同一不可变工件。已有 anchor-host 缓存命中时
 不强制重编旧宿主，快照仍是可失效的动作种子，不承诺每个动作命中。
 `check-snapshot-routing.py` 展开矩阵并按 OS/架构/场景保守检查唯一 writer，拒绝本次五个
 升级 writer 及四个网络 writer 的回归；新矩阵语法必须扩展校验，不能静默跳过。

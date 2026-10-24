@@ -137,6 +137,67 @@ def writer_regressions(documents):
     assert 'cargo build -p uc-connectivity-host -p uc-connectivity-relay --locked' in network
 
 
+def unique_matrix_artifacts(documents):
+    # 证据按具体执行实例命名，不能沿用共享缓存场景；每个 workflow run 的 v4 artifact 不可覆盖。
+    artifacts = {}
+    jobs_checked = 0
+    for filename, text in documents.items():
+        for job in re.split(r'(?=^  [\w-]+:\n)', text, flags=re.M):
+            if not re.search(r'^      matrix:', job, re.M):
+                continue
+            uploads = [step for step in re.split(r'(?=^      - )', job, flags=re.M)
+                       if 'uses: actions/upload-artifact@' in step]
+            if not uploads:
+                continue
+            jobs_checked += 1
+            job_name = job.splitlines()[0].strip().rstrip(':')
+            for row in matrix_rows(job):
+                host = expand_matrix(re.search(r'^    runs-on: (.+)$', job, re.M)[1], row)
+                if host.startswith('ubuntu-'):
+                    os_name, arch = 'Linux', 'ARM64' if host.endswith('-arm') else 'X64'
+                elif host == 'macos-15':
+                    os_name, arch = 'macOS', 'ARM64'
+                elif host in ('windows-2025', 'windows-11-arm'):
+                    os_name, arch = 'Windows', 'ARM64' if host.endswith('-arm') else 'X64'
+                else:
+                    raise AssertionError(f'Unclassified artifact matrix host: {host}')
+                for number, step in enumerate(uploads):
+                    match = re.search(r'^          name: (.+)$', step, re.M)
+                    name = match[1].strip("\"'") if match else 'artifact'
+                    for context, value in [('github.job', job_name), ('github.run_attempt', '<attempt>'),
+                                           ('runner.os', os_name), ('runner.arch', arch)]:
+                        name = re.sub(r'\$\{\{\s*' + re.escape(context) + r'\s*\}\}', value, name)
+                    name = expand_matrix(name, row)
+                    key = (filename, name)
+                    artifacts.setdefault(key, []).append(f'{job_name}:{row}:upload-{number}')
+    duplicates = {key: owners for key, owners in artifacts.items() if len(owners) > 1}
+    assert not duplicates, f'Duplicate matrix artifacts: {duplicates}'
+    return jobs_checked, len(artifacts)
+
+
+def artifact_regressions(documents):
+    changes = [
+        ('engine-real-environment.yml', 'name: engine-real-environment-${{ matrix.mode }}', 'name: engine-real-environment-network'),
+        ('engine-real-environment.yml', 'name: mbx-${{ github.job }}-${{ matrix.mode }}-', 'name: mbx-${{ github.job }}-'),
+        ('engine-real-environment.yml', 'name: engine-upgrade-matrix-${{ matrix.dimension }}-', 'name: engine-upgrade-matrix-'),
+        ('pr-check.yml', 'name: connection-recovery-evidence-${{ matrix.mode }}', 'name: connection-recovery-evidence'),
+    ]
+    for filename, original, replacement in changes:
+        assert original in documents[filename]
+        broken = dict(documents, **{filename: documents[filename].replace(original, replacement)})
+        try:
+            unique_matrix_artifacts(broken)
+        except AssertionError as error:
+            assert 'Duplicate matrix artifacts' in str(error)
+        else:
+            raise AssertionError(f'Artifact collision not rejected: {original}')
+    # 同一缓存场景保留；手动场景的证据也继续保留输入模式，避免名称失去含义。
+    nightly = documents['engine-real-environment.yml']
+    assert nightly.count('cache-key: engine-real-environment-network') == 2
+    assert 'scene: engine-real-environment-network' in nightly
+    assert 'name: engine-real-environment-${{ inputs.mode }}-${{ github.run_attempt }}' in nightly
+
+
 root = Path(__file__).resolve().parents[2]
 workflows = list((root/'.github/workflows').glob('*.yml'))
 for path in workflows:
@@ -169,3 +230,7 @@ documents = {path.name: path.read_text() for path in workflows}
 writers = unique_writers(documents)
 writer_regressions(documents)
 print(f'Matrix-expanded writer uniqueness passed for {len(writers)} platform/architecture/scenario keys; duplicate regressions rejected')
+
+artifact_jobs, artifact_names = unique_matrix_artifacts(documents)
+artifact_regressions(documents)
+print(f'Matrix artifact uniqueness passed: {artifact_jobs} jobs, {artifact_names} expanded names; four collision regressions rejected')
