@@ -1481,13 +1481,9 @@ impl IrohSessionBuilder {
             Arc<dyn BlobStoreLifecyclePort>,
         ) -> Arc<BlobTransport>,
     ) -> Result<BlobHandlers, IrohNodeError> {
-        // Phase D1: enable iroh-blobs internal GC at fixed interval.
-        // `FsStore::load_with_opts` is the only public entry that can
-        // wire `GcConfig` — `gc::run_gc` / `gc_run_once` themselves are
-        // crate-private in iroh-blobs 0.100. The store internally
-        // `tokio::spawn`s `run_gc(store, config)` once at load time;
-        // the loop lives until the store actor exits (i.e. effectively
-        // the daemon's lifetime).
+        // 通过公开加载入口配置 SDK 内部 GC；GC 与存储工作由 Store 自己监督。
+        // 完整关闭须等待 GC、已接受的 import/export、actor、元数据及私有 runtime，
+        // 不能把 Router 关闭或句柄释放当作 Store 已完成关闭。
         //
         // `load_with_opts` 的第一个参数是 redb 数据库**文件**路径,不是 root
         // 目录。`Options::new(root)` 才接 root,内部派生出 `root/data`、

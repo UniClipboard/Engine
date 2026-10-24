@@ -1069,9 +1069,9 @@
 | `iroh.bind` | `crates/uc-infra-p2p/src/network/iroh/node.rs:965` | `info` | message-body |
 | `iroh.bind` | `crates/uc-infra-p2p/src/network/iroh/node.rs:979` | `info` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1045` | `debug` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1534` | `info` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1538` | `warn` | message-body |
-| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1555` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1530` | `info` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1534` | `warn` | message-body |
+| `<module>` | `crates/uc-infra-p2p/src/network/iroh/node.rs:1551` | `info` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/node/shutdown.rs:54` | `instrument` | - |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/node/shutdown.rs:104` | `warn` | message-body |
 | `<module>` | `crates/uc-infra-p2p/src/network/iroh/node/shutdown.rs:125` | `debug` | message-body |
