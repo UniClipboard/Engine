@@ -1,0 +1,56 @@
+name: MBX CAS snapshot
+description: Transfer a verified CAS-only archive; compilation never uses native S3.
+inputs:
+  operation:
+    description: restore or save
+    default: restore
+  scene:
+    description: Compatible platform and build scenario
+    required: true
+  endpoint:
+    description: Existing private R2 endpoint
+    default: ''
+  access-key-id:
+    description: Existing scoped R2 access key
+    default: ''
+  secret-access-key:
+    description: Existing scoped R2 secret
+    default: ''
+  require-hit:
+    description: Require archive recovery for dedicated remote validation
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    # 自托管机器使用既有 Python，不安装到 hosted runner 的固定系统路径。
+    - uses: actions/setup-python@v5
+      if: runner.environment == 'github-hosted'
+      with:
+        python-version: '3.12'
+    - name: Check snapshot Python runtime
+      shell: bash
+      run: python3 -c "import sys; assert sys.version_info >= (3, 9), 'Snapshot transport requires Python 3.9+'"
+    - name: Install snapshot transport SDK
+      continue-on-error: true
+      if: inputs.endpoint != '' && inputs.access-key-id != '' && inputs.secret-access-key != ''
+      shell: bash
+      run: |
+        if [[ ! -f "$RUNNER_TEMP/engine-snapshot-sdk/boto3/__init__.py" ]]; then
+          python3 -m pip install --disable-pip-version-check --quiet --target "$RUNNER_TEMP/engine-snapshot-sdk" boto3==1.40.0
+        fi
+    - name: Transfer CAS snapshot
+      shell: bash
+      env:
+        BUILD_CACHE_R2_ENDPOINT: ${{ inputs.endpoint }}
+        BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ inputs.access-key-id }}
+        BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ inputs.secret-access-key }}
+        SNAPSHOT_OPERATION: ${{ inputs.operation }}
+        SNAPSHOT_SCENE: ${{ inputs.scene }}
+        SNAPSHOT_REQUIRE_HIT: ${{ inputs.require-hit }}
+        UC_MBX_SNAPSHOT_WRITER: ${{ inputs.operation == 'save' && 'true' || 'false' }}
+        GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+        PYTHONPATH: ${{ runner.temp }}/engine-snapshot-sdk
+      run: |
+        args=()
+        if [[ "$SNAPSHOT_REQUIRE_HIT" == true ]]; then args+=(--require-hit); fi
+        python3 scripts/build-cache/mbx-snapshot.py "$SNAPSHOT_OPERATION" --scene "$SNAPSHOT_SCENE" "${args[@]}"

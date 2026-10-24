@@ -13,12 +13,6 @@ inputs:
       depend on that optimization level, such as instrumented coverage.
     required: false
     default: "false"
-  compile-cache-access:
-    description: >-
-      write only for jobs bound to the branch-restricted engine-build-cache-writer environment; read otherwise.
-      The R2 token itself enforces the permission, this only selects the MBX requested mode; native protected-push policy still applies.
-    required: false
-    default: read
   compile-cache-r2-endpoint:
     description: R2 S3 endpoint secret; empty selects the local MBX cache.
     required: false
@@ -32,7 +26,7 @@ inputs:
     required: false
     default: ""
   dependency-cache:
-    description: Cache Cargo downloads and credential-free local MBX actions; never restore target outputs.
+    description: Cache Cargo downloads only; never restore target or live MBX directories.
     required: false
     default: "true"
 
@@ -45,22 +39,24 @@ runs:
 
     - name: Start MBX compiler cache
       shell: bash
-      env:
-        BUILD_CACHE_ACCESS: ${{ inputs.compile-cache-access }}
-        BUILD_CACHE_R2_ENDPOINT: ${{ inputs.compile-cache-r2-endpoint }}
-        BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ inputs.compile-cache-r2-access-key-id }}
-        BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ inputs.compile-cache-r2-secret-access-key }}
       run: bash scripts/build-cache/start-ci-mbx.sh
 
-    # 不恢复 target；所有编译动作由 MBX 按输入决定命中。无 R2 凭据时保存 ref 隔离的本地 CAS。
-    - name: Cache Cargo downloads and local MBX actions
+    - name: Restore compressed MBX snapshot
+      uses: ./.github/actions/mbx-snapshot
+      with:
+        scene: ${{ inputs.cache-key }}
+        endpoint: ${{ inputs.compile-cache-r2-endpoint }}
+        access-key-id: ${{ inputs.compile-cache-r2-access-key-id }}
+        secret-access-key: ${{ inputs.compile-cache-r2-secret-access-key }}
+
+    # 只缓存 Cargo 下载；MBX 必须经导出闭包归档，禁止转储 live cache 或 target。
+    - name: Cache Cargo downloads
       if: inputs.dependency-cache == 'true'
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       with:
         workspaces: . -> target
         shared-key: mbx-${{ inputs.cache-key }}
         cache-targets: 'false'
-        cache-directories: ${{ inputs.compile-cache-r2-access-key-id == '' && format('{0}/engine-mbx-cache', runner.temp) || '' }}
 
     # 显式提供构建来源后，uc-observability-runtime 的 build script 不再跟踪 git 与源码目录的修改时间；
     # 否则同一 job 内每次 cargo 调用都可能重跑它，并连锁重编 uc-infra-profile、uc-engine 与全部宿主。

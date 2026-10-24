@@ -24,7 +24,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     environment:
-      name: engine-build-cache-reader
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     strategy:
       fail-fast: false
@@ -89,6 +89,16 @@ jobs:
           bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-storage --lib active_space_generation_manifest_store 2>&1 | tee "$RUNNER_TEMP/windows-evidence/storage-tests.log"
           bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-local --lib fs::atomic_publish 2>&1 | tee -a "$RUNNER_TEMP/windows-evidence/storage-tests.log"
           bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-local --lib fs::durability 2>&1 | tee -a "$RUNNER_TEMP/windows-evidence/storage-tests.log"
+
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: windows-${{ matrix.arch }}
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain Windows evidence
         if: always()

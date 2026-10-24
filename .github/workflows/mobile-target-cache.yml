@@ -12,11 +12,17 @@ concurrency:
   group: mobile-target-cache-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  android:
+  product:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, ubuntu-latest]
+        include:
+          - runner: macos-15
+            platform: android
+          - runner: ubuntu-latest
+            platform: android
+          - runner: macos-15
+            platform: ios
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     environment:
@@ -26,7 +32,8 @@ jobs:
       CARGO_BUILD_JOBS: '3'
       CARGO_INCREMENTAL: '0'
       MBX_GC_MAX_SIZE: 20GiB
-      MBX_REMOTE_MODE: read-write
+      UC_ENGINE_MBX_LOCAL_ONLY: "1"
+      UC_MBX_SNAPSHOT_VARIANT: 2f9afc9956b0cda82e65c912f0c0f6dc6aa51256
     steps:
       - uses: actions/checkout@v6
         with:
@@ -48,16 +55,21 @@ jobs:
         run: |
           {
             echo "MBX_CACHE_DIR=$RUNNER_TEMP/mobile-producer-cas"
+            echo "UC_ENGINE_MBX_STATS_DIR=$RUNNER_TEMP/mobile-producer-evidence"
             echo "CARGO_TARGET_DIR=$RUNNER_TEMP/mobile-target"
             echo "CARGO_HOME=$RUNNER_TEMP/mobile-target/cargo-home"
           } >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/mobile-target/cargo-home/bin" >> "$GITHUB_PATH"
-      - name: Prepare pinned Android compiler
+      - name: Prepare pinned platform compiler
         run: |
           mkdir -p "$CARGO_HOME"
           rustup toolchain install 1.95.0 --profile minimal
-          rustup target add --toolchain 1.95.0 aarch64-linux-android
-          cargo +1.95.0 install cargo-ndk --version 4.1.2 --locked
+          if [[ '${{ matrix.platform }}' == android ]]; then
+            rustup target add --toolchain 1.95.0 aarch64-linux-android x86_64-linux-android
+            cargo +1.95.0 install cargo-ndk --version 4.1.2 --locked
+          else
+            rustup target add --toolchain 1.95.0 aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+          fi
       - name: Stage immutable product and cache automation
         shell: bash
         run: |
@@ -89,12 +101,17 @@ jobs:
           version = re.search(r'^MBX_VERSION=([0-9.]+)$', (root / 'scripts/build-cache/mbx.sh').read_text(), re.M).group(1)
           Path(output).write_text(json.dumps({'productSource': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(), 'automationSource': automation, 'mbxVersion': version, 'cacheScriptHashes': hashes, 'modifiedCacheEntryFiles': changed, 'productTreeClean': not changed}, indent=2))
           PYCODE
-      - name: Publish Android release compilation actions
+      - name: Restore compatible product snapshot
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          scene: mobile-product-${{ matrix.platform }}
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+      - name: Compile Android release actions locally
+        if: matrix.platform == 'android'
         shell: bash
         env:
-          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
-          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
-          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
           MBX_STATS_REPORT: ${{ runner.temp }}/mobile-producer-evidence/android-stats.json
           MBX_BYPASS_LOG: ${{ runner.temp }}/mobile-producer-evidence/android-bypass.txt
         run: |
@@ -125,16 +142,33 @@ jobs:
           root = Path(os.environ['RUNNER_TEMP']) / 'mobile-producer-evidence'
           stats = json.loads((root / 'android-stats.json').read_text())
           assert stats['bypasses'].get('unknown-codegen-option', 0) == 0
-          assert stats['uploaded_bytes'] > 0 or stats['restored_output_files'] > 0
+          assert stats['uploaded_bytes'] == stats['downloaded_bytes'] == 0
           PYCODE
+      - name: Compile iOS release actions locally
+        if: matrix.platform == 'ios'
+        shell: bash
+        run: |
+          cd "$PRODUCT_ROOT"
+          source scripts/build-cache/env.sh
+          UC_ENGINE_UNIFFI_TARGET_DIR="$CARGO_TARGET_DIR" UC_ENGINE_UNIFFI_BUILD_PROFILE=release UC_ENGINE_UNIFFI_BUILD_LOCKED=1 \
+            bash bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
+      - name: Publish product CAS snapshot
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: mobile-product-${{ matrix.platform }}
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
       - name: Preserve producer evidence and library
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mobile-producer-${{ runner.os }}-${{ runner.arch }}
+          name: mobile-producer-${{ matrix.platform }}-${{ runner.os }}-${{ runner.arch }}
           path: |
             ${{ runner.temp }}/mobile-producer-evidence/
             ${{ runner.temp }}/mobile-target/aarch64-linux-android/release/libuc_engine_uniffi.so
+            ${{ runner.temp }}/mobile-target/uc-engine-uniffi-dist/ios
           if-no-files-found: warn
       - name: Remove owned temporary product tree
         if: always() && env.PRODUCT_ROOT != ''

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""运行一次真实 R2 构建，保留安全诊断并拒绝未计入 MBX 统计的远端失败。"""
+"""运行本地快照构建，拒绝任何原生远端流量；传输和动作命中分开验证。"""
 import argparse
 import json
 import os
@@ -17,15 +17,18 @@ FAILURES = {
 }
 
 
-def verify(report, failures, mode, consumer):
+def verify(report, failures, snapshot_status, consumer):
     problems = []
     for key in ("remote_failures", "background_upload_failures"):
         if report[key] != 0:
             problems.append(key)
+    for key in ("remote_manifest_lookups", "remote_action_lookups", "remote_blob_requests", "remote_blob_pack_requests"):
+        if report[key] != 0:
+            problems.append(key)
     problems.extend(key for key, count in failures.items() if count)
-    if mode == "read-only" and report["uploaded_bytes"] != 0:
-        problems.append("read_only_uploaded")
-    if consumer and not (report["downloaded_bytes"] > 0 and report["hits"] > 0):
+    if report["uploaded_bytes"] != 0 or report["downloaded_bytes"] != 0:
+        problems.append("native_remote_traffic")
+    if consumer and snapshot_status == "hit" and not (report["hits"] > 0 and report["restored_output_files"] > 0):
         problems.append("consumer_did_not_restore")
     return problems
 
@@ -41,7 +44,8 @@ def main():
     if not command:
         parser.error("missing build command")
     report_path = Path(os.environ["MBX_STATS_REPORT"])
-    mode = os.environ["MBX_REMOTE_MODE"]
+    snapshot_path = Path(os.environ.get("UC_ENGINE_MBX_STATS_DIR", report_path.parent)) / "snapshot-restore.json"
+    snapshot_status = json.loads(snapshot_path.read_text())["status"] if snapshot_path.exists() else "not-restored"
     # 不允许旧统计把本次未完成的构建误判为成功。
     report_path.unlink(missing_ok=True)
     failures = dict.fromkeys(FAILURES, 0)
@@ -59,7 +63,7 @@ def main():
     report_path.with_suffix(".diagnostics.json").write_text(json.dumps(evidence, indent=2) + "\n")
     if returncode:
         return returncode if returncode > 0 else 128 - returncode
-    problems = verify(json.loads(report_path.read_text()), failures, mode, args.consumer)
+    problems = verify(json.loads(report_path.read_text()), failures, snapshot_status, args.consumer)
     if problems:
         print("R2 verification failed: " + ", ".join(problems), file=sys.stderr)
         return 1

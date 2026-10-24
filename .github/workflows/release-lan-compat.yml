@@ -31,7 +31,7 @@ concurrency:
 # 仓库 .cargo/config.toml 的两路并行限制只约束本地构建；发布构建使用 runner 的全部逻辑核。
 env:
   CARGO_BUILD_JOBS: default
-  MBX_REMOTE_MODE: write-only
+  UC_ENGINE_MBX_LOCAL_ONLY: "1"
 
 jobs:
   build:

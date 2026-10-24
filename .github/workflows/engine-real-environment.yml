@@ -53,10 +53,10 @@ jobs:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     # 编译缓存凭据：只有 main 上的可信运行绑定限定 main 分支的写入环境，其余运行（PR、合并队列、其他分支）用只读令牌；
-    # fork 与 Dependabot 拿不到任何 secret，回退为按 ref 隔离的 GitHub Actions 缓存。
-    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/029-ci-r2-compile-cache.md。
+    # fork 与 Dependabot 拿不到任何 secret，只进行本地冷编译。
+    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/033-unified-mbx-rust-builds.md。
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: ${{ github.ref == 'refs/heads/main' && matrix.mode == 'direct' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     timeout-minutes: 40
     strategy:
@@ -73,8 +73,7 @@ jobs:
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
-          cache-key: engine-real-environment-${{ matrix.mode }}
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          cache-key: engine-real-environment-network
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -117,6 +116,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Publish scenario CAS snapshot
+        if: success() && matrix.mode == 'direct' && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: engine-real-environment-network
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -130,7 +139,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade' && inputs.mode != 'membership-e2e' && inputs.mode != 'upgrade-matrix'
     runs-on: ubuntu-24.04
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: engine-build-cache-reader
       deployment: false
     timeout-minutes: 40
     steps:
@@ -143,8 +152,7 @@ jobs:
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
-          cache-key: engine-real-environment-${{ inputs.mode }}
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          cache-key: engine-real-environment-network
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -217,7 +225,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-profile-upgrade
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -267,6 +274,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: engine-real-environment-profile-upgrade
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -291,7 +308,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-membership-e2e
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -339,6 +355,16 @@ jobs:
   # 升级兼容矩阵（各锚点到当前源码与 D1 完整链）：先按 rev 构建并缓存全部旧版宿主，再按维度分片运行，最后合并
   # 矩阵表。夜间、锚点定义变化的 PR 与手动触发运行同一矩阵。
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: engine-real-environment-membership-e2e
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -366,7 +392,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-upgrade-matrix
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -384,6 +409,17 @@ jobs:
           started_at=$(date +%s)
           bash scripts/testing/build-upgrade-anchors.sh --all
           echo "- anchor host build wall time: $(( $(date +%s) - started_at ))s" >> "$GITHUB_STEP_SUMMARY"
+      # 唯一生产者覆盖所有 shard 的共同编译图；dimension 只筛选运行的测试。
+      # 不在此运行矩阵测试，d1-d4 仍分别执行全部既有验证。
+      - name: Install cargo-nextest for shared matrix compilation
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145
+      - name: Compile shared upgrade matrix actions
+        run: |
+          cargo build --locked -p uc-connectivity-host
+          cargo nextest run --profile ci --locked -p uc-upgrade-matrix -E 'package(uc-upgrade-matrix)' --no-run
+
       - name: Retain anchor build records
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -394,6 +430,16 @@ jobs:
             target/upgrade-anchors/*/build.log
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: engine-real-environment-upgrade-matrix
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain MBX compiler evidence
         if: always()
@@ -408,7 +454,7 @@ jobs:
     needs: upgrade-anchors
     runs-on: ubuntu-24.04
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: engine-build-cache-reader
       deployment: false
     timeout-minutes: 240
     strategy:
@@ -426,7 +472,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-upgrade-matrix
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}

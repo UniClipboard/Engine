@@ -14,12 +14,14 @@ SCRIPT = Path(__file__).with_name("verify-r2-build.py")
 class R2VerificationTests(unittest.TestCase):
     def run_build(self, warning="", code=0, consumer=False, **changes):
         report = dict(remote_failures=0, background_upload_failures=0,
-                      uploaded_bytes=0, downloaded_bytes=123, hits=1)
+                      remote_manifest_lookups=0, remote_action_lookups=0, remote_blob_requests=0, remote_blob_pack_requests=0,
+                      uploaded_bytes=0, downloaded_bytes=0, hits=1, restored_output_files=1)
         report.update(changes)
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "producer.json"
             # 预置一份通过的报告，证明入口不会复用上一轮统计。
             path.write_text(json.dumps(report))
+            (path.parent / "snapshot-restore.json").write_text('{"status":"hit"}')
             command = [sys.executable, str(SCRIPT)]
             if consumer:
                 command.append("--consumer")
@@ -49,13 +51,13 @@ class R2VerificationTests(unittest.TestCase):
                 self.assertEqual(self.run_build(warning)[0], 1)
 
     def test_existing_native_failure_checks_remain(self):
-        for key in ("remote_failures", "background_upload_failures", "uploaded_bytes"):
+        for key in ("remote_failures", "background_upload_failures", "uploaded_bytes", "downloaded_bytes", "remote_manifest_lookups", "remote_action_lookups", "remote_blob_requests", "remote_blob_pack_requests"):
             with self.subTest(key=key):
                 self.assertEqual(self.run_build(**{key: 1})[0], 1)
 
-    def test_consumer_requires_downloads_and_hits(self):
+    def test_snapshot_consumer_requires_local_hits_and_restored_files(self):
         self.assertEqual(self.run_build(consumer=True)[0], 0)
-        for key in ("downloaded_bytes", "hits"):
+        for key in ("restored_output_files", "hits"):
             with self.subTest(key=key):
                 self.assertEqual(self.run_build(consumer=True, **{key: 0})[0], 1)
 
