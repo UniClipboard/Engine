@@ -139,7 +139,7 @@ const NOQ_PROTO: &str = "noq-proto-1.3.0";
 /// 根 `Cargo.toml` 的 `[patch.crates-io]` 固定的 iroh 提交（前 7 位，即 cargo 签出目录名）。
 /// 固定后的 iroh 不在 `iroh-1.3.0` 这样的注册表目录里，而在 git 签出目录里；规则仍按 `IROH`
 /// 逻辑版本匹配，但只接受这里列出的提交，换提交必须同时评审规则并更新这里。
-const PINNED_IROH_REVS: &[&str] = &["43e232f"];
+const PINNED_IROH_REVS: &[&str] = &["c8efae0"];
 
 const CONNECTION_ERROR_VARIANTS: &[&str] = &[
     "VersionMismatch",
@@ -471,7 +471,7 @@ pub(crate) const RULES: &[Rule] = &[
         burst: 16,
         refill_ms: 250,
     },
-    // 固定提交 `43e232f` 的 `remote_state.rs:1089`：路径打开因 CID/路径号耗尽被推迟后重试。
+    // 固定提交 `c8efae0` 的 `remote_state.rs:1089`：路径打开因 CID/路径号耗尽被推迟后重试。
     // 只输出事件本身（原始字段是候选地址，一律丢弃）；出现频率就是 #214 H1 的直接证据。
     Rule {
         event: "path.open_deferred",
@@ -624,7 +624,7 @@ mod tests {
     const REGISTRY: &str =
         "/home/u/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-1.3.0/src/socket.rs";
     const PINNED: &str =
-        "/home/u/.cargo/git/checkouts/iroh-0123456789abcdef/43e232f/iroh/src/socket.rs";
+        "/home/u/.cargo/git/checkouts/iroh-0123456789abcdef/c8efae0/iroh/src/socket.rs";
 
     #[test]
     fn registry_layout_keeps_matching_by_version_directory() {
@@ -644,10 +644,10 @@ mod tests {
     fn unlisted_revision_package_or_hash_shape_does_not_match() {
         for file in [
             "/c/git/checkouts/iroh-0123456789abcdef/1111111/iroh/src/socket.rs",
-            "/c/git/checkouts/iroh-0123456789abcdef/43e232f/iroh-relay/src/lib.rs",
-            "/c/git/checkouts/iroh-0123456789abcde/43e232f/iroh/src/socket.rs",
-            "/c/git/checkouts/iroh-0123456789abcdeg/43e232f/iroh/src/socket.rs",
-            "/c/git/checkouts/iroh-0123456789abcdef/43e232f/iroh",
+            "/c/git/checkouts/iroh-0123456789abcdef/c8efae0/iroh-relay/src/lib.rs",
+            "/c/git/checkouts/iroh-0123456789abcde/c8efae0/iroh/src/socket.rs",
+            "/c/git/checkouts/iroh-0123456789abcdeg/c8efae0/iroh/src/socket.rs",
+            "/c/git/checkouts/iroh-0123456789abcdef/c8efae0/iroh",
         ] {
             let path = callsite_path(Some(file));
             assert_eq!(path.version_dir, None, "{file}");

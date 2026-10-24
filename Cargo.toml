@@ -51,21 +51,15 @@ dbg_macro = "warn"
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
-# [patch] is only read from the root manifest of a build, so it does not reach repositories that depend on Engine;
-# they must repeat the section below (see docs/design-docs/decisions/034-pin-iroh-to-unreleased-upstream-commit.md). The iroh-blobs fork is a git dependency of
-# uc-infra-p2p, and the patched swarm-discovery (with the vendored iroh-mdns-address-lookup) is a path dependency
-# of uc-infra-p2p.
-#
-# iroh 1.3.0 (the latest release) still queues duplicate path-open attempts without bound while a connection is stuck
-# at its path-id limit (n0-computer/iroh#4551). The revision below is the first upstream commit that bounds it. It also
-# carries the IPv6 relay-URL QAD fix and the X-Iroh-Endpoint-Id relay header. Remove this section when a release
-# contains that commit. `iroh-tickets` and `iroh-util` are registry crates, so all four crates of the iroh
-# repository are patched together to keep a single copy of each.
+# 根补丁只在最终构建工作区生效；宿主同步本段，见 ADR-034。
+# UniClipboard fork 保留上游 43e232f 的路径队列修复，仅固定经过修复的 DNS 依赖链。
+# 四个包同时覆盖，避免 iroh-tickets / iroh-util 引入第二份 iroh-base。
+# 上游完整发布路径队列与 EDNS 修复后退出 fork；iroh-blobs 和 mDNS 来源不变。
 [patch.crates-io]
-iroh = { git = "https://github.com/n0-computer/iroh", rev = "43e232fbcbf11aa9cf03a78ac83f52296f01d6b3" }
-iroh-base = { git = "https://github.com/n0-computer/iroh", rev = "43e232fbcbf11aa9cf03a78ac83f52296f01d6b3" }
-iroh-dns = { git = "https://github.com/n0-computer/iroh", rev = "43e232fbcbf11aa9cf03a78ac83f52296f01d6b3" }
-iroh-relay = { git = "https://github.com/n0-computer/iroh", rev = "43e232fbcbf11aa9cf03a78ac83f52296f01d6b3" }
+iroh = { git = "https://github.com/UniClipboard/iroh.git", rev = "c8efae061e3daa0afc6aa6db856cfcf8576da97b" }
+iroh-base = { git = "https://github.com/UniClipboard/iroh.git", rev = "c8efae061e3daa0afc6aa6db856cfcf8576da97b" }
+iroh-dns = { git = "https://github.com/UniClipboard/iroh.git", rev = "c8efae061e3daa0afc6aa6db856cfcf8576da97b" }
+iroh-relay = { git = "https://github.com/UniClipboard/iroh.git", rev = "c8efae061e3daa0afc6aa6db856cfcf8576da97b" }
 
 [profile.dev]
 debug = "line-tables-only"
