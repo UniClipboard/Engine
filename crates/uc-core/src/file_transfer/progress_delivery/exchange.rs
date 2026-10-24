@@ -12,7 +12,7 @@ pub enum ExchangePriority {
 pub const EXCHANGE_GLOBAL_ACTIVE: usize = 4;
 /// 排队等待的交换全局上限。
 pub const EXCHANGE_GLOBAL_QUEUED: usize = 64;
-const EXCHANGE_PEER_QUEUED: usize = 16;
+pub const EXCHANGE_PEER_QUEUED: usize = 16;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExchangeRefusal<W> {

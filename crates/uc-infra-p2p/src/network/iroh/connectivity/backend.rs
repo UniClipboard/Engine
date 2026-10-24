@@ -3,6 +3,7 @@ use super::super::connect::{connect_with_staggered_retry_classified, strip_relay
 use super::super::peer_address_resolver::PeerAddressResolver;
 use super::IrohPeerConnection;
 use async_trait::async_trait;
+use iroh::endpoint::ConnectOptions;
 use iroh::{Endpoint, EndpointAddr};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -10,6 +11,7 @@ use uc_application::deps::{ConnectivityBackend, ConnectivityError, PeerConnectio
 use uc_core::ids::DeviceId;
 use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort};
 use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
+use uc_observability_contract::diagnostics::within_network_scope;
 use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
 use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
@@ -18,10 +20,13 @@ use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
+use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
+use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
 /// 同一 endpoint 上的独立协议连接池只使用各自固定的协商配置。
 #[derive(Clone, Copy)]
 pub enum ConnectivityProfile {
+    TransferProgress,
     Blob,
     Presence,
     ActiveClipboardState,
@@ -94,6 +99,11 @@ impl ConnectivityBackend for IrohConnectivityBackend {
         }
         let (preferred, fallback, label) = match self.profile {
             ConnectivityProfile::Blob => (BLOBS_ALPN, BLOBS_ALPN, "blob"),
+            ConnectivityProfile::TransferProgress => (
+                TRANSFER_PROGRESS_ALPN,
+                LEGACY_TRANSFER_PROGRESS_ALPN,
+                "transfer-progress",
+            ),
             ConnectivityProfile::Presence => (
                 PEER_REACHABILITY_ALPN,
                 LEGACY_PEER_REACHABILITY_ALPN,
@@ -131,6 +141,24 @@ impl ConnectivityBackend for IrohConnectivityBackend {
             tokio::select! {
                 _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
                 result = self.endpoint.connect(address, preferred) => result.map_err(|source| ConnectivityError::Backend(Box::new(source))),
+            }
+        } else if matches!(self.profile, ConnectivityProfile::TransferProgress) {
+            // 方向名额覆盖唯一原生拨号；兼容ALPN在同一次握手提供，不交错创建影子连接。
+            let dial = async {
+                let connecting = within_network_scope(self.endpoint.connect_with_opts(
+                    strip_relay_if_lan_only(address),
+                    preferred,
+                    ConnectOptions::new().with_additional_alpns(vec![fallback.to_vec()]),
+                ))
+                .await
+                .map_err(|source| ConnectivityError::Backend(Box::new(source)))?;
+                within_network_scope(connecting)
+                    .await
+                    .map_err(|source| ConnectivityError::Backend(Box::new(source)))
+            };
+            tokio::select! {
+                _=cancel.cancelled()=>return Err(ConnectivityError::Stopped),
+                result=dial=>result,
             }
         } else {
             let dial = connect_with_staggered_retry_classified(

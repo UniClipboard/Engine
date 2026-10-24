@@ -1,4 +1,5 @@
 //! 最大原始CAS计划与真实分页；状态载荷为合成fixture，不冒充1024文件实际交付。
+use super::super::profile_probe::ProfilePair;
 use super::super::progress_probe::{progress_budget, Fixture};
 use super::{AuthorityProcess, SOURCE};
 use crate::network::iroh::transfer_progress_v2::TransferProgressWire;
@@ -12,15 +13,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressExchangeDeadline,
-    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSourceTask,
-    ProgressTaskDescriptor, TransferProgressSnapshotReader,
+    ConnectionLease, ConnectivityError, ConnectivityManager, ElapsedClockError, ElapsedClockPort,
+    ProgressExchangeDeadline, ProgressReceiveError, ProgressSnapshotRead,
+    ProgressSnapshotRoundPort, ProgressSourceTask, ProgressTaskDescriptor,
+    TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::{
     FileTransferCancellationReason, ProgressActive, ProgressFailureReason, ProgressIdentity,
     ProgressItem, ProgressItemKind, ProgressItemState, ProgressPhase, ProgressSnapshotRefusal,
     ProgressTerminal, ProgressTerminalOutcome,
 };
+use uc_core::ids::DeviceId;
 use uc_sync_protocol::transfer_progress::v2::{
     encode_frame, read_frame, ActiveProgress, CancelReason, Envelope, FailureReason, FrameRefusal,
     ItemKind, ItemState, LogicalItem, Message, Phase, ProducerDescriptor, QueryResult,
@@ -191,7 +194,44 @@ fn descriptor(value: ProgressTaskDescriptor) -> ProducerDescriptor {
         item_count: value.item_count,
     }
 }
+enum Network {
+    Baseline(Fixture),
+    Progress(ProfilePair),
+}
+impl Network {
+    fn outbound(&self) -> ConnectivityManager {
+        match self {
+            Self::Baseline(f) => f.outbound.clone(),
+            Self::Progress(f) => f.outbound.clone(),
+        }
+    }
+    fn receiving(&self) -> &ConnectionLease {
+        match self {
+            Self::Baseline(f) => &f.receiving,
+            Self::Progress(f) => &f.receiving,
+        }
+    }
+    fn peer(&self) -> DeviceId {
+        match self {
+            Self::Baseline(f) => f.sending.peer(),
+            Self::Progress(f) => f.peer,
+        }
+    }
+    fn profile(&self) -> &'static str {
+        match self {
+            Self::Baseline(_) => "clipboard_fixture",
+            Self::Progress(_) => "transfer_progress",
+        }
+    }
+    async fn close(self) -> anyhow::Result<()> {
+        match self {
+            Self::Baseline(f) => f.close().await,
+            Self::Progress(f) => f.close().await,
+        }
+    }
+}
 struct Evidence {
+    profile: &'static str,
     requests: usize,
     largest: usize,
     rss_before: Option<u64>,
@@ -215,11 +255,13 @@ async fn exchange(
     mode: Mode,
 ) -> anyhow::Result<(Result<ProgressSnapshotRead, ProgressReceiveError>, Evidence)> {
     let rss_before = resident_bytes();
-    let fixture = Fixture::new(1, 1, TRANSFER_PROGRESS_ALPN).await?;
-    let reader = TransferProgressSnapshotReader::new(
-        fixture.outbound.clone(),
-        Arc::new(TransferProgressWire),
-    );
+    let fixture = if mode == Mode::Good {
+        Network::Progress(ProfilePair::new().await?)
+    } else {
+        Network::Baseline(Fixture::new(1, 1, TRANSFER_PROGRESS_ALPN).await?)
+    };
+    let reader =
+        TransferProgressSnapshotReader::new(fixture.outbound(), Arc::new(TransferProgressWire));
     let clock = Arc::new(Clock(AtomicU64::new(0)));
     let budget = if mode == Mode::Deadline {
         ProgressExchangeDeadline::new(clock.clone(), Duration::from_secs(5))?
@@ -231,8 +273,8 @@ async fn exchange(
     let largest = AtomicUsize::new(0);
     let serve = async {
         for number in 0..mode.count() {
-            let mut stream = fixture.receiving.accept_bi().await?;
-            fixture.receiving.check_current().await?;
+            let mut stream = fixture.receiving().accept_bi().await?;
+            fixture.receiving().check_current().await?;
             let request = read_frame(&mut stream.receive).await?.message;
             assert!(
                 matches!(stream.receive.read_u8().await,Err(error) if error.kind()==std::io::ErrorKind::UnexpectedEof)
@@ -347,13 +389,14 @@ async fn exchange(
         }
         anyhow::Ok(())
     };
-    let peer = fixture.sending.peer();
+    let peer = fixture.peer();
     let (outcome, served) = tokio::join!(
         reader.read_snapshot(&peer, expected.clone(), &budget, &stop),
         serve
     );
     served?;
     let evidence = Evidence {
+        profile: fixture.profile(),
         requests: requests.load(Ordering::SeqCst),
         largest: largest.load(Ordering::SeqCst),
         rss_before,
@@ -399,6 +442,7 @@ async fn actual_maximum_v3_plan_survives_sixteen_real_snapshot_pages() -> anyhow
                 "staged_capacity_items":snapshot.items.capacity(),"staged_item_storage_bytes":snapshot.items.capacity()*std::mem::size_of::<ProgressItemState>(),
                 "rss_before_bytes":evidence.rss_before,"rss_after_bytes":evidence.rss_after,
                 "state_payload":"synthetic","plan_authority":"actual_application_cas_v3",
+                "connection_profile":evidence.profile,
             });
             std::fs::write(path,serde_json::to_vec_pretty(&report)?)?;
         }

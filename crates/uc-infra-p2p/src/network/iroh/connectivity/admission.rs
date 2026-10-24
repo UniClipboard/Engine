@@ -8,7 +8,7 @@ use super::backend::ConnectivityProfile;
 use async_trait::async_trait;
 use std::sync::Arc;
 use uc_application::deps::{
-    AdmissionAttempt, AdmissionGrant, ConnectivityError, InboundAdmissionFence,
+    AdmissionAttempt, AdmissionGrant, ConnectionProtocol, ConnectivityError, InboundAdmissionFence,
     InboundIdentityReservation, PeerConnection, PeerIdentityDirectoryPort,
     SessionConnectionAdmissionPort,
 };
@@ -38,6 +38,7 @@ impl IrohConnectionAdmission {
             connections,
             protocol: match profile {
                 ConnectivityProfile::Blob => InboundPeerProtocol::Blob,
+                ConnectivityProfile::TransferProgress => InboundPeerProtocol::TransferProgress,
                 ConnectivityProfile::Presence => InboundPeerProtocol::Presence,
                 ConnectivityProfile::ActiveClipboardPull => {
                     InboundPeerProtocol::ActiveClipboardPull
@@ -87,6 +88,14 @@ impl IrohConnectionAdmission {
         epoch: RevocationEpoch,
         connection: Arc<dyn PeerConnection>,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        if self.protocol == InboundPeerProtocol::TransferProgress
+            && !matches!(
+                connection.protocol(),
+                ConnectionProtocol::TransferProgressV1 | ConnectionProtocol::TransferProgressV2
+            )
+        {
+            return Err(ConnectivityError::Denied);
+        }
         let registration = self
             .connections
             .register_managed_since(&peer, connection.clone(), epoch)
@@ -140,7 +149,15 @@ impl AdmissionGrant for Grant {
         self.peer
     }
     async fn can_retain(&self) -> Result<bool, ConnectivityError> {
-        if self.owner.protocol != InboundPeerProtocol::Blob {
+        if !matches!(
+            self.owner.protocol,
+            InboundPeerProtocol::Blob | InboundPeerProtocol::TransferProgress
+        ) {
+            return Ok(false);
+        }
+        if self.owner.protocol == InboundPeerProtocol::TransferProgress
+            && self.connection.protocol() != ConnectionProtocol::TransferProgressV2
+        {
             return Ok(false);
         }
         self.check_current().await?;
