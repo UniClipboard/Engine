@@ -69,7 +69,7 @@
 * [x] BlobTransferPort 取消合同和全部内部消费者同步迁移；不保留无意义旧包装或生产 feature 旁路。
 * [x] 删除对端级 shutdown_endpoint 取消、SDK 自拨池和旧 provider 业务路径，保留底层 store 能力。
 * [ ] mod.rs 保持模块入口；所有权和恢复规则不散回 materializer、Engine 或绑定。
-* [ ] 架构检查限制业务代码直接用原生 Endpoint／Connection，实际 bridge／SDK 实现保留明确边界。
+* [x] 架构检查限制业务代码直接用原生 Endpoint／Connection，实际 bridge／SDK 实现保留明确边界。
 * [ ] 按 spec §5.8 验证业务触发、结果、部分失败与隐私，正常清理不冒充业务入口。
 
 ## 阶段 5：真实矩阵、回归与交付
@@ -113,6 +113,8 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 检查部分失败、独立重试成功／取消、错误子能力、隐私及真实列表／详情。
 
 ## 当前验收边界
+
+- 2026-10-24：补齐 Core／Application 的原生 Iroh 生产依赖与源码门禁，真实包名检查覆盖重命名依赖；完整检查先由新增反例触发失败，再通过七个新增反例与测试依赖／Infra bridge 正例。
 
 - SDK 正式依赖固定为同一 fork 的 `152c42a`；停止、协议、旧新资料与资源须以该修订验证。
 - 前一候选的完整 Engine job、资源验收、升级回归及平台编译已有通过结果，仍不能替代交付候选全部门禁。
