@@ -130,3 +130,7 @@ mod outbound_probe;
 #[cfg(test)]
 #[path = "stream_delivery_probe.rs"]
 mod delivery_probe;
+
+#[cfg(test)]
+#[path = "stream_shared_query_probe.rs"]
+mod shared_query_probe;

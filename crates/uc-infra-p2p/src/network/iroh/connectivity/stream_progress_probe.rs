@@ -51,16 +51,16 @@ impl ConnectivityBackend for Backend {
     }
 }
 
-struct Members {
+pub(super) struct Members {
     identity: KnownPeerIdentity,
     admitted: AtomicBool,
-    read_gate: ReadGate,
+    pub(super) read_gate: ReadGate,
 }
 
-struct ReadGate {
-    armed: AtomicBool,
-    entered: Notify,
-    released: Semaphore,
+pub(super) struct ReadGate {
+    pub(super) armed: AtomicBool,
+    pub(super) entered: Notify,
+    pub(super) released: Semaphore,
 }
 #[async_trait]
 impl PeerIdentityDirectoryPort for Members {
@@ -86,7 +86,7 @@ pub(super) struct Fixture {
     inbound: ConnectivityManager,
     pub(super) sending: ConnectionLease,
     pub(super) receiving: ConnectionLease,
-    membership: Arc<Members>,
+    pub(super) membership: Arc<Members>,
 }
 
 impl Fixture {

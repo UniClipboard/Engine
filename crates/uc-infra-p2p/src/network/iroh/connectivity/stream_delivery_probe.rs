@@ -12,10 +12,10 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectionLease, CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal,
-    ProgressExchangeDeadline, ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask,
-    ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
-    ProgressTerminalDelivery, ProgressTerminalNotice, ProgressTerminalRoundPort,
-    TransferProgressProducer, TransferProgressReceiver,
+    ProgressExchangeDeadline, ProgressExchangeService, ProgressReceiveError, ProgressReceiverPort,
+    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalNotice, ProgressTerminalRoundPort, TransferProgressProducer,
+    TransferProgressReceiver, TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::{
     ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
@@ -244,8 +244,15 @@ async fn blocked_authenticated_peer_does_not_hold_up_another_peers_actual_termin
             peak: AtomicUsize::new(0),
             peers: Mutex::new(HashSet::new()),
         });
-        let (delivery, worker) =
-            ProgressTerminalDelivery::new(Arc::new(SystemElapsedClock), authority, rounds.clone());
+        let (delivery, worker) = ProgressExchangeService::new(
+            Arc::new(SystemElapsedClock),
+            authority,
+            rounds.clone(),
+            Arc::new(TransferProgressSnapshotReader::new(
+                first.outbound.clone(),
+                Arc::new(TransferProgressWire),
+            )),
+        );
         let stop = CancellationToken::new();
         let running = tokio::spawn(worker.run(stop.clone()));
         assert_eq!(

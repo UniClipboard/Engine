@@ -1,6 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 
+/// 同端已等待的终态优先于普通查询；不同对端仍按轮转公平启动。
+#[derive(Clone, Copy)]
+pub enum ExchangePriority {
+    Terminal,
+    Normal,
+}
+
 /// 同时在途的网络交换全局上限。
 pub const EXCHANGE_GLOBAL_ACTIVE: usize = 4;
 /// 排队等待的交换全局上限。
@@ -47,7 +54,12 @@ impl<P: Clone + Eq + Hash, W> ExchangeQueue<P, W> {
         self.active.len()
     }
 
-    pub fn enqueue(&mut self, peer: P, work: W) -> Result<(), ExchangeRefusal<W>> {
+    pub fn enqueue(
+        &mut self,
+        peer: P,
+        work: W,
+        priority: ExchangePriority,
+    ) -> Result<(), ExchangeRefusal<W>> {
         if self.queued >= EXCHANGE_GLOBAL_QUEUED {
             return Err(ExchangeRefusal::GlobalQueueFull(work));
         }
@@ -58,7 +70,10 @@ impl<P: Clone + Eq + Hash, W> ExchangeQueue<P, W> {
         if queue.is_empty() {
             self.ring.push_back(peer);
         }
-        queue.push_back(work);
+        match priority {
+            ExchangePriority::Terminal => queue.push_front(work),
+            ExchangePriority::Normal => queue.push_back(work),
+        }
         self.queued += 1;
         Ok(())
     }
