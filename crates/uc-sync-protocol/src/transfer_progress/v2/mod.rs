@@ -12,4 +12,4 @@ pub use model::{
 pub const TRANSFER_PROGRESS_ALPN: &[u8] = b"uniclipboard/transfer-progress/2";
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_PAGE_ITEMS: usize = 64;
-pub const MAX_ITEMS: usize = 1024;
+pub use uc_core::file_transfer::MAX_PROGRESS_ITEMS as MAX_ITEMS;

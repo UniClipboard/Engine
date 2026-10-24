@@ -117,3 +117,5 @@ pub use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY
 
 #[cfg(feature = "test-util")]
 pub mod test_support;
+
+pub mod transfer_progress_v2;

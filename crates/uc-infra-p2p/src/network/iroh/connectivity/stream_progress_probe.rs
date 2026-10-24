@@ -4,6 +4,7 @@ use crate::network::iroh::admitted_connections::AdmittedConnections;
 use crate::network::iroh::transfer_progress_adapter::TRANSFER_PROGRESS_ALPN;
 use async_trait::async_trait;
 use iroh::{Endpoint, RelayMode};
+use iroh_blobs::ALPN as BLOBS_ALPN;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,7 +85,7 @@ impl Fixture {
     ) -> anyhow::Result<Self> {
         let server = Endpoint::builder(iroh::endpoint::presets::N0)
             .relay_mode(RelayMode::Disabled)
-            .alpns(vec![alpn.to_vec()])
+            .alpns(vec![alpn.to_vec(), BLOBS_ALPN.to_vec()])
             .bind()
             .await?;
         let client = Endpoint::builder(iroh::endpoint::presets::N0)
@@ -148,6 +149,11 @@ impl Fixture {
             ..ConnectivityPolicy::default()
         };
         // 阶段 0 复用真实成员准入；Router 的进度 profile 接线另验。
+        let profile = if alpn == BLOBS_ALPN {
+            ConnectivityProfile::Blob
+        } else {
+            ConnectivityProfile::Clipboard
+        };
         let outbound = ConnectivityManager::new(
             Arc::new(Backend(sending.clone())),
             Arc::new(IrohConnectionAdmission::new(
@@ -155,7 +161,7 @@ impl Fixture {
                 membership.clone(),
                 fingerprint.clone(),
                 AdmittedConnections::default(),
-                ConnectivityProfile::Clipboard,
+                profile,
             )),
             policy,
         );
@@ -166,7 +172,7 @@ impl Fixture {
                 incoming_members,
                 fingerprint,
                 AdmittedConnections::default(),
-                ConnectivityProfile::Clipboard,
+                profile,
             )),
             policy,
         );
