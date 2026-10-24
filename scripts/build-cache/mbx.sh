@@ -12,6 +12,16 @@
 # 缓存位置由调用方环境的 MBX_CACHE_DIR 决定（未设置时使用 mbx 平台默认位置）；仓库不写入机器路径。
 set -euo pipefail
 
+# CI 编译永远不配置原生远端，空 URL 覆盖 self-hosted 全局 MBX 配置。
+# 即使继承凭据、旧配置文件或显式 --r2，也不能重新开启逐对象请求。
+if [[ "${GITHUB_ACTIONS:-}" == true || "${UC_ENGINE_MBX_LOCAL_ONLY:-}" == 1 ]]; then
+  if [[ "${1:-}" == --r2 ]]; then shift; fi
+  unset UC_ENGINE_MBX_ENV_FILE
+  for variable in ${!BUILD_CACHE_R2_@} ${!AWS_@} ${!MBX_REMOTE_@}; do unset "$variable"; done
+  export MBX_REMOTE_URL="" MBX_REMOTE_NAMESPACE="" MBX_REMOTE_S3_ENDPOINT="" MBX_REMOTE_S3_REGION=""
+  export MBX_REMOTE_TOKEN="" MBX_REMOTE_TOKEN_FILE="" MBX_REMOTE_OIDC_AUDIENCE=""
+fi
+
 # 同时支持 shell Cargo 与原生 Node/Python 子进程；配置只在构建进程树加载。
 if [[ "${1:-}" != --install ]]; then
   if [[ -n "${UC_ENGINE_MBX_ENV_FILE:-}" ]]; then

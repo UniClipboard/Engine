@@ -19,56 +19,29 @@ MBX 不接管或回收 target。外置路径由本机既有配置或调用方提
 仍需调用方安排；内存紧张时通过 `CARGO_BUILD_JOBS=2` 收紧，命令行 `-j N` 优先于环境默认。
 不要通过关闭必要 features、降低 Infra 优化级别或改变发布 profile 换取无法比较的耗时。
 
-## R2 分布式动作缓存
+## CI 压缩快照与本地 R2 入口
 
-使用固定 MBX 原生 S3 后端：`just mbx --r2 <Cargo 参数>`。每个 worker 仍有独立 target 和本地
-动作缓存；远端对象位于 `uniclipboard-build-cache` 桶的 `engine/mbx/v1/`，不读取历史 sccache 对象。
-R2 共享编译结果，不提供跨机器编译锁或调度，也不会把 sccache 对象转换为 MBX 对象。
+CI 的唯一远端编译缓存是外层 CAS 压缩快照，格式、兼容键、信任边界及验证契约见
+[ADR-033](decisions/033-unified-mbx-rust-builds.md#2026-10-24-修订ci-仅使用外层压缩-cas-快照)。
+无凭据、缺失或损坏归档只进行本地冷编译；任何 CI 编译的 MBX 原生上传/下载均应为零。
+`mbx-r2-cache.yml` 保留完整 workspace check 与迁移 E2E，并在可信 main 发布后用独立空
+CAS/target 验证归档恢复。原生 hits、测试实际执行和外层下载分别记录，不能混为一谈。
 
-调用方从安全凭据管理器提供 `BUILD_CACHE_R2_ENDPOINT`、`BUILD_CACHE_R2_ACCESS_KEY_ID` 与
-`BUILD_CACHE_R2_SECRET_ACCESS_KEY`，不要在仓库、命令行参数或日志中保存值。端点是账户的 HTTPS R2
-S3 端点；访问密钥仅限该桶。缺少任一项时入口报错，不会启动本地构建冒充远端使用。
-入口只在当前子进程映射为原生 AWS 凭据，region 为 `auto`，默认 `MBX_REMOTE_MODE=read-only`；
-本机和 PR 应使用只读令牌。凭据会进入本次构建的环境，原生 MBX 不是对 build script 的凭据隔离机制。
+开发机仍可显式使用 `just mbx --r2 <Cargo 参数>`，调用方从安全凭据管理器提供三项
+`BUILD_CACHE_R2_*` 凭据，默认原生只读。该路径不属于 CI，也不共享新的快照格式；CI 即使
+收到 `--r2` 也强制本地编译。不要在仓库、命令行或日志保存凭据，不伪造 CI 身份取得写权限。
 
-可信 main 的受保护分支 push CI 才使用写令牌与 `read-write`；写令牌仍放在仅允许 main 的
-`engine-build-cache-writer` 环境，PR 使用 `engine-build-cache-reader`。MBX 1.24.0 会将本地、PR、
-未保护分支和手工触发收紧为只读，不能靠只写 `read-write` 启用发布，也不得伪造 GitHub 环境。
-主线必须真实受保护；接入前应核对实际规则。本机尚需独立配置只读凭据，GitHub secrets 无法读回。
-正式 release/tag 经 MBX 只复用本次 job 的可信本地动作缓存，不接入共享编译档案。主线发布与 PR 只读验收由
-[`mbx-r2-cache.yml`](../../.github/workflows/mbx-r2-cache.yml) 运行，工件包含诊断及原生统计；主线还必须
-运行独立空 target/动作缓存的消费者并确认下载、命中、无远端错误与零上传。主线分别播种
-`check --workspace --all-targets --locked` 与迁移测试构建的 manifest；消费者按同一命令读取，
-不能用测试构建的种子代替常用 check 的种子。PR 也运行独立只读消费者，读取既有主线种子；
-这不证明本次 PR 的代码已经由主线发布，真实读写发布仍须单独验收。
+本地聚焦验证：
 
-R2 验收 job 单独设置 `MBX_GC_MAX_SIZE=40GiB`，避免完整 workspace 消费者耗尽默认 20 GiB
-下载预算；统一入口的默认值仍为 20 GiB。MBX 1.24.0 将此值同时用于每次构建的下载预算和
-本地动作缓存 GC，不能当作整个 job 的磁盘上限：producer/consumer 的动作缓存与 target
-分别保留。每次构建前后（包括失败退出）记录两个位置的文件系统余量与四个目录的占用，
-以固定标签和字节/KiB 计数保存到 R2 工件；同一文件系统的容量不能相加。快照不是峰值测量，
-不保证任意构建都有足够磁盘，也不将 metadata 警告归因于下载预算。
+```bash
+python3 scripts/build-cache/mbx-snapshot.test.py
+python3 scripts/build-cache/mbx-snapshot.integration.py
+python3 scripts/build-cache/verify-r2-build.test.py
+python3 scripts/build-cache/check-snapshot-routing.py
+```
 
-R2 诊断使用 `just mbx --r2 --mbx doctor --json`；预取使用
-`just mbx --r2 --mbx prefetch check --workspace --all-targets --locked`。空 manifest 不等于连接故障，
-但诊断成功也不等于编译命中。用 `MBX_STATS_REPORT` 保存原生统计，并在独立空 target/本地动作缓存
-消费者中确认 `downloaded_bytes`、恢复输出与 hits；远端错误和上传失败也必须保留。
-MBX 1.18.0 的 `remote_failures` 不覆盖全部预取失败：PR #174 的 macOS 原始日志已有
-`remote cache blob prefetch failed` 与 `No buffer space available (os error 55)`，但统计验收仍通过。
-R2 工作流通过 `verify-r2-build.py` 同时检查原生统计与固定错误分类；诊断工件只保存分类计数，
-不保存含端点的原始日志。macOS 另外保留构建前后资源计数，用于区分系统资源不足与远端故障；
-本次 macOS 失败样本的网络内存分配拒绝数从 0 增至 34,206，证实共享 mbuf 池耗尽；
-不是仅凭 `ENOBUFS` 推测凭据或 runner 版本问题。`prepare-ci-network.sh` 仅在临时 GitHub
-托管 macOS runner 上将 TCP 每方向自动缓冲增长限制到 256 KiB（已有更小限制保持不变），
-为 MBX 的最多 64 个并发远端传输及本机 IPC 保留共享缓冲余量。不关闭缓存、预取、TCP
-自动调节或修改持久系统配置；本机和 self-hosted runner 不作系统修改。真实主线读写验证仍
-须在受保护 main push 完成，PR 只读验证不能替代。
-
-R2 的桶级令牌不能按前缀隔离信任；只有可信构建可以拿到写令牌。MBX 原生内容校验、请求期限、
-读失败后本地编译与异步上传负责缓存失败恢复，不另实现网络缓存层。R2 的真实共享命中及耗时须另行
-验收，先前的 2/4 任务基准不是远端缓存收益。配置语义见
-[MBX 固定版本远端缓存文档](https://github.com/jdx/mr-boxington/blob/v1.24.0/docs/remote-cache.md)
-与 [Cloudflare R2 S3 接入](https://developers.cloudflare.com/r2/get-started/s3/)。
+integration 使用仓库 target 下独占的短期 fixture，并在子进程结束后回收；不清理已有 target。
+R2 专用验收继续保留磁盘与 macOS 资源计数，但采样不是峰值，也不证明托管快照收益。
 
 ## 可重复测量
 
@@ -117,4 +90,4 @@ MBX 参数语义以 [固定版本文档](https://github.com/jdx/mr-boxington/blo
 
 `just cargo test`、`just cargo nextest` 与各测试分组脚本都经过 MBX。MBX 只恢复编译产物；测试、网络交互与工件断言仍实际执行。metadata/fmt/审计不是可命中的 rustc 动作，第一次编译和不支持的原生 bypass 也不能记为命中。
 
-CI 保存每次 Cargo 调用的原生 JSON 到 runner 的 `mbx-evidence`；R2 凭据通过临时 0600 文件在入口加载，GITHUB_ENV 只含路径。fork 无凭据使用本地 CAS 与 ref 隔离的 Actions 后备，真实 R2 不因环境缺失而伪装成功。`compile-cache-benchmark.yml` 手工运行只读 R2，使用两个独立空 target 和本次本地 CAS 验证恢复，不模拟主线发布。
+CI 在 `mbx-evidence` 保存原生编译统计与独立快照传输报告。凭据仅进入传输步骤；fork 无凭据只进行本地编译。`compile-cache-benchmark.yml` 只读兼容快照，使用两个独立空 target 和本次本地 CAS 验证恢复，不模拟主线发布。

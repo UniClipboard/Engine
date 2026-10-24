@@ -31,8 +31,8 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     # 编译缓存凭据：只有 main 上的可信运行绑定限定 main 分支的写入环境，其余运行（PR、合并队列、其他分支）用只读令牌；
-    # fork 与 Dependabot 拿不到任何 secret，回退为按 ref 隔离的 GitHub Actions 缓存。
-    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/029-ci-r2-compile-cache.md。
+    # fork 与 Dependabot 拿不到任何 secret，只进行本地冷编译。
+    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/033-unified-mbx-rust-builds.md。
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
@@ -46,7 +46,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-checks-macos
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -85,6 +84,13 @@ jobs:
           scripts/testing/relay-recovery-support.test.mjs
           scripts/testing/connection-recovery-session.test.mjs
 
+      - name: Check snapshot-only cache boundaries
+        run: |
+          python3 scripts/build-cache/mbx-snapshot.test.py
+          python3 scripts/build-cache/verify-r2-build.test.py
+          python3 scripts/build-cache/check-snapshot-routing.py
+          python3 scripts/build-cache/mbx-snapshot.integration.py
+
       - name: Check patch whitespace
         run: git diff --check
 
@@ -93,6 +99,16 @@ jobs:
         run: cargo test -p uc-infra-profile --test peer_address_read_diagnostics --locked
 
   # 升级兼容冒烟：上一个 Desktop 锚点到当前源码的 5 个单元；旧版宿主按 rev 与宿主摘要缓存，命中时不重建。
+
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: rust-checks-macos
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain MBX compiler evidence
         if: always()
@@ -124,7 +140,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-upgrade-matrix-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -172,6 +187,16 @@ jobs:
             target/active-clipboard-connectivity-evidence/fixed-main
           if-no-files-found: error
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: rust-upgrade-matrix-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -202,7 +227,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-tests-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -289,6 +313,16 @@ jobs:
             target/active-clipboard-connectivity-evidence/relay
           if-no-files-found: error
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: rust-tests-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -315,7 +349,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: peer-reachability-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -337,6 +370,16 @@ jobs:
             target/upgrade-anchors/*/host.json
           if-no-files-found: error
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: peer-reachability-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
   blob-connectivity:
     name: Blob transfer required network and upgrade matrix
     if: github.event.action != 'labeled'
@@ -355,7 +398,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: blob-connectivity-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -378,13 +420,23 @@ jobs:
             target/upgrade-anchors/*/host.json
           if-no-files-found: error
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: blob-connectivity-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
   mobile-bindings:
     name: Mobile binding compile ${{ matrix.platform }}
     if: github.event.action != 'labeled'
     runs-on: macos-15
     timeout-minutes: 60
     environment:
-      name: engine-build-cache-reader
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     strategy:
       fail-fast: false
@@ -400,7 +452,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: pr-mobile-${{ matrix.platform }}
-          compile-cache-access: read
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -420,6 +471,16 @@ jobs:
         if: matrix.platform == 'android'
         run: bash bindings/uc-engine-uniffi/scripts/build-android-aar.sh
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: pr-mobile-${{ matrix.platform }}
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
   harmonyos-binding:
     name: HarmonyOS binding compile
     # 外部 fork 不在持有 SDK 的 self-hosted 机器执行源码；其平台验收保留跳过，不登记通过。
@@ -429,7 +490,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, deveco]
     timeout-minutes: 45
     environment:
-      name: engine-build-cache-reader
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -437,7 +498,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: pr-harmonyos
-          compile-cache-access: read
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -452,6 +512,16 @@ jobs:
           AR_aarch64_unknown_linux_ohos="$native_root/llvm/bin/llvm-ar" \
           CMAKE="$native_root/build-tools/cmake/bin/cmake" \
             cargo check --locked -p uc-ohos-napi --target aarch64-unknown-linux-ohos
+
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: pr-harmonyos
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
   coverage:
     name: Rust coverage
@@ -472,7 +542,6 @@ jobs:
         with:
           cache-key: rust-coverage-linux
           fast-compile-infra: "true"
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -501,6 +570,16 @@ jobs:
           fail_ci_if_error: true
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: rust-coverage-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain MBX compiler evidence
         if: always()
@@ -538,7 +617,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: connection-recovery-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -553,6 +631,16 @@ jobs:
           name: connection-recovery-evidence-${{ matrix.mode }}
           path: target/connection-recovery-evidence
           if-no-files-found: warn
+
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: connection-recovery-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain MBX compiler evidence
         if: always()

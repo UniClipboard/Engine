@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   cache:
-    name: MBX R2 (${{ matrix.runner }})
+    name: MBX snapshot (${{ matrix.runner }})
     # fork/Dependabot 没有凭据，明确跳过而不是报告远端验收通过。
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
@@ -45,8 +45,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
 
-      - name: Test R2 verification
-        run: python3 scripts/build-cache/verify-r2-build.test.py
+      - name: Test snapshot boundaries and native round trip
+        run: |
+          python3 scripts/build-cache/verify-r2-build.test.py
+          python3 scripts/build-cache/mbx-snapshot.test.py
+          python3 scripts/build-cache/mbx-snapshot.integration.py
 
       - name: Prepare isolated outputs
         run: |
@@ -57,6 +60,13 @@ jobs:
             echo "UC_ENGINE_SOURCE_COMMIT=$(git rev-parse HEAD)"
             echo "UC_ENGINE_SOURCE_STATE=clean"
           } >> "$GITHUB_ENV"
+
+      - name: Prepare local-only MBX
+        shell: bash
+        run: |
+          bash scripts/build-cache/start-ci-mbx.sh
+          echo "UC_ENGINE_MBX_STATS_DIR=$RUNNER_TEMP/mbx-r2-evidence" >> "$GITHUB_ENV"
+          echo "MBX_CACHE_EXPORT_GROUP=r2-validation" >> "$GITHUB_ENV"
 
       # 只采集资源计数，不列连接、进程环境或文件路径；不修改 runner 的系统配置。
       - name: Record macOS resource baseline
@@ -74,43 +84,42 @@ jobs:
         if: runner.os == 'macOS'
         run: bash scripts/build-cache/prepare-ci-network.sh
 
-      - name: Exercise R2 and Engine migration
+      - name: Compile and run Engine migration locally
         env:
-          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
-          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
-          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
-          MBX_REMOTE_MODE: read-only
           MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-producer-cache
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-producer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/producer.json
         run: |
-          bash scripts/build-cache/mbx.sh --r2 --mbx doctor --json > "$RUNNER_TEMP/mbx-r2-evidence/doctor.json"
-          python3 scripts/build-cache/verify-r2-build.py -- bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
+          bash scripts/build-cache/mbx.sh --mbx doctor --json > "$RUNNER_TEMP/mbx-r2-evidence/doctor.json"
+          python3 scripts/build-cache/verify-r2-build.py -- bash scripts/build-cache/mbx.sh test -p uc-engine --test config_migration_round_trip_e2e --locked
+
+      - name: Restore independent consumer snapshot
+        uses: ./.github/actions/mbx-snapshot
+        env:
+          MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-consumer-cache
+        with:
+          scene: r2-validation
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+          require-hit: 'true'
 
       - name: Verify independent workspace check consumer
         env:
-          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
-          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
-          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
-          MBX_REMOTE_MODE: read-only
           MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-consumer-cache
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer-check.json
         run: |
-          python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh --r2 check --workspace --all-targets --locked
+          python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh check --workspace --all-targets --locked
 
       # 使用独立 target/动作缓存；PR 只读既有种子，不能声称验证了本次主线发布。
-      - name: Verify independent R2 consumer
+      - name: Verify independent snapshot consumer
         env:
-          BUILD_CACHE_R2_ENDPOINT: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
-          BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
-          BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
-          MBX_REMOTE_MODE: read-only
           MBX_CACHE_DIR: ${{ runner.temp }}/mbx-r2-consumer-cache
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/mbx-r2-consumer
           MBX_STATS_REPORT: ${{ runner.temp }}/mbx-r2-evidence/consumer.json
         run: |
-          python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh --r2 test -p uc-engine --test config_migration_round_trip_e2e --locked
+          python3 scripts/build-cache/verify-r2-build.py --consumer -- bash scripts/build-cache/mbx.sh test -p uc-engine --test config_migration_round_trip_e2e --locked
 
       - name: Record macOS resource outcome
         if: always() && runner.os == 'macOS'
