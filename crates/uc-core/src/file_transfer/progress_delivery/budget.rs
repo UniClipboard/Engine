@@ -1,39 +1,4 @@
-use std::error::Error;
-use std::fmt;
 use std::time::Duration;
-
-use crate::error_class::ErrorClass;
-
-/// 包含系统挂起时间的单调经过时间来源。
-/// 读数不能换算成日期；读取失败保留原始来源，不借用墙钟延长期限。
-pub trait ElapsedClockPort: Send + Sync {
-    fn elapsed(&self) -> Result<Duration, ElapsedClockError>;
-}
-
-#[derive(thiserror::Error)]
-#[error("elapsed clock unavailable")]
-pub struct ElapsedClockError {
-    #[source]
-    pub source: Box<dyn Error + Send + Sync>,
-}
-impl fmt::Debug for ElapsedClockError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, formatter)
-    }
-}
-impl ErrorClass for ElapsedClockError {
-    fn class(&self) -> &'static str {
-        "elapsed_clock_unavailable"
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ElapsedClockRefusal {
-    #[error("platform has no suspend-inclusive clock")]
-    UnsupportedPlatform,
-    #[error("native elapsed clock count is invalid")]
-    InvalidNativeCount,
-}
 
 /// 期限预算的当前判定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

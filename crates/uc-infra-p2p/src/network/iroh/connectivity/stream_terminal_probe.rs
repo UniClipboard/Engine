@@ -1,5 +1,5 @@
 //! 实际 BAO 接收、文件导出、Application 采用与业务 ACK；生产接收交接仍另验。
-use super::progress_probe::Fixture;
+use super::progress_probe::{progress_budget, Fixture};
 use crate::network::iroh::blob_exchange::IrohBlobExchangeAdapter;
 use crate::network::iroh::transfer_progress_v2::TransferProgressInbound;
 use anyhow::{bail, ensure};
@@ -135,7 +135,7 @@ async fn register(
             incoming,
             &fixture.receiving,
             1,
-            Instant::now() + BUDGET,
+            progress_budget(),
             &cancel,
             owner
         )
@@ -278,17 +278,11 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
     let pause = gate.clone();
     let cancellation = CancellationToken::new();
     let stop_ack = cancellation.clone();
-    let deadline = Instant::now() + BUDGET;
+    let budget = progress_budget();
+    let deadline = budget.instant();
     let serving = tokio::spawn(async move {
-        TransferProgressInbound::serve(
-            incoming,
-            &connection,
-            1,
-            deadline,
-            &stop_ack,
-            pause.as_ref(),
-        )
-        .await
+        TransferProgressInbound::serve(incoming, &connection, 1, budget, &stop_ack, pause.as_ref())
+            .await
     });
     timeout(BUDGET, gate.entered.notified()).await?;
     let mut reading = Box::pin(read_frame(&mut sending.receive));
@@ -320,7 +314,7 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
             incoming,
             &fixture.receiving,
             1,
-            Instant::now() + BUDGET,
+            progress_budget(),
             &stop,
             owner.as_ref()
         ),
@@ -349,7 +343,7 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
             incoming,
             &fixture.receiving,
             1,
-            Instant::now() + BUDGET,
+            progress_budget(),
             &stop,
             owner.as_ref()
         ),
@@ -374,7 +368,7 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
             incoming,
             &fixture.receiving,
             1,
-            Instant::now() + BUDGET,
+            progress_budget(),
             &stop,
             owner.as_ref()
         ),

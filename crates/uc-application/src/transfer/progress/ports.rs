@@ -1,10 +1,10 @@
 use super::{
-    ProgressBound, ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor,
-    ProgressTerminalNotice,
+    ElapsedClockError, ProgressBound, ProgressExchangeDeadline, ProgressReceiveError,
+    ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminalNotice,
 };
 use crate::connectivity::{ConnectionLease, StreamLease};
 use async_trait::async_trait;
-use tokio::time::Instant;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::ProgressIdentity;
 use uc_core::ids::DeviceId;
@@ -49,14 +49,28 @@ pub trait ProgressTaskAuthorityPort: Send + Sync {
 /// 一次已准入连接上的完整登记交换；新挑战必须实时读取authority，不使用调用前捕获的attempt。
 /// 借用流，原负责人持许可至后置权威检查及实际连接保留读取结束。
 #[async_trait]
-pub trait ProgressRegistrationWirePort: Send + Sync {
+pub trait ProgressWirePort: Send + Sync {
     async fn register(
         &self,
         stream: &mut StreamLease,
         connection: &ConnectionLease,
         source: ProgressIdentity,
         authority: &dyn ProgressTaskAuthorityPort,
-        deadline: Instant,
+        deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ProgressBound, ProgressReceiveError>;
+    /// 有界终态交换；成功必须回显完全相同的已采用终态。
+    async fn terminal(
+        &self,
+        stream: &mut StreamLease,
+        connection: &ConnectionLease,
+        notice: ProgressTerminalNotice,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<ProgressTerminalNotice, ProgressReceiveError>;
+}
+
+/// 包含系统挂起时间的单调读数，实际消费及失败处理由progress负责人统一承担。
+pub trait ElapsedClockPort: Send + Sync {
+    fn elapsed(&self) -> Result<Duration, ElapsedClockError>;
 }

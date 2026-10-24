@@ -22,9 +22,10 @@ pub use receive_recovery::{
 
 mod progress_delivery;
 pub use progress_delivery::{
-    ExchangeQueue, ExchangeRefusal, RetransmitEffect, RetransmitInput, RetransmitStop,
-    TerminalLedger, TerminalRetransmit, EXCHANGE_GLOBAL_ACTIVE, EXCHANGE_GLOBAL_QUEUED,
-    TERMINAL_GLOBAL_CAPACITY, TERMINAL_PEER_CAPACITY, TERMINAL_RETENTION, TERMINAL_ROUND_LIMIT,
+    BudgetStatus, ElapsedBudget, ExchangeQueue, ExchangeRefusal, RetransmitEffect, RetransmitInput,
+    RetransmitStop, TerminalLedger, TerminalRetransmit, EXCHANGE_GLOBAL_ACTIVE,
+    EXCHANGE_GLOBAL_QUEUED, TERMINAL_GLOBAL_CAPACITY, TERMINAL_PEER_CAPACITY, TERMINAL_RETENTION,
+    TERMINAL_ROUND_LIMIT,
 };
 
 mod progress_registration;
