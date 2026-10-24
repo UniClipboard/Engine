@@ -40,6 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Prepare Rust build
@@ -62,6 +63,9 @@ jobs:
 
       - name: Check repository ownership and release rules
         run: node scripts/architecture/check-engine-repository.mjs
+
+      - name: Verify independent Engine Git consumer
+        run: node scripts/architecture/check-engine-git-consumer.mjs
         env:
           RUST_STYLE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
 
@@ -115,6 +119,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Install build tools
@@ -194,6 +199,8 @@ jobs:
       UC_TEST_ARTIFACTS_DIR: target/test-artifacts/ci
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
 
       - name: Install network test tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
@@ -308,6 +315,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install mandatory network and build tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake ripgrep
@@ -348,6 +356,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install mandatory network and build tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake ripgrep
@@ -396,6 +405,8 @@ jobs:
       UC_ENGINE_UNIFFI_BUILD_PROFILE: dev
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
@@ -433,6 +444,8 @@ jobs:
       deployment: false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
@@ -466,6 +479,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
 
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
@@ -529,6 +544,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Install network test tools

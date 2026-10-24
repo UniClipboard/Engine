@@ -83,7 +83,7 @@ static_assertions = "1"
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace", "logs"] }
 opentelemetry-appender-tracing = { version = "=0.32.0", default-features = false }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace", "logs", "testing"] }
-iroh = { version = "1.3.0" }
+iroh = { workspace = true }
 
 [dependencies.tempfile]
 version = "3"

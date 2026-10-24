@@ -35,6 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           repository: UniClipboard/UniClip
           ref: ${{ inputs.mobile_ref || '5289c4aff8e8953a1561fdb925218901097bec1b' }}
           persist-credentials: false
