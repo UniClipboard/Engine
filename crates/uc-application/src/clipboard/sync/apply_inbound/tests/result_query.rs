@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::blob::{BlobDigest, BlobTicket, PlaintextHash};
 use uc_core::ports::{
-    AttemptError, AttemptState, EntryReceiveAttempt, EntryReceiveProgress,
-    FileTransferProjectionError, GetEntryReceiveProgressPort, ListNonTerminalAttemptsPort,
-    TrackedFileTransferStatus,
+    AttemptError, AttemptState, BeginReceiveAttemptPort, BeginReceiveOutcome, EntryReceiveAttempt,
+    EntryReceiveProgress, FileTransferProjectionError, GetEntryReceiveProgressPort,
+    ListNonTerminalAttemptsPort, TrackedFileTransferStatus,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SnapshotHash, SystemClipboardSnapshot};
 
@@ -83,10 +83,10 @@ impl GetEntryReceiveProgressPort for Progress {
             entry_id: entry.into(),
             attempt_id: self.0.attempt_id.lock().unwrap().clone(),
             state: *self.0.state.lock().unwrap(),
-            total_bytes: 14,
-            completed_bytes: 7,
-            items_total: 1,
-            items_completed: 1,
+            total_bytes: 0,
+            completed_bytes: 0,
+            items_total: 0,
+            items_completed: 0,
             items: Vec::new(),
         }))
     }
@@ -95,6 +95,68 @@ impl GetEntryReceiveProgressPort for Progress {
 impl ListNonTerminalAttemptsPort for Progress {
     async fn list_non_terminal_attempts(&self) -> Result<Vec<EntryReceiveAttempt>, AttemptError> {
         Ok(Vec::new())
+    }
+}
+
+// attempt已写入、创建端口尚未返回时，同一个业务查询也必须看见完整未启动计划。
+struct QueryBeforeBeginReturns {
+    inner: Arc<AttemptGate>,
+    query: Arc<ReceiveProgressQuery>,
+}
+impl QueryBeforeBeginReturns {
+    async fn assert_original_plan(&self, entry: &str) {
+        let progress = self
+            .query
+            .get(&EntryId::from(entry))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            progress.items_total, 2,
+            "attempt一旦可见，未启动原始项也必须计入总量"
+        );
+        assert_eq!(progress.total_bytes, 14);
+        assert_eq!(progress.items.len(), 2);
+        assert_eq!(progress.items_completed, 0);
+        assert_eq!(progress.completed_bytes, 0);
+        assert!(progress
+            .items
+            .iter()
+            .all(|item| item.status == TrackedFileTransferStatus::Pending));
+    }
+}
+#[async_trait]
+impl BeginReceiveAttemptPort for QueryBeforeBeginReturns {
+    async fn begin_first_receive(
+        &self,
+        entry: &str,
+        attempt: &str,
+        now_ms: i64,
+    ) -> Result<BeginReceiveOutcome, AttemptError> {
+        let outcome = self
+            .inner
+            .begin_first_receive(entry, attempt, now_ms)
+            .await?;
+        if outcome == BeginReceiveOutcome::Begun {
+            self.assert_original_plan(entry).await;
+        }
+        Ok(outcome)
+    }
+    async fn begin_redelivery(
+        &self,
+        entry: &str,
+        expected: &str,
+        attempt: &str,
+        now_ms: i64,
+    ) -> Result<BeginReceiveOutcome, AttemptError> {
+        let outcome = self
+            .inner
+            .begin_redelivery(entry, expected, attempt, now_ms)
+            .await?;
+        if outcome == BeginReceiveOutcome::Begun {
+            self.assert_original_plan(entry).await;
+        }
+        Ok(outcome)
     }
 }
 
@@ -150,6 +212,16 @@ async fn real_partial_materialization_query_only_completes_files_that_were_actua
         let attempts = AttemptGate::empty();
         let readiness = Arc::new(ReceiveReadinessCoordinator::new());
         readiness.ensure_ready(|| async { Ok(()) }).await.unwrap();
+        let projection = Arc::new(Progress(attempts.clone()));
+        let initial_query = Arc::new(ReceiveProgressQuery::new(
+            projection.clone(),
+            projection,
+            readiness.work_registry(),
+        ));
+        let observed_begin = Arc::new(QueryBeforeBeginReturns {
+            inner: attempts.clone(),
+            query: initial_query,
+        });
         let capture = Arc::new(Capture {
             entry: Mutex::new(None),
             attempts: attempts.clone(),
@@ -167,7 +239,7 @@ async fn real_partial_materialization_query_only_completes_files_that_were_actua
                 blob_materializer: Arc::new(materializer),
                 receive_attempts: InboundReceiveAttemptDeps {
                     get: attempts.clone(),
-                    begin: attempts.clone(),
+                    begin: observed_begin,
                     claim_commit: attempts.clone(),
                     request_cancel: attempts.clone(),
                     begin_failure: attempts.clone(),

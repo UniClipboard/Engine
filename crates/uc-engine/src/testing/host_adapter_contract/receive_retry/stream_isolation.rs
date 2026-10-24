@@ -9,7 +9,7 @@ use crate::{
     CancelEntryReceiveInput, ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput,
     Engine, EngineConfig, EntryReceiveCancellationOutcome, HostCapabilities, HostCapabilityError,
     HostCapabilityErrorCategory, HostClipboardSnapshot, HostDirectories, HostFileAccess,
-    HostFileHandle, HostFileMetadata, JoinSpaceInput, Operation, OperationResult,
+    HostFileHandle, HostFileMetadata, JoinSpaceInput, Operation, OperationResult, ReceiveItemKind,
     ReceiveProgressSummary, ResendEntryInput, ResendEntryOutcome, RestoreClipboardInput,
     SecretString, SendFilesInput, SendTextInput, SettingsPatch, SyncSettingsPatch,
 };
@@ -88,7 +88,15 @@ async fn receiving_entry(receiver: &Engine, previous: Option<&str>) -> ReceivePr
             };
             let mut candidates = rows
                 .into_iter()
-                .filter(|row| row.state == "receiving" && Some(row.entry_id.as_str()) != previous);
+                // 排除配对后仍在收尾的文本接收，只选择本场景的文件意图。
+                .filter(|row| {
+                    row.state == "receiving"
+                        && row
+                            .items
+                            .iter()
+                            .any(|item| item.kind == ReceiveItemKind::File)
+                        && Some(row.entry_id.as_str()) != previous
+                });
             if let Some(row) = candidates.next() {
                 assert!(candidates.next().is_none(), "只能有一个新增接收尝试");
                 assert_eq!(row.items_total, 3);

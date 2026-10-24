@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, PoisonError, Weak};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
-use uc_core::ports::{EntryReceiveProgress, ReceiveItemKind};
+use uc_core::ports::{EntryReceiveProgress, ReceiveItemKind, TrackedFileTransferStatus};
 use uc_core::MimeType;
 
 mod projection;
@@ -51,7 +51,7 @@ pub(crate) struct PlannedReceiveItem {
 pub(super) struct ReceiveReceipt {
     attempt: String,
     source: Option<ReceiveSource>,
-    planned: Vec<PlannedReceiveItem>,
+    planned: Arc<[PlannedReceiveItem]>,
     batch: Weak<ReceiveBatch>,
     final_facts: Option<ReceiveFacts>,
     landed: HashMap<usize, ReceivedItem>,
@@ -92,6 +92,22 @@ impl ReceiveSource {
 }
 
 impl ReceiveAction {
+    /// 在持久 attempt 可见前准备不可变计划；此时不替换旧尝试的来源或交付证明。
+    pub(crate) fn prepare_plan(&self, source: &ReceiveSource) {
+        let progress = self
+            .progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(progress) = progress {
+            *progress
+                .prepared_plan
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) =
+                Some(source.planned(&progress.entry, &progress.attempt).into());
+        }
+    }
+
     pub(crate) fn inherit_results(&self, selection: &ReceiveSelection) {
         let progress = self
             .progress
@@ -112,7 +128,7 @@ impl ReceiveAction {
             .filter(|receipt| receipt.attempt == progress.attempt)
         {
             receipt.landed = selection.landed.clone();
-            for item in &receipt.planned {
+            for item in receipt.planned.iter() {
                 if let Some(previous) = selection.unselected.get(&item.blob_index) {
                     self.batch.inherit_result(&item.id, previous);
                 }
@@ -146,7 +162,12 @@ impl ReceiveAction {
         {
             return;
         }
-        let planned = source.planned(&progress.entry, &progress.attempt);
+        let planned = progress
+            .prepared_plan
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(|| source.planned(&progress.entry, &progress.attempt).into())
+            .clone();
         let expected_hash = source.expected_hash.clone();
         let previous = state.receipts.insert(
             progress.entry.clone(),
@@ -204,7 +225,8 @@ impl ReceiveAction {
                     .is_some_and(|receipt| receipt.attempt == progress.attempt)
             {
                 if let Some(source) = &previous.source {
-                    let planned = source.planned(&progress.entry, &progress.attempt);
+                    let planned: Arc<[_]> =
+                        source.planned(&progress.entry, &progress.attempt).into();
                     if let Some(facts) = &mut previous.final_facts {
                         facts.rebase(&previous.planned, &planned);
                     }
@@ -303,6 +325,32 @@ impl ReceiveWorkRegistry {
             .get(&EntryId::from(progress.entry_id.clone()))
             .filter(|receipt| receipt.attempt == progress.attempt_id)
         else {
+            // 创建端口可能已经提交，但完整来源尚未交接；只使用同一原动作的已知计划和事实。
+            let key = (
+                EntryId::from(progress.entry_id.clone()),
+                progress.attempt_id.clone(),
+            );
+            if let Some(active) = state.active.get(&key).and_then(Weak::upgrade) {
+                let planned = active
+                    .prepared_plan
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                if let (Some(planned), Some(batch)) = (planned, active.batch.upgrade()) {
+                    let committed = planned
+                        .iter()
+                        .filter(|item| {
+                            progress.items.iter().any(|saved| {
+                                saved.item_id == item.id
+                                    && saved.status == TrackedFileTransferStatus::Completed
+                            })
+                        })
+                        .map(|item| item.blob_index)
+                        .collect();
+                    progress.items = batch.items(&planned, &committed, progress.state);
+                    return projection::project_totals(&planned, progress);
+                }
+            }
             return Ok(());
         };
         let committed = receipt.landed.keys().copied().collect::<HashSet<_>>();

@@ -603,6 +603,7 @@ impl ApplyInboundClipboardUseCase {
         &self,
         entry_id: &EntryId,
         action: &ReceiveAction,
+        source: Option<ReceiveSource>,
     ) -> Result<Option<String>, ApplyInboundError> {
         let Some(ports) = &self.receive_attempts else {
             return Ok(None);
@@ -623,6 +624,9 @@ impl ApplyInboundClipboardUseCase {
                     ApplyInboundError::Internal(SourceError::new(error))
                 }
             })?;
+        if let Some(source) = &source {
+            action.prepare_plan(source);
+        }
         let now_ms = ports.clock.now_ms();
         let current = ports
             .get
@@ -668,7 +672,12 @@ impl ApplyInboundClipboardUseCase {
             }
         };
         match outcome {
-            BeginReceiveOutcome::Begun => Ok(Some(attempt_id)),
+            BeginReceiveOutcome::Begun => {
+                if let Some(source) = source {
+                    action.retain_source(source);
+                }
+                Ok(Some(attempt_id))
+            }
             BeginReceiveOutcome::AlreadyReceiving | BeginReceiveOutcome::Superseded => Err(
                 ApplyInboundError::Internal(anyhow!("remote receive attempt could not be started")),
             ),
@@ -1254,24 +1263,8 @@ impl ApplyInboundClipboardUseCase {
                 }
             }
         } else {
-            self.begin_receive_attempt(&receiver_entry_id, receive_action)
-                .await?
-        };
-        if let Some(prepared) = retry.as_mut() {
-            receive_action.retain_source(prepared.source.clone());
-            if let Some(selection) = &prepared.selection {
-                receive_action.inherit_results(selection);
-            }
-            if let (Some(reply), Some(attempt_id)) =
-                (prepared.accepted.take(), receive_attempt_id.as_ref())
-            {
-                let _ = reply.send(RetryEntryReceiveOutcome::Accepted {
-                    attempt_id: attempt_id.clone(),
-                });
-            }
-        } else {
-            if !blob_refs.is_empty() || file_set_manifest.is_some() {
-                receive_action.retain_source(ReceiveSource {
+            let source =
+                (!blob_refs.is_empty() || file_set_manifest.is_some()).then(|| ReceiveSource {
                     from_device: input.from_device,
                     expected_hash: input.snapshot_hash.clone(),
                     blob_refs: blob_refs.clone(),
@@ -1286,6 +1279,20 @@ impl ApplyInboundClipboardUseCase {
                             mime: rep.mime.clone(),
                         })
                         .collect(),
+                });
+            self.begin_receive_attempt(&receiver_entry_id, receive_action, source)
+                .await?
+        };
+        if let Some(prepared) = retry.as_mut() {
+            receive_action.retain_source(prepared.source.clone());
+            if let Some(selection) = &prepared.selection {
+                receive_action.inherit_results(selection);
+            }
+            if let (Some(reply), Some(attempt_id)) =
+                (prepared.accepted.take(), receive_attempt_id.as_ref())
+            {
+                let _ = reply.send(RetryEntryReceiveOutcome::Accepted {
+                    attempt_id: attempt_id.clone(),
                 });
             }
         }

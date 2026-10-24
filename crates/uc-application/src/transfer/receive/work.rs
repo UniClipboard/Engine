@@ -92,6 +92,8 @@ struct Progress {
     attempt: String,
     cancel: CancellationToken,
     completion: watch::Sender<Completion>,
+    prepared_plan: Mutex<Option<Arc<[PlannedReceiveItem]>>>,
+    batch: Weak<ReceiveBatch>,
 }
 
 /// 同一接收处理和其监督者共同持有；只有监督者能声明整个动作结束。
@@ -331,6 +333,8 @@ impl ReceiveAction {
             attempt: attempt.to_owned(),
             cancel: self.generation.child_token(),
             completion: watch::channel(None).0,
+            prepared_plan: Mutex::new(None),
+            batch: Arc::downgrade(&self.batch),
         });
         state.active.retain(|_, value| value.strong_count() != 0);
         state.active.insert(
