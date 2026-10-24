@@ -8,6 +8,7 @@ pub mod active_clipboard;
 mod addr_filter;
 mod admission_transport_material;
 pub mod admitted_connections;
+pub mod blob_exchange;
 pub mod blobs;
 mod conn_path;
 mod connect;
@@ -113,3 +114,6 @@ pub fn product_alpns() -> Vec<&'static [u8]> {
     ]
 }
 pub use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
+
+#[cfg(feature = "test-util")]
+pub mod test_support;

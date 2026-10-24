@@ -1,22 +1,32 @@
-use std::path::PathBuf;
+use super::output::PreparedBlobPath;
+use std::future::Future;
 use std::sync::Arc;
 
+use super::transport::{
+    BlobDownloadPreparation, BlobDownloadResources, BlobExchangeError, BlobExchangeFailure,
+    PreparedDownload,
+};
+use super::transport::{DownloadResponse, DownloadTask};
+use crate::transfer::receive::DownloadSettlement;
 use bytes::Bytes;
+use std::time::Duration;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use uc_core::ids::EntryId;
 use uc_core::ports::blob::{
-    BlobDigest, BlobProgressSink, BlobReferenceRepositoryPort, BlobTicket, BlobTransferPort,
-    PlaintextHash, TagReason,
+    BlobDigest, BlobReferenceRepositoryPort, BlobTicket, BlobTransferPort, PlaintextHash, TagReason,
 };
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::ContentHashPort;
 
 pub(crate) struct FetchBlobInput {
+    pub(in super::super) settlement: DownloadSettlement,
     pub ticket: BlobTicket,
+    pub cancel: CancellationToken,
     pub entry_id: EntryId,
-    /// 可选进度上报通道。adapter 在 fetch 过程中按字节阈值/时间窗节流回调。
-    /// `None` 则 adapter 不上报,行为与改造前一致。
-    pub progress: Option<Arc<dyn BlobProgressSink>>,
+    /// 取得原下载许可后执行的本地准备，返回可选的已校验进度交接。
+    pub(in super::super) preparation: BlobDownloadPreparation,
 }
 
 #[derive(Debug, Clone)]
@@ -35,10 +45,12 @@ pub(crate) struct FetchBlobOutcome {
 /// transfer no longer routes the full plaintext through `Bytes` + a second
 /// `tokio::fs::write`.
 pub(crate) struct FetchBlobPathInput {
+    pub(in super::super) settlement: DownloadSettlement,
     pub ticket: BlobTicket,
+    pub cancel: CancellationToken,
     pub entry_id: EntryId,
-    pub target_path: PathBuf,
-    pub progress: Option<Arc<dyn BlobProgressSink>>,
+    pub(super) target_path: PreparedBlobPath,
+    pub(in super::super) preparation: BlobDownloadPreparation,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +65,7 @@ pub(crate) struct FetchBlobPathOutcome {
 }
 
 pub(crate) struct FetchBlobUseCase {
+    downloads: Arc<BlobDownloadResources>,
     hash: Arc<dyn ContentHashPort>,
     blob_transfer: Arc<dyn BlobTransferPort>,
     blob_reference: Arc<dyn BlobReferenceRepositoryPort>,
@@ -61,12 +74,14 @@ pub(crate) struct FetchBlobUseCase {
 
 impl FetchBlobUseCase {
     pub fn new(
+        downloads: Arc<BlobDownloadResources>,
         hash: Arc<dyn ContentHashPort>,
         blob_transfer: Arc<dyn BlobTransferPort>,
         blob_reference: Arc<dyn BlobReferenceRepositoryPort>,
         transfer_cipher: Arc<dyn TransferCipherPort>,
     ) -> Self {
         Self {
+            downloads,
             hash,
             blob_transfer,
             blob_reference,
@@ -75,20 +90,60 @@ impl FetchBlobUseCase {
     }
 
     #[tracing::instrument(name = "usecase.fetch_blob.execute", skip_all)]
-    pub async fn execute(&self, input: FetchBlobInput) -> Result<FetchBlobOutcome, FetchBlobError> {
-        let digest = self
-            .blob_transfer
-            .digest_of(&input.ticket)
-            .map_err(|e| FetchBlobError::Transfer(anyhow::Error::from(e)))?;
-        let progress_ref: Option<&dyn BlobProgressSink> = input
-            .progress
-            .as_ref()
-            .map(|p| &**p as &dyn BlobProgressSink);
-        let encrypted_bytes = self
-            .blob_transfer
-            .fetch(&input.ticket, progress_ref)
+    pub(in super::super) fn execute<T, F>(
+        self: &Arc<Self>,
+        input: FetchBlobInput,
+        finish: impl FnOnce(Result<FetchBlobOutcome, BlobExchangeError>, DownloadResponse<T>) -> F
+            + Send
+            + 'static,
+    ) -> DownloadTask<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, BlobExchangeError>> + Send + 'static,
+    {
+        let prepared = match self.downloads.prepare(&input.ticket, &input.cancel) {
+            Ok(prepared) => prepared,
+            Err(error) => return DownloadTask::rejected(error, input.cancel),
+        };
+        let owner = self.clone();
+        self.downloads
+            .transport
+            .supervise(input.cancel.clone(), move |response| async move {
+                let result = owner
+                    .execute_inner(input, prepared)
+                    .await
+                    .map_err(fetch_error);
+                finish(result, response).await
+            })
+    }
+    async fn execute_inner(
+        &self,
+        input: FetchBlobInput,
+        prepared: PreparedDownload,
+    ) -> Result<FetchBlobOutcome, FetchBlobError> {
+        let received = self
+            .downloads
+            .obtain(
+                prepared,
+                &input.cancel,
+                input.preparation,
+                input.settlement.clone(),
+            )
             .await
-            .map_err(|e| FetchBlobError::Transfer(anyhow::Error::from(e)))?;
+            .map_err(|source| FetchBlobError::Transfer(source.into()))?;
+        let digest = received.digest;
+        if input.cancel.is_cancelled() {
+            return Err(FetchBlobError::Cancelled(BlobExchangeFailure::Cancelled));
+        }
+        let encrypted_bytes = self
+            .downloads
+            .store
+            .read(digest)
+            .await
+            .map_err(|source| FetchBlobError::Transfer(source.into()))?;
+        if input.cancel.is_cancelled() {
+            return Err(FetchBlobError::Cancelled(BlobExchangeFailure::Cancelled));
+        }
         let plaintext_bytes = Bytes::from(
             self.transfer_cipher
                 .decrypt(&encrypted_bytes)
@@ -102,6 +157,11 @@ impl FetchBlobUseCase {
                 .bytes,
         );
 
+        received
+            .request
+            .validate(Instant::now() + Duration::from_secs(60), &input.cancel)
+            .await
+            .map_err(|source| FetchBlobError::Transfer(source.into()))?;
         self.blob_reference
             .save(plaintext_hash, digest)
             .await
@@ -119,40 +179,79 @@ impl FetchBlobUseCase {
         })
     }
 
-    /// Streaming fetch — write the blob directly to `target_path` instead
-    /// of returning it as `Bytes`. GH#487 Phase 2.
-    ///
-    /// Differs from [`execute`](Self::execute) in three places:
-    /// * Calls `BlobTransferPort::fetch_to_path`, so the full plaintext
-    ///   never passes through `Bytes` on this code path.
-    /// * Skips the `ContentHashPort::hash_bytes` step. File blobs are
-    ///   stored raw and unencrypted on iroh-blobs (see `PublishBlobUseCase`
-    ///   path branch); the BAO root the adapter validates equals the
-    ///   plaintext blake3, so `plaintext_hash` is read straight from
-    ///   `digest` rather than being recomputed by streaming the file
-    ///   back in. Saves a second whole-file BLAKE3 pass.
-    /// * Returns the file size from `tokio::fs::metadata` so callers can
-    ///   emit a final progress event without re-reading the file.
+    /// Raw 文件经 SDK 校验后流式导出；内容保护及下载许可继续覆盖引用和标签结算。
     #[tracing::instrument(name = "usecase.fetch_blob.execute_to_path", skip_all)]
-    pub async fn execute_to_path(
+    pub(in super::super) fn execute_to_path<T, F>(
+        self: &Arc<Self>,
+        input: FetchBlobPathInput,
+        finish: impl FnOnce(Result<FetchBlobPathOutcome, BlobExchangeError>, DownloadResponse<T>) -> F
+            + Send
+            + 'static,
+    ) -> DownloadTask<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, BlobExchangeError>> + Send + 'static,
+    {
+        let prepared = match self.downloads.prepare(&input.ticket, &input.cancel) {
+            Ok(prepared) => prepared,
+            Err(error) => return DownloadTask::rejected(error, input.cancel),
+        };
+        let owner = self.clone();
+        self.downloads
+            .transport
+            .supervise(input.cancel.clone(), move |response| async move {
+                let result = owner
+                    .execute_path_inner(input, prepared)
+                    .await
+                    .map_err(fetch_error);
+                finish(result, response).await
+            })
+    }
+    async fn execute_path_inner(
         &self,
         input: FetchBlobPathInput,
+        prepared: PreparedDownload,
     ) -> Result<FetchBlobPathOutcome, FetchBlobError> {
-        let progress_ref: Option<&dyn BlobProgressSink> = input
-            .progress
-            .as_ref()
-            .map(|p| &**p as &dyn BlobProgressSink);
-        let digest = self
-            .blob_transfer
-            .fetch_to_path(&input.ticket, &input.target_path, progress_ref)
+        let received = self
+            .downloads
+            .obtain(
+                prepared,
+                &input.cancel,
+                input.preparation,
+                input.settlement.clone(),
+            )
             .await
-            .map_err(|e| FetchBlobError::Transfer(anyhow::Error::from(e)))?;
+            .map_err(|source| FetchBlobError::Transfer(source.into()))?;
+        let digest = received.digest;
+        if input.cancel.is_cancelled() {
+            return Err(FetchBlobError::Cancelled(BlobExchangeFailure::Cancelled));
+        }
+        let bytes_written = self
+            .downloads
+            .store
+            .export(
+                digest,
+                input
+                    .target_path
+                    .path()
+                    .map_err(|source| FetchBlobError::Transfer(source.into()))?,
+            )
+            .await
+            .map_err(|source| FetchBlobError::Transfer(source.into()))?;
+        if input.cancel.is_cancelled() {
+            return Err(FetchBlobError::Cancelled(BlobExchangeFailure::Cancelled));
+        }
 
         // File blobs are content-addressed by blake3 of the raw plaintext;
         // since they're stored without encryption the adapter's digest IS
         // the plaintext hash (mirrors `PublishBlobUseCase::execute_path`).
         let plaintext_hash = PlaintextHash::from_bytes(*digest.as_bytes());
 
+        received
+            .request
+            .validate(Instant::now() + Duration::from_secs(60), &input.cancel)
+            .await
+            .map_err(|source| FetchBlobError::Transfer(source.into()))?;
         self.blob_reference
             .save(plaintext_hash, digest)
             .await
@@ -161,11 +260,6 @@ impl FetchBlobUseCase {
             .tag(&digest, TagReason::ClipboardEntry(input.entry_id.clone()))
             .await
             .map_err(|e| FetchBlobError::Transfer(anyhow::Error::from(e)))?;
-
-        let bytes_written = tokio::fs::metadata(&input.target_path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
 
         Ok(FetchBlobPathOutcome {
             entry_id: input.entry_id,
@@ -178,6 +272,8 @@ impl FetchBlobUseCase {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FetchBlobError {
+    #[error("blob fetch cancelled")]
+    Cancelled(#[source] BlobExchangeFailure),
     #[error("hash failed")]
     Hash(#[source] anyhow::Error),
     #[error("blob transfer failed")]
@@ -186,4 +282,21 @@ pub(crate) enum FetchBlobError {
     Reference(#[source] anyhow::Error),
     #[error("blob payload decryption failed")]
     Cipher(#[source] anyhow::Error),
+}
+
+fn fetch_error(source: FetchBlobError) -> BlobExchangeError {
+    let kind = match &source {
+        FetchBlobError::Cancelled(_) => BlobExchangeFailure::Cancelled,
+        FetchBlobError::Cipher(_) | FetchBlobError::Hash(_) => BlobExchangeFailure::Integrity,
+        FetchBlobError::Reference(_) => BlobExchangeFailure::Store,
+        FetchBlobError::Transfer(error) => error
+            .chain()
+            .find_map(|source| {
+                source
+                    .downcast_ref::<BlobExchangeError>()
+                    .map(|error| error.kind)
+            })
+            .unwrap_or(BlobExchangeFailure::Store),
+    };
+    BlobExchangeError::new(kind, source)
 }

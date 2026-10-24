@@ -37,7 +37,7 @@ use uc_core::ports::blob::BlobTicket;
 use uc_core::MimeType;
 use uc_core::{ObservedClipboardRepresentation, SystemClipboardSnapshot};
 
-use super::apply_inbound::{InboundFileSetManifest, InboundFileSetMember};
+use crate::transfer::receive::materialization::{InboundFileSetManifest, InboundFileSetMember};
 
 /// V3 blob refs trailer magic. Each ref carries 6 fields:
 /// `ticket / entry_id / filename / mime / size_bytes / representation_index`.
@@ -713,7 +713,9 @@ mod tests {
 
     #[test]
     fn directory_manifest_round_trip_preserves_member_locations() {
-        use crate::clipboard::sync::apply_inbound::{InboundFileSetManifest, InboundFileSetMember};
+        use crate::transfer::receive::materialization::{
+            InboundFileSetManifest, InboundFileSetMember,
+        };
         use uc_core::clipboard::FileSetMemberKind;
 
         let original = fixture_snapshot("directory placeholder");

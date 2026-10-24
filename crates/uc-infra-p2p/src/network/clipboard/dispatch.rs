@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::time::{timeout_at, Instant};
+use tokio_util::sync::CancellationToken;
 use uc_application::deps::{ConnectionLease, ConnectivityError, ConnectivityManager};
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
@@ -89,7 +90,12 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
                 ))),
             };
         }
-        let connection = match self.manager.connect(*target, deadline).await {
+        let connection = match self
+            .manager
+            .request(*target)
+            .connect(deadline, &CancellationToken::new())
+            .await
+        {
             Ok(connection) => connection,
             Err(error) => {
                 // 既有稳定端口的离线分类是最后的业务边界；manager 内保留完整来源。

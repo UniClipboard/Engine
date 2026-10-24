@@ -114,11 +114,11 @@ async fn clipboard_and_group_profiles_negotiate_distinct_connections_to_the_same
         ConnectivityProfile::GroupUpdate,
     );
     let clipboard = clipboard
-        .connect(DeviceId::new("receiver"), CancellationToken::new())
+        .connect(DeviceId::new("receiver"), None, CancellationToken::new())
         .await
         .unwrap();
     let group = group
-        .connect(DeviceId::new("receiver"), CancellationToken::new())
+        .connect(DeviceId::new("receiver"), None, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(
@@ -156,7 +156,7 @@ async fn legacy_only_peer_reports_the_actual_group_protocol_after_negotiation() 
         ConnectivityProfile::GroupUpdate,
     );
     let connection = backend
-        .connect(DeviceId::new("receiver"), CancellationToken::new())
+        .connect(DeviceId::new("receiver"), None, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(connection.protocol(), ConnectionProtocol::LegacyGroupUpdate);

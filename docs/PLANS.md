@@ -20,6 +20,8 @@
 
 ## 当前专项计划
 
+- Issue #34 第七切片：[文件／blob 受管传输执行计划](exec-plans/active/2026-10-21-blob-connectivity-plan.md)，对应[实现规格](exec-plans/active/2026-10-21-blob-connectivity-spec.md)。状态为阶段 0 前置证明完成、阶段 1／2 完整结算与阶段 3 手动选择重试验收推进：公开底层 SDK／Uni、原始重试材料、当前授权、两个冻结旧端 Direct／Relay 资料矩阵及协议资源基线通过，见[复现与方案](exec-plans/active/2026-10-21-blob-connectivity-feasibility.md)。目标包含单任务取消隔离、有限调度与重试、独立文件部分失败及手动重试，保持文件夹完整发布和旧版文件互通。SDK 接入及原始项重试材料须先通过阶段 0，反向进度完整迁移留在第八片。
+
 - Issue #34 第六切片：[设备可达性、准入与存活检查执行计划](exec-plans/completed/2026-10-14-peer-reachability-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-14-peer-reachability-connectivity-spec.md)。状态为完成；完整 Application presence owner、独立 Uni manager、3N 长期保留与暂态额度分离、本机读取故障来源和显示语义落地；本地完整回归、旧新双角色 Direct／Relay 及全部必需平台 CI 通过，真机与额外历史矩阵跳过；文件／blob／进度等剩余范围继续保留。
 
 - Issue #34 第五切片：[当前剪贴板状态与按需拉取执行计划](exec-plans/completed/2026-10-14-active-clipboard-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-14-active-clipboard-connectivity-spec.md)。状态为完成，本地验收与代码提交线上必需检查通过；四向 Uni 迁移、每次网络交换 10 秒、每轮 4 目标、最新待发状态与独立容量；保留原恢复语义和文件本体链路。

@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::assembly::facade::build_relay_diagnostic;
+#[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+use crate::testing::receive_completion;
 use tokio::sync::mpsc;
 use uc_application::deps::{
     ApplicationDeps, ClipboardEntryPorts, ClipboardPorts, ClipboardRepresentationPorts,
@@ -36,6 +38,7 @@ use uc_core::diagnostics::HostLogProfile;
 use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
+use uc_core::ports::security::BlobCipherPort;
 use uc_core::ports::*;
 use uc_infra_content::clipboard::{
     new_in_memory_change_origin, ClipboardPayloadResolver, DurableSpoolQueue,
@@ -78,7 +81,7 @@ use uc_infra_storage::db::repositories::{
     DieselBlobReferenceRepository, DieselBlobRepository, DieselClipboardEntryReplaceRepository,
     DieselClipboardEntryRepository, DieselClipboardEventRepository,
     DieselClipboardRepresentationRepository, DieselClipboardSelectionRepository,
-    DieselEntryAvailabilityRepository, DieselFileTransferRepository,
+    DieselEntryAvailabilityRepository, DieselEntryResourceReader, DieselFileTransferRepository,
     DieselInboundReceiveCommitRepository, DieselPeerAddressRepository,
     DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository, DieselSpaceSecurityStore,
     DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
@@ -104,7 +107,7 @@ use uc_observability_contract::uc_info;
 /// Infrastructure layer implementations
 struct InfraLayer {
     // Clipboard repositories
-    clipboard_entry_ports: ClipboardEntryPorts,
+    clipboard_entry_factory: Box<dyn FnOnce(Arc<dyn BlobCipherPort>) -> ClipboardEntryPorts + Send>,
     clipboard_event_repo: Arc<dyn ClipboardEventWriterPort>,
     /// 与 `clipboard_event_repo` 共享底层 `DieselClipboardEventRepository`,
     /// 但暴露的是读端口(`ClipboardEventRepositoryPort`),用于视图层反查
@@ -746,6 +749,7 @@ pub async fn wire_dependencies_from_inputs(
         record_publish: directory_publish_impl.clone(),
         get_publish: directory_publish_impl,
         begin_receive: directory_attempt_impl.clone(),
+        begin_retry: file_transfer_adapter.clone(),
         claim_commit: directory_attempt_impl.clone(),
         request_cancel: directory_attempt_impl.clone(),
         begin_failure: directory_attempt_impl.clone(),
@@ -838,6 +842,7 @@ pub async fn wire_dependencies_from_inputs(
         &infra.clipboard_event_repo,
         &infra.representation_repo,
     );
+    let clipboard_entry_ports = (infra.clipboard_entry_factory)(blob_cipher.clone());
     directory_receive.commit_inbound = Arc::new(EncryptingInboundReceiveCommit::new(
         directory_receive.commit_inbound.clone(),
         blob_cipher.clone(),
@@ -939,6 +944,9 @@ pub async fn wire_dependencies_from_inputs(
         ),
     );
 
+    #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+    let search_pipeline = receive_completion::decorate(search_pipeline);
+
     let mut deps = ApplicationDeps {
         paths: paths.clone(),
         host_log_profile,
@@ -953,6 +961,10 @@ pub async fn wire_dependencies_from_inputs(
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
         clipboard: ClipboardPorts {
+            resource_snapshot: Arc::new(DieselEntryResourceReader::new(
+                infra.db_executor.clone(),
+                blob_cipher.clone(),
+            )),
             history_file_references: Arc::new(
                 uc_infra_storage::db::repositories::DieselHistoryFileReferences::new(
                     infra.db_executor.clone(),
@@ -961,7 +973,7 @@ pub async fn wire_dependencies_from_inputs(
             ),
             clipboard: platform.clipboard,
             system_clipboard: platform.system_clipboard,
-            entry_ports: infra.clipboard_entry_ports,
+            entry_ports: clipboard_entry_ports,
             clipboard_event_repo: encrypting_event_writer,
             clipboard_event_reader_repo: infra.clipboard_event_reader_repo.clone(),
             representation_store: decrypting_rep_repo,

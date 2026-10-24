@@ -1,41 +1,56 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use diesel::dsl::sql;
 use diesel::prelude::*;
+use diesel::sql_types::{Nullable, Text};
 use diesel::upsert::excluded;
 use tracing::debug_span;
 
+use super::directory_publish_log_cipher::V3DirectoryPublishLogCipher;
+use super::directory_publish_log_repo::DirectoryPublishProtection;
 use crate::db::models::{EntryReceiveAttemptRow, FileTransferRow, NewFileTransferRow};
 use crate::db::ports::DbExecutor;
-use crate::db::schema::{entry_receive_attempt, file_transfer};
+use crate::db::schema::{directory_publish_log, entry_receive_attempt, file_transfer};
 use crate::file_transfer::persistence_cipher::{
     ResolvedTransferPersistenceProtection, TransferMetadata, TransferPersistenceProtection,
 };
 use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::ports::entry_receive_attempt::AttemptState;
 use uc_core::ports::file_transfer::{
-    compute_aggregate_status, CancelDirectoryAttemptTransfersPort, EntryReceiveProgress,
-    EntryTransferSummary, ExpiredInflightTransfer, FailInflightTransfersPort,
+    compute_aggregate_status, group_receive_items, CancelDirectoryAttemptTransfersPort,
+    EntryReceiveProgress, EntryTransferSummary, ExpiredInflightTransfer, FailInflightTransfersPort,
     FileTransferProjectionError, FinalizeProvisionalReceivePort, FindAttemptIdForTransferPort,
     FindEntryIdForTransferPort, GetEntryReceiveProgressPort, GetEntryTransferSummaryPort,
     ListExpiredInflightTransfersPort, ListProvisionalReceivesPort, PendingInboundTransfer,
     ProvisionalInboundTransfer, ProvisionalReceiveAction, ProvisionalReceiveError,
-    ProvisionalReceiveRecovery, RecordReceiverTransferPort, SeedProvisionalReceivePort,
-    TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
+    ProvisionalReceiveRecovery, ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemProgress,
+    RecordReceiverTransferPort, SeedProvisionalReceivePort, TrackedFileTransferStatus,
+    UpdateProvisionalReceivePathPort,
 };
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
+use uc_core::ports::ReceiveFileFailure;
 use uc_infra_security::ContentProtection;
+#[cfg(test)]
+#[path = "file_transfer_repo/concurrency_tests.rs"]
+mod concurrency_tests;
+mod retry;
 use uc_observability_contract::{
     log_fields::{log_id, log_vocab},
     uc_debug,
 };
 
+/// 行已绑定此前实际保存的条目；不将其输出纳入新尝试清理。
+pub(super) const ENTRY_DELIVERED_BINDING: &str = "entry_bound";
+
 /// SQLite adapter for the receiver-side file-transfer projection ports.
 pub struct DieselFileTransferRepository<E> {
     executor: E,
     protection: TransferPersistenceProtection,
+    directory_protection: DirectoryPublishProtection,
 }
 
 impl<E> DieselFileTransferRepository<E> {
@@ -46,14 +61,24 @@ impl<E> DieselFileTransferRepository<E> {
     ) -> Self {
         Self {
             executor,
-            protection: TransferPersistenceProtection::legacy(derive_subkey, current_profile),
+            protection: TransferPersistenceProtection::legacy(
+                derive_subkey.clone(),
+                current_profile.clone(),
+            ),
+            directory_protection: DirectoryPublishProtection::Legacy {
+                derive_subkey,
+                current_profile,
+            },
         }
     }
 
     pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
         Self {
             executor,
-            protection: TransferPersistenceProtection::v3(protection),
+            protection: TransferPersistenceProtection::v3(protection.clone()),
+            directory_protection: DirectoryPublishProtection::V3(V3DirectoryPublishLogCipher::new(
+                protection,
+            )),
         }
     }
 }
@@ -115,7 +140,7 @@ impl<E: DbExecutor> RecordReceiverTransferPort for DieselFileTransferRepository<
                 "legacy".to_owned()
             },
             receive_item_id: Some(transfer.transfer_id.clone()),
-            item_role: None,
+            item_role: transfer.item_role.map(|role| role.as_str().to_owned()),
             content_hash: None,
             status: TrackedFileTransferStatus::Pending.as_str().to_string(),
             source_device: transfer.origin_device_id.clone(),
@@ -131,7 +156,8 @@ impl<E: DbExecutor> RecordReceiverTransferPort for DieselFileTransferRepository<
                 // 防止重试 seed 把已 transferring / completed / failed /
                 // cancelled 的终止态行覆盖回 pending。包在 transaction 里
                 // 保证 SELECT-then-INSERT 原子。
-                conn.transaction::<_, diesel::result::Error, _>(|conn| {
+                // 先取得写资格，避免状态读取后被另一连接提交，使只读快照无法升级为写事务。
+                conn.immediate_transaction::<_, diesel::result::Error, _>(|conn| {
                     let existing_status: Option<String> = file_transfer::table
                         .filter(file_transfer::transfer_id.eq(&row.transfer_id))
                         .select(file_transfer::status)
@@ -154,6 +180,9 @@ impl<E: DbExecutor> RecordReceiverTransferPort for DieselFileTransferRepository<
                         .set((
                             file_transfer::entry_id.eq(excluded(file_transfer::entry_id)),
                             file_transfer::attempt_id.eq(excluded(file_transfer::attempt_id)),
+                            file_transfer::item_role.eq(sql::<Nullable<Text>>(
+                                "COALESCE(excluded.item_role, file_transfer.item_role)",
+                            )),
                             file_transfer::file_size.eq(excluded(file_transfer::file_size)),
                             file_transfer::source_device.eq(excluded(file_transfer::source_device)),
                             file_transfer::metadata_ciphertext
@@ -541,6 +570,44 @@ impl<E: DbExecutor> GetEntryTransferSummaryPort for DieselFileTransferRepository
     }
 }
 
+const RECEIVE_FAILURE_CODES: &[(ReceiveItemFailureReason, &str)] = &[
+    (
+        ReceiveItemFailureReason::NetworkUnavailable,
+        "network_unavailable",
+    ),
+    (ReceiveItemFailureReason::TimedOut, "timed_out"),
+    (ReceiveItemFailureReason::AccessDenied, "access_denied"),
+    (
+        ReceiveItemFailureReason::StorageUnavailable,
+        "storage_unavailable",
+    ),
+    (
+        ReceiveItemFailureReason::IntegrityCheckFailed,
+        "integrity_check_failed",
+    ),
+    (ReceiveItemFailureReason::Interrupted, "interrupted"),
+    (ReceiveItemFailureReason::Unknown, "unknown"),
+];
+
+fn receive_failure_reason(code: Option<&str>) -> ReceiveItemFailureReason {
+    let code = if code == Some("timeout") {
+        Some("timed_out")
+    } else {
+        code
+    };
+    RECEIVE_FAILURE_CODES
+        .iter()
+        .find_map(|(reason, value)| (Some(*value) == code).then_some(*reason))
+        .unwrap_or(ReceiveItemFailureReason::Unknown)
+}
+
+pub(super) fn receive_failure_code(reason: ReceiveItemFailureReason) -> &'static str {
+    RECEIVE_FAILURE_CODES
+        .iter()
+        .find_map(|(known, value)| (*known == reason).then_some(*value))
+        .unwrap_or("unknown")
+}
+
 #[async_trait]
 impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository<E> {
     async fn get_entry_receive_progress(
@@ -563,11 +630,18 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                     .filter(file_transfer::entry_id.eq(&entry_id))
                     .filter(file_transfer::attempt_id.eq(Some(&attempt.current_attempt_id)))
                     .load::<FileTransferRow>(conn)?;
-                Ok(Some((attempt, rows)))
+                let directory = directory_publish_log::table
+                    .filter(directory_publish_log::entry_id.eq(&entry_id))
+                    .filter(directory_publish_log::attempt_id.eq(&attempt.current_attempt_id))
+                    .select(directory_publish_log::entry_id)
+                    .first::<String>(conn)
+                    .optional()?
+                    .is_some();
+                Ok(Some((attempt, rows, directory)))
             })
             .map_err(backend)?;
 
-        let Some((attempt, rows)) = result else {
+        let Some((attempt, rows, directory)) = result else {
             return Ok(None);
         };
         let state = AttemptState::from_str(&attempt.attempt_state)
@@ -575,15 +649,6 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
         // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
         let items_total = u32::try_from(rows.len()).map_err(|_| {
             FileTransferProjectionError::Backend("receive item count exceeds u32".into())
-        })?;
-        let items_completed = u32::try_from(
-            rows.iter()
-                .filter(|row| row.status == TrackedFileTransferStatus::Completed.as_str())
-                .count(),
-        )
-        // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
-        .map_err(|_| {
-            FileTransferProjectionError::Backend("completed receive item count exceeds u32".into())
         })?;
         let total_bytes = rows
             .iter()
@@ -596,8 +661,78 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                 }),
                 None => Ok(sum),
             })?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let status =
+                TrackedFileTransferStatus::from_str_value(&row.status).ok_or_else(|| {
+                    FileTransferProjectionError::Backend("invalid receive item status".into())
+                })?;
+            let kind = match row.item_role.as_deref() {
+                Some("representation") => ReceiveItemKind::Representation,
+                Some("file") => ReceiveItemKind::File,
+                _ => ReceiveItemKind::Unknown,
+            };
+            let local_failure = row.failure_code.as_deref().map(|code| {
+                if code == FileTransferCancellationReason::LocalUser.as_str() {
+                    ReceiveFileFailure::Cancelled
+                } else {
+                    ReceiveFileFailure::Failed(receive_failure_reason(Some(code)))
+                }
+            });
+            let (status, local_reason) = local_failure.map_or((status, None), |failure| {
+                failure.project(status, row.binding_state == ENTRY_DELIVERED_BINDING)
+            });
+            let failure_reason = local_reason.or_else(|| match status {
+                TrackedFileTransferStatus::Failed => {
+                    Some(receive_failure_reason(row.failure_code.as_deref()))
+                }
+                TrackedFileTransferStatus::Cancelled
+                    if row.failure_code.as_deref() == Some("timeout") =>
+                {
+                    Some(ReceiveItemFailureReason::TimedOut)
+                }
+                _ => None,
+            });
+            items.push(ReceiveItemProgress {
+                item_id: row
+                    .receive_item_id
+                    .clone()
+                    .unwrap_or_else(|| row.transfer_id.clone()),
+                kind,
+                status,
+                failure_reason,
+            });
+        }
+        let delivered = rows
+            .iter()
+            .filter(|row| row.binding_state == ENTRY_DELIVERED_BINDING)
+            .map(|row| {
+                row.receive_item_id
+                    .clone()
+                    .unwrap_or_else(|| row.transfer_id.clone())
+            })
+            .collect::<HashSet<_>>();
+        // 完成判定复用Core业务规则；目录聚合沿用成员粒度，集合仍表达整个目录单元。
+        let member_items = group_receive_items(state, false, items.clone(), &delivered);
+        let completed_item_ids = member_items
+            .iter()
+            .filter(|item| item.status == TrackedFileTransferStatus::Completed)
+            .map(|item| item.item_id.as_str())
+            .collect::<HashSet<_>>();
+        let items_completed = u32::try_from(
+            member_items
+                .iter()
+                .filter(|item| item.status == TrackedFileTransferStatus::Completed)
+                .count(),
+        )
+        // discarded-source[int-conversion]: `core::num::TryFromIntError`: the target classification already expresses the range or length mismatch
+        .map_err(|_| {
+            FileTransferProjectionError::Backend("completed receive item count exceeds u32".into())
+        })?;
         let completed_bytes = rows.iter().try_fold(0_i64, |sum, row| {
-            if row.status != TrackedFileTransferStatus::Completed.as_str() {
+            let item_id = row.receive_item_id.as_deref().unwrap_or(&row.transfer_id);
+            if !completed_item_ids.contains(item_id) {
                 return Ok(sum);
             }
             match row.file_size {
@@ -613,6 +748,7 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
             }
         })?;
 
+        let items = group_receive_items(state, directory, items, &delivered);
         Ok(Some(EntryReceiveProgress {
             entry_id: attempt.entry_id,
             attempt_id: attempt.current_attempt_id,
@@ -621,6 +757,7 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
             completed_bytes,
             items_total,
             items_completed,
+            items,
         }))
     }
 }
@@ -871,6 +1008,7 @@ mod tests {
 
     async fn seed(repo: &Repo, transfer_id: &str, filename: &str) {
         repo.upsert_pending_transfer(&PendingInboundTransfer {
+            item_role: None,
             transfer_id: transfer_id.to_string(),
             entry_id: "entry-directory".to_string(),
             attempt_id: None,

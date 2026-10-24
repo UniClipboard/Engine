@@ -16,6 +16,7 @@
 //! [`install_peer_reachability`]: IrohSessionBuilder::install_peer_reachability
 //! [`install_clipboard`]: IrohSessionBuilder::install_clipboard
 
+use super::blob_exchange::without_request_span;
 use super::discovery::endpoint_id;
 use futures_util::{stream, stream::BoxStream, StreamExt};
 #[cfg(any(test, feature = "test-util"))]
@@ -58,8 +59,8 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
-use tracing::instrument;
 use tracing::instrument::WithSubscriber;
+use tracing::{dispatcher, instrument, Dispatch};
 use uc_application::deps::{
     ConnectionHint, DiscoveryError, DiscoveryManager, IssueMembershipBranchRecoveryPort,
     PeerReachabilityEnvironmentPort, PeerReachabilityTransport,
@@ -95,8 +96,12 @@ use super::active_clipboard::{
 };
 use super::addr_filter::apply_addr_filter;
 use super::admission_transport_material::IrohAdmissionTransportMaterial;
+use super::blob_exchange::{IrohBlobExchangeAdapter, IrohBlobHandler};
 use super::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 use super::connectivity::{IrohPeerReachabilityHandler, PresenceEnvironment};
+use uc_application::deps::{
+    BlobExchangePort, BlobReadStorePort, BlobStoreLifecyclePort, BlobTransport,
+};
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 #[cfg(test)]
 const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
@@ -201,6 +206,8 @@ pub struct ActiveClipboardPullHandlers {
 
 /// [`IrohSessionBuilder::install_blobs`] 产出的 blob port。
 pub struct BlobHandlers {
+    pub transport: Arc<BlobTransport>,
+    pub read_store: Arc<dyn BlobReadStorePort>,
     pub blob_transfer: Arc<dyn BlobTransferPort>,
 }
 
@@ -879,16 +886,19 @@ impl IrohNodeBuilder {
         let connection_observations =
             super::observed_connections::ObservedConnections::new(recorder.clone());
         let session_protocols = Arc::new(SessionProtocolRegistry::new());
-        let mut endpoint_builder = Endpoint::builder(presets::N0)
-            .clear_address_lookup()
-            .secret_key(secret)
-            .relay_mode(relay_mode)
-            .transport_config(build_transport_config(config.congestion_controller))
-            // UniClipboard#486: drop Clash TUN / link-local IPs from every
-            // address-lookup service in one shot, and drop CGNAT/Tailscale
-            // overlay IPs unless the user opts in. See `build_addr_filter`.
-            .addr_filter(build_addr_filter(allow_overlay))
-            .hooks(session_protocols.endpoint_hooks());
+        // 第三方构造和驱动一起隔离，避免在future创建时捕获调用请求的parent。
+        let mut endpoint_builder = dispatcher::with_default(&Dispatch::none(), || {
+            Endpoint::builder(presets::N0)
+                .clear_address_lookup()
+                .secret_key(secret)
+                .relay_mode(relay_mode)
+                .transport_config(build_transport_config(config.congestion_controller))
+                // UniClipboard#486: drop Clash TUN / link-local IPs from every
+                // address-lookup service in one shot, and drop CGNAT/Tailscale
+                // overlay IPs unless the user opts in. See `build_addr_filter`.
+                .addr_filter(build_addr_filter(allow_overlay))
+                .hooks(session_protocols.endpoint_hooks())
+        });
         // 保留 N0 原生平台的原服务及原配置，只包裹固定的采集入口。
         if !config.disable_relays {
             use super::observed_address_lookup::ObservedAddressLookupBuilder;
@@ -973,21 +983,20 @@ impl IrohNodeBuilder {
         }
 
         let discovery_slot = Arc::new(OnceLock::new());
-        let endpoint = endpoint_builder
-            // 统一候选入口；mDNS 发布及所有结果仍经过原地址过滤。
-            .address_lookup(DirectoryAddressLookupBuilder {
-                mdns: mdns.clone(),
-                cloud_enabled: !config.disable_relays,
-                recorder: recorder.clone(),
-                manager: discovery_slot.clone(),
-            })
-            .bind()
-            // Endpoint 的长期驱动不能持有启动/恢复操作的 span。
-            .with_subscriber(tracing::Dispatch::new(
-                tracing::subscriber::NoSubscriber::default(),
-            ))
-            .await
-            .map_err(|err| IrohNodeError::Bind(anyhow::Error::new(err)))?;
+        let endpoint = async {
+            endpoint_builder
+                .address_lookup(DirectoryAddressLookupBuilder {
+                    mdns: mdns.clone(),
+                    cloud_enabled: !config.disable_relays,
+                    recorder: recorder.clone(),
+                    manager: discovery_slot.clone(),
+                })
+                .bind()
+                .await
+        }
+        .with_subscriber(Dispatch::none())
+        .await
+        .map_err(|err| IrohNodeError::Bind(anyhow::Error::new(err)))?;
         let endpoint = Arc::new(endpoint);
         // 只有 bind 完成才将来源标记为可采集；失败构造不能留下 Enabled 假象。
         {
@@ -1462,20 +1471,19 @@ impl IrohSessionBuilder {
 
     /// 安装 iroh-blobs 传输能力。
     ///
-    /// 这个方法把官方 iroh-blobs handler 注册到当前共享 Router 上,同时
-    /// 返回实现 `BlobTransferPort` 的 adapter。sqlite 去重缓存不在这里
-    /// 构造,它属于数据库装配链。
+    /// 在同一存储上组装 SDK 能力和 Application 完整负责人，Router 只注册受管 handler。
+    /// sqlite 引用仓储仍由数据库装配链提供。
     pub async fn install_blobs(
         &mut self,
         store_dir: PathBuf,
+        assemble: impl FnOnce(
+            Arc<dyn BlobExchangePort>,
+            Arc<dyn BlobStoreLifecyclePort>,
+        ) -> Arc<BlobTransport>,
     ) -> Result<BlobHandlers, IrohNodeError> {
-        // Phase D1: enable iroh-blobs internal GC at fixed interval.
-        // `FsStore::load_with_opts` is the only public entry that can
-        // wire `GcConfig` — `gc::run_gc` / `gc_run_once` themselves are
-        // crate-private in iroh-blobs 0.100. The store internally
-        // `tokio::spawn`s `run_gc(store, config)` once at load time;
-        // the loop lives until the store actor exits (i.e. effectively
-        // the daemon's lifetime).
+        // 通过公开加载入口配置 SDK 内部 GC；GC 与存储工作由 Store 自己监督。
+        // 完整关闭须等待 GC、已接受的 import/export、actor、元数据及私有 runtime，
+        // 不能把 Router 关闭或句柄释放当作 Store 已完成关闭。
         //
         // `load_with_opts` 的第一个参数是 redb 数据库**文件**路径,不是 root
         // 目录。`Options::new(root)` 才接 root,内部派生出 `root/data`、
@@ -1489,9 +1497,11 @@ impl IrohSessionBuilder {
             add_protected: None,
         });
         let db_path = store_dir.join("blobs.db");
-        let store = iroh_blobs::store::fs::FsStore::load_with_opts(db_path, options)
-            .await
-            .map_err(|err| IrohNodeError::BlobStoreInit(anyhow::Error::from(err)))?;
+        let store = without_request_span(|| {
+            iroh_blobs::store::fs::FsStore::load_with_opts(db_path, options)
+        })
+        .await
+        .map_err(|err| IrohNodeError::BlobStoreInit(anyhow::Error::from(err)))?;
 
         // Phase E1 (transitional): sweep `auto-*` tags left behind by
         // pre-Phase-F daemons.
@@ -1514,7 +1524,7 @@ impl IrohSessionBuilder {
         // sweep becomes a near-no-op (delete-prefix on an empty range);
         // we keep it for one or two release cycles to cover stragglers
         // and then can drop the call entirely.
-        match store.tags().delete_prefix(b"auto-").await {
+        match without_request_span(|| store.tags().delete_prefix(b"auto-")).await {
             Ok(removed) => {
                 if removed > 0 {
                     uc_info!(removed = removed, "iroh blobs: swept stale auto-* tags");
@@ -1529,9 +1539,9 @@ impl IrohSessionBuilder {
             }
         }
 
-        let protocol = iroh_blobs::BlobsProtocol::new(&store, None);
-
-        self.install_session_handler([BLOBS_ALPN], protocol)?;
+        let exchange = Arc::new(IrohBlobExchangeAdapter::new(store.clone()));
+        let owner = assemble(exchange.clone(), exchange.clone());
+        self.install_session_handler([BLOBS_ALPN], IrohBlobHandler::new(owner.clone()))?;
 
         let adapter = Arc::new(IrohBlobTransferAdapter::new(
             Arc::clone(&self.context.endpoint),
@@ -1545,6 +1555,8 @@ impl IrohSessionBuilder {
         );
 
         Ok(BlobHandlers {
+            transport: owner,
+            read_store: exchange,
             blob_transfer: adapter,
         })
     }
@@ -1660,6 +1672,10 @@ impl IrohNodeError {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "node/startup_trace_tests.rs"]
+mod startup_trace_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2230,7 +2246,7 @@ mod tests {
                     Arc::new(
                         uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory,
                     ),
-                    peer_reachability,
+                    peer_reachability.clone(),
                 );
                 ConnectivityManager::new(
                     deps.backend,
@@ -2241,8 +2257,22 @@ mod tests {
             .expect("install clipboard");
 
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let BlobHandlers { blob_transfer } = builder
-            .install_blobs(tempdir.path().join("iroh-blobs"))
+        let BlobHandlers { blob_transfer, .. } = builder
+            .install_blobs(tempdir.path().join("iroh-blobs"), {
+                let deps = builder.connectivity_deps(
+                    ConnectivityProfile::Blob,
+                    Arc::new(EmptyPeerAddressRepo),
+                    Arc::new(EmptyMemberRepo),
+                    Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+                    Arc::new(
+                        uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory,
+                    ),
+                    peer_reachability.clone(),
+                );
+                move |exchange, lifecycle| {
+                    BlobTransport::new(deps.backend, deps.admission, exchange, lifecycle)
+                }
+            })
             .await
             .expect("install blobs");
 
@@ -2259,6 +2289,141 @@ mod tests {
 
         let node = spawn_session(network, builder).await;
         node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quiesce_waits_for_managed_blob_work_after_router_waiter_is_cancelled() {
+        use tokio::sync::Semaphore;
+        use uc_application::deps::{
+            BlobExchangeError, BlobExchangeFailure, BlobReceived, BlobValidatedProgress,
+            KnownPeerIdentity, MembershipLedgerError, StreamLease,
+        };
+        use uc_core::ports::blob::BlobDigest;
+        struct Directory(KnownPeerIdentity);
+        #[async_trait]
+        impl PeerIdentityDirectoryPort for Directory {
+            async fn known_peer_identities(
+                &self,
+            ) -> Result<Vec<KnownPeerIdentity>, MembershipLedgerError> {
+                Ok(vec![self.0.clone()])
+            }
+        }
+        struct SlowExport {
+            entered: Semaphore,
+            cancelled: Semaphore,
+            finish: Semaphore,
+        }
+        #[async_trait]
+        impl BlobExchangePort for SlowExport {
+            async fn receive(
+                &self,
+                _: StreamLease,
+                _: BlobDigest,
+                _: tokio_util::sync::CancellationToken,
+                _: Arc<dyn BlobValidatedProgress>,
+            ) -> Result<BlobReceived, BlobExchangeError> {
+                panic!("unexpected receive");
+            }
+            async fn provide(
+                &self,
+                stream: StreamLease,
+                _: tokio::time::Instant,
+                cancel: tokio_util::sync::CancellationToken,
+            ) -> Result<(), BlobExchangeError> {
+                self.entered.add_permits(1);
+                cancel.cancelled().await;
+                self.cancelled.add_permits(1);
+                self.finish
+                    .acquire()
+                    .await
+                    .expect("actual export finish")
+                    .forget();
+                drop(stream);
+                Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled))
+            }
+        }
+        let network = IrohNodeBuilder::bind(
+            &identity_store(),
+            IrohNodeConfig {
+                disable_relays: true,
+                ..IrohNodeConfig::default()
+            },
+        )
+        .await
+        .expect("bind");
+        let mut builder = network.prepare_session();
+        let client = Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("client");
+        let fingerprint =
+            Arc::new(uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory);
+        let directory = Arc::new(Directory(KnownPeerIdentity {
+            device_id: DeviceId::new("blob-requester"),
+            identity_fingerprint: fingerprint
+                .from_public_key(client.id().as_bytes())
+                .expect("fingerprint"),
+        }));
+        let backend = Arc::new(IrohConnectivityBackend::new(
+            builder.context.endpoint.clone(),
+            Arc::new(EmptyPeerAddressRepo),
+            None,
+            ConnectivityProfile::Blob,
+        ));
+        let admission = Arc::new(IrohConnectionAdmission::new(
+            directory,
+            Arc::new(crate::network::iroh::StaticPeerAdmission(true)),
+            fingerprint,
+            builder.admitted_connections.clone(),
+            ConnectivityProfile::Blob,
+        ));
+        let slow = Arc::new(SlowExport {
+            entered: Semaphore::new(0),
+            cancelled: Semaphore::new(0),
+            finish: Semaphore::new(0),
+        });
+        let provided = slow.clone();
+        let directory = tempfile::tempdir().expect("store directory");
+        builder
+            .install_blobs(directory.path().join("blobs"), move |_, lifecycle| {
+                BlobTransport::new(backend, admission, provided, lifecycle)
+            })
+            .await
+            .expect("managed blobs");
+        let mut node = spawn_session(network, builder).await;
+        let connection = client
+            .connect(node.session_context.endpoint.addr(), BLOBS_ALPN)
+            .await
+            .expect("connection");
+        let (mut send, _receive) = connection.open_bi().await.expect("stream");
+        // 本例只验证会话与实际工作寿命，SDK 请求／响应由 managed_tests 的真实下载器覆盖。
+        send.write_all(&[0]).await.expect("first stream data");
+        tokio::time::timeout(Duration::from_secs(2), slow.entered.acquire())
+            .await
+            .expect("provider started")
+            .expect("started signal")
+            .forget();
+        {
+            let stopping = node.quiesce_session();
+            tokio::pin!(stopping);
+            tokio::select! {
+                result = &mut stopping => panic!("quiesce abandoned actual work: {result:?}"),
+                signal = slow.cancelled.acquire() => signal.expect("cancel signal").forget(),
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut stopping)
+                    .await
+                    .is_err()
+            );
+            slow.finish.add_permits(1);
+            tokio::time::timeout(Duration::from_secs(2), stopping)
+                .await
+                .expect("quiesce completed")
+                .expect("quiesce");
+        }
+        client.close().await;
+        node.shutdown().await.expect("shutdown");
     }
 
     // ──────────────────────────────────────────────────────────────────

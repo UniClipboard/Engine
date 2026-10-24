@@ -8,6 +8,7 @@ use crate::connectivity::ConnectivityManager;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::time::{timeout_at, Instant};
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ActiveClipboardPullClientError, ActiveClipboardPullClientPort};
@@ -31,7 +32,11 @@ impl ActiveClipboardPullClientPort for ActivePullClient {
     ) -> Result<Vec<u8>, ActiveClipboardPullClientError> {
         let deadline = Instant::now() + ACTIVE_EXCHANGE_TIMEOUT;
         let response = timeout_at(deadline, async {
-            let connection = self.manager.connect(*peer, deadline).await?;
+            let connection = self
+                .manager
+                .request(*peer)
+                .connect(deadline, &CancellationToken::new())
+                .await?;
             let mut stream = connection.open_bi(deadline).await?;
             self.wire
                 .write_pull_request(stream.send.as_mut(), snapshot_hash)

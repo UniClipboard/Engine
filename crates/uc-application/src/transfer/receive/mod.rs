@@ -5,3 +5,30 @@
 //! complete owner of receive settlement and terminal writes.
 
 pub(crate) mod reconciliation;
+pub(super) mod scheduler;
+pub(super) mod timing;
+
+pub(crate) mod cancellation;
+
+pub(crate) mod materialization;
+
+pub(crate) mod work;
+
+pub(crate) mod batch;
+
+pub(crate) mod query;
+
+mod identity;
+pub(crate) use identity::receive_item_ids;
+
+pub(crate) mod retry;
+
+mod download_work;
+pub(super) use download_work::DownloadSettlement;
+
+mod local_settlement;
+pub(super) use local_settlement::{
+    LocalSettlement, LocalSettlementFailure, LocalSettlementOutcome,
+};
+
+pub(crate) use super::policy::{LOCAL_SETTLEMENT_RETRY_INITIAL, LOCAL_SETTLEMENT_RETRY_MAX};

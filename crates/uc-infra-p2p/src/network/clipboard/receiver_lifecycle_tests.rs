@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::ConnectionProtocol;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, ClipboardReceiverPort, ConnectionMode, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream,
-    PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation,
+    PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
@@ -35,7 +35,14 @@ impl AsyncRead for ReceiveHalf {
         Pin::new(&mut self.0).poll_read(cx, buf)
     }
 }
-impl PeerReceiveStream for ReceiveHalf {}
+impl PeerReceiveStream for ReceiveHalf {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn stop(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        Err(ConnectivityError::Stopped)
+    }
+}
 struct SendHalf {
     write: WriteHalf<DuplexStream>,
     stalled: bool,
@@ -61,6 +68,13 @@ impl AsyncWrite for SendHalf {
     }
 }
 impl PeerSendStream for SendHalf {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn reset(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        // 此旧协议 fixture 不提供显式停止能力；需要停止的用例使用真实 bridge。
+        Err(ConnectivityError::Stopped)
+    }
     fn settled(&mut self) -> futures_util::future::BoxFuture<'_, Result<(), ConnectivityError>> {
         Box::pin(async { Ok(()) })
     }
@@ -129,6 +143,7 @@ impl ConnectivityBackend for MemoryBackend {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         Err(ConnectivityError::Offline)
@@ -182,7 +197,9 @@ impl SessionConnectionAdmissionPort for InboundAdmission {
     async fn adopt_inbound(
         &self,
         _: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        reservation.identified(Grant(self.0.clone()).peer())?;
         Ok(Box::new(Grant(self.0.clone())))
     }
 }
@@ -461,6 +478,7 @@ impl ConnectivityBackend for LoopbackBackend {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         Ok(self.0.clone())

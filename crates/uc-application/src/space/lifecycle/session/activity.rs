@@ -152,8 +152,12 @@ impl SpaceSessionActivity {
     }
 
     pub(crate) async fn pause_for_lock(&self) -> Result<(), SpaceActivityError> {
+        // 原接收持有提交／清理所需密钥，必须实际排空后才能锁定。
+        self.receive
+            .close_receive_gate()
+            .await
+            .map_err(|source| SpaceActivityError::Receive(source.into()))?;
         self.connections.pause().await?;
-        self.receive.close_receive_gate();
         self.search
             .pause()
             .await

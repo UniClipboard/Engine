@@ -2,7 +2,11 @@ use std::collections::HashMap;
 
 #[cfg(feature = "dev-tools")]
 mod active_pull_cancellation;
+#[cfg(all(feature = "dev-tools", target_os = "linux"))]
+mod blob_resources;
 mod profile_upgrade_backup;
+#[cfg(feature = "dev-tools")]
+mod receive_retry;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -354,7 +358,7 @@ impl Respond for ResolveEnginePairingTicket {
 }
 
 #[cfg(feature = "dev-tools")]
-async fn mount_engine_rendezvous(server: &MockServer) {
+pub(crate) async fn mount_engine_rendezvous(server: &MockServer) {
     const INVITATION_CODE: &str = "E2E0-A001";
     const EXPIRES_AT_MS: i64 = 1_900_000_000_000;
 

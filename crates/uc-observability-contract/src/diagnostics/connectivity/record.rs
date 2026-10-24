@@ -411,7 +411,7 @@ impl LocalEvent {
             }
             Self::InboundPeerRejected { protocol, reason } => {
                 fields.insert("direction".into(), json!("inbound"));
-                fields.insert("protocol".into(), json!(protocol));
+                fields.insert("protocol".into(), json!(protocol.wire()));
                 fields.insert("uc.outcome".into(), json!("rejected"));
                 fields.insert("error.phase".into(), json!(reason.phase()));
                 fields.insert("error.reason".into(), json!(reason));

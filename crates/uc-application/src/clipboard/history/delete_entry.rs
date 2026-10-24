@@ -1,49 +1,49 @@
+mod cache_files;
+
+use self::cache_files::CacheFiles;
+use crate::transfer::receive::work::ReceiveWorkRegistry;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info_span, Instrument};
+use uc_core::clipboard::ClipboardRepositoryError;
 use uc_core::ids::EntryId;
 use uc_core::ports::blob::{BlobTransferPort, TagReason};
 use uc_core::ports::clipboard::{
-    DeleteClipboardEntryPort, DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
+    DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
     ListRepresentationsForEventPort,
 };
-use uc_core::ports::{ClipboardEventWriterPort, ClipboardSelectionRepositoryPort, SearchIndexPort};
+use uc_core::ports::SearchIndexPort;
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
 };
 
 /// Use case for deleting clipboard entries with all associated data.
 pub(crate) struct DeleteClipboardEntryUseCase {
+    receive_work: Arc<ReceiveWorkRegistry>,
     get_entry: Arc<dyn GetClipboardEntryPort>,
-    delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-    selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-    event_writer: Arc<dyn ClipboardEventWriterPort>,
+    delete: Arc<dyn DeleteClipboardEntryWithReceiveStatePort>,
     representation_repo: Arc<dyn ListRepresentationsForEventPort>,
     file_cache_dir: Option<PathBuf>,
     search_index: Option<Arc<dyn SearchIndexPort>>,
     blob_transfer: Option<Arc<dyn BlobTransferPort>>,
-    delete_with_receive_state: Option<Arc<dyn DeleteClipboardEntryWithReceiveStatePort>>,
 }
 
 impl DeleteClipboardEntryUseCase {
     pub(crate) fn from_ports(
         get_entry: Arc<dyn GetClipboardEntryPort>,
-        delete_entry: Arc<dyn DeleteClipboardEntryPort>,
-        selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
-        event_writer: Arc<dyn ClipboardEventWriterPort>,
+        delete: Arc<dyn DeleteClipboardEntryWithReceiveStatePort>,
         representation_repo: Arc<dyn ListRepresentationsForEventPort>,
+        receive_work: Arc<ReceiveWorkRegistry>,
     ) -> Self {
         Self {
+            receive_work,
             get_entry,
-            delete_entry,
-            selection_repo,
-            event_writer,
+            delete,
             representation_repo,
             file_cache_dir: None,
             search_index: None,
             blob_transfer: None,
-            delete_with_receive_state: None,
         }
     }
 
@@ -62,14 +62,6 @@ impl DeleteClipboardEntryUseCase {
         self
     }
 
-    pub(crate) fn with_receive_state_delete(
-        mut self,
-        delete: Arc<dyn DeleteClipboardEntryWithReceiveStatePort>,
-    ) -> Self {
-        self.delete_with_receive_state = Some(delete);
-        self
-    }
-
     /// Deletes a clipboard entry and its associated selection, event, and snapshot
     /// representations in the required order. For file entries (text/uri-list),
     /// also deletes the cache files from disk when they live inside the managed
@@ -80,57 +72,35 @@ impl DeleteClipboardEntryUseCase {
         fields(entry_id = %entry_id)
     )]
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<()> {
-        let entry = async {
-            self.get_entry
-                .get_entry(entry_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Clipboard entry not found: {}", entry_id))
-        }
-        .instrument(info_span!(
-            "fetch_entry",
-            entry_id = %entry_id
-        ))
-        .await?;
-        let event_id = entry.event_id.clone();
-
-        let representations = self
-            .representation_repo
-            .get_representations_for_event(&event_id)
+        let _receive_scope = self.receive_work.delete_scope(entry_id).await?;
+        let entry = self
+            .get_entry
+            .get_entry(entry_id)
+            .instrument(info_span!("fetch_entry", entry_id = %entry_id))
             .await
-            .unwrap_or_default();
-
-        if let Some(delete) = self.delete_with_receive_state.as_ref() {
-            delete
-                .delete_entry_with_receive_state(entry_id, &event_id)
+            .context("read entry before deletion")?;
+        let representations = match entry {
+            Some(entry) => self
+                .representation_repo
+                .get_representations_for_event(&entry.event_id)
                 .await
-                .context("Failed to delete entry")?;
-        } else {
-            self.selection_repo
-                .delete_selection(entry_id)
-                .instrument(info_span!(
-                    "delete_selection",
-                    entry_id = %entry_id
-                ))
+                .context("read representations before deletion")?,
+            None => Vec::new(),
+        };
+        let cache_files = match &self.file_cache_dir {
+            Some(root) => CacheFiles::verify(&representations, root)
                 .await
-                .context("Failed to delete selection")?;
-
-            self.delete_entry
-                .delete_entry(entry_id)
-                .instrument(info_span!(
-                    "delete_entry",
-                    entry_id = %entry_id
-                ))
-                .await
-                .context("Failed to delete entry")?;
-
-            self.event_writer
-                .delete_event_and_representations(&event_id)
-                .instrument(info_span!(
-                    "delete_event",
-                    event_id = %event_id
-                ))
-                .await
-                .context("Failed to delete event")?;
+                .context("verify managed cache ownership before entry deletion")?,
+            None => None,
+        };
+        // 仓储在同一原子边界解析实际条目与NoEntry状态，缺失不能伪报删除成功。
+        if !self
+            .delete
+            .delete_entry_with_receive_state(entry_id)
+            .await
+            .context("delete entry and settled receive state")?
+        {
+            return Err(ClipboardRepositoryError::NotFound("clipboard entry".into()).into());
         }
 
         if let Some(blob_transfer) = self.blob_transfer.as_ref() {
@@ -152,60 +122,27 @@ impl DeleteClipboardEntryUseCase {
         }
 
         async {
-            let Some(ref cache_dir) = self.file_cache_dir else {
+            let Some(cache_files) = cache_files else {
                 return;
             };
-
-            for rep in &representations {
-                let mime = rep.mime_type.as_ref().map(|m| m.as_str()).unwrap_or("");
-                if mime.contains("uri-list") {
-                    if let Some(ref inline) = rep.inline_data {
-                        let uri_text = String::from_utf8_lossy(inline);
-                        for line in uri_text.lines() {
-                            let line = line.trim();
-                            if line.is_empty() || line.starts_with('#') {
-                                continue;
-                            }
-                            let path = if line.starts_with("file://") {
-                                url::Url::parse(line)
-                                    .ok()
-                                    .and_then(|u| u.to_file_path().ok())
-                            } else {
-                                Some(std::path::PathBuf::from(line))
-                            };
-
-                            let Some(path) = path else {
-                                continue;
-                            };
-
-                            if !path.starts_with(cache_dir) {
-                                uc_info!(
-                                    "Skipping file deletion — path is outside the managed file-cache directory (user-owned file)"
-                                );
-                                continue;
-                            }
-
-                            if let Err(e) = tokio::fs::remove_file(&path).await {
-                                uc_warn!(
-                                    error_kind = "cache_file_remove",
-                                    io_error_kind = io_error_kind(&e),
-                                    "Failed to delete cache file during entry cleanup"
-                                );
-                            } else {
-                                uc_info!("Deleted cache file during entry cleanup");
-                                if let Some(parent) = path.parent() {
-                                    if parent != cache_dir.as_path() && parent.starts_with(cache_dir)
-                                    {
-                                        let _ = tokio::fs::remove_dir(parent).await;
-                                    }
-                                }
-                            }
+            for path in cache_files.paths {
+                if let Err(source) = tokio::fs::remove_file(&path).await {
+                    uc_warn!(
+                        error_kind = "cache_file_remove",
+                        io_error_kind = io_error_kind(&source),
+                        "Failed to delete cache file during entry cleanup"
+                    );
+                } else {
+                    uc_info!("Deleted cache file during entry cleanup");
+                    if let Some(parent) = path.parent() {
+                        if parent != cache_files.root && parent.starts_with(&cache_files.root) {
+                            let _ = tokio::fs::remove_dir(parent).await;
                         }
                     }
                 }
             }
         }
-        .instrument(info_span!("cleanup_cache_files", event_id = %event_id))
+        .instrument(info_span!("cleanup_cache_files", entry_id = %entry_id))
         .await;
 
         if let Some(search_index) = self.search_index.as_ref() {
@@ -225,9 +162,11 @@ impl DeleteClipboardEntryUseCase {
 
         uc_info!(
             entry_id = log_id(&entry_id),
-            event_id = log_id(&event_id),
             "Deleted clipboard entry successfully"
         );
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

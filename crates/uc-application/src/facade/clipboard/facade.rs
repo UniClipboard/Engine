@@ -2,6 +2,10 @@
 //! The complete inbound receive lifecycle is owned separately by
 //! `ClipboardInboundRuntime`.
 
+use crate::transfer::receive::query::ReceiveProgressQuery;
+use crate::transfer::receive::retry::{
+    RetryEntryReceiveError, RetryEntryReceiveOutcome, RetryEntryReceiveUseCase,
+};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -10,12 +14,10 @@ use tracing::instrument;
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
-    CancelDirectoryAttemptTransfersPort, CleanupDirectoryStagingPort, ClipboardDispatchPort,
-    ClipboardHeader, ClockPort, CommitInboundReceivePort, DeviceIdentityPort, DispatchAck,
-    EntryDeliveryRepositoryPort, FindMobileDeviceByIdPort, FirstSyncStatePort,
-    GetDirectoryPublishRecordPort, GetEntryAttemptPort, GetEntryReceiveProgressPort,
-    ListNonTerminalAttemptsPort, LocalIdentityPort, PeerAddressRepositoryPort,
-    PeerReachabilityPort, RequestReceiveCancellationPort, SettingsPort,
+    ClipboardDispatchPort, ClipboardHeader, ClockPort, DeviceIdentityPort, DispatchAck,
+    EntryDeliveryRepositoryPort, EntryReceiveProgress, FindMobileDeviceByIdPort,
+    FirstSyncStatePort, LocalIdentityPort, PeerAddressRepositoryPort, PeerReachabilityPort,
+    SettingsPort,
 };
 use uc_core::MemberRepositoryPort;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
@@ -33,11 +35,13 @@ use crate::clipboard::sync::{
     DispatchOutcome, DispatchPerTarget, DispatchSyncError,
 };
 use crate::deps::CurrentSpaceMemberScopePort;
-use crate::facade::blob_transfer::{BlobTransferFacade, SharedHostEventEmitter};
-use crate::facade::clipboard::cancel_entry_receive::{
+use crate::facade::blob_transfer::SharedHostEventEmitter;
+use crate::runtime_lifecycle::LifecycleError;
+use crate::transfer::receive::cancellation::{
     CancelEntryReceiveError, CancelEntryReceiveOutcome, CancelEntryReceiveUseCase,
 };
-use crate::runtime_lifecycle::LifecycleError;
+use crate::transfer::receive::materialization::sweep_inbound_staging as sweep_materialization_staging;
+use crate::transfer::receive::materialization::InboundFileSetManifest;
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ports::clipboard::GetClipboardEntryPort;
 use uc_core::ports::ClipboardEventRepositoryPort;
@@ -160,9 +164,8 @@ pub struct ClipboardSyncFacade {
     dispatch_uc: Arc<DispatchClipboardEntryUseCase>,
     view_uc: Arc<GetEntryDeliveryViewUseCase>,
     cancel_entry_receive_uc: Option<Arc<CancelEntryReceiveUseCase>>,
-    receive_progress: Option<Arc<dyn GetEntryReceiveProgressPort>>,
-    list_receive_attempts: Option<Arc<dyn ListNonTerminalAttemptsPort>>,
-    host_event_bus: Arc<crate::facade::HostEventBus>,
+    receive_progress: Option<Arc<ReceiveProgressQuery>>,
+    retry_entry_receive: Option<Arc<RetryEntryReceiveUseCase>>,
 }
 
 #[derive(Clone, Copy)]
@@ -195,7 +198,7 @@ impl ClipboardSyncFacade {
     /// Governance only: nothing here is fatal. A leftover area costs disk
     /// space, not correctness, since no entry refers to it.
     pub async fn sweep_orphaned_inbound_staging(dirs: &[std::path::PathBuf]) -> usize {
-        crate::clipboard::sync::sweep_inbound_staging(dirs).await
+        sweep_materialization_staging(dirs).await
     }
 
     pub(crate) fn new(deps: ClipboardSyncDeps) -> Self {
@@ -230,8 +233,7 @@ impl ClipboardSyncFacade {
             view_uc,
             cancel_entry_receive_uc: None,
             receive_progress: None,
-            list_receive_attempts: None,
-            host_event_bus: deps.host_event_bus.clone(),
+            retry_entry_receive: None,
         }
     }
 
@@ -239,86 +241,49 @@ impl ClipboardSyncFacade {
         ClipboardSyncDispatch { facade: self }
     }
 
-    pub(crate) fn with_entry_receive_cancellation(
+    pub(crate) fn with_entry_receive_actions(
         mut self,
-        get_attempt: Arc<dyn GetEntryAttemptPort>,
-        request_cancel: Arc<dyn RequestReceiveCancellationPort>,
-        progress: Arc<dyn GetEntryReceiveProgressPort>,
-        list_attempts: Arc<dyn ListNonTerminalAttemptsPort>,
-        commit_inbound: Arc<dyn CommitInboundReceivePort>,
-        get_publish: Arc<dyn GetDirectoryPublishRecordPort>,
-        staging_cleanup: Arc<dyn CleanupDirectoryStagingPort>,
-        cancel_projection: Arc<dyn CancelDirectoryAttemptTransfersPort>,
-        blob_transfer: Arc<BlobTransferFacade>,
-        clock: Arc<dyn ClockPort>,
+        progress: Arc<ReceiveProgressQuery>,
+        cancellation: Arc<CancelEntryReceiveUseCase>,
+        retry: Arc<RetryEntryReceiveUseCase>,
     ) -> Self {
-        self.receive_progress = Some(progress.clone());
-        self.list_receive_attempts = Some(list_attempts);
-        self.cancel_entry_receive_uc = Some(Arc::new(CancelEntryReceiveUseCase::new(
-            get_attempt,
-            request_cancel,
-            commit_inbound,
-            get_publish,
-            staging_cleanup,
-            cancel_projection,
-            blob_transfer,
-            clock,
-            self.host_event_bus.clone(),
-        )));
+        self.receive_progress = Some(progress);
+        self.retry_entry_receive = Some(retry);
+        self.cancel_entry_receive_uc = Some(cancellation);
         self
+    }
+
+    pub async fn retry_entry_receive(
+        &self,
+        entry_id: EntryId,
+        expected_attempt_id: String,
+        item_ids: Vec<String>,
+    ) -> Result<RetryEntryReceiveOutcome, RetryEntryReceiveError> {
+        let Some(owner) = &self.retry_entry_receive else {
+            return Ok(RetryEntryReceiveOutcome::Unavailable);
+        };
+        owner.execute(entry_id, expected_attempt_id, item_ids).await
     }
 
     pub async fn get_entry_receive_progress(
         &self,
         entry_id: &EntryId,
-    ) -> Result<Option<uc_core::ports::EntryReceiveProgress>, CancelEntryReceiveError> {
-        let progress = self
-            .receive_progress
+    ) -> Result<Option<EntryReceiveProgress>, CancelEntryReceiveError> {
+        self.receive_progress
             .as_ref()
-            .ok_or(CancelEntryReceiveError::Unavailable)?;
-        progress
-            .get_entry_receive_progress(entry_id.as_ref())
+            .ok_or(CancelEntryReceiveError::Unavailable)?
+            .get(entry_id)
             .await
-            .map_err(|error| {
-                CancelEntryReceiveError::Attempt(
-                    anyhow::Error::from(error).context("read entry receive progress"),
-                )
-            })
     }
 
     pub async fn list_entry_receive_progress(
         &self,
-    ) -> Result<Vec<uc_core::ports::EntryReceiveProgress>, CancelEntryReceiveError> {
-        let attempts = self
-            .list_receive_attempts
+    ) -> Result<Vec<EntryReceiveProgress>, CancelEntryReceiveError> {
+        self.receive_progress
             .as_ref()
             .ok_or(CancelEntryReceiveError::Unavailable)?
-            .list_non_terminal_attempts()
+            .list()
             .await
-            .map_err(|error| {
-                CancelEntryReceiveError::Attempt(
-                    anyhow::Error::from(error).context("list receive attempts"),
-                )
-            })?;
-        let progress = self
-            .receive_progress
-            .as_ref()
-            .ok_or(CancelEntryReceiveError::Unavailable)?;
-        let mut result = Vec::with_capacity(attempts.len());
-        for attempt in attempts {
-            if let Some(current) = progress
-                .get_entry_receive_progress(&attempt.entry_id)
-                .await
-                .map_err(|error| {
-                    CancelEntryReceiveError::Attempt(
-                        anyhow::Error::from(error).context("read entry receive progress"),
-                    )
-                })?
-            {
-                result.push(current);
-            }
-        }
-        Ok(result)
     }
 
     pub async fn cancel_entry_receive(
@@ -451,7 +416,7 @@ impl ClipboardSyncFacade {
         &self,
         snapshot: SystemClipboardSnapshot,
         blob_refs: Vec<V3BlobRef>,
-        manifest: crate::clipboard::sync::apply_inbound::InboundFileSetManifest,
+        manifest: InboundFileSetManifest,
         origin: ClipboardChangeOrigin,
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,
@@ -539,7 +504,7 @@ impl ClipboardSyncDispatch<'_> {
         &self,
         snapshot: SystemClipboardSnapshot,
         blob_refs: Vec<V3BlobRef>,
-        manifest: crate::clipboard::sync::apply_inbound::InboundFileSetManifest,
+        manifest: InboundFileSetManifest,
         origin: ClipboardChangeOrigin,
         entry_id: Option<EntryId>,
         target_filter: Option<Vec<DeviceId>>,

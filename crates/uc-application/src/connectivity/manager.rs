@@ -1,19 +1,24 @@
 use super::acquisition::Acquisition;
-use super::connection::ConnectionRecord;
+use super::checks::checked;
+use super::connection::{AcceptedStream, ConnectionRecord};
+use super::inbound::{InboundAdmissionPolicy, InboundReservation};
+use super::lifetime::ConnectionLifetime;
 use super::pending::{PendingInboundLease, UnboundConnection};
+use super::request::ConnectionRequestScope;
 use super::retention::{ConnectionActivity, IdleRetentionPolicy};
 use super::{
-    AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectivityBackend,
-    ConnectivityError, InboundConnectionError, PeerConnection, SessionConnectionAdmissionPort,
-    StreamLease,
+    AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionRequest,
+    ConnectivityBackend, ConnectivityError, InboundConnectionError, InboundIdentityReservation,
+    PeerConnection, SessionConnectionAdmissionPort, StreamLease,
 };
+use futures::future::{ready, Either};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::{oneshot, watch, Semaphore};
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
@@ -27,6 +32,12 @@ use uc_observability_contract::diagnostics::{record_task_join_failure, Diagnosti
 pub struct ConnectivityPolicy {
     /// presence 首流准入与长期保留采用独立生命周期，其他协议保持默认策略。
     pub presence_retention: bool,
+    /// 取消／到期后等待已开始的拨号与本地准入工作实际结束。
+    pub supervise_local_work: bool,
+    /// 显式配置时，未知身份与识别后准入使用不同额度及同一绝对期限。
+    pub inbound_admission: Option<InboundAdmissionPolicy>,
+    /// 包括拨号中与关闭未完成的连接；不把方向名额当作交换额度。
+    pub connections_per_peer_direction: Option<usize>,
     pub outbound_per_peer: usize,
     pub inbound_per_connection: usize,
     pub inbound_per_session: usize,
@@ -35,12 +46,19 @@ pub struct ConnectivityPolicy {
     pub flights_per_session: usize,
     pub idle_retention: Option<IdleRetentionPolicy>,
     pub accepted_stream_timeout: Option<Duration>,
+    /// 先接收当前流再立即判额度，超额只拒绝本次，不进入等待队列。
+    pub reject_excess_inbound: bool,
+    /// 等待首流再做身份与成员准入，空预热连接仅占未知入站额度。
+    pub admit_on_first_stream: bool,
     pub task_kind: DiagnosticTaskKind,
 }
 impl Default for ConnectivityPolicy {
     fn default() -> Self {
         Self {
             presence_retention: false,
+            supervise_local_work: false,
+            inbound_admission: None,
+            connections_per_peer_direction: None,
             outbound_per_peer: 4,
             inbound_per_connection: 4,
             inbound_per_session: 16,
@@ -49,14 +67,26 @@ impl Default for ConnectivityPolicy {
             flights_per_session: 64,
             idle_retention: None,
             accepted_stream_timeout: None,
+            reject_excess_inbound: false,
+            admit_on_first_stream: false,
             task_kind: DiagnosticTaskKind::ClipboardConnectivityWorker,
         }
+    }
+}
+impl ConnectivityPolicy {
+    pub(super) fn wait_for_local_work(self) -> bool {
+        self.presence_retention
+            || self.supervise_local_work
+            || self.inbound_admission.is_some()
+            || self.connections_per_peer_direction.is_some()
     }
 }
 pub(super) struct PeerState {
     pub outbound: Arc<Semaphore>,
     pub waiting: Arc<Semaphore>,
     pub pending_inbound: Arc<Semaphore>,
+    pub inbound_connections: Option<Arc<Semaphore>>,
+    pub outbound_connections: Option<Arc<Semaphore>>,
 }
 struct FlightOutcome {
     mode: ConnectionMode,
@@ -68,6 +98,24 @@ struct Flight {
     waiters: AtomicUsize,
     result: watch::Sender<Option<FlightResult>>,
     permit: Mutex<Option<OwnedSemaphorePermit>>,
+}
+impl Flight {
+    async fn settled(&self) -> Result<(), ConnectivityError> {
+        let mut result = self.result.subscribe();
+        loop {
+            if let Some(outcome) = result.borrow_and_update().as_ref() {
+                return match outcome {
+                    Ok(_) => Ok(()),
+                    Err(source) if matches!(source.as_ref(), ConnectivityError::Stopped) => Ok(()),
+                    Err(source) => Err(ConnectivityError::Shared(source.clone())),
+                };
+            }
+            result
+                .changed()
+                .await
+                .map_err(ConnectivityError::ResultClosed)?;
+        }
+    }
 }
 struct Waiter(Arc<Flight>);
 impl Drop for Waiter {
@@ -84,9 +132,9 @@ struct State {
     flights: HashMap<DeviceId, Arc<Flight>>,
     live: Vec<Weak<ConnectionRecord>>,
 }
-struct Inner {
+pub(super) struct Inner {
     backend: Arc<dyn ConnectivityBackend>,
-    admission: Arc<dyn SessionConnectionAdmissionPort>,
+    pub(super) admission: Arc<dyn SessionConnectionAdmissionPort>,
     policy: ConnectivityPolicy,
     state: Mutex<State>,
     retained: Mutex<HashMap<(DeviceId, bool), Arc<ConnectionRecord>>>,
@@ -97,7 +145,7 @@ struct Inner {
     waiting: Arc<Semaphore>,
     flights: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
-    incoming: Arc<Semaphore>,
+    pub(super) incoming: Arc<Semaphore>,
     shutdown: tokio::sync::Mutex<()>,
 }
 impl Drop for Inner {
@@ -109,7 +157,7 @@ impl Drop for Inner {
 /// 同一协议会话的完整连接负责人。任务由自身 JoinSet 持有。
 #[derive(Clone)]
 pub struct ConnectivityManager {
-    inner: Arc<Inner>,
+    pub(super) inner: Arc<Inner>,
 }
 impl ConnectivityManager {
     pub fn new(
@@ -131,11 +179,16 @@ impl ConnectivityManager {
                 waiting: Arc::new(Semaphore::new(policy.waiters_per_session)),
                 flights: Arc::new(Semaphore::new(policy.flights_per_session)),
                 inbound: Arc::new(Semaphore::new(policy.inbound_per_session)),
-                incoming: Arc::new(Semaphore::new(if policy.presence_retention {
-                    16
-                } else {
-                    policy.waiters_per_session
-                })),
+                incoming: Arc::new(Semaphore::new(policy.inbound_admission.map_or_else(
+                    || {
+                        if policy.presence_retention {
+                            16
+                        } else {
+                            policy.waiters_per_session
+                        }
+                    },
+                    |limits| limits.unidentified,
+                ))),
                 shutdown: tokio::sync::Mutex::new(()),
             }),
         }
@@ -151,25 +204,48 @@ impl ConnectivityManager {
             return peer;
         }
         let peer = Arc::new(PeerState {
+            inbound_connections: self
+                .inner
+                .policy
+                .connections_per_peer_direction
+                .map(|limit| Arc::new(Semaphore::new(limit))),
+            outbound_connections: self
+                .inner
+                .policy
+                .connections_per_peer_direction
+                .map(|limit| Arc::new(Semaphore::new(limit))),
             outbound: Arc::new(Semaphore::new(self.inner.policy.outbound_per_peer)),
             waiting: Arc::new(Semaphore::new(self.inner.policy.waiters_per_peer)),
-            pending_inbound: Arc::new(Semaphore::new(2)),
+            pending_inbound: Arc::new(Semaphore::new(
+                self.inner
+                    .policy
+                    .inbound_admission
+                    .map_or(2, |limits| limits.identified_per_peer),
+            )),
         });
         state.peers.insert(target, Arc::downgrade(&peer));
         peer
     }
-    pub async fn connect(
-        &self,
-        target: DeviceId,
-        deadline: Instant,
-    ) -> Result<ConnectionLease, ConnectivityError> {
-        self.connect_with_cancel(target, deadline, &CancellationToken::new())
-            .await
+    /// 同步冻结本请求的准入与会话；协议可在自己的有界队列之前创建它。
+    pub fn request(&self, target: DeviceId) -> ConnectionRequest {
+        ConnectionRequest {
+            manager: self.clone(),
+            target,
+            attempt: Arc::from(self.inner.admission.begin(target)),
+            session: self.stop_token(),
+            address_hint: None,
+        }
     }
-    /// presence 取消后由原监督者结算真实本地工作，调用方无需拼装取消与回收。
-    pub async fn connect_with_cancel(
+    pub(crate) fn freeze_request(&self) -> ConnectionRequestScope {
+        ConnectionRequestScope {
+            manager: self.clone(),
+            session: self.stop_token(),
+            fence: self.inner.admission.inbound_fence(),
+        }
+    }
+    pub(super) async fn acquire_request(
         &self,
-        target: DeviceId,
+        request: &ConnectionRequest,
         deadline: Instant,
         cancel: &CancellationToken,
     ) -> Result<ConnectionLease, ConnectivityError> {
@@ -179,8 +255,8 @@ impl ConnectivityManager {
         if Instant::now() >= deadline {
             return Err(ConnectivityError::DeadlineExpired);
         }
-        // 在任何排队之前冻结撤销基线。
-        let attempt: Arc<dyn AdmissionAttempt> = Arc::from(self.inner.admission.begin(target));
+        let target = request.target;
+        let attempt = request.attempt.clone();
         let peer = self.peer(target);
         let _global = self
             .inner
@@ -233,7 +309,13 @@ impl ConnectivityManager {
         };
         let _waiter = Waiter(flight.clone());
         if launch {
-            self.launch(target, peer.clone(), flight.clone(), attempt.clone());
+            self.launch(
+                target,
+                peer.clone(),
+                flight.clone(),
+                attempt.clone(),
+                request.address_hint.clone(),
+            );
         }
         let mut rx = flight.result.subscribe();
         let awaiting = timeout_at(deadline, async {
@@ -251,8 +333,13 @@ impl ConnectivityManager {
             biased;
             _ = cancel.cancelled() => {
                 drop(_waiter);
-                if self.inner.policy.presence_retention {
-                    while rx.borrow_and_update().is_none() { rx.changed().await.map_err(ConnectivityError::ResultClosed)?; }
+                if self.inner.policy.wait_for_local_work() && flight.waiters.load(Ordering::Acquire) == 0 {
+                    if let Err(additional) = flight.settled().await {
+                        return Err(ConnectivityError::Settlement {
+                            primary: Box::new(ConnectivityError::Stopped),
+                            additional: Box::new(additional),
+                        });
+                    }
                 }
                 return Err(ConnectivityError::Stopped);
             }
@@ -261,14 +348,15 @@ impl ConnectivityManager {
         let outcome = match outcome {
             Ok(result) => result?,
             Err(source) => {
-                if self.inner.policy.presence_retention {
-                    flight.cancel.cancel();
-                    let mut settled = flight.result.subscribe();
-                    while settled.borrow_and_update().is_none() {
-                        settled
-                            .changed()
-                            .await
-                            .map_err(ConnectivityError::ResultClosed)?;
+                drop(_waiter);
+                if self.inner.policy.wait_for_local_work()
+                    && flight.waiters.load(Ordering::Acquire) == 0
+                {
+                    if let Err(additional) = flight.settled().await {
+                        return Err(ConnectivityError::Settlement {
+                            primary: Box::new(ConnectivityError::TimedOut(source)),
+                            additional: Box::new(additional),
+                        });
                     }
                 }
                 return Err(ConnectivityError::TimedOut(source));
@@ -300,7 +388,7 @@ impl ConnectivityManager {
                 // 旧端已领取或共同结果已经失活；负载尚未发送，原请求期限内有界取得新连接。
                 let record = tokio::select! {
                     _ = self.inner.stop.cancelled() => return Err(ConnectivityError::Stopped),
-                    result = timeout_at(deadline, self.acquire(target, peer, attempt.clone())) => result.map_err(ConnectivityError::TimedOut)??,
+                    result = timeout_at(deadline, self.acquire(target, peer, attempt.clone(), request.address_hint.clone())) => result.map_err(ConnectivityError::TimedOut)??,
                 };
                 ConnectionLease::outbound(record, attempt.clone())
             }
@@ -309,18 +397,39 @@ impl ConnectivityManager {
     /// 尚未发送请求的已失活连接可重获；原请求撤销快照不能随新拨号刷新。
     pub async fn refresh(
         &self,
-        previous: &ConnectionLease,
+        previous: ConnectionLease,
         deadline: Instant,
+        cancel: &CancellationToken,
     ) -> Result<ConnectionLease, ConnectivityError> {
         let request = previous.request.clone().ok_or(ConnectivityError::Denied)?;
-        request.check_current().await?;
         if !previous.is_closed() && !previous.is_unreachable() {
             return Err(ConnectivityError::Denied);
         }
-        let fresh = self.connect(previous.peer(), deadline).await?;
-        let lease = ConnectionLease::outbound(fresh.record.clone(), request)?;
-        lease.check_current().await?;
-        Ok(lease)
+        let frozen = ConnectionRequest {
+            manager: self.clone(),
+            target: previous.peer(),
+            attempt: request,
+            session: previous.record.stop.clone(),
+            address_hint: previous.record.address_hint.clone(),
+        };
+        let mut settled = previous.record._lifetime.settled();
+        previous.close();
+        self.retire(&previous);
+        drop(previous);
+        // 旧租约、兄弟流的本地工作和原生关闭共同完成后才重获方向名额。
+        // 等待本身不保留旧 record，也不刷新原请求资格、会话或期限。
+        if self.policy().connections_per_peer_direction.is_some() {
+            tokio::select! {
+                biased;
+                _ = frozen.session.cancelled() => return Err(ConnectivityError::Stopped),
+                _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
+                result = timeout_at(deadline, settled.wait_for(|finished| *finished)) => {
+                    result.map_err(ConnectivityError::TimedOut)?
+                        .map_err(ConnectivityError::ResultClosed)?;
+                }
+            }
+        }
+        frozen.connect(deadline, cancel).await
     }
     fn launch(
         &self,
@@ -328,13 +437,15 @@ impl ConnectivityManager {
         peer: Arc<PeerState>,
         flight: Arc<Flight>,
         attempt: Arc<dyn AdmissionAttempt>,
+        address_hint: Option<Vec<u8>>,
     ) {
         let weak = Arc::downgrade(&self.inner);
         let task_kind = self.inner.policy.task_kind;
         let mut acquisition = self.acquisition();
+        acquisition.address_hint = address_hint;
         acquisition.cancel = flight.cancel.clone();
         let pending = acquisition.pending.clone();
-        let settle_local = self.inner.policy.presence_retention;
+        let settle_local = self.inner.policy.wait_for_local_work();
         let mut tasks = self
             .inner
             .tasks
@@ -399,7 +510,7 @@ impl ConnectivityManager {
                 if let Some(inner) = weak.upgrade() {
                     let mut state = inner.state.lock().unwrap_or_else(PoisonError::into_inner);
                     // shutdown 可能已移除 flight；结果发布仍必须检查取消，不依赖表中所有权。
-                    if inner.stop.is_cancelled() || flight.cancel.is_cancelled() {
+                    if result.is_ok() && (inner.stop.is_cancelled() || flight.cancel.is_cancelled()) {
                         result = Err(Arc::new(ConnectivityError::Stopped));
                     }
                     if state
@@ -419,9 +530,6 @@ impl ConnectivityManager {
                         }
                     }
                 }
-                if let (Some(inner), Ok(record)) = (weak.upgrade(), &result) {
-                    Self::watch_connection(&inner, record.connection.clone());
-                }
                 let result = result.map(|record| {
                     Arc::new(FlightOutcome {
                         mode: record.connection.mode(),
@@ -436,7 +544,9 @@ impl ConnectivityManager {
     }
     fn acquisition(&self) -> Acquisition {
         Acquisition {
+            owner: Arc::downgrade(&self.inner),
             backend: self.inner.backend.clone(),
+            address_hint: None,
             policy: self.inner.policy,
             inbound: self.inner.inbound.clone(),
             waiting: self.inner.waiting.clone(),
@@ -450,6 +560,7 @@ impl ConnectivityManager {
         target: DeviceId,
         peer: Arc<PeerState>,
         attempt: Arc<dyn AdmissionAttempt>,
+        address_hint: Option<Vec<u8>>,
     ) -> Result<Arc<ConnectionRecord>, ConnectivityError> {
         let _permit = self
             .inner
@@ -458,15 +569,21 @@ impl ConnectivityManager {
             .acquire_owned()
             .await
             .map_err(ConnectivityError::ResourceClosed)?;
-        let record = self.acquisition().connect(target, peer, attempt).await?;
+        let mut acquisition = self.acquisition();
+        acquisition.address_hint = address_hint;
+        let record = acquisition.connect(target, peer, attempt).await?;
         self.track(&record)?;
         Ok(record)
     }
     pub(super) async fn admit_pending(
         &self,
         connection: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
-        self.inner.admission.adopt_inbound(connection).await
+        self.inner
+            .admission
+            .adopt_inbound(connection, reservation)
+            .await
     }
     pub(super) fn stop_token(&self) -> CancellationToken {
         self.inner
@@ -491,6 +608,7 @@ impl ConnectivityManager {
         deadline: Instant,
     ) -> Result<(ConnectionLease, StreamLease), ConnectivityError> {
         let fence = self.inner.admission.inbound_fence();
+        let session = self.stop_token();
         let raw = UnboundConnection {
             raw: connection,
             adopted: false,
@@ -501,20 +619,26 @@ impl ConnectivityManager {
             .clone()
             .try_acquire_owned()
             .map_err(ConnectivityError::Busy)?;
-        Self::watch_connection(&self.inner, raw.raw.clone());
+        let lifetime = Arc::new(ConnectionLifetime::default());
+        Self::watch_connection(
+            &self.inner,
+            raw.raw.clone(),
+            lifetime.clone(),
+            session.clone(),
+        );
         tokio::select! {
             _ = self.inner.stop.cancelled() => Err(ConnectivityError::Stopped),
             result = timeout_at(deadline, async {
                 let global = self.inner.inbound.clone().acquire_owned().await
                     .map_err(ConnectivityError::ResourceClosed)?;
-                let grant = self.inner.admission.adopt_inbound(raw.raw.clone()).await?;
+                let grant = self.inner.admission.adopt_inbound(raw.raw.clone(), &fence).await?;
                 if let Some(fence) = &fence { fence.check_current(&grant.peer())?; }
                 grant.check_current().await?;
                 let pair = raw.raw.accept_bi().await?;
                 PendingInboundLease {
                     send: pair.0, receive: pair.1, deadline,
                     received_at: Instant::now(), raw, manager: self.clone(),
-                    incoming, global, fence, identified_capacity: None, identified_peer: None,
+                    incoming, global, fence, lifetime, session, identified_capacity: None, identified_peer: None,
                 }.bind(grant).await
             }) => result.map_err(ConnectivityError::TimedOut)?,
         }
@@ -526,6 +650,7 @@ impl ConnectivityManager {
     ) -> impl Future<Output = Result<PendingInboundLease, ConnectivityError>> + Send + 'static {
         let manager = self.clone();
         let fence = manager.inner.admission.inbound_fence();
+        let session = manager.stop_token();
         let raw = UnboundConnection {
             raw: connection,
             adopted: false,
@@ -541,10 +666,16 @@ impl ConnectivityManager {
         }
         async move {
             let incoming = incoming?;
-            if manager.inner.stop.is_cancelled() {
+            if session.is_cancelled() {
                 return Err(ConnectivityError::Stopped);
             }
-            Self::watch_connection(&manager.inner, raw.raw.clone());
+            let lifetime = Arc::new(ConnectionLifetime::default());
+            Self::watch_connection(
+                &manager.inner,
+                raw.raw.clone(),
+                lifetime.clone(),
+                session.clone(),
+            );
             let (pair, global, received_at) = tokio::select! {
                 _ = manager.inner.stop.cancelled() => return Err(ConnectivityError::Stopped),
                 result = timeout_at(deadline, async {
@@ -559,6 +690,8 @@ impl ConnectivityManager {
                 receive: pair.1,
                 raw,
                 manager: manager.clone(),
+                session,
+                lifetime,
                 incoming,
                 global,
                 fence,
@@ -569,61 +702,178 @@ impl ConnectivityManager {
             })
         }
     }
-    pub async fn accept(
+    pub fn accept(
         &self,
         connection: Arc<dyn PeerConnection>,
-    ) -> Result<ConnectionLease, InboundConnectionError> {
-        let capacity = self
-            .inner
-            .incoming
-            .clone()
-            .try_acquire_owned()
-            .map_err(|error| InboundConnectionError {
-                cause: ConnectivityError::Busy(error),
-                _capacity: None,
-            })?;
-        if self.inner.stop.is_cancelled() {
-            return Err(InboundConnectionError {
-                cause: ConnectivityError::Stopped,
-                _capacity: Some(capacity),
-            });
-        }
-        let grant = match self.inner.admission.adopt_inbound(connection.clone()).await {
-            Ok(grant) => grant,
+    ) -> impl Future<Output = Result<ConnectionLease, InboundConnectionError>> + Send + 'static
+    {
+        let pending = match InboundReservation::new(self.clone(), connection) {
+            Ok(pending) => pending,
             Err(cause) => {
-                return Err(InboundConnectionError {
+                return Either::Left(ready(Err(InboundConnectionError {
                     cause,
-                    _capacity: Some(capacity),
-                })
+                    _capacity: None,
+                })))
             }
         };
-        let peer = self.peer(grant.peer());
-        let record = Arc::new(ConnectionRecord {
-            connection,
-            activity: Arc::new(ConnectionActivity::default()),
-            stop: self.inner.stop.clone(),
-            cache_cancel: CancellationToken::new(),
-            presence_retention: self.inner.policy.presence_retention,
-            accepted_stream_timeout: self.inner.policy.accepted_stream_timeout,
-            pending: tokio::sync::Mutex::new(None),
-            exchange_claimed: AtomicBool::new(false),
-            grant,
-            peer,
-            inbound: Arc::new(Semaphore::new(self.inner.policy.inbound_per_connection)),
-            inbound_global: self.inner.inbound.clone(),
-            waiting_global: self.inner.waiting.clone(),
-            _inbound_connection: Some(capacity),
-        });
-        self.track(&record)
-            .map_err(|cause| InboundConnectionError {
-                cause,
-                _capacity: None,
-            })?;
-        Ok(ConnectionLease {
-            record,
-            request: None,
-            _activity: None,
-        })
+        let work = async move {
+            let mut pending = pending;
+            let manager = pending.manager.clone();
+            if pending.session.is_cancelled() {
+                return Err(pending.failed(ConnectivityError::Stopped));
+            }
+            let first = if manager.policy().admit_on_first_stream {
+                let deadline = pending.deadline.ok_or_else(|| InboundConnectionError {
+                    cause: ConnectivityError::DeadlineExpired,
+                    _capacity: None,
+                })?;
+                let first_stream_deadline = manager
+                    .policy()
+                    .idle_retention
+                    .zip(pending.started_at)
+                    .map_or(deadline, |(idle, start)| deadline.min(start + idle.timeout));
+                let accepted = tokio::select! {
+                    biased;
+                    _ = pending.session.cancelled() => Err(ConnectivityError::Stopped),
+                    result = timeout_at(first_stream_deadline, pending.raw.raw.accept_bi()) => result.map_err(ConnectivityError::TimedOut).and_then(|result| result),
+                };
+                match accepted {
+                    Ok(pair) => Some(pair),
+                    Err(source) => return Err(pending.failed(source)),
+                }
+            } else {
+                None
+            };
+            let admitted = manager
+                .inner
+                .admission
+                .adopt_inbound(pending.raw.raw.clone(), &pending);
+            let grant = match pending.deadline {
+                Some(deadline) => {
+                    let checking = checked(
+                        admitted,
+                        manager.policy().wait_for_local_work(),
+                        deadline,
+                        &pending.session,
+                    );
+                    tokio::pin!(checking);
+                    tokio::select! {
+                        biased;
+                        _ = pending.session.cancelled() => { pending.raw.raw.close(); checking.await },
+                        _ = tokio::time::sleep_until(deadline) => { pending.raw.raw.close(); checking.await },
+                        result = &mut checking => result,
+                    }
+                }
+                None => admitted.await,
+            };
+            let grant = match grant {
+                Ok(grant) => grant,
+                Err(cause) => return Err(pending.failed(cause)),
+            };
+            if let Err(cause) = pending.verify(grant.peer()) {
+                return Err(pending.failed(cause));
+            }
+            let peer = manager.peer(grant.peer());
+            let activity = Arc::new(ConnectionActivity::default());
+            let first = match first {
+                Some(pair) => Some(AcceptedStream {
+                    pair,
+                    activity: activity.acquire().map_err(|cause| InboundConnectionError {
+                        cause,
+                        _capacity: None,
+                    })?,
+                    accepted_at: pending.started_at.unwrap_or_else(Instant::now),
+                }),
+                None => None,
+            };
+            let record = Arc::new(ConnectionRecord {
+                connection: pending.raw.raw.clone(),
+                address_hint: None,
+                activity,
+                stop: pending.session.clone(),
+                cache_cancel: CancellationToken::new(),
+                supervise_local_work: manager.policy().wait_for_local_work(),
+                accepted_stream_timeout: manager.policy().accepted_stream_timeout,
+                reject_excess_inbound: manager.policy().reject_excess_inbound,
+                first_inbound_at: Mutex::new(pending.started_at),
+                pending: tokio::sync::Mutex::new(first),
+                exchange_claimed: AtomicBool::new(false),
+                grant,
+                peer,
+                inbound: Arc::new(Semaphore::new(manager.policy().inbound_per_connection)),
+                inbound_global: manager.inner.inbound.clone(),
+                waiting_global: manager.inner.waiting.clone(),
+                inbound_direction: true,
+                _lifetime: pending.lifetime.clone(),
+                _inbound_connection: pending.take_unidentified(),
+            });
+            pending.raw.adopted = true;
+            manager
+                .track(&record)
+                .map_err(|cause| InboundConnectionError {
+                    cause,
+                    _capacity: None,
+                })?;
+            Ok(ConnectionLease {
+                record,
+                request: None,
+                _activity: None,
+            })
+        };
+        if self.inner.policy.wait_for_local_work() {
+            let (send, receive) = oneshot::channel();
+            let weak = Arc::downgrade(&self.inner);
+            let task_kind = self.inner.policy.task_kind;
+            let mut tasks = self
+                .inner
+                .tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            while let Some(result) = tasks.try_join_next() {
+                Self::record_task_result(&self.inner, result);
+            }
+            // 请求方丢弃等待只关闭结果通道；已开始的本地准入仍归同一 JoinSet。
+            tasks.spawn(
+                async move {
+                    let worker = AbortOnDropHandle::new(tokio::spawn(
+                        work.instrument(Span::none()).with_current_subscriber(),
+                    ));
+                    let result = match worker.await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            record_task_join_failure(task_kind);
+                            let error = Arc::new(error);
+                            if let Some(inner) = weak.upgrade() {
+                                inner
+                                    .failure
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .get_or_insert_with(|| error.clone());
+                            }
+                            Err(InboundConnectionError {
+                                cause: ConnectivityError::Task(error),
+                                _capacity: None,
+                            })
+                        }
+                    };
+                    // 已无等待者时直接释放结果，不能留下授权连接或额度。
+                    // discarded-source[channel]: 等待方已退出，错误携带结果本体；在此释放已结算结果。
+                    let _ = send.send(result);
+                }
+                .instrument(Span::none())
+                .with_current_subscriber(),
+            );
+            let owner = self.clone();
+            Either::Right(Either::Left(async move {
+                let _owner = owner;
+                receive.await.map_err(|source| InboundConnectionError {
+                    cause: ConnectivityError::InboundResultClosed(source),
+                    _capacity: None,
+                })?
+            }))
+        } else {
+            Either::Right(Either::Right(work))
+        }
     }
     /// 交换预算已耗尽时停止复用；在途兄弟流保留原使用权，最后使用者结束才关闭旧连接。
     pub fn evict(&self, lease: &ConnectionLease) {
@@ -643,7 +893,7 @@ impl ConnectivityManager {
                 state.active.remove(&lease.peer());
             }
         }
-        let key = (lease.peer(), lease.record._inbound_connection.is_some());
+        let key = (lease.peer(), lease.record.inbound_direction);
         let mut retained = self
             .inner
             .retained
@@ -658,7 +908,7 @@ impl ConnectivityManager {
     }
     /// 取消指定使用权的跨轮保留；失效连接不再留给后续请求。
     pub fn retire(&self, lease: &ConnectionLease) {
-        let key = (lease.peer(), lease.record._inbound_connection.is_some());
+        let key = (lease.peer(), lease.record.inbound_direction);
         let mut retained = self
             .inner
             .retained
@@ -685,7 +935,7 @@ impl ConnectivityManager {
             return Ok(false);
         }
         lease.check_current().await?;
-        let key = (lease.peer(), lease.record._inbound_connection.is_some());
+        let key = (lease.peer(), lease.record.inbound_direction);
         let mut tasks = self
             .inner
             .tasks
@@ -763,29 +1013,24 @@ impl ConnectivityManager {
         }
         state.live.retain(|record| record.strong_count() > 0);
         state.live.push(Arc::downgrade(record));
-        drop(state);
-        Self::watch_connection(&self.inner, record.connection.clone());
         Ok(())
     }
-    fn watch_connection(inner: &Inner, connection: Arc<dyn PeerConnection>) {
+    pub(super) fn watch_connection(
+        inner: &Inner,
+        connection: Arc<dyn PeerConnection>,
+        lifetime: Arc<ConnectionLifetime>,
+        stop: CancellationToken,
+    ) {
         let mut tasks = inner.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         while let Some(result) = tasks.try_join_next() {
             Self::record_task_result(inner, result);
         }
-        if inner.stop.is_cancelled() {
-            connection.close();
-            return;
-        }
-        let stop = inner
-            .session
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        // 只持原生能力，不持 record/租约；最后使用者仍立即关闭，没有空闲池。
+        // 不持 record/活动租约；方向名额等真实关闭与所有本地工作都完成后才释放。
         tasks.spawn(
             async move {
+                let _lifetime = lifetime;
                 tokio::select! {
-                    _ = stop.cancelled() => connection.close(),
+                    _ = stop.cancelled() => { connection.close(); connection.closed().await; },
                     _ = connection.closed() => {},
                 }
             }
@@ -799,6 +1044,24 @@ impl ConnectivityManager {
             let mut failure = inner.failure.lock().unwrap_or_else(PoisonError::into_inner);
             if failure.is_none() {
                 *failure = Some(Arc::new(error));
+            }
+        }
+    }
+    async fn join_tasks(&self) {
+        loop {
+            let mut tasks = {
+                let mut owned = self
+                    .inner
+                    .tasks
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if owned.is_empty() {
+                    break;
+                }
+                std::mem::replace(&mut *owned, JoinSet::new())
+            };
+            while let Some(result) = tasks.join_next().await {
+                Self::record_task_result(&self.inner, result);
             }
         }
     }
@@ -826,17 +1089,7 @@ impl ConnectivityManager {
                 .unwrap_or_else(PoisonError::into_inner)
                 .clear();
         }
-        let mut tasks = {
-            let mut tasks = self
-                .inner
-                .tasks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            std::mem::replace(&mut *tasks, JoinSet::new())
-        };
-        while let Some(result) = tasks.join_next().await {
-            Self::record_task_result(&self.inner, result);
-        }
+        self.join_tasks().await;
         *self
             .inner
             .session
@@ -877,17 +1130,7 @@ impl ConnectivityManager {
                 flight.cancel.cancel();
             }
         }
-        let mut tasks = {
-            let mut owned = self
-                .inner
-                .tasks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            std::mem::replace(&mut *owned, JoinSet::new())
-        };
-        while let Some(result) = tasks.join_next().await {
-            Self::record_task_result(&self.inner, result);
-        }
+        self.join_tasks().await;
         let failure = self
             .inner
             .failure

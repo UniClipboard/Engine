@@ -1,9 +1,21 @@
+pub use super::output::BlobOutputTarget;
+use super::output::PreparedBlobPath;
+use crate::transfer::receive::batch::ReceiveBatch;
+use crate::transfer::receive::LocalSettlement;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use self::finalization::{transfer_error, FetchFinalization};
+use self::preparation::FetchPreparationState;
+mod cancellation;
+mod finalization;
+mod terminal_repair;
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::sync::PoisonError;
+pub(crate) use terminal_repair::{FetchTerminalFailure, TerminalSettlementPending};
+mod preparation;
 use tokio_util::sync::CancellationToken;
 
 use uc_core::file_transfer::{
@@ -16,15 +28,17 @@ use uc_core::ports::blob::{
     PlaintextHash,
 };
 use uc_core::ports::security::TransferCipherPort;
-use uc_core::ports::ContentHashPort;
-use uc_observability_contract::{
-    error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
-};
+use uc_core::ports::{ContentHashPort, ReceiveItemRole};
+use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
+use super::notifications::OutboundNotifications;
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
+use crate::transfer::blob::transport::{
+    BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, BlobTransport,
+    DownloadCompletion,
+};
 use crate::transfer::blob::{
-    fetch_failure_reason, FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput,
-    PublishBlobUseCase,
+    FetchBlobInput, FetchBlobPathInput, FetchBlobUseCase, PublishBlobInput, PublishBlobUseCase,
 };
 use crate::transfer::file::facade::{
     BeginReceiverTransfer, FileTransferFacade, ReceiverTransferRegistration,
@@ -39,7 +53,8 @@ use crate::transfer::file::session::ReceiverTransferHandle;
 /// fan-out 到所有已注册下游,装配顺序无关。
 pub type SharedHostEventEmitter = Arc<HostEventBus>;
 
-pub(crate) struct BlobTransferDeps {
+pub struct BlobTransferDeps {
+    pub downloads: Arc<BlobDownloadResources>,
     pub hash: Arc<dyn ContentHashPort>,
     pub blob_transfer: Arc<dyn BlobTransferPort>,
     pub blob_reference: Arc<dyn BlobReferenceRepositoryPort>,
@@ -115,6 +130,8 @@ pub struct PublishBlobResult {
 /// 不提供 transfer_context 时 fetch_blob 表现等同于改造前——只拉数据,不发事件。
 #[derive(Debug, Clone)]
 pub struct FetchTransferContext {
+    pub item_role: ReceiveItemRole,
+    pub(crate) batch: Option<Arc<ReceiveBatch>>,
     pub transfer_id: String,
     /// Clipboard entry that owns this transfer. Directory members use a
     /// distinct `transfer_id` while sharing this entry id for aggregation.
@@ -169,6 +186,7 @@ impl BatchPosition {
 
 #[derive(Debug, Clone)]
 pub struct FetchBlobCommand {
+    pub cancellation: CancellationToken,
     pub ticket: BlobTicket,
     /// **发送端**侧的 entry_id —— 仅用于 iroh blob tag 与 fetch use case
     /// 内部记录,不会出现在 host event 里。前端关联用的是
@@ -193,11 +211,12 @@ pub struct FetchBlobResult {
 /// Used by the inbound materializer for free-standing files so the
 /// receive side stops materialising 800 MB+ payloads in memory only to
 /// `tokio::fs::write` them out again.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FetchBlobToPathCommand {
+    pub cancellation: CancellationToken,
     pub ticket: BlobTicket,
     pub entry_id: EntryId,
-    pub target_path: PathBuf,
+    pub target_path: BlobOutputTarget,
     pub transfer_context: Option<FetchTransferContext>,
 }
 
@@ -224,6 +243,8 @@ pub enum BlobTransferError {
     /// Fetch 表达"传输本身失败",Cancelled 表达"传输被主动撤回"。
     #[error("fetch blob cancelled")]
     Cancelled,
+    #[error("blob cancellation remains incomplete")]
+    CancellationIncomplete(#[source] tokio::time::error::Elapsed),
     #[error("record blob transfer failed")]
     Persistence(#[source] anyhow::Error),
 }
@@ -247,45 +268,43 @@ pub enum InboundCancelOutcome {
     NotInflight,
 }
 
-/// 一次进行中 fetch 的取消句柄。
-struct InflightFetch {
-    /// trigger 后:facade 内的 select! 唤醒 fetch 路径,提前 break。
-    token: CancellationToken,
-    /// 让 cancel 路径能调 `BlobTransferPort::shutdown_inflight_fetch`
-    /// 把 iroh-blobs Downloader 内部 actor task 用的那条 QUIC connection
-    /// 也撕掉(只 break caller 没用 —— actor 还会继续下载完整 blob)。
-    ticket: BlobTicket,
-    /// The same session used by fetch progress and terminal settlement.
-    session: Option<Arc<ReceiverTransferHandle>>,
-    /// Directory receive attempt that owns this member fetch.
-    attempt_id: Option<String>,
-    /// 反向上报通道。`cancel_inbound_transfer` 在撕 QUIC connection
-    /// 之前先用它给 sender 发一帧 `Cancelled` 状态,让 sender UI 也能
-    /// 看到中性"已取消"展示(而不是 fetch error 路径反向推的 Failed)。
-    /// 反向通道用独立 ALPN,撕 fetch connection 不会影响这条帧。
-    outbound: Option<OutboundReportContext>,
+#[derive(Clone, Copy)]
+pub(crate) enum TransferCancellationWait {
+    Bounded,
+    Complete,
 }
 
+/// 单项获取及唯一取消协调者的完成事实，取消不提前移除登记。
+#[derive(Clone)]
+struct InflightFetch {
+    completion: DownloadCompletion,
+    cancelling: Arc<Mutex<Option<DownloadCompletion>>>,
+    token: CancellationToken,
+    prepared: Arc<FetchPreparationState>,
+    attempt_id: Option<String>,
+    local: Option<LocalSettlement>,
+}
+
+#[derive(Clone)]
 pub struct BlobTransferFacade {
     publish_uc: Arc<PublishBlobUseCase>,
     fetch_uc: Arc<FetchBlobUseCase>,
-    /// `BlobTransferPort` 句柄留一份给取消路径调 `shutdown_inflight_fetch`;
-    /// use case 内部也持有同一个 `Arc<dyn BlobTransferPort>`。
-    blob_transfer: Arc<dyn BlobTransferPort>,
+    /// 全部获取、通知和收尾任务由同一个传输负责人监督。
+    pub(in super::super) transport: Arc<BlobTransport>,
     host_event_emitter: Option<SharedHostEventEmitter>,
-    outbound_progress_reporter: Option<Arc<dyn OutboundProgressReporterPort>>,
+    outbound_progress_reporter: Option<Arc<OutboundNotifications>>,
     file_transfer: Option<Arc<FileTransferFacade>>,
-    /// 进行中 fetch 的取消句柄登记表。key=`transfer_id`。
-    ///
-    /// fetch_blob / fetch_blob_to_path 在带 `transfer_context` 时
-    /// 入口注册、出口移除。`cancel_inbound_transfer` 通过 transfer_id
-    /// 查表,trigger token + 通过 ticket 撕 QUIC connection + 落
-    /// `Cancelled` domain event。
+    /// 以具体接收项登记取消；重复调用接入原来的真实完成通知。
     inflight_fetches: Arc<Mutex<HashMap<String, InflightFetch>>>,
 }
 
 impl BlobTransferFacade {
-    pub(crate) fn new(deps: BlobTransferDeps) -> Self {
+    #[doc(hidden)]
+    pub fn new(deps: BlobTransferDeps) -> Self {
+        let outbound_progress_reporter = deps
+            .outbound_progress_reporter
+            .map(|reporter| OutboundNotifications::new(reporter, &deps.downloads.transport));
+        let transport = deps.downloads.transport.clone();
         let publish_uc = Arc::new(PublishBlobUseCase::new(
             Arc::clone(&deps.hash),
             Arc::clone(&deps.blob_transfer),
@@ -293,6 +312,7 @@ impl BlobTransferFacade {
             Arc::clone(&deps.transfer_cipher),
         ));
         let fetch_uc = Arc::new(FetchBlobUseCase::new(
+            deps.downloads,
             deps.hash,
             Arc::clone(&deps.blob_transfer),
             deps.blob_reference,
@@ -301,14 +321,22 @@ impl BlobTransferFacade {
         Self {
             publish_uc,
             fetch_uc,
-            blob_transfer: deps.blob_transfer,
+            transport,
             host_event_emitter: deps.host_event_emitter,
-            outbound_progress_reporter: deps.outbound_progress_reporter,
+            outbound_progress_reporter,
             file_transfer: deps.file_transfer,
             inflight_fetches: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    /// 旧扫描只恢复无负责人行；活跃获取及未完收尾使用本负责人的实际时钟。
+    pub(in super::super) fn owns_inbound_work(&self, transfer_id: &str) -> bool {
+        self.inflight_fetches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(transfer_id)
+            .is_some_and(InflightFetch::is_running)
+    }
     async fn begin_lifecycle(
         &self,
         ctx: &FetchTransferContext,
@@ -319,6 +347,7 @@ impl BlobTransferFacade {
         };
         facade
             .begin_receiver_transfer(BeginReceiverTransfer {
+                item_role: Some(ctx.item_role),
                 transfer_id: ctx.transfer_id.clone(),
                 peer_id: ctx.peer_id.clone(),
                 filename: ctx.filename.clone(),
@@ -380,157 +409,6 @@ impl BlobTransferFacade {
         }
     }
 
-    /// 取消一次进行中的 inbound fetch。
-    ///
-    /// 四件事按顺序发生:
-    /// 1. **先**通过反向 progress 通道给 sender 发一帧
-    ///    `OutboundProgressStatus::Cancelled { reason }` —— 让 sender UI
-    ///    收到 cancel 终态(而不是后续 fetch error 路径反向推的 Failed)。
-    ///    反向通道用独立 ALPN,与待撕的 fetch QUIC connection 物理隔离,
-    ///    所以这一步必须在 step 3 之前完成,**且 await 直到写帧返回**,
-    ///    避免 reporter 内部还没真把帧写入 socket 就被后续 fetch error
-    ///    覆盖。
-    /// 2. trigger registry 里这个 `transfer_id` 对应的 cancellation token —
-    ///    fetch 路径里的 `tokio::select!` 会立刻唤醒,fetch_uc 那条分支被
-    ///    drop,本端 receiver 不再接收 bytes;
-    /// 3. 通过 `BlobTransferPort::shutdown_inflight_fetch(&ticket)` 撕掉
-    ///    iroh-blobs Downloader actor 内部用的 QUIC connection,让 actor
-    ///    task 也真的退出(否则它会继续把整个 blob 下完);
-    /// 4. Settle the same file-transfer session as cancelled.
-    ///
-    /// 幂等:同一个 `transfer_id` 不在 registry(没有进行中的 fetch,或者
-    /// 已经被取消过)时返回 `Ok(())`,不重复发事件。
-    ///
-    /// `reason` 透传给 `Cancelled` 事件与反向 cancel 帧 ——
-    /// - 用户点取消按钮:`LocalUser`
-    /// - timeout sweep 触发:`Timeout`
-    /// - 删除流程联动:`Replaced` 或 `LocalUser`
-    pub async fn cancel_inbound_transfer(
-        &self,
-        transfer_id: &str,
-        reason: FileTransferCancellationReason,
-    ) -> Result<InboundCancelOutcome, BlobTransferError> {
-        // 一次性取出 entry,避免锁跨 await。
-        let entry = self
-            .inflight_fetches
-            .lock()
-            // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
-            .map_err(|_| {
-                BlobTransferError::Fetch(anyhow::anyhow!("in-flight fetch registry is poisoned"))
-            })?
-            .remove(transfer_id);
-        let Some(entry) = entry else {
-            uc_info!(
-                transfer_id = log_id(&transfer_id),
-                "cancel_inbound_transfer: no in-flight fetch, no-op"
-            );
-            return Ok(InboundCancelOutcome::NotInflight);
-        };
-
-        // Step 1: 先告诉 sender 我们要取消了。一定要在撕 connection 之前
-        // 完成 ——cancel 帧走的是独立 ALPN 通道,与 fetch QUIC connection
-        // 不共用,撕 fetch 不会影响这一帧;但 reporter 内部要 dial / open_uni
-        // / write,需要 await 完成。
-        //
-        // **视角翻转**:`reason` 是 receiver 视角(`LocalUser` 是 receiver
-        // 设备上的用户、`RemotePeer` 是 sender 那边触发的)。沿反向通道发
-        // 给 sender 时,把 device-relative 的两个变体对调一下,这样 sender
-        // 端 UI 拿到的就是 sender 视角的 reason —— 可以直接用同一张 i18n
-        // 表渲染("你/对方"的归属正确)。`Timeout` / `Replaced` / `Unknown`
-        // 是设备无关的共同语义,原样透传。
-        if let Some(outbound) = entry.outbound.as_ref() {
-            let sender_view_reason = flip_cancel_reason_perspective(reason);
-            outbound
-                .reporter
-                .report(
-                    &outbound.target,
-                    &outbound.transfer_id,
-                    0,
-                    None,
-                    OutboundProgressStatus::Cancelled {
-                        reason: sender_view_reason,
-                    },
-                )
-                .await;
-        }
-
-        // Step 2: trigger select! 让 fetch 路径退出。
-        entry.token.cancel();
-
-        // Step 3: 撕 QUIC connection 让 iroh-blobs actor task 也退出。
-        // best-effort: shutdown 失败说明 connection 已经关了,语义上等价
-        // 于"已经撤回",继续走 step 4。
-        if let Err(err) = self
-            .blob_transfer
-            .shutdown_inflight_fetch(&entry.ticket)
-            .await
-        {
-            uc_warn!(
-                transfer_id = log_id(&transfer_id),
-                error_kind = "inflight_fetch_shutdown",
-                io_error_kind = io_error_kind(&err),
-                "cancel_inbound_transfer: shutdown_inflight_fetch failed (treated as already gone)"
-            );
-        }
-
-        // Step 4: 落 Cancelled 事件。peer_id 在 fetch 入口注册时一起存进
-        // registry,这里取出来直接发,避免编一个污染事件流。
-        if let Some(session) = entry.session {
-            if let Err(error) = session.cancel(reason).await {
-                uc_warn!(
-                    transfer_id = log_id(&transfer_id),
-                    error_kind = "session_cancel",
-                    io_error_kind = io_error_kind(&error),
-                    "cancel_inbound_transfer: session cancel failed"
-                );
-            }
-        }
-
-        Ok(InboundCancelOutcome::Cancelled)
-    }
-
-    pub(crate) async fn cancel_inbound_attempt(
-        &self,
-        attempt_id: &str,
-        reason: FileTransferCancellationReason,
-    ) -> Result<usize, BlobTransferError> {
-        let transfer_ids = self
-            .inflight_fetches
-            .lock()
-            // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
-            .map_err(|_| {
-                BlobTransferError::Fetch(anyhow::anyhow!("in-flight fetch registry is poisoned"))
-            })?
-            .iter()
-            .filter(|(_, fetch)| fetch.attempt_id.as_deref() == Some(attempt_id))
-            .map(|(transfer_id, _)| transfer_id.clone())
-            .collect::<Vec<_>>();
-
-        let mut cancelled = 0usize;
-        let mut first_error = None;
-        for transfer_id in transfer_ids {
-            match self.cancel_inbound_transfer(&transfer_id, reason).await {
-                Ok(InboundCancelOutcome::Cancelled) => cancelled += 1,
-                Ok(InboundCancelOutcome::NotInflight) => {}
-                Err(error) => {
-                    uc_warn!(
-                        transfer_id = log_id(&transfer_id),
-                        error_kind = "member_transfer_cancel",
-                        io_error_kind = io_error_kind(&error),
-                        "failed to cancel directory member transfer"
-                    );
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-            }
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(cancelled),
-        }
-    }
-
     pub async fn publish_blob(
         &self,
         command: PublishBlobCommand,
@@ -578,150 +456,69 @@ impl BlobTransferFacade {
         &self,
         command: FetchBlobCommand,
     ) -> Result<FetchBlobResult, BlobTransferError> {
+        let settlement = command
+            .transfer_context
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .batch
+                    .as_ref()
+                    .map(|batch| batch.local_settlement(&context.transfer_id))
+            })
+            .unwrap_or_default();
         let iroh_tag_entry_id = command.entry_id.clone();
         let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
-        let lifecycle_session = match command.transfer_context.as_ref() {
-            Some(ctx) if ctx.individual_lifecycle || ctx.batch_position.is_first() => {
-                self.begin_lifecycle(ctx, String::new()).await?
-            }
-            Some(ctx) => self.existing_lifecycle(ctx).await?,
-            None => None,
+        let cancel_token = command.cancellation.child_token();
+        let prepared = Arc::new(FetchPreparationState::default());
+        let preparation = self.prepare_fetch(
+            command.transfer_context.clone(),
+            Box::pin(async { Ok(String::new()) }),
+            outbound_ctx.clone(),
+            cancel_token.clone(),
+            prepared.clone(),
+        );
+        let input = FetchBlobInput {
+            settlement: settlement.clone(),
+            preparation,
+            ticket: command.ticket,
+            cancel: cancel_token.clone(),
+            entry_id: iroh_tag_entry_id,
         };
-        let progress_sink = self
-            .build_progress_sink(
-                command.transfer_context.as_ref(),
-                lifecycle_session.clone(),
-                outbound_ctx.clone(),
-            )
-            .await;
-        if let (Some(ctx), Some(sink)) = (command.transfer_context.as_ref(), progress_sink.as_ref())
-        {
-            if ctx.individual_lifecycle || ctx.batch_position.is_first() {
-                sink.report(0, ctx.total_bytes).await;
-            }
-        }
-
-        let cancel_token = CancellationToken::new();
-        if let Some(ctx) = command.transfer_context.as_ref() {
-            self.inflight_fetches
-                .lock()
-                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
-                .map_err(|_| {
-                    BlobTransferError::Fetch(anyhow::anyhow!(
-                        "in-flight fetch registry is poisoned"
-                    ))
-                })?
-                .insert(
-                    ctx.transfer_id.clone(),
-                    InflightFetch {
-                        token: cancel_token.clone(),
-                        ticket: command.ticket.clone(),
-                        session: lifecycle_session.clone(),
-                        attempt_id: ctx.attempt_id.clone(),
-                        outbound: outbound_ctx.clone(),
-                    },
-                );
-        }
-
-        let result = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => Err(BlobTransferError::Cancelled),
-            result = self.fetch_uc.execute(FetchBlobInput {
-                ticket: command.ticket,
-                entry_id: iroh_tag_entry_id,
-                progress: progress_sink.clone(),
-            }) => result.map_err(|error| BlobTransferError::Fetch(anyhow::Error::from(error))),
+        let finalization = FetchFinalization {
+            owner: self.clone(),
+            context: command.transfer_context.clone(),
+            prepared: prepared.clone(),
+            cancel: cancel_token.clone(),
+            settlement,
         };
-
-        if let Some(ctx) = command.transfer_context.as_ref() {
-            self.inflight_fetches
-                .lock()
-                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
-                .map_err(|_| {
-                    BlobTransferError::Fetch(anyhow::anyhow!(
-                        "in-flight fetch registry is poisoned"
-                    ))
-                })?
-                .remove(&ctx.transfer_id);
-        }
-
-        match result {
-            Ok(outcome) => {
-                if let Some(ctx) = command.transfer_context.as_ref() {
-                    let final_size = outcome.plaintext.len() as u64;
-                    let total = ctx.total_bytes.or(Some(final_size));
-                    // 最终一帧 100% Progress 每次都推(进度条 UI 体验),
-                    // 但 complete lifecycle + outbound terminal Completed
-                    // 只在 batch 收尾时发,避免提前告诉 sender"完成了"。
-                    if let Some(sink) = progress_sink.as_ref() {
-                        sink.report(final_size, total).await;
-                    }
-                    if ctx.individual_lifecycle {
-                        if let Some(session) = lifecycle_session.as_ref() {
-                            if let Err(error) = session.complete().await {
-                                uc_warn!(
-                                    transfer_id = log_id(&ctx.transfer_id),
-                                    error_kind = "session_complete",
-                                    io_error_kind = io_error_kind(&error),
-                                    "blob fetch: session completion failed"
-                                );
-                            }
-                        }
-                    }
-                    if ctx.batch_position.is_last() {
-                        if !ctx.individual_lifecycle {
-                            if let Some(session) = lifecycle_session.as_ref() {
-                                if let Err(error) = session.complete().await {
-                                    uc_warn!(
-                                        transfer_id = log_id(&ctx.transfer_id),
-                                        error_kind = "batch_session_complete",
-                                        io_error_kind = io_error_kind(&error),
-                                        "blob fetch: batch session completion failed"
-                                    );
-                                }
-                            }
-                        }
-                        self.report_outbound_terminal(
-                            ctx,
-                            final_size,
-                            total,
-                            OutboundProgressStatus::Completed,
-                        )
-                        .await;
-                    }
-                }
-                Ok(FetchBlobResult {
-                    plaintext: outcome.plaintext,
-                    entry_id: outcome.entry_id,
-                    plaintext_hash: outcome.plaintext_hash,
-                    digest: outcome.digest,
-                })
-            }
-            Err(BlobTransferError::Cancelled) => Err(BlobTransferError::Cancelled),
-            Err(BlobTransferError::Fetch(msg)) => {
-                if let Some(ctx) = command.transfer_context.as_ref() {
-                    if let Some(session) = lifecycle_session.as_ref() {
-                        if let Err(error) = session.fail(fetch_failure_reason(&msg), None).await {
-                            uc_warn!(
-                                transfer_id = log_id(&ctx.transfer_id),
-                                error_kind = "session_failure_settle",
-                                io_error_kind = io_error_kind(&error),
-                                "blob fetch: session failure settlement failed"
-                            );
-                        }
-                    }
-                    self.report_outbound_terminal(
-                        ctx,
-                        0,
-                        ctx.total_bytes,
-                        OutboundProgressStatus::Failed,
-                    )
-                    .await;
-                }
-                Err(BlobTransferError::Fetch(msg))
-            }
-            Err(other) => Err(other),
-        }
+        let operation = self.start_fetch(
+            command.transfer_context.as_ref(),
+            cancel_token,
+            &prepared,
+            || {
+                self.fetch_uc
+                    .execute(input, move |result, response| async move {
+                        finalization
+                            .finish(
+                                result.map(|outcome| {
+                                    let bytes = outcome.plaintext.len() as u64;
+                                    (
+                                        FetchBlobResult {
+                                            plaintext: outcome.plaintext,
+                                            entry_id: outcome.entry_id,
+                                            plaintext_hash: outcome.plaintext_hash,
+                                            digest: outcome.digest,
+                                        },
+                                        bytes,
+                                    )
+                                }),
+                                response,
+                            )
+                            .await
+                    })
+            },
+        )?;
+        operation.await.map_err(transfer_error)
     }
 
     /// 流式 fetch:把 blob 从 iroh store 直接 export 到 `target_path`,
@@ -733,176 +530,88 @@ impl BlobTransferFacade {
         &self,
         command: FetchBlobToPathCommand,
     ) -> Result<FetchBlobToPathResult, BlobTransferError> {
+        let settlement = command
+            .transfer_context
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .batch
+                    .as_ref()
+                    .map(|batch| batch.local_settlement(&context.transfer_id))
+            })
+            .unwrap_or_default();
         let iroh_tag_entry_id = command.entry_id.clone();
         let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
-        let lifecycle_session = match command.transfer_context.as_ref() {
-            Some(ctx) if ctx.individual_lifecycle || ctx.batch_position.is_first() => {
-                let cached_path = if ctx.attempt_id.is_some() {
+        let cancel_token = command.cancellation.child_token();
+        let prepared = Arc::new(FetchPreparationState::default());
+        let target_path = PreparedBlobPath::default();
+        let output_path = target_path.clone();
+        let hide_cached_path = command
+            .transfer_context
+            .as_ref()
+            .is_some_and(|context| context.attempt_id.is_some());
+        let preparation = self.prepare_fetch(
+            command.transfer_context.clone(),
+            Box::pin(async move {
+                let path =
+                    command.target_path.prepare().await.map_err(|source| {
+                        BlobExchangeError::new(BlobExchangeFailure::Store, source)
+                    })?;
+                let cached_path = if hide_cached_path {
                     String::new()
                 } else {
-                    command.target_path.to_string_lossy().into_owned()
+                    path.to_string_lossy().into_owned()
                 };
-                self.begin_lifecycle(ctx, cached_path).await?
-            }
-            Some(ctx) => self.existing_lifecycle(ctx).await?,
-            None => None,
+                output_path.publish(path)?;
+                Ok(cached_path)
+            }),
+            outbound_ctx.clone(),
+            cancel_token.clone(),
+            prepared.clone(),
+        );
+        let input = FetchBlobPathInput {
+            settlement: settlement.clone(),
+            preparation,
+            ticket: command.ticket,
+            cancel: cancel_token.clone(),
+            entry_id: iroh_tag_entry_id,
+            target_path,
         };
-        let progress_sink = self
-            .build_progress_sink(
-                command.transfer_context.as_ref(),
-                lifecycle_session.clone(),
-                outbound_ctx.clone(),
-            )
-            .await;
-        if let (Some(ctx), Some(sink)) = (command.transfer_context.as_ref(), progress_sink.as_ref())
-        {
-            if ctx.individual_lifecycle || ctx.batch_position.is_first() {
-                sink.report(0, ctx.total_bytes).await;
-            }
-        }
-
-        // 注册取消句柄:带 transfer_context 时,在 inflight registry 留下
-        // (token, ticket, peer_id, outbound),让 `cancel_inbound_transfer`
-        // 能查到并 trigger token + 反向推 cancel 帧 + 撕 QUIC connection。
-        // 无 transfer_context 时(纯静默拉取,例如 CLI 工具),token 仍然
-        // 创建但不进 registry —— select! 这一条分支就永远不会被唤醒,
-        // 等价于原行为。
-        let cancel_token = CancellationToken::new();
-        if let Some(ctx) = command.transfer_context.as_ref() {
-            self.inflight_fetches
-                .lock()
-                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
-                .map_err(|_| {
-                    BlobTransferError::Fetch(anyhow::anyhow!(
-                        "in-flight fetch registry is poisoned"
-                    ))
-                })?
-                .insert(
-                    ctx.transfer_id.clone(),
-                    InflightFetch {
-                        token: cancel_token.clone(),
-                        ticket: command.ticket.clone(),
-                        session: lifecycle_session.clone(),
-                        attempt_id: ctx.attempt_id.clone(),
-                        outbound: outbound_ctx.clone(),
-                    },
-                );
-        }
-
-        // select! 把 fetch_uc 包到一个取消感知的 future 里。cancel arm 中
-        // 不重发 Cancelled lifecycle event —— `cancel_inbound_transfer` 已
-        // 经在调用端把 event 落了,这里只负责让 fetch 路径退出。
-        let result = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => {
-                Err(BlobTransferError::Cancelled)
-            }
-            res = self.fetch_uc.execute_to_path(FetchBlobPathInput {
-                ticket: command.ticket,
-                entry_id: iroh_tag_entry_id,
-                target_path: command.target_path,
-                progress: progress_sink.clone(),
-            }) => {
-                res.map_err(|e| BlobTransferError::Fetch(anyhow::Error::from(e)))
-            }
+        let finalization = FetchFinalization {
+            owner: self.clone(),
+            context: command.transfer_context.clone(),
+            prepared: prepared.clone(),
+            cancel: cancel_token.clone(),
+            settlement,
         };
-
-        // fetch 出口必移除 registry,否则 cancel_inbound_transfer 会找到
-        // 一个已经结束的 entry,无害但会污染 metric。
-        if let Some(ctx) = command.transfer_context.as_ref() {
-            self.inflight_fetches
-                .lock()
-                // discarded-source[lock-poisoned]: `std::sync::PoisonError<Guard>`: the poison error holds the guard and cannot be stored across threads
-                .map_err(|_| {
-                    BlobTransferError::Fetch(anyhow::anyhow!(
-                        "in-flight fetch registry is poisoned"
-                    ))
-                })?
-                .remove(&ctx.transfer_id);
-        }
-
-        match result {
-            Ok(outcome) => {
-                if let Some(ctx) = command.transfer_context.as_ref() {
-                    let final_size = outcome.bytes_written;
-                    let total = ctx.total_bytes.or(Some(final_size));
-                    if let Some(sink) = progress_sink.as_ref() {
-                        sink.report(final_size, total).await;
-                    }
-                    if ctx.individual_lifecycle {
-                        if let Some(session) = lifecycle_session.as_ref() {
-                            if let Err(error) = session.complete().await {
-                                uc_warn!(
-                                    transfer_id = log_id(&ctx.transfer_id),
-                                    error_kind = "session_complete",
-                                    io_error_kind = io_error_kind(&error),
-                                    "blob fetch: session completion failed"
-                                );
-                            }
-                        }
-                    }
-                    if ctx.batch_position.is_last() {
-                        if !ctx.individual_lifecycle {
-                            if let Some(session) = lifecycle_session.as_ref() {
-                                if let Err(error) = session.complete().await {
-                                    uc_warn!(
-                                        transfer_id = log_id(&ctx.transfer_id),
-                                        error_kind = "batch_session_complete",
-                                        io_error_kind = io_error_kind(&error),
-                                        "blob fetch: batch session completion failed"
-                                    );
-                                }
-                            }
-                        }
-                        self.report_outbound_terminal(
-                            ctx,
-                            final_size,
-                            total,
-                            OutboundProgressStatus::Completed,
-                        )
-                        .await;
-                    }
-                }
-                Ok(FetchBlobToPathResult {
-                    entry_id: outcome.entry_id,
-                    plaintext_hash: outcome.plaintext_hash,
-                    digest: outcome.digest,
-                    bytes_written: outcome.bytes_written,
-                })
-            }
-            Err(BlobTransferError::Cancelled) => {
-                // 取消路径不发任何 lifecycle / outbound 终态 ——
-                // `cancel_inbound_transfer` 已经在撕 connection 之前把
-                // `OutboundProgressStatus::Cancelled` 帧推给 sender,并
-                // 落了 `Cancelled` domain event。这里再发 outbound Failed
-                // 会让 sender 端 UI 从已经显示的"已取消"切回"失败"(race)。
-                Err(BlobTransferError::Cancelled)
-            }
-            Err(e) => {
-                let failure = anyhow::Error::from(e);
-                let reason = fetch_failure_reason(&failure);
-                if let Some(ctx) = command.transfer_context.as_ref() {
-                    if let Some(session) = lifecycle_session.as_ref() {
-                        if let Err(error) = session.fail(reason, None).await {
-                            uc_warn!(
-                                transfer_id = log_id(&ctx.transfer_id),
-                                error_kind = "session_failure_settle",
-                                io_error_kind = io_error_kind(&error),
-                                "blob fetch: session failure settlement failed"
-                            );
-                        }
-                    }
-                    self.report_outbound_terminal(
-                        ctx,
-                        0,
-                        ctx.total_bytes,
-                        OutboundProgressStatus::Failed,
-                    )
-                    .await;
-                }
-                Err(BlobTransferError::Fetch(failure))
-            }
-        }
+        let operation = self.start_fetch(
+            command.transfer_context.as_ref(),
+            cancel_token,
+            &prepared,
+            || {
+                self.fetch_uc
+                    .execute_to_path(input, move |result, response| async move {
+                        finalization
+                            .finish(
+                                result.map(|outcome| {
+                                    let bytes = outcome.bytes_written;
+                                    (
+                                        FetchBlobToPathResult {
+                                            entry_id: outcome.entry_id,
+                                            plaintext_hash: outcome.plaintext_hash,
+                                            digest: outcome.digest,
+                                            bytes_written: outcome.bytes_written,
+                                        },
+                                        bytes,
+                                    )
+                                }),
+                                response,
+                            )
+                            .await
+                    })
+            },
+        )?;
+        operation.await.map_err(transfer_error)
     }
 
     /// 从 `FetchTransferContext` 构造 outbound report context。
@@ -920,6 +629,8 @@ impl BlobTransferFacade {
         let transfer_id = ctx.outbound_transfer_id.clone()?;
         let target = ctx.outbound_target?;
         Some(OutboundReportContext {
+            item: ctx.transfer_id.clone(),
+            batch: ctx.batch.clone(),
             reporter,
             transfer_id,
             target,
@@ -962,25 +673,57 @@ impl BlobTransferFacade {
         total_bytes: Option<u64>,
         status: OutboundProgressStatus,
     ) {
-        let (Some(reporter), Some(tid), Some(target)) = (
-            self.outbound_progress_reporter.as_ref(),
-            ctx.outbound_transfer_id.as_ref(),
-            ctx.outbound_target.as_ref(),
-        ) else {
-            return;
-        };
-        reporter
-            .report(target, tid, bytes_transferred, total_bytes, status)
-            .await;
+        if let Some(outbound) = self.build_outbound_context(Some(ctx)) {
+            outbound.report(bytes_transferred, total_bytes, status);
+        }
     }
+}
+
+fn cancellation_result(
+    cancelled: usize,
+    errors: Vec<BlobTransferError>,
+) -> Result<usize, BlobTransferError> {
+    let mut errors = errors.into_iter();
+    let Some(first) = errors.next() else {
+        return Ok(cancelled);
+    };
+    let additional = errors
+        .map(|source| BlobExchangeError::new(BlobExchangeFailure::Settlement, source))
+        .collect::<Vec<_>>();
+    if additional.is_empty() {
+        return Err(first);
+    }
+    let mut report = BlobExchangeError::new(BlobExchangeFailure::Settlement, first);
+    report.additional = additional;
+    Err(BlobTransferError::Fetch(report.into()))
 }
 
 /// 反向上报上下文。同时配齐三个字段才会触发 outbound report。
 #[derive(Clone)]
 struct OutboundReportContext {
-    reporter: Arc<dyn OutboundProgressReporterPort>,
+    item: String,
+    batch: Option<Arc<ReceiveBatch>>,
+    reporter: Arc<OutboundNotifications>,
     transfer_id: String,
     target: DeviceId,
+}
+
+impl OutboundReportContext {
+    fn report(&self, bytes: u64, total: Option<u64>, status: OutboundProgressStatus) {
+        if let Some(batch) = &self.batch {
+            batch.record(
+                self.reporter.clone(),
+                self.target,
+                &self.transfer_id,
+                &self.item,
+                bytes,
+                status,
+            );
+        } else {
+            self.reporter
+                .report(&self.target, &self.transfer_id, bytes, total, status);
+        }
+    }
 }
 
 /// 把 receiver 视角的 cancel reason 翻转成 sender 视角的 reason。
@@ -1043,26 +786,71 @@ impl BlobProgressSink for FileTransferProgressSink {
         }
 
         if let Some(ob) = self.outbound.as_ref() {
-            ob.reporter
-                .report(
-                    &ob.target,
-                    &ob.transfer_id,
-                    cumulative_bytes,
-                    cumulative_total,
-                    OutboundProgressStatus::InProgress,
-                )
-                .await;
+            ob.report(
+                cumulative_bytes,
+                cumulative_total,
+                OutboundProgressStatus::InProgress,
+            );
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    mod budget;
+    mod finalization;
+    mod targets;
+
+    use crate::transfer::blob::transport::{
+        BlobExchangeError, BlobReadStorePort, BlobReceived, BlobSource, BlobSourcePort,
+    };
+    use std::path::Path;
+
     use super::*;
     use tokio::sync::Semaphore;
     use uc_core::clipboard::{ContentHash, HashAlgorithm};
     use uc_core::ports::blob::{BlobError, BlobReferenceError, TagReason};
     use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
+
+    #[test]
+    fn cancelling_multiple_members_preserves_each_cleanup_source() {
+        let error = cancellation_result(
+            0,
+            vec![
+                BlobTransferError::Fetch(
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
+                ),
+                BlobTransferError::Fetch(
+                    std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem).into(),
+                ),
+            ],
+        )
+        .expect_err("cleanup failed");
+        let BlobTransferError::Fetch(error) = error else {
+            panic!("structured report required")
+        };
+        let report = error
+            .downcast_ref::<BlobExchangeError>()
+            .expect("exchange report");
+        assert_eq!(
+            report
+                .source
+                .chain()
+                .find_map(|source| source.downcast_ref::<std::io::Error>())
+                .expect("primary IO")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            report.additional[0]
+                .source
+                .chain()
+                .find_map(|source| source.downcast_ref::<std::io::Error>())
+                .expect("additional IO")
+                .kind(),
+            std::io::ErrorKind::ReadOnlyFilesystem
+        );
+    }
 
     struct TestHash;
 
@@ -1112,17 +900,143 @@ mod tests {
         }
     }
 
+    struct CountedProtection(Arc<std::sync::atomic::AtomicUsize>);
+    impl crate::transfer::blob::transport::BlobRetainedContent for CountedProtection {}
+    impl Drop for CountedProtection {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    struct FileProbeSource;
+    #[async_trait]
+    impl BlobSourcePort for FileProbeSource {
+        fn inspect(&self, ticket: &BlobTicket) -> Result<BlobSource, BlobExchangeError> {
+            assert_eq!(ticket.as_bytes(), &[1]);
+            Ok(BlobSource {
+                source_key: [0; 32],
+                digest: BlobDigest::from_bytes(*blake3::hash(b"retried").as_bytes()),
+                address_hint: Vec::new(),
+            })
+        }
+        async fn resolve_peer(&self, _: &[u8; 32]) -> Result<DeviceId, BlobExchangeError> {
+            Ok(DeviceId::new("peer"))
+        }
+    }
+    /// 导出失败后留下实际不可remove_file的目标，观察完整清理责任。
+    pub(crate) struct FailedFileExport {
+        pub(crate) output: std::sync::Mutex<Option<std::path::PathBuf>>,
+        pub(crate) cancelled: bool,
+        pub(crate) obstruct_cleanup: bool,
+    }
+    /// 实际下载调度与文件输出；本地替身持有可计数保护，不模拟网络验收。
+    pub(crate) fn local_file_probe(
+        failed_export: Option<Arc<FailedFileExport>>,
+    ) -> (
+        Arc<BlobTransferFacade>,
+        Arc<BlobTransport>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use crate::transfer::blob::test_support::{FakeLocalStore, RejectUnexpectedNetwork};
+        let transfer = Arc::new(BlockingBlobTransfer {
+            failed_export,
+            ..BlockingBlobTransfer::new()
+        });
+        transfer.release.add_permits(1024);
+        let protected = transfer.protected.clone();
+        let transport = BlobTransport::new(
+            Arc::new(RejectUnexpectedNetwork),
+            Arc::new(RejectUnexpectedNetwork),
+            Arc::new(RejectUnexpectedNetwork),
+            Arc::new(RejectUnexpectedNetwork),
+        );
+        let facade = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
+            downloads: Arc::new(BlobDownloadResources {
+                transport: transport.clone(),
+                source: Arc::new(FileProbeSource),
+                store: Arc::new(FakeLocalStore(transfer.clone())),
+            }),
+            hash: Arc::new(TestHash),
+            blob_transfer: transfer,
+            blob_reference: Arc::new(TestReferences),
+            transfer_cipher: Arc::new(TestCipher),
+            host_event_emitter: None,
+            outbound_progress_reporter: None,
+            file_transfer: None,
+        }));
+        (facade, transport, protected)
+    }
+
     struct BlockingBlobTransfer {
+        failed_export: Option<Arc<FailedFileExport>>,
         started: Semaphore,
         release: Semaphore,
+        fail_reads: std::sync::atomic::AtomicBool,
+        protected: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl BlockingBlobTransfer {
         fn new() -> Self {
             Self {
+                failed_export: None,
                 started: Semaphore::new(0),
                 release: Semaphore::new(0),
+                fail_reads: std::sync::atomic::AtomicBool::new(false),
+                protected: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
+        }
+    }
+
+    #[async_trait]
+    impl BlobReadStorePort for BlockingBlobTransfer {
+        async fn protect(
+            &self,
+            digest: BlobDigest,
+        ) -> Result<Option<BlobReceived>, BlobExchangeError> {
+            self.protected
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(BlobReceived {
+                digest,
+                size: 0,
+                protection: Box::new(CountedProtection(self.protected.clone())),
+            }))
+        }
+        async fn read(&self, _: BlobDigest) -> Result<Bytes, BlobExchangeError> {
+            self.started.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .expect("release slow local work")
+                .forget();
+            if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(BlobExchangeError::new(
+                    BlobExchangeFailure::Store,
+                    std::io::Error::from(std::io::ErrorKind::StorageFull),
+                ));
+            }
+            Ok(Bytes::from_static(b"image"))
+        }
+        async fn export(&self, _: BlobDigest, target: &Path) -> Result<u64, BlobExchangeError> {
+            self.started.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            if let Some(failure) = &self.failed_export {
+                if failure.obstruct_cleanup {
+                    tokio::fs::remove_file(target).await.unwrap();
+                    tokio::fs::create_dir(target).await.unwrap();
+                }
+                *failure.output.lock().unwrap() = Some(target.to_owned());
+                return Err(if failure.cancelled {
+                    BlobExchangeError::refused(BlobExchangeFailure::Cancelled)
+                } else {
+                    BlobExchangeError::new(
+                        BlobExchangeFailure::Store,
+                        std::io::Error::from(std::io::ErrorKind::StorageFull),
+                    )
+                });
+            }
+            tokio::fs::write(target, b"retried")
+                .await
+                .map_err(|source| BlobExchangeError::new(BlobExchangeFailure::Store, source))?;
+            Ok(7)
         }
     }
 
@@ -1148,35 +1062,6 @@ mod tests {
             Err(BlobError::Internal("unused".into()))
         }
 
-        async fn fetch(
-            &self,
-            _ticket: &BlobTicket,
-            _progress: Option<&dyn BlobProgressSink>,
-        ) -> Result<Bytes, BlobError> {
-            self.started.add_permits(1);
-            let permit = self
-                .release
-                .acquire()
-                .await
-                .map_err(|error| BlobError::Internal(error.into()))?;
-            permit.forget();
-            Ok(Bytes::from_static(b"image"))
-        }
-
-        async fn fetch_to_path(
-            &self,
-            _ticket: &BlobTicket,
-            _target_path: &std::path::Path,
-            _progress: Option<&dyn BlobProgressSink>,
-        ) -> Result<BlobDigest, BlobError> {
-            Err(BlobError::Internal("unused".into()))
-        }
-
-        async fn shutdown_inflight_fetch(&self, _ticket: &BlobTicket) -> Result<(), BlobError> {
-            self.release.add_permits(1);
-            Ok(())
-        }
-
         async fn has(&self, _digest: &BlobDigest) -> Result<bool, BlobError> {
             Ok(false)
         }
@@ -1198,52 +1083,131 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn attempt_cancel_interrupts_representation_fetch() {
-        let transfer = Arc::new(BlockingBlobTransfer::new());
-        let facade = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
-            hash: Arc::new(TestHash),
-            blob_transfer: transfer.clone(),
-            blob_reference: Arc::new(TestReferences),
-            transfer_cipher: Arc::new(TestCipher),
-            host_event_emitter: None,
-            outbound_progress_reporter: None,
-            file_transfer: None,
-        }));
-        let fetch = tokio::spawn({
-            let facade = Arc::clone(&facade);
-            async move {
-                facade
-                    .fetch_blob(FetchBlobCommand {
-                        ticket: BlobTicket::from_bytes(vec![1; 32]),
-                        entry_id: EntryId::from("sender-image"),
-                        transfer_context: Some(FetchTransferContext {
-                            transfer_id: "entry:attempt:a1:representation:0".to_owned(),
-                            entry_id: "entry".to_owned(),
-                            attempt_id: Some("a1".to_owned()),
-                            peer_id: "peer".to_owned(),
-                            total_bytes: Some(5),
-                            filename: String::new(),
-                            outbound_transfer_id: None,
-                            outbound_target: None,
-                            batch_position: BatchPosition::Only,
-                            individual_lifecycle: true,
-                        }),
+    struct BlockedReporter {
+        started: Semaphore,
+    }
+    #[async_trait]
+    impl OutboundProgressReporterPort for BlockedReporter {
+        async fn report(
+            &self,
+            _: &DeviceId,
+            _: &str,
+            _: u64,
+            _: Option<u64>,
+            _: OutboundProgressStatus,
+        ) {
+            self.started.add_permits(1);
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attempt_cancel_settles_slow_local_work_with_a_permanently_blocked_reporter() {
+        for abandon_waiter in [false, true] {
+            let reporter = Arc::new(BlockedReporter {
+                started: Semaphore::new(0),
+            });
+            let transfer = Arc::new(BlockingBlobTransfer::new());
+            let facade = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
+                downloads: {
+                    use crate::transfer::blob::test_support::{
+                        FakeLocalStore, RejectUnexpectedNetwork,
+                    };
+                    use crate::transfer::blob::transport::{BlobDownloadResources, BlobTransport};
+                    let local = Arc::new(FakeLocalStore(transfer.clone()));
+                    Arc::new(BlobDownloadResources {
+                        transport: BlobTransport::new(
+                            Arc::new(RejectUnexpectedNetwork),
+                            Arc::new(RejectUnexpectedNetwork),
+                            Arc::new(RejectUnexpectedNetwork),
+                            Arc::new(RejectUnexpectedNetwork),
+                        ),
+                        source: local.clone(),
+                        store: local,
                     })
-                    .await
+                },
+                hash: Arc::new(TestHash),
+                blob_transfer: transfer.clone(),
+                blob_reference: Arc::new(TestReferences),
+                transfer_cipher: Arc::new(TestCipher),
+                host_event_emitter: None,
+                outbound_progress_reporter: Some(reporter.clone()),
+                file_transfer: None,
+            }));
+            let fetch = tokio::spawn({
+                let facade = Arc::clone(&facade);
+                async move {
+                    facade
+                        .fetch_blob(FetchBlobCommand {
+                            cancellation: CancellationToken::new(),
+                            ticket: BlobTicket::from_bytes(vec![1; 32]),
+                            entry_id: EntryId::from("sender-image"),
+                            transfer_context: Some(FetchTransferContext {
+                                item_role: ReceiveItemRole::Representation,
+                                batch: None,
+                                transfer_id: "entry:attempt:a1:representation:0".to_owned(),
+                                entry_id: "entry".to_owned(),
+                                attempt_id: Some("a1".to_owned()),
+                                peer_id: "peer".to_owned(),
+                                total_bytes: Some(5),
+                                filename: String::new(),
+                                outbound_transfer_id: Some("sender-image".to_owned()),
+                                outbound_target: Some(DeviceId::new("peer")),
+                                batch_position: BatchPosition::Only,
+                                individual_lifecycle: true,
+                            }),
+                        })
+                        .await
+                }
+            });
+            let permit = transfer.started.acquire().await.expect("fetch started");
+            permit.forget();
+
+            reporter
+                .started
+                .acquire()
+                .await
+                .expect("reporter entered")
+                .forget();
+            if abandon_waiter {
+                fetch.abort();
             }
-        });
-        let permit = transfer.started.acquire().await.expect("fetch started");
-        permit.forget();
-
-        let cancelled = facade
-            .cancel_inbound_attempt("a1", FileTransferCancellationReason::LocalUser)
-            .await
-            .expect("cancel attempt");
-        transfer.release.add_permits(1);
-        let fetch_result = fetch.await.expect("fetch task");
-
-        assert_eq!(cancelled, 1);
-        assert!(matches!(fetch_result, Err(BlobTransferError::Cancelled)));
+            assert!(facade.owns_inbound_work("entry:attempt:a1:representation:0"));
+            let incomplete = facade
+                .cancel_inbound_attempt(
+                    "a1",
+                    FileTransferCancellationReason::LocalUser,
+                    TransferCancellationWait::Bounded,
+                )
+                .await;
+            assert!(matches!(
+                incomplete,
+                Err(BlobTransferError::CancellationIncomplete(_))
+            ));
+            transfer.release.add_permits(1);
+            let cancelled = facade
+                .cancel_inbound_attempt(
+                    "a1",
+                    FileTransferCancellationReason::LocalUser,
+                    TransferCancellationWait::Bounded,
+                )
+                .await
+                .expect("cancel attempt");
+            let fetch_result = fetch.await;
+            assert_eq!(cancelled, 1);
+            if abandon_waiter {
+                assert!(fetch_result.expect_err("waiter aborted").is_cancelled());
+            } else {
+                assert!(matches!(
+                    fetch_result.expect("fetch task"),
+                    Err(BlobTransferError::Cancelled)
+                ));
+            }
+            facade
+                .transport
+                .shutdown(super::super::transport::BlobShutdownWait::Complete)
+                .await
+                .expect("full shutdown");
+        }
     }
 }

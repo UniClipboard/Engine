@@ -14,9 +14,10 @@ use uc_core::ports::{
     BeginReceiveFailurePort, BeginReceiveOutcome, CancelDirectoryAttemptTransfersPort,
     ClaimReceiveCommitPort, FinalizeProvisionalReceivePort, GetEntryAttemptPort,
     GetEntryReceiveProgressPort, ListNonTerminalAttemptsPort, ListProvisionalReceivesPort,
-    PendingInboundTransfer, ProvisionalInboundTransfer, ProvisionalReceiveAction, ReceiveItemRole,
-    RecordReceiverTransferPort, RequestReceiveCancellationOutcome, RequestReceiveCancellationPort,
-    SeedProvisionalReceivePort, TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
+    PendingInboundTransfer, ProvisionalInboundTransfer, ProvisionalReceiveAction,
+    ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemRole, RecordReceiverTransferPort,
+    RequestReceiveCancellationOutcome, RequestReceiveCancellationPort, SeedProvisionalReceivePort,
+    TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
 };
 use uc_infra_storage::db::executor::DieselSqliteExecutor;
 use uc_infra_storage::db::pool::init_db_pool;
@@ -24,7 +25,7 @@ use uc_infra_storage::db::ports::DbExecutor;
 use uc_infra_storage::db::repositories::{
     DieselEntryReceiveAttemptRepository, DieselFileTransferRepository,
 };
-use uc_infra_storage::db::schema::{entry_receive_attempt, file_transfer};
+use uc_infra_storage::db::schema::{directory_publish_log, entry_receive_attempt, file_transfer};
 
 type AttemptRepo = DieselEntryReceiveAttemptRepository<DieselSqliteExecutor>;
 type TransferRepo = DieselFileTransferRepository<DieselSqliteExecutor>;
@@ -112,6 +113,7 @@ async fn seed_transfer(
     file_size: Option<i64>,
 ) {
     repo.upsert_pending_transfer(&PendingInboundTransfer {
+        item_role: None,
         transfer_id: transfer_id.to_owned(),
         entry_id: entry_id.to_owned(),
         attempt_id: attempt_id.map(str::to_owned),
@@ -509,9 +511,13 @@ async fn receive_progress_uses_only_the_current_attempt() {
     assert_eq!(progress.attempt_id, "a2");
     assert_eq!(progress.state, AttemptState::Receiving);
     assert_eq!(progress.total_bytes, 50);
-    assert_eq!(progress.completed_bytes, 30);
+    assert_eq!(progress.completed_bytes, 0);
     assert_eq!(progress.items_total, 2);
-    assert_eq!(progress.items_completed, 1);
+    assert_eq!(progress.items_completed, 0);
+    assert!(progress
+        .items
+        .iter()
+        .all(|item| item.status != TrackedFileTransferStatus::Completed));
 }
 
 #[tokio::test]
@@ -582,4 +588,194 @@ async fn legacy_transfer_seed_remains_outside_directory_attempt_projection() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn receive_items_keep_ids_roles_and_fixed_reasons_without_private_metadata() {
+    let (attempts, transfers, writer, _directory) = repos();
+    attempts
+        .begin_first_receive("entry", "a1", 1)
+        .await
+        .unwrap();
+    for (id, role) in [
+        ("first", Some(ReceiveItemRole::File)),
+        ("image", Some(ReceiveItemRole::Representation)),
+        ("legacy", None),
+    ] {
+        let transfer = PendingInboundTransfer {
+            item_role: role,
+            transfer_id: id.into(),
+            entry_id: "entry".into(),
+            attempt_id: Some("a1".into()),
+            origin_device_id: "private-device-sentinel".into(),
+            filename: "private-name-sentinel.bin".into(),
+            file_size: Some(10),
+            cached_path: "/private/path-sentinel.bin".into(),
+            created_at_ms: 1,
+        };
+        transfers.upsert_pending_transfer(&transfer).await.unwrap();
+        // 重复的历史 seed 缺少类型时，不能擦除已经取得的类型资料。
+        if id == "image" {
+            transfers
+                .upsert_pending_transfer(&PendingInboundTransfer {
+                    item_role: None,
+                    ..transfer
+                })
+                .await
+                .unwrap();
+        }
+    }
+    writer
+        .run(|conn| {
+            diesel::update(file_transfer::table.filter(file_transfer::transfer_id.eq("first")))
+                .set((
+                    file_transfer::status.eq("failed"),
+                    file_transfer::failure_code.eq(Some("access_denied")),
+                ))
+                .execute(conn)?;
+            // 模拟损坏字段；公开查询不能把任意持久字符串当作原因原样返回。
+            diesel::update(file_transfer::table.filter(file_transfer::transfer_id.eq("legacy")))
+                .set((
+                    file_transfer::status.eq("failed"),
+                    file_transfer::failure_code.eq(Some("private-unknown-sentinel")),
+                ))
+                .execute(conn)?;
+            Ok(())
+        })
+        .unwrap();
+    let progress = transfers
+        .get_entry_receive_progress("entry")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(progress.items.len(), 3);
+    assert_eq!(progress.items[0].item_id, "first");
+    assert_eq!(progress.items[0].kind, ReceiveItemKind::File);
+    assert_eq!(
+        progress.items[0].failure_reason,
+        Some(ReceiveItemFailureReason::AccessDenied)
+    );
+    assert_eq!(progress.items[1].item_id, "image");
+    assert_eq!(progress.items[1].kind, ReceiveItemKind::Representation);
+    assert_eq!(progress.items[2].kind, ReceiveItemKind::Unknown);
+    assert_eq!(
+        progress.items[2].failure_reason,
+        Some(ReceiveItemFailureReason::Unknown)
+    );
+    let exposed = format!("{progress:?}");
+    for private in [
+        "private-device-sentinel",
+        "private-name-sentinel",
+        "path-sentinel",
+        "private-unknown-sentinel",
+    ] {
+        assert!(!exposed.contains(private));
+    }
+}
+
+#[tokio::test]
+async fn directory_receive_query_exposes_one_unit_until_atomic_settlement_finishes() {
+    let (attempts, transfers, writer, _directory) = repos();
+    attempts
+        .begin_first_receive("entry", "a1", 1)
+        .await
+        .unwrap();
+    seed_transfer(&transfers, "first", "entry", Some("a1"), Some(10)).await;
+    seed_transfer(&transfers, "last", "entry", Some("a1"), Some(20)).await;
+    set_completed(&writer, "first");
+    set_completed(&writer, "last");
+    writer
+        .run(|conn| {
+            diesel::insert_into(directory_publish_log::table)
+                .values((
+                    directory_publish_log::entry_id.eq("entry"),
+                    directory_publish_log::attempt_id.eq("a1"),
+                    directory_publish_log::phase.eq("staging"),
+                    directory_publish_log::partial_publication.eq(false),
+                    directory_publish_log::partial_root_count.eq(0),
+                    directory_publish_log::landed.eq(false),
+                    directory_publish_log::updated_at_ms.eq(1),
+                ))
+                .execute(conn)?;
+            Ok(())
+        })
+        .unwrap();
+    for state in [
+        "receiving",
+        "committing",
+        "cancelling",
+        "failing",
+        "failed",
+        "cancelled",
+        "completed",
+    ] {
+        let stored = state.to_owned();
+        writer
+            .run(move |conn| {
+                diesel::update(
+                    entry_receive_attempt::table
+                        .filter(entry_receive_attempt::entry_id.eq("entry")),
+                )
+                .set(entry_receive_attempt::attempt_state.eq(stored))
+                .execute(conn)?;
+                Ok(())
+            })
+            .unwrap();
+        let progress = transfers
+            .get_entry_receive_progress("entry")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress.items.len(), 1);
+        assert_eq!(progress.items[0].item_id, "directory_unit");
+        assert_eq!(progress.items[0].kind, ReceiveItemKind::DirectoryUnit);
+        let expected = match state {
+            "failed" => TrackedFileTransferStatus::Failed,
+            "cancelled" => TrackedFileTransferStatus::Cancelled,
+            "completed" => TrackedFileTransferStatus::Completed,
+            _ => TrackedFileTransferStatus::Transferring,
+        };
+        assert_eq!(progress.items[0].status, expected);
+        // 聚合计数仍表示成员；下载完成不能替代整个目录的业务提交。
+        assert_eq!(progress.items_total, 2);
+        assert_eq!(
+            progress.items_completed,
+            if state == "completed" { 2 } else { 0 }
+        );
+        assert_eq!(
+            progress.completed_bytes,
+            if state == "completed" { 30 } else { 0 }
+        );
+    }
+    // 进程内收尾尚未结束时，持久成员失败也须保留具体原因，不能使父目录提前结束。
+    writer
+        .run(|conn| {
+            diesel::update(
+                entry_receive_attempt::table.filter(entry_receive_attempt::entry_id.eq("entry")),
+            )
+            .set(entry_receive_attempt::attempt_state.eq("receiving"))
+            .execute(conn)?;
+            diesel::update(file_transfer::table.filter(file_transfer::transfer_id.eq("first")))
+                .set((
+                    file_transfer::status.eq("failed"),
+                    file_transfer::failure_code.eq(Some("storage_unavailable")),
+                ))
+                .execute(conn)?;
+            Ok(())
+        })
+        .unwrap();
+    let pending = transfers
+        .get_entry_receive_progress("entry")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pending.items[0].status,
+        TrackedFileTransferStatus::Transferring
+    );
+    assert_eq!(
+        pending.items[0].failure_reason,
+        Some(ReceiveItemFailureReason::StorageUnavailable)
+    );
+    assert_eq!(pending.items_completed, 0);
 }

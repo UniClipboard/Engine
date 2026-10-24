@@ -1,8 +1,7 @@
 use crate::clipboard::inbound::ClipboardReceiverPort;
+use crate::clipboard::sync::apply_inbound::classify_apply_failure;
 use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
-use std::error::Error as StdError;
 use std::fmt;
-use std::io::{Error as IoError, ErrorKind};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -310,25 +309,6 @@ impl InboundProcessor {
             receipt,
         })
     }
-}
-
-fn classify_apply_failure(error: &(dyn StdError + 'static)) -> ClipboardReceiveFailure {
-    let mut source = Some(error);
-    for _ in 0..32 {
-        let Some(error) = source else {
-            break;
-        };
-        if let Some(error) = error.downcast_ref::<IoError>() {
-            return match error.kind() {
-                ErrorKind::PermissionDenied => ClipboardReceiveFailure::ApplyPermissionDenied,
-                ErrorKind::StorageFull => ClipboardReceiveFailure::ApplyStorageFull,
-                ErrorKind::ReadOnlyFilesystem => ClipboardReceiveFailure::ApplyReadOnly,
-                _ => ClipboardReceiveFailure::ApplyIoFailed,
-            };
-        }
-        source = error.source();
-    }
-    ClipboardReceiveFailure::ApplyFailed
 }
 
 async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {

@@ -839,6 +839,7 @@ async fn acquisition_capability_failures_keep_their_source_in_dispatch_reports()
         async fn connect(
             &self,
             _: DeviceId,
+            _address_hint: Option<Vec<u8>>,
             _cancel: CancellationToken,
         ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
             let source = Box::new(std::io::Error::other("private-capability-sentinel"));

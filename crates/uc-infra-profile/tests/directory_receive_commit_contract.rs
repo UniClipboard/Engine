@@ -153,6 +153,7 @@ async fn create_commit_atomically_publishes_entry_manifest_attempt_and_log() {
 
     commit_repo
         .commit_inbound_receive(&InboundReceiveSettlement::Complete {
+            delivered_item_ids: Vec::new(),
             record: InboundReceiveRecord::Create {
                 entry: ClipboardEntry::new(EntryId::from("entry"), EventId::from("event"), 1, 5),
                 event: create_event(),
@@ -218,6 +219,7 @@ async fn missing_publish_log_rolls_back_entry_and_manifest_after_their_inserts()
 
     let result = commit_repo
         .commit_inbound_receive(&InboundReceiveSettlement::Complete {
+            delivered_item_ids: Vec::new(),
             record: InboundReceiveRecord::Create {
                 entry: ClipboardEntry::new(EntryId::from("entry"), EventId::from("event"), 1, 5),
                 event: create_event(),
@@ -371,6 +373,7 @@ async fn replace_commit_preserves_attempt_transfers_and_removes_legacy_transfers
     );
     commit_repo
         .commit_inbound_receive(&InboundReceiveSettlement::Complete {
+            delivered_item_ids: Vec::new(),
             record: InboundReceiveRecord::Replace {
                 entry_id: EntryId::from("entry"),
                 new_event,

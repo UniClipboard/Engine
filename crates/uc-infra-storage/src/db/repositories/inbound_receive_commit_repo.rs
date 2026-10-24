@@ -1,36 +1,52 @@
+mod file_failure;
+mod progress;
+
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use diesel::prelude::*;
+use uc_core::file_transfer::receive_no_entry_confirmation;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
 use uc_core::ports::AttemptState;
 use uc_core::ports::{
     CommitInboundReceivePort, CompletedReceiveArtifacts, InboundReceiveCommitError,
     InboundReceiveRecord, InboundReceiveSettlement, NoEntryReceiveArtifacts,
-    PartialReceiveArtifacts, PartialReceiveTerminal,
+    PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveArtifactPhase,
+    ReceiveArtifactResolution,
 };
 
 use super::clipboard_entry_repo::insert_entry_and_selection_rows;
 use super::clipboard_event_repo::insert_clipboard_event_rows;
 use super::entry_file_set_repo::{replace_entry_file_set_rows, EntryFileSetProtection};
+use super::entry_receive_attempt_repo::to_attempt;
 use super::entry_replace_repo::{
     prepare_entry_replacement, replace_entry_content_rows, PreparedEntryReplacement,
 };
+use super::file_transfer_repo::ENTRY_DELIVERED_BINDING;
+use super::receive_artifact_cipher::V3ReceiveArtifactCipher;
+use super::receive_artifact_log_repo::ReceiveArtifactProtection;
 use crate::db::mappers::clipboard_entry_mapper::ClipboardEntryRowMapper;
 use crate::db::mappers::clipboard_event_mapper::ClipboardEventRowMapper;
 use crate::db::mappers::clipboard_selection_mapper::ClipboardSelectionRowMapper;
 use crate::db::mappers::snapshot_representation_mapper::RepresentationRowMapper;
 use crate::db::models::snapshot_representation::NewSnapshotRepresentationRow;
-use crate::db::models::{NewClipboardEntryRow, NewClipboardEventRow, NewClipboardSelectionRow};
+use crate::db::models::{
+    EntryReceiveAttemptRow, NewClipboardEntryRow, NewClipboardEventRow, NewClipboardSelectionRow,
+};
 use crate::db::ports::{DbExecutor, InsertMapper};
-use crate::db::schema::{directory_publish_log, entry_receive_attempt, receive_artifact_log};
+use crate::db::schema::{
+    directory_publish_log, entry_receive_attempt, file_transfer, receive_artifact_log,
+};
+use progress::PreparedFileArtifacts;
+use uc_core::ports::inbound_receive_commit::ReceiveArtifactSettlement;
 use uc_infra_security::ContentProtection;
 
 pub struct DieselInboundReceiveCommitRepository<E> {
     executor: E,
     file_set_protection: EntryFileSetProtection,
+    artifact_protection: ReceiveArtifactProtection,
 }
 
 impl<E> DieselInboundReceiveCommitRepository<E> {
@@ -41,14 +57,24 @@ impl<E> DieselInboundReceiveCommitRepository<E> {
     ) -> Self {
         Self {
             executor,
-            file_set_protection: EntryFileSetProtection::legacy(derive_subkey, current_profile),
+            file_set_protection: EntryFileSetProtection::legacy(
+                derive_subkey.clone(),
+                current_profile.clone(),
+            ),
+            artifact_protection: ReceiveArtifactProtection::Legacy {
+                derive_subkey,
+                current_profile,
+            },
         }
     }
 
     pub fn new_v3(executor: E, protection: Arc<ContentProtection>) -> Self {
         Self {
             executor,
-            file_set_protection: EntryFileSetProtection::v3(protection),
+            file_set_protection: EntryFileSetProtection::v3(protection.clone()),
+            artifact_protection: ReceiveArtifactProtection::V3(V3ReceiveArtifactCipher::new(
+                protection,
+            )),
         }
     }
 }
@@ -77,11 +103,19 @@ enum CommitInvariantError {
     AttemptStateMismatch,
     #[error("artifact record missing")]
     ArtifactRecordMissing,
+    #[error("artifact ownership changed")]
+    ArtifactStateMismatch,
     #[error("directory publish record missing")]
     DirectoryPublishRecordMissing,
+    #[error("receive file outcome does not match its settlement")]
+    DeliveryItemMismatch,
 }
 
 fn map_error(error: anyhow::Error) -> InboundReceiveCommitError {
+    let error = match error.downcast::<InboundReceiveCommitError>() {
+        Ok(error) => return error,
+        Err(error) => error,
+    };
     match error.downcast_ref::<CommitInvariantError>() {
         Some(CommitInvariantError::AttemptStateMismatch) => {
             InboundReceiveCommitError::AttemptStateMismatch
@@ -89,10 +123,15 @@ fn map_error(error: anyhow::Error) -> InboundReceiveCommitError {
         Some(CommitInvariantError::ArtifactRecordMissing) => {
             InboundReceiveCommitError::ArtifactRecordMissing
         }
+        Some(CommitInvariantError::ArtifactStateMismatch) => {
+            InboundReceiveCommitError::ArtifactStateMismatch
+        }
         Some(CommitInvariantError::DirectoryPublishRecordMissing) => {
             InboundReceiveCommitError::DirectoryPublishRecordMissing
         }
-        None => InboundReceiveCommitError::Backend(error.context("commit inbound receive").into()),
+        Some(CommitInvariantError::DeliveryItemMismatch) | None => {
+            InboundReceiveCommitError::Backend(error.context("commit inbound receive").into())
+        }
     }
 }
 
@@ -138,19 +177,104 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
         &self,
         settlement: &InboundReceiveSettlement,
     ) -> Result<(), InboundReceiveCommitError> {
-        let allow_cancelled_replay = matches!(
-            settlement,
+        if let InboundReceiveSettlement::FileFailed {
+            entry_id,
+            attempt_id,
+            artifact,
+            failure,
+            now_ms,
+        } = settlement
+        {
+            return self
+                .commit_failed_file_artifacts(
+                    entry_id,
+                    attempt_id,
+                    artifact,
+                    Some(*failure),
+                    *now_ms,
+                )
+                .await;
+        }
+        if let InboundReceiveSettlement::FileCleaned {
+            entry_id,
+            attempt_id,
+            artifact,
+            now_ms,
+        } = settlement
+        {
+            return self
+                .commit_failed_file_artifacts(entry_id, attempt_id, artifact, None, *now_ms)
+                .await;
+        }
+        let no_entry_replay = match settlement {
             InboundReceiveSettlement::NoEntry {
-                terminal: PartialReceiveTerminal::Cancelled,
-                artifacts: NoEntryReceiveArtifacts::None,
+                terminal,
+                artifacts,
                 ..
+            } => Some((*terminal, *artifacts)),
+            _ => None,
+        };
+        let progress_artifacts = match settlement {
+            InboundReceiveSettlement::Progress {
+                delivered_item_ids,
+                record,
+                attempt_id,
+                artifact,
+                ..
+            } => Some(
+                PreparedFileArtifacts::prepare(
+                    &self.executor,
+                    &self.artifact_protection,
+                    record.entry_id().as_ref(),
+                    attempt_id,
+                    artifact,
+                    ReceiveArtifactSettlement::Delivered(delivered_item_ids),
+                )
+                .await?,
+            ),
+            _ => None,
+        };
+        let delivered_item_ids = match settlement {
+            InboundReceiveSettlement::Progress {
+                delivered_item_ids, ..
             }
-        );
+            | InboundReceiveSettlement::Complete {
+                delivered_item_ids, ..
+            }
+            | InboundReceiveSettlement::Partial {
+                delivered_item_ids, ..
+            } => delivered_item_ids.clone(),
+            InboundReceiveSettlement::NoEntry { .. } => Vec::new(),
+            InboundReceiveSettlement::FileFailed { .. }
+            | InboundReceiveSettlement::FileCleaned { .. } => {
+                return Err(InboundReceiveCommitError::AttemptStateMismatch)
+            }
+        };
         let (record, entry_id, attempt_id, file_set, expected, target, artifacts, now_ms) =
             match settlement {
+                InboundReceiveSettlement::FileFailed { .. }
+                | InboundReceiveSettlement::FileCleaned { .. } => {
+                    return Err(InboundReceiveCommitError::AttemptStateMismatch)
+                }
+                InboundReceiveSettlement::Progress {
+                    record,
+                    attempt_id,
+                    now_ms,
+                    ..
+                } => (
+                    Some(record),
+                    record.entry_id().to_string(),
+                    attempt_id.clone(),
+                    None,
+                    AttemptState::Receiving,
+                    AttemptState::Receiving,
+                    ArtifactAction::None,
+                    *now_ms,
+                ),
                 InboundReceiveSettlement::Complete {
                     record,
                     attempt_id,
+                    delivered_item_ids: _,
                     file_set,
                     artifacts,
                     now_ms,
@@ -173,6 +297,7 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                 InboundReceiveSettlement::Partial {
                     record,
                     attempt_id,
+                    delivered_item_ids: _,
                     terminal,
                     file_set,
                     artifacts,
@@ -230,7 +355,18 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
 
         self.executor
             .run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    if let Some((terminal, artifacts)) = no_entry_replay {
+                        if confirm_no_entry_replay(
+                            conn,
+                            &entry_id,
+                            &attempt_id,
+                            terminal,
+                            artifacts,
+                        )? {
+                            return Ok(());
+                        }
+                    }
                     if let Some(prepared_record) = &prepared_record {
                         match prepared_record {
                             PreparedRecord::Create {
@@ -263,28 +399,82 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                     ))
                     .execute(conn)?;
                     if attempt_updated != 1 {
-                        let already_cancelled = allow_cancelled_replay
-                            && entry_receive_attempt::table
-                                .filter(entry_receive_attempt::entry_id.eq(&entry_id))
-                                .filter(entry_receive_attempt::current_attempt_id.eq(&attempt_id))
-                                .filter(
-                                    entry_receive_attempt::attempt_state
-                                        .eq(AttemptState::Cancelled.to_string()),
-                                )
-                                .count()
-                                .get_result::<i64>(conn)?
-                                == 1;
-                        if !already_cancelled {
-                            return Err(CommitInvariantError::AttemptStateMismatch.into());
-                        }
+                        return Err(CommitInvariantError::AttemptStateMismatch.into());
                     }
 
+                    if let Some(progress) = &progress_artifacts {
+                        progress.commit(conn, &entry_id, &attempt_id, now_ms)?;
+                    }
                     settle_artifacts(conn, &entry_id, &attempt_id, artifacts, now_ms)?;
+                    for item_id in &delivered_item_ids {
+                        let updated = diesel::update(
+                            file_transfer::table
+                                .filter(file_transfer::entry_id.eq(&entry_id))
+                                .filter(file_transfer::attempt_id.eq(&attempt_id))
+                                .filter(file_transfer::receive_item_id.eq(item_id))
+                                .filter(file_transfer::status.eq("completed"))
+                                .filter(file_transfer::failure_code.is_null()),
+                        )
+                        .set((
+                            file_transfer::binding_state.eq(ENTRY_DELIVERED_BINDING),
+                            file_transfer::updated_at_ms.eq(now_ms),
+                        ))
+                        .execute(conn)?;
+                        if updated != 1 {
+                            return Err(CommitInvariantError::DeliveryItemMismatch.into());
+                        }
+                    }
                     Ok(())
                 })
             })
             .map_err(map_error)
     }
+}
+
+/// 回执丢失后的确认没有持久副作用，不能以重放为由重新移交产物。
+fn confirm_no_entry_replay(
+    conn: &mut diesel::sqlite::SqliteConnection,
+    entry_id: &str,
+    attempt_id: &str,
+    terminal: PartialReceiveTerminal,
+    artifacts: NoEntryReceiveArtifacts,
+) -> Result<bool> {
+    let current = entry_receive_attempt::table
+        .filter(entry_receive_attempt::entry_id.eq(entry_id))
+        .select(EntryReceiveAttemptRow::as_select())
+        .first(conn)
+        .optional()?
+        .map(to_attempt)
+        .transpose()?;
+    let record = if artifacts == NoEntryReceiveArtifacts::RolledBack {
+        receive_artifact_log::table
+            .filter(receive_artifact_log::entry_id.eq(entry_id))
+            .filter(receive_artifact_log::attempt_id.eq(attempt_id))
+            .select((
+                receive_artifact_log::phase,
+                receive_artifact_log::resolution,
+            ))
+            .first::<(String, String)>(conn)
+            .optional()?
+            .map(|(phase, resolution)| {
+                Ok::<_, anyhow::Error>((
+                    ReceiveArtifactPhase::parse(&phase)?,
+                    ReceiveArtifactResolution::parse(&resolution)?,
+                ))
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    receive_no_entry_confirmation(
+        entry_id,
+        attempt_id,
+        current.as_ref(),
+        terminal,
+        artifacts,
+        record,
+    )
+    .map_err(anyhow::Error::new)
 }
 
 fn terminal_expected(terminal: PartialReceiveTerminal) -> AttemptState {

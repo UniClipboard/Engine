@@ -8,9 +8,8 @@ use uc_core::ports::file_transfer::{
 };
 use uc_core::ports::{
     ClockPort, FinalizeProvisionalReceivePort, ProvisionalReceiveAction, ProvisionalReceiveError,
-    RecordReceiverTransferPort, SeedProvisionalReceivePort,
+    ReceiveItemRole, RecordReceiverTransferPort, SeedProvisionalReceivePort,
 };
-use uc_core::FileTransferEvent;
 
 use crate::transfer::file::lifecycle::{FileTransferLifecycle, FileTransferLifecycleDeps};
 use crate::transfer::file::FileTransferApplicationError;
@@ -33,6 +32,7 @@ pub enum ReceiverTransferRegistration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeginReceiverTransfer {
+    pub item_role: Option<ReceiveItemRole>,
     pub transfer_id: String,
     pub peer_id: String,
     pub filename: String,
@@ -95,6 +95,7 @@ impl FileTransferFacade {
         self.sessions.ensure_open().await?;
         if let Some(existing) = self.sessions.get(&input.transfer_id).await {
             return if existing.matches(&input) {
+                existing.start().await?;
                 Ok(existing)
             } else {
                 Err(FileTransferApplicationError::SessionConflict {
@@ -122,28 +123,12 @@ impl FileTransferFacade {
             Arc::clone(&self.publisher),
             Arc::downgrade(&self.sessions),
             timeline.last_progress_bytes,
+            timeline.started,
         ));
 
-        if timeline.started {
-            self.sessions.insert(Arc::clone(&session)).await;
-            return Ok(session);
-        }
-
-        let started = FileTransferEvent::started(
-            input.transfer_id,
-            input.peer_id,
-            input.filename,
-            input.file_size,
-        );
-        self.store
-            .append(started.clone())
-            .await
-            .map_err(FileTransferApplicationError::Store)?;
+        // 先登记原负责人；Started 的本地失败也必须保留在同一 session 内结算。
         self.sessions.insert(Arc::clone(&session)).await;
-        self.publisher
-            .publish(started)
-            .await
-            .map_err(FileTransferApplicationError::Publish)?;
+        session.start().await?;
         Ok(session)
     }
 
@@ -184,6 +169,7 @@ impl FileTransferFacade {
             } => self
                 .repo
                 .upsert_pending_transfer(&PendingInboundTransfer {
+                    item_role: input.item_role,
                     transfer_id: input.transfer_id.clone(),
                     entry_id: entry_id.clone(),
                     attempt_id: attempt_id.clone(),
@@ -240,12 +226,6 @@ impl FileTransferFacade {
         self.lifecycle.ensure_receive_ready().await
     }
 
-    /// Lifecycle action: close the receive gate so inbound transfers are
-    /// rejected until the next `ensure_receive_ready`.
-    pub fn close_receive_gate(&self) {
-        self.lifecycle.close_receive_gate();
-    }
-
     /// Read the current receive-gate status.
     pub fn receive_readiness_status(&self) -> ReceiveReadinessStatus {
         self.lifecycle.receive_readiness_status()
@@ -274,8 +254,8 @@ impl EnsureReceiveReadyPort for FileTransferFacade {
         self.lifecycle.ensure_receive_ready().await
     }
 
-    fn close_receive_gate(&self) {
-        self.lifecycle.close_receive_gate();
+    async fn close_receive_gate(&self) -> Result<(), ReceiveReadinessError> {
+        self.lifecycle.close_receive_gate().await
     }
 
     fn receive_readiness_status(&self) -> ReceiveReadinessStatus {

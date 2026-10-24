@@ -18,6 +18,7 @@ pub enum ConnectionMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionProtocol {
     Unsupported,
+    Blob,
     PeerReachabilityV1,
     PeerReachabilityV2,
     ActiveClipboardState,
@@ -35,6 +36,7 @@ pub trait ConnectivityBackend: Send + Sync {
     async fn connect(
         &self,
         target: DeviceId,
+        address_hint: Option<Vec<u8>>,
         cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError>;
 }

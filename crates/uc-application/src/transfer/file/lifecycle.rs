@@ -20,8 +20,10 @@ use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
 };
 
-use crate::facade::blob_transfer::{BlobTransferFacade, InboundCancelOutcome};
+use crate::facade::blob_transfer::{BlobTransferError, BlobTransferFacade, InboundCancelOutcome};
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
+use crate::transfer::blob::facade::TransferCancellationWait;
+use crate::transfer::receive::materialization::sweep_inbound_staging as sweep_materialization_staging;
 use crate::transfer::receive::reconciliation::{
     EnsureReceiveReadyPort, ReceiveReadinessCoordinator, ReceiveReadinessError,
     ReceiveReadinessStatus, ReconcileReceiveAttemptsUseCase,
@@ -43,6 +45,7 @@ pub struct FileTransferLifecycleDeps {
     pub list_receive_attempts: Arc<dyn uc_core::ports::ListNonTerminalAttemptsPort>,
     pub list_unsettled_artifacts: Arc<dyn uc_core::ports::ListUnsettledReceiveArtifactsPort>,
     pub get_directory_publish: Arc<dyn uc_core::ports::GetDirectoryPublishRecordPort>,
+    pub record_directory_publish: Arc<dyn uc_core::ports::RecordDirectoryPublishPort>,
     pub begin_receive_failure: Arc<dyn uc_core::ports::BeginReceiveFailurePort>,
     pub cleanup_artifacts: Arc<dyn uc_core::ports::CleanupReceiveArtifactsPort>,
     pub commit_inbound: Arc<dyn uc_core::ports::CommitInboundReceivePort>,
@@ -108,6 +111,7 @@ impl FileTransferLifecycle {
             list_receive_attempts,
             list_unsettled_artifacts,
             get_directory_publish,
+            record_directory_publish,
             begin_receive_failure,
             cleanup_artifacts,
             commit_inbound,
@@ -129,6 +133,7 @@ impl FileTransferLifecycle {
                 list_receive_attempts,
                 list_unsettled_artifacts,
                 get_directory_publish,
+                record_directory_publish,
                 begin_receive_failure,
                 cleanup_artifacts,
                 list_provisional,
@@ -176,6 +181,7 @@ impl FileTransferLifecycle {
         let clock = Arc::clone(&self.clock);
         let bus = Arc::clone(&self.host_event_bus);
         let readiness = Arc::clone(&self.receive_readiness);
+        let receive_work = readiness.work_registry();
 
         tokio::spawn(
             async move {
@@ -216,6 +222,12 @@ impl FileTransferLifecycle {
                         }
                     };
 
+                    let expired = expired.into_iter()
+                        .filter(|transfer| {
+                            !receive_work.owns_entry(&transfer.entry_id)
+                                && !blob_transfer.owns_inbound_work(&transfer.transfer_id)
+                        })
+                        .collect::<Vec<_>>();
                     if expired.is_empty() {
                         continue;
                     }
@@ -226,6 +238,9 @@ impl FileTransferLifecycle {
                     );
 
                     for t in &expired {
+                        let Some(_cleanup) = receive_work.claim_cleanup(&t.entry_id) else {
+                            continue;
+                        };
                         if sweep_cancelled(&cancel) {
                             return;
                         }
@@ -234,6 +249,7 @@ impl FileTransferLifecycle {
                                 .cancel_inbound_transfer(
                                     &t.transfer_id,
                                     FileTransferCancellationReason::Timeout,
+                                    TransferCancellationWait::Bounded,
                                 )
                                 .await
                             {
@@ -243,6 +259,10 @@ impl FileTransferLifecycle {
                                 }
                                 Ok(InboundCancelOutcome::NotInflight) => {
                                     // fall through to mark_failed
+                                }
+                                Err(BlobTransferError::CancellationIncomplete(_)) => {
+                                    // discarded-source[timeout]: 真实工作尚未结束，不能竞争写终态或删除其输出。
+                                    continue;
                                 }
                                 Err(err) => {
                                     uc_warn!(
@@ -364,8 +384,8 @@ impl EnsureReceiveReadyPort for FileTransferLifecycle {
         Self::ensure_receive_ready(self).await
     }
 
-    fn close_receive_gate(&self) {
-        self.receive_readiness.mark_not_ready();
+    async fn close_receive_gate(&self) -> Result<(), ReceiveReadinessError> {
+        self.receive_readiness.close().await
     }
 
     fn receive_readiness_status(&self) -> ReceiveReadinessStatus {
@@ -445,7 +465,7 @@ async fn sweep_inbound_staging(
         }
     }
 
-    crate::clipboard::sync::sweep_inbound_staging(&scan_dirs).await;
+    sweep_materialization_staging(&scan_dirs).await;
 }
 
 /// Best-effort cleanup of a cached file or transfer directory.

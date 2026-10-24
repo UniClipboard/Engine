@@ -2,6 +2,7 @@
 //!
 //! 本模块只负责约束记录形状，不安装 subscriber，也不选择或连接后端。
 
+use crate::wire_enum;
 use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -477,50 +478,29 @@ impl DiagnosticDomain {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiagnosticOperation {
-    TaskShutdown,
-    SessionRecovery,
-    MembershipRecovery,
-    ClipboardSend,
-    ClipboardResend,
-    ClipboardCopyAndSync,
-    ClipboardPersist,
-    ClipboardWriteSystem,
-    ClipboardDispatch,
-    ClipboardReceive,
-    ClipboardAddressResolve,
-    ClipboardConnect,
-    SpaceAdmission,
-    MembershipHistorySync,
-    MembershipGroupUpdate,
-    NetworkTransport,
-    ProfileStorageUpgrade,
-    SessionLifecycle,
-}
-
-impl DiagnosticOperation {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ClipboardCopyAndSync => "clipboard.copy_and_sync",
-            Self::ClipboardSend => "clipboard.send",
-            Self::ClipboardResend => "clipboard.resend",
-            Self::ClipboardPersist => "clipboard.persist",
-            Self::ClipboardWriteSystem => "clipboard.write_system",
-            Self::ClipboardDispatch => "clipboard_dispatch",
-            Self::ClipboardReceive => "clipboard_receive",
-            Self::ClipboardAddressResolve => "clipboard_address_resolve",
-            Self::ClipboardConnect => "clipboard_connect",
-            Self::SpaceAdmission => "space_admission",
-            Self::MembershipHistorySync => "membership_history_sync",
-            Self::MembershipRecovery => "membership_recovery",
-            Self::MembershipGroupUpdate => "membership_group_update",
-            Self::NetworkTransport => "network_transport",
-            Self::ProfileStorageUpgrade => "profile_storage_upgrade",
-            Self::SessionLifecycle => "session_lifecycle",
-            Self::TaskShutdown => "runtime.shutdown_tasks",
-            Self::SessionRecovery => "runtime.recover_session",
-        }
+wire_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DiagnosticOperation: &'static str {
+        ClipboardCopyAndSync => "clipboard.copy_and_sync",
+        ClipboardSend => "clipboard.send",
+        ClipboardResend => "clipboard.resend",
+        ClipboardPersist => "clipboard.persist",
+        ClipboardWriteSystem => "clipboard.write_system",
+        ClipboardDispatch => "clipboard_dispatch",
+        ClipboardReceive => "clipboard_receive",
+        ClipboardAddressResolve => "clipboard_address_resolve",
+        ClipboardConnect => "clipboard_connect",
+        SpaceAdmission => "space_admission",
+        MembershipHistorySync => "membership_history_sync",
+        MembershipRecovery => "membership_recovery",
+        MembershipGroupUpdate => "membership_group_update",
+        NetworkTransport => "network_transport",
+        ProfileStorageUpgrade => "profile_storage_upgrade",
+        SessionLifecycle => "session_lifecycle",
+        TaskShutdown => "runtime.shutdown_tasks",
+        SessionRecovery => "runtime.recover_session",
+        ClipboardRetryReceive => "clipboard.retry_receive",
+        ClipboardExportFile => "clipboard.export_file",
     }
 }
 
@@ -616,6 +596,7 @@ macro_rules! diagnostic_task_kinds {
 diagnostic_task_kinds! {
     /// 普通剪贴板共享拨号任务异常退出。
     ClipboardConnectivityWorker => "clipboard_connectivity_worker",
+    BlobTransportWorker => "blob_transport_worker",
     /// presence 完整收发与保留连接任务异常退出。
     PresenceConnectivityWorker => "presence_connectivity_worker",
     MembershipHistoryConnectivityWorker => "membership_history_connectivity_worker",
@@ -726,7 +707,7 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
         (DiagnosticOperation::NetworkTransport, DiagnosticRole::Sponsor) => {
             "pairing.receive_request"
         }
-        _ => context.operation.as_str(),
+        _ => context.operation.wire(),
     };
     let flow = matches!(
         (
@@ -752,7 +733,7 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
             otel.name = name,
             uc.display.name = tracing::field::Empty,
             uc.domain = context.domain.as_str(),
-            uc.operation = context.operation.as_str(),
+            uc.operation = context.operation.wire(),
             uc.role = context.role.as_str(),
             uc.flow.id = %FlowAttribute(flow),
             otel.kind = context.kind.as_str(),
@@ -767,7 +748,7 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
             otel.name = name,
             uc.display.name = tracing::field::Empty,
             uc.domain = context.domain.as_str(),
-            uc.operation = context.operation.as_str(),
+            uc.operation = context.operation.wire(),
             uc.role = context.role.as_str(),
             otel.kind = context.kind.as_str(),
             otel.status_code = tracing::field::Empty,
@@ -791,6 +772,13 @@ pub fn operation_span(context: OperationContext) -> tracing::Span {
             let _ = span.set_parent(parent);
         }
     }
+    span
+}
+
+/// 用户稍后发起的动作使用全新的在线关联，不继承已经结束的发送或接收记录。
+pub fn independent_operation_span(context: OperationContext) -> tracing::Span {
+    let span = operation_span(context);
+    let _ = span.set_parent(opentelemetry::Context::new());
     span
 }
 
@@ -959,7 +947,7 @@ pub fn complete_operation(mut completion: OperationCompletion) {
     span.record("uc.outcome", outcome);
     let duration_ms = u64::try_from(completion.duration.as_millis()).unwrap_or(u64::MAX);
     let domain = completion.domain.as_str();
-    let operation = completion.operation.as_str();
+    let operation = completion.operation.wire();
     let role = completion.role.as_str();
     match completion.result {
         CompletionResult::Succeeded => {
@@ -1027,7 +1015,7 @@ pub fn complete_unassociated_operation(completion: OperationCompletion) {
 fn emit_unassociated_operation(completion: OperationCompletion) {
     let duration_ms = u64::try_from(completion.duration.as_millis()).unwrap_or(u64::MAX);
     let domain = completion.domain.as_str();
-    let operation = completion.operation.as_str();
+    let operation = completion.operation.wire();
     let role = completion.role.as_str();
     match completion.result {
         CompletionResult::Conflict => record_unassociated_non_error_completion(

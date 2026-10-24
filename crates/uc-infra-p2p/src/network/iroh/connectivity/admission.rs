@@ -8,8 +8,9 @@ use super::backend::ConnectivityProfile;
 use async_trait::async_trait;
 use std::sync::Arc;
 use uc_application::deps::{
-    AdmissionAttempt, AdmissionGrant, ConnectivityError, InboundAdmissionFence, PeerConnection,
-    PeerIdentityDirectoryPort, SessionConnectionAdmissionPort,
+    AdmissionAttempt, AdmissionGrant, ConnectivityError, InboundAdmissionFence,
+    InboundIdentityReservation, PeerConnection, PeerIdentityDirectoryPort,
+    SessionConnectionAdmissionPort,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::PeerAdmissionPort;
@@ -36,6 +37,7 @@ impl IrohConnectionAdmission {
             admission,
             connections,
             protocol: match profile {
+                ConnectivityProfile::Blob => InboundPeerProtocol::Blob,
                 ConnectivityProfile::Presence => InboundPeerProtocol::Presence,
                 ConnectivityProfile::ActiveClipboardPull => {
                     InboundPeerProtocol::ActiveClipboardPull
@@ -107,7 +109,11 @@ struct Attempt {
 #[async_trait]
 impl AdmissionAttempt for Attempt {
     async fn check_current(&self) -> Result<(), ConnectivityError> {
-        // 请求围栏只验证自身快照；当前成员权威读取与整体关闭由连接 grant 统一负责。
+        // Blob 可直接交付本机缓存，没有连接 grant；请求本身也须核对当前成员权威。
+        if self.owner.protocol == InboundPeerProtocol::Blob {
+            return self.owner.check(self.peer, self.epoch).await;
+        }
+        // 其他协议仍由请求围栏验证快照，连接 grant 读取当前成员权威并负责整体关闭。
         if self.owner.connections.current(&self.peer, self.epoch) {
             Ok(())
         } else {
@@ -132,6 +138,13 @@ struct Grant {
 impl AdmissionGrant for Grant {
     fn peer(&self) -> DeviceId {
         self.peer
+    }
+    async fn can_retain(&self) -> Result<bool, ConnectivityError> {
+        if self.owner.protocol != InboundPeerProtocol::Blob {
+            return Ok(false);
+        }
+        self.check_current().await?;
+        Ok(true)
     }
     async fn check_current(&self) -> Result<(), ConnectivityError> {
         let result = self.owner.check(self.peer, self.epoch).await;
@@ -175,6 +188,7 @@ impl SessionConnectionAdmissionPort for IrohConnectionAdmission {
     async fn adopt_inbound(
         &self,
         connection: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
         let peer = self
             .identities
@@ -184,7 +198,8 @@ impl SessionConnectionAdmissionPort for IrohConnectionAdmission {
                 record_inbound_rejection(self.protocol, error.rejection());
                 ConnectivityError::Admission(Box::new(error))
             })?;
-        // 识别之后冻结撤销基线，登记与准入保持原有原子护栏。
+        reservation.identified(peer)?;
+        // 先交接额度并检查入口围栏，再冻结登记用的撤销基线。
         let result = self
             .register_and_check(peer, self.connections.epoch(&peer), connection)
             .await;

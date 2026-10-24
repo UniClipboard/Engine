@@ -1,3 +1,4 @@
+use super::entry_receive_attempt_repo::delete_receive_state;
 use crate::db::models::ClipboardEntryRow;
 use crate::db::models::NewClipboardEntryRow;
 use crate::db::models::NewClipboardSelectionRow;
@@ -5,7 +6,7 @@ use crate::db::ports::DbExecutor;
 use crate::db::ports::{InsertMapper, RowMapper};
 use crate::db::schema::{
     clipboard_entry, clipboard_event, clipboard_selection, clipboard_snapshot_representation,
-    entry_receive_attempt, receive_artifact_log,
+    directory_publish_log, entry_receive_attempt, receive_artifact_log,
 };
 use anyhow::Result;
 use diesel::query_dsl::methods::FilterDsl;
@@ -13,27 +14,53 @@ use diesel::query_dsl::methods::LimitDsl;
 use diesel::query_dsl::methods::OffsetDsl;
 use diesel::query_dsl::methods::OrderDsl;
 use diesel::query_dsl::methods::SelectDsl;
-use diesel::Connection;
 use diesel::ExpressionMethods;
 use diesel::OptionalExtension;
 use diesel::RunQueryDsl;
 use diesel::SqliteConnection;
+use diesel::{sql_types::Text, QueryableByName};
+use diesel::{BoolExpressionMethods, Connection};
 use tracing::instrument;
-use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError, ClipboardSelectionDecision};
-use uc_core::ids::{EntryId, EventId};
+use uc_application::facade::clipboard_history::HistoryDeletionTargetsPort;
+use uc_core::clipboard::{
+    check_receive_deletion, ClipboardEntry, ClipboardRepositoryError, ClipboardSelectionDecision,
+};
+use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::{
     DeleteClipboardEntryPort, DeleteClipboardEntryWithReceiveStatePort,
     FindEntryIdBySnapshotHashPort, GetClipboardEntryPort, GetEntrySnapshotHashPort,
     ListClipboardEntriesPort, SaveClipboardEntryPort, SetClipboardEntryFavoritePort,
     TouchClipboardEntryPort,
 };
-use uc_core::ports::{AttemptState, ClipboardEntryStore};
+use uc_core::ports::{
+    AttemptState, ClipboardEntryStore, ReceiveArtifactPhase, ReceiveArtifactResolution,
+};
 
 pub struct DieselClipboardEntryRepository<E, ME, MS, RE> {
     executor: E,
     entry_mapper: ME,
     selection_mapper: MS,
     row_entry_mapper: RE,
+}
+
+#[derive(QueryableByName)]
+struct HistoryDeletionTarget {
+    #[diesel(sql_type = Text)]
+    entry_id: String,
+}
+
+#[async_trait::async_trait]
+impl<E: DbExecutor, ME: Send + Sync, MS: Send + Sync, RE: Send + Sync> HistoryDeletionTargetsPort
+    for DieselClipboardEntryRepository<E, ME, MS, RE>
+{
+    async fn history_deletion_targets(&self) -> Result<Vec<EntryId>> {
+        self.executor.run(|conn| {
+            let rows = diesel::sql_query(
+                "SELECT entry_id FROM clipboard_entry UNION SELECT entry_id FROM entry_receive_attempt UNION SELECT entry_id FROM file_transfer WHERE entry_id IS NOT NULL UNION SELECT entry_id FROM receive_artifact_log UNION SELECT entry_id FROM directory_publish_log",
+            ).load::<HistoryDeletionTarget>(conn)?;
+            Ok(rows.into_iter().map(|row| EntryId::from(row.entry_id)).collect())
+        })
+    }
 }
 
 impl<E, ME, MS, RE> DieselClipboardEntryRepository<E, ME, MS, RE> {
@@ -463,10 +490,8 @@ where
     async fn delete_entry_with_receive_state(
         &self,
         entry_id: &EntryId,
-        event_id: &EventId,
-    ) -> Result<(), ClipboardRepositoryError> {
+    ) -> Result<bool, ClipboardRepositoryError> {
         let entry_id = entry_id.to_string();
-        let event_id = event_id.to_string();
         self.executor
             .run(move |conn| {
                 conn.transaction::<_, anyhow::Error, _>(|conn| {
@@ -475,47 +500,75 @@ where
                         .select(entry_receive_attempt::attempt_state)
                         .first::<String>(conn)
                         .optional()?;
-                    if attempt_state
+                    let attempt_state = attempt_state
                         .as_deref()
                         .map(str::parse::<AttemptState>)
-                        .transpose()?
-                        .is_some_and(|state| !state.is_terminal())
-                    {
-                        return Err(anyhow::anyhow!("entry has a nonterminal remote receive"));
-                    }
-                    let pending_artifacts = receive_artifact_log::table
+                        .transpose()?;
+                    let unsettled_artifacts = receive_artifact_log::table
                         .filter(receive_artifact_log::entry_id.eq(&entry_id))
-                        .filter(receive_artifact_log::resolution.eq("pending"))
+                        .filter(
+                            receive_artifact_log::phase
+                                .ne(ReceiveArtifactPhase::Settled.as_str())
+                                .or(receive_artifact_log::resolution.ne_all([
+                                    ReceiveArtifactResolution::Landed.as_str(),
+                                    ReceiveArtifactResolution::RolledBack.as_str(),
+                                ])),
+                        )
                         .select(receive_artifact_log::entry_id)
                         .first::<String>(conn)
                         .optional()?
                         .is_some();
-                    if pending_artifacts {
-                        return Err(anyhow::anyhow!("entry has unsettled receive artifacts"));
-                    }
-
-                    diesel::delete(
-                        clipboard_selection::table
-                            .filter(clipboard_selection::entry_id.eq(&entry_id)),
-                    )
-                    .execute(conn)?;
-                    diesel::delete(
-                        clipboard_entry::table.filter(clipboard_entry::entry_id.eq(&entry_id)),
-                    )
-                    .execute(conn)?;
-                    diesel::delete(
-                        clipboard_snapshot_representation::table
-                            .filter(clipboard_snapshot_representation::event_id.eq(&event_id)),
-                    )
-                    .execute(conn)?;
-                    diesel::delete(
-                        clipboard_event::table.filter(clipboard_event::event_id.eq(&event_id)),
-                    )
-                    .execute(conn)?;
-                    crate::db::repositories::entry_receive_attempt_repo::delete_receive_state(
-                        conn, &entry_id,
+                    let unpublished = directory_publish_log::table
+                        .filter(directory_publish_log::entry_id.eq(&entry_id))
+                        .filter(directory_publish_log::landed.eq(false))
+                        .select(directory_publish_log::attempt_id)
+                        .load::<String>(conn)?;
+                    let rolled_back = receive_artifact_log::table
+                        .filter(receive_artifact_log::entry_id.eq(&entry_id))
+                        .filter(
+                            receive_artifact_log::phase.eq(ReceiveArtifactPhase::Settled.as_str()),
+                        )
+                        .filter(
+                            receive_artifact_log::resolution
+                                .eq(ReceiveArtifactResolution::RolledBack.as_str()),
+                        )
+                        .select(receive_artifact_log::attempt_id)
+                        .load::<String>(conn)?;
+                    check_receive_deletion(
+                        attempt_state,
+                        unsettled_artifacts,
+                        &unpublished,
+                        &rolled_back,
                     )?;
-                    Ok(())
+
+                    let event_id = clipboard_entry::table
+                        .filter(clipboard_entry::entry_id.eq(&entry_id))
+                        .select(clipboard_entry::event_id)
+                        .first::<String>(conn)
+                        .optional()?;
+                    let had_entry = event_id.is_some();
+                    if let Some(event_id) = event_id {
+                        diesel::delete(
+                            clipboard_selection::table
+                                .filter(clipboard_selection::entry_id.eq(&entry_id)),
+                        )
+                        .execute(conn)?;
+                        diesel::delete(
+                            clipboard_entry::table.filter(clipboard_entry::entry_id.eq(&entry_id)),
+                        )
+                        .execute(conn)?;
+                        diesel::delete(
+                            clipboard_snapshot_representation::table
+                                .filter(clipboard_snapshot_representation::event_id.eq(&event_id)),
+                        )
+                        .execute(conn)?;
+                        diesel::delete(
+                            clipboard_event::table.filter(clipboard_event::event_id.eq(&event_id)),
+                        )
+                        .execute(conn)?;
+                    }
+                    let had_receive = delete_receive_state(conn, &entry_id)?;
+                    Ok(had_entry || had_receive)
                 })
             })
             .map_err(|error| {
@@ -572,6 +625,7 @@ mod tests {
     use crate::db::pool::init_db_pool;
     use crate::db::ports::DbExecutor;
     use tempfile::{tempdir, TempDir};
+    use uc_core::ids::EventId;
 
     type Repo = DieselClipboardEntryRepository<
         DieselSqliteExecutor,
@@ -708,7 +762,7 @@ mod tests {
                         .values((
                             receive_artifact_log::entry_id.eq(&entry_id),
                             receive_artifact_log::attempt_id.eq("attempt"),
-                            receive_artifact_log::phase.eq("landed"),
+                            receive_artifact_log::phase.eq("settled"),
                             receive_artifact_log::resolution.eq(artifact_resolution),
                             receive_artifact_log::artifact_ciphertext.eq(vec![1_u8, 2, 3]),
                             receive_artifact_log::updated_at_ms.eq(1_i64),
@@ -889,11 +943,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_clear_targets_include_unsaved_and_orphan_state_without_duplicate_entries() {
+        let (repo, executor, _tempdir) = make_repo();
+        let (entry, _) = seed_entry_with_receive_state(&executor, "completed", "landed");
+        executor.run(|conn| {
+            diesel::sql_query("INSERT INTO entry_receive_attempt (entry_id, current_attempt_id, attempt_state, updated_at_ms) VALUES ('unsaved', 'attempt', 'failed', 0)").execute(conn)?;
+            diesel::sql_query("INSERT INTO file_transfer (transfer_id, entry_id, binding_state, receive_item_id, status, source_device, metadata_ciphertext, created_at_ms, updated_at_ms) VALUES ('orphan-transfer', 'orphan', 'legacy', 'item', 'failed', 'peer', X'00', 0, 0)").execute(conn)?;
+            diesel::sql_query("INSERT INTO receive_artifact_log (entry_id, attempt_id, phase, resolution, artifact_ciphertext, updated_at_ms) VALUES ('artifact-only', 'old', 'settled', 'rolled_back', X'00', 0)").execute(conn)?;
+            diesel::sql_query("INSERT INTO directory_publish_log (entry_id, attempt_id, phase, root_map_ciphertext, partial_publication, partial_root_count, landed, updated_at_ms) VALUES ('directory-only', 'old', 'landed', X'00', 0, 0, 1, 0)").execute(conn)?;
+            Ok(())
+        }).unwrap();
+        let targets = repo.history_deletion_targets().await.unwrap();
+        assert_eq!(targets.len(), 5);
+        for id in [
+            entry,
+            EntryId::from("unsaved"),
+            EntryId::from("orphan"),
+            EntryId::from("artifact-only"),
+            EntryId::from("directory-only"),
+        ] {
+            assert!(targets.contains(&id));
+            assert!(repo.delete_entry_with_receive_state(&id).await.unwrap());
+        }
+        assert!(repo.history_deletion_targets().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn combined_delete_removes_terminal_entry_and_receive_state() {
         let (repo, executor, _tempdir) = make_repo();
-        let (entry_id, event_id) = seed_entry_with_receive_state(&executor, "completed", "landed");
+        let (entry_id, _event_id) = seed_entry_with_receive_state(&executor, "completed", "landed");
 
-        repo.delete_entry_with_receive_state(&entry_id, &event_id)
+        repo.delete_entry_with_receive_state(&entry_id)
             .await
             .unwrap();
 
@@ -901,12 +981,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn combined_delete_cleans_unsaved_receive_atomically_and_reports_actual_absence() {
+        for refusal in [
+            None,
+            Some("running"),
+            Some("pending"),
+            Some("unsettled_phase"),
+            Some("write_failure"),
+            Some("orphan"),
+            Some("publication"),
+            Some("rolled_back_publication"),
+            Some("wrong_attempt_publication"),
+        ] {
+            let (repo, executor, _tempdir) = make_repo();
+            let (entry_id, event_id) = seed_entry_with_receive_state(
+                &executor,
+                if refusal == Some("running") {
+                    "receiving"
+                } else {
+                    "failed"
+                },
+                if refusal == Some("pending") {
+                    "pending"
+                } else {
+                    "rolled_back"
+                },
+            );
+            let raw_id = entry_id.to_string();
+            executor.run(move |conn| {
+                diesel::delete(clipboard_selection::table).execute(conn)?;
+                diesel::delete(clipboard_entry::table).execute(conn)?;
+                diesel::delete(clipboard_snapshot_representation::table).execute(conn)?;
+                diesel::delete(clipboard_event::table.filter(clipboard_event::event_id.eq(event_id.to_string()))).execute(conn)?;
+                diesel::sql_query("INSERT INTO file_transfer (transfer_id, entry_id, binding_state, receive_item_id, status, source_device, metadata_ciphertext, created_at_ms, updated_at_ms) VALUES ('unsaved-transfer', ?, 'attempt_bound', 'item', 'failed', 'peer', X'00', 0, 0)")
+                    .bind::<diesel::sql_types::Text, _>(raw_id).execute(conn)?;
+                diesel::sql_query("INSERT INTO file_transfer_events (transfer_id, sequence, event_type, payload_ciphertext, occurred_at_ms) VALUES ('unsaved-transfer', 0, 'started', X'00', 0)").execute(conn)?;
+                if matches!(refusal, Some("publication" | "rolled_back_publication" | "wrong_attempt_publication")) {
+                    if refusal == Some("publication") {
+                        diesel::delete(receive_artifact_log::table).execute(conn)?;
+                    } else {
+                        diesel::sql_query("UPDATE receive_artifact_log SET phase = 'settled'").execute(conn)?;
+                    }
+                    diesel::sql_query("INSERT INTO directory_publish_log (entry_id, attempt_id, phase, root_map_ciphertext, partial_publication, partial_root_count, landed, updated_at_ms) SELECT entry_id, current_attempt_id, 'publishing', X'00', 1, 1, 0, 0 FROM entry_receive_attempt").execute(conn)?;
+                }
+                if refusal == Some("wrong_attempt_publication") {
+                    diesel::sql_query("UPDATE directory_publish_log SET attempt_id = 'other-attempt'").execute(conn)?;
+                }
+                if refusal == Some("unsettled_phase") {
+                    diesel::sql_query("UPDATE receive_artifact_log SET phase = 'rolling_back'").execute(conn)?;
+                }
+                if refusal == Some("orphan") {
+                    diesel::delete(entry_receive_attempt::table).execute(conn)?;
+                    diesel::delete(receive_artifact_log::table).execute(conn)?;
+                }
+                if refusal == Some("write_failure") {
+                    diesel::sql_query("CREATE TRIGGER fail_receive_delete BEFORE DELETE ON entry_receive_attempt BEGIN SELECT RAISE(ABORT, 'injected receive deletion failure'); END").execute(conn)?;
+                }
+                Ok(())
+            }).unwrap();
+            let result = repo.delete_entry_with_receive_state(&entry_id).await;
+            if matches!(refusal, None | Some("orphan" | "rolled_back_publication")) {
+                assert!(result.unwrap());
+                assert!(!repo
+                    .delete_entry_with_receive_state(&entry_id)
+                    .await
+                    .unwrap());
+            } else {
+                let error = result.unwrap_err();
+                assert!(std::error::Error::source(&error).is_some());
+                if refusal == Some("write_failure") {
+                    let mut cause: &(dyn std::error::Error + 'static) = &error;
+                    while !matches!(
+                        cause.downcast_ref::<diesel::result::Error>(),
+                        Some(diesel::result::Error::DatabaseError(_, _))
+                    ) {
+                        cause = cause.source().expect("必须保留实际SQLite删除失败来源");
+                    }
+                }
+            }
+            executor
+                .run(move |conn| {
+                    use crate::db::schema::{
+                        directory_publish_log, file_transfer, file_transfer_events,
+                    };
+                    let expected = i64::from(!matches!(
+                        refusal,
+                        None | Some("orphan" | "rolled_back_publication")
+                    ));
+                    assert_eq!(
+                        clipboard_entry::table
+                            .select(diesel::dsl::count_star())
+                            .get_result::<i64>(conn)?,
+                        0
+                    );
+                    assert_eq!(
+                        entry_receive_attempt::table
+                            .select(diesel::dsl::count_star())
+                            .get_result::<i64>(conn)?,
+                        expected
+                    );
+                    assert_eq!(
+                        receive_artifact_log::table
+                            .select(diesel::dsl::count_star())
+                            .get_result::<i64>(conn)?,
+                        if refusal == Some("publication") {
+                            0
+                        } else {
+                            expected
+                        }
+                    );
+                    assert_eq!(
+                        file_transfer::table
+                            .select(diesel::dsl::count_star())
+                            .get_result::<i64>(conn)?,
+                        expected
+                    );
+                    assert_eq!(
+                        file_transfer_events::table
+                            .select(diesel::dsl::count_star())
+                            .get_result::<i64>(conn)?,
+                        expected
+                    );
+                    assert_eq!(
+                        directory_publish_log::table
+                            .select(diesel::dsl::count_star())
+                            .get_result::<i64>(conn)?,
+                        i64::from(matches!(
+                            refusal,
+                            Some("publication" | "wrong_attempt_publication")
+                        ))
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn combined_delete_rejects_nonterminal_receive_without_changes() {
         let (repo, executor, _tempdir) = make_repo();
-        let (entry_id, event_id) = seed_entry_with_receive_state(&executor, "receiving", "landed");
+        let (entry_id, _event_id) = seed_entry_with_receive_state(&executor, "receiving", "landed");
 
         assert!(repo
-            .delete_entry_with_receive_state(&entry_id, &event_id)
+            .delete_entry_with_receive_state(&entry_id)
             .await
             .is_err());
 
@@ -916,10 +1133,11 @@ mod tests {
     #[tokio::test]
     async fn combined_delete_loses_to_an_attempt_that_is_committing() {
         let (repo, executor, _tempdir) = make_repo();
-        let (entry_id, event_id) = seed_entry_with_receive_state(&executor, "committing", "landed");
+        let (entry_id, _event_id) =
+            seed_entry_with_receive_state(&executor, "committing", "landed");
 
         assert!(repo
-            .delete_entry_with_receive_state(&entry_id, &event_id)
+            .delete_entry_with_receive_state(&entry_id)
             .await
             .is_err());
 
@@ -929,10 +1147,11 @@ mod tests {
     #[tokio::test]
     async fn combined_delete_rejects_pending_artifacts_without_changes() {
         let (repo, executor, _tempdir) = make_repo();
-        let (entry_id, event_id) = seed_entry_with_receive_state(&executor, "completed", "pending");
+        let (entry_id, _event_id) =
+            seed_entry_with_receive_state(&executor, "completed", "pending");
 
         assert!(repo
-            .delete_entry_with_receive_state(&entry_id, &event_id)
+            .delete_entry_with_receive_state(&entry_id)
             .await
             .is_err());
 
@@ -942,7 +1161,7 @@ mod tests {
     #[tokio::test]
     async fn combined_delete_rolls_back_every_table_when_a_delete_fails() {
         let (repo, executor, _tempdir) = make_repo();
-        let (entry_id, event_id) = seed_entry_with_receive_state(&executor, "completed", "landed");
+        let (entry_id, _event_id) = seed_entry_with_receive_state(&executor, "completed", "landed");
         executor
             .run(|conn| {
                 diesel::sql_query(
@@ -955,7 +1174,7 @@ mod tests {
             .unwrap();
 
         assert!(repo
-            .delete_entry_with_receive_state(&entry_id, &event_id)
+            .delete_entry_with_receive_state(&entry_id)
             .await
             .is_err());
 

@@ -2208,6 +2208,13 @@ function packageSelectorSources() {
 function repositorySources() {
   return {
     packageSelectors: packageSelectorSources(),
+    blobLocalCapability: read('crates/uc-core/src/ports/blob/transfer.rs'),
+    blobBusinessProduction: [
+      productionSources('crates/uc-core/src', [], true),
+      productionSources('crates/uc-application/src', [], true),
+    ].join('\n'),
+    blobNativeProduction: productionSources('crates/uc-infra-p2p/src', [], true),
+    blobRouterBridge: read('crates/uc-infra-p2p/src/network/iroh/blob_exchange/handler.rs'),
     monolithicMembershipHistoryPresent: existsSync(join(REPOSITORY_ROOT, 'crates/uc-core/src/membership/versioned_membership_history.rs')),
     membershipHistoryRoot: read('crates/uc-core/src/membership/versioned_membership_history/mod.rs'),
     membershipHistoryCore: readSourceTree('crates/uc-core/src/membership/versioned_membership_history'),
@@ -2354,6 +2361,30 @@ function checkPresenceOwnership(sources) {
   return problems
 }
 
+// blob网络工作只经过通用租约；本地发布端口不能重新获得获取或对端取消能力。
+function checkBlobTransferOwnership(metadata, sources) {
+  const problems = []
+  // 依赖元数据使用真实包名，重命名不能把原生传输带入业务层；测试依赖不受此生产约束。
+  for (const owner of ['uc-core', 'uc-application']) {
+    for (const dependency of normalDependencies(packageByName(metadata, owner))) {
+      if (/^iroh(?:-|$)/.test(dependency.name))
+        problems.push(`${owner} must not depend on native Iroh transport: ${dependency.name}`)
+    }
+  }
+  const businessCode = sources.blobBusinessProduction.replace(/^\s*\/\/.*$/gm, '')
+  if (/\biroh(?:_blobs)?\s*::/.test(businessCode))
+    problems.push('blob Core and Application code must remain backend independent')
+  if (/async\s+fn\s+(?:fetch|fetch_to_path|shutdown_inflight_fetch)\b/.test(sources.blobLocalCapability))
+    problems.push('retired blob fetch or peer-wide cancellation capability must not return')
+  if (/\bDownloader\b|\.downloader\s*\(/.test(sources.blobNativeProduction))
+    problems.push('production blob transfers must not create an SDK Downloader or its connection pool')
+  if (/\bshutdown_endpoint\b/.test(sources.blobNativeProduction))
+    problems.push('blob cancellation must not close a peer connection')
+  if (/\bBlobsProtocol\b/.test(sources.blobNativeProduction) || /\.(?:connect|open_bi|accept_bi)\s*\(/.test(sources.blobRouterBridge))
+    problems.push('blob Router must delegate the complete connection to the Application owner')
+  return problems
+}
+
 function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
   return [
     ...checkWorkspaceShape(metadata),
@@ -2383,6 +2414,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkIrohPeerAddressResolution(sources),
     ...checkActiveClipboardTransportOwnership(sources),
     ...checkPresenceOwnership(sources),
+    ...checkBlobTransferOwnership(metadata, sources),
     ...checkSessionSupervisorOwnership(sources),
     ...checkRuntimeLifecycleOwnership(sources),
     ...checkSpaceAccessConstructionModes(sources),
@@ -2410,6 +2442,52 @@ function expectRejected(name, mutate, metadata, sources) {
 }
 
 function runNegativeFixtures(metadata, sources) {
+  // 原生 bridge 的源码保留在实际基线；业务层的显式测试依赖也仍可用于测试夹具。
+  const fixtureMetadata = clone(metadata)
+  for (const owner of ['uc-core', 'uc-application']) {
+    packageByName(fixtureMetadata, owner).dependencies.push({
+      name: 'iroh', rename: 'native_fixture', kind: 'dev', optional: false,
+    })
+  }
+  if (checkBlobTransferOwnership(fixtureMetadata, sources).length !== 0)
+    throw new Error('blob test dependencies and the native bridge must remain allowed')
+  process.stdout.write('OK blob test dependencies and native bridge allowed\n')
+  expectRejected('blob native Application endpoint', (_metadata, changed) => {
+    changed.blobBusinessProduction += '\nuse iroh::Endpoint;\n'
+  }, metadata, sources)
+  expectRejected('blob native Core connection alias', (_metadata, changed) => {
+    changed.blobBusinessProduction += '\npub type NativeConnection = iroh::endpoint::Connection;\n'
+  }, metadata, sources)
+  expectRejected('blob native Application SDK import', (_metadata, changed) => {
+    changed.blobBusinessProduction += '\nuse iroh_blobs::get::fsm;\n'
+  }, metadata, sources)
+  for (const owner of ['uc-core', 'uc-application']) {
+    for (const dependency of ['iroh', 'iroh-blobs']) {
+      expectRejected(`blob renamed native dependency in ${owner}: ${dependency}`, changed => {
+        packageByName(changed, owner).dependencies.push({
+          name: dependency,
+          rename: 'native_transport',
+          kind: null,
+          optional: false,
+        })
+      }, metadata, sources)
+    }
+  }
+  expectRejected('retired blob fetch capability', (_metadata, changed) => {
+    changed.blobLocalCapability += '\nasync fn fetch_to_path() {}\n'
+  }, metadata, sources)
+  expectRejected('blob SDK self-dialing pool', (_metadata, changed) => {
+    changed.blobNativeProduction += '\nlet downloader = store.downloader(endpoint);\n'
+  }, metadata, sources)
+  expectRejected('blob peer-wide cancellation', (_metadata, changed) => {
+    changed.blobNativeProduction += '\nasync fn cancel() { pool.shutdown_endpoint(peer).await; }\n'
+  }, metadata, sources)
+  expectRejected('blob raw provider handler', (_metadata, changed) => {
+    changed.blobNativeProduction += '\nlet handler = BlobsProtocol::new(store, None);\n'
+  }, metadata, sources)
+  expectRejected('blob bridge stream workflow', (_metadata, changed) => {
+    changed.blobRouterBridge += '\nasync fn bypass() { connection.accept_bi().await; }\n'
+  }, metadata, sources)
   expectRejected('presence native workflow bypass', (_metadata, changed) => {
     changed.presenceBridge += '\nasync fn bypass() { connection.accept_bi().await; }\n'
   }, metadata, sources)

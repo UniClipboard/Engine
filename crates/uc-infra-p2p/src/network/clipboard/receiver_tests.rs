@@ -9,7 +9,7 @@ use tracing::Instrument;
 use uc_application::deps::ConnectivityPolicy;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectivityBackend, ConnectivityError,
-    PeerConnection, SessionConnectionAdmissionPort,
+    InboundIdentityReservation, PeerConnection, SessionConnectionAdmissionPort,
 };
 use uc_observability_contract::diagnostics::{
     operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole, DiagnosticSpanKind,
@@ -447,10 +447,11 @@ impl ConnectivityBackend for RecordingBackend {
     async fn connect(
         &self,
         target: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let connection = self.native.connect(target, _cancel).await?;
+        let connection = self.native.connect(target, _address_hint, _cancel).await?;
         self.connections
             .lock()
             .unwrap()
@@ -586,8 +587,9 @@ impl SessionConnectionAdmissionPort for DelayedAdmission {
     async fn adopt_inbound(
         &self,
         connection: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
-        self.inner.adopt_inbound(connection).await
+        self.inner.adopt_inbound(connection, reservation).await
     }
 }
 

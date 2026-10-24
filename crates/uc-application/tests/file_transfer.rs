@@ -27,7 +27,8 @@ use uc_core::ports::{
     FinalizeProvisionalReceivePort, GetDirectoryPublishRecordPort, GetEntryAttemptPort,
     InboundReceiveSettlement, ListNonTerminalAttemptsPort, ListProvisionalReceivesPort,
     ListUnsettledReceiveArtifactsPort, ProvisionalReceiveAction, ProvisionalReceiveError,
-    ProvisionalReceiveRecovery, ReceiveArtifact, ReceiveArtifactLogError, ReceiveArtifactRecord,
+    ProvisionalReceiveRecovery, PublishLogError, PublishPhase, ReceiveArtifact,
+    ReceiveArtifactLogError, ReceiveArtifactRecord, RecordDirectoryPublishPort,
     RecordReceiverTransferPort, SeedProvisionalReceivePort,
 };
 use uc_core::{FileTransferCancellationReason, FileTransferEvent, FileTransferFailureReason};
@@ -192,6 +193,29 @@ impl ListUnsettledReceiveArtifactsPort for NoopReceiveAttemptPorts {
 }
 
 #[async_trait]
+impl RecordDirectoryPublishPort for NoopReceiveAttemptPorts {
+    async fn record_phase(
+        &self,
+        _: &str,
+        _: &str,
+        _: PublishPhase,
+        _: &[(PathBuf, PathBuf)],
+        _: i64,
+    ) -> Result<(), PublishLogError> {
+        Ok(())
+    }
+    async fn record_partial(
+        &self,
+        _: &str,
+        _: &str,
+        _: u32,
+        _: i64,
+    ) -> Result<(), PublishLogError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl GetDirectoryPublishRecordPort for NoopReceiveAttemptPorts {
     async fn get_publish_record(
         &self,
@@ -266,6 +290,7 @@ fn noop_lifecycle_deps() -> FileTransferLifecycleDeps {
         list_receive_attempts: Arc::clone(&attempts) as _,
         list_unsettled_artifacts: Arc::clone(&attempts) as _,
         get_directory_publish: Arc::clone(&attempts) as _,
+        record_directory_publish: Arc::clone(&attempts) as _,
         begin_receive_failure: Arc::clone(&attempts) as _,
         cleanup_artifacts: Arc::clone(&attempts) as _,
         commit_inbound: Arc::clone(&attempts) as _,
@@ -448,6 +473,7 @@ fn build_context() -> TestContext {
 
 fn entry_transfer(transfer_id: &str) -> BeginReceiverTransfer {
     BeginReceiverTransfer {
+        item_role: None,
         transfer_id: transfer_id.into(),
         peer_id: "peer-1".into(),
         filename: "report.pdf".into(),
@@ -742,13 +768,29 @@ async fn persisted_start_is_not_forgotten_when_publishing_fails() {
         .active_session("transfer-1")
         .await
         .expect("persisted session must remain active");
-    let retried_session = facade
+    let retry_error = facade
         .begin_receiver_transfer(entry_transfer("transfer-1"))
         .await
+        .unwrap_err();
+    assert!(matches!(
+        retry_error,
+        FileTransferApplicationError::TransferAlreadyFinished { .. }
+    ));
+    persisted_session
+        .fail(FileTransferFailureReason::StorageUnavailable, None)
+        .await
         .unwrap();
-
-    assert!(Arc::ptr_eq(&persisted_session, &retried_session));
-    assert_eq!(store.load("transfer-1").await.unwrap().len(), 1);
+    let history = store.load("transfer-1").await.unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(matches!(history[0], FileTransferEvent::Started { .. }));
+    assert!(matches!(
+        history[1],
+        FileTransferEvent::Failed {
+            reason: FileTransferFailureReason::StorageUnavailable,
+            ..
+        }
+    ));
+    assert!(facade.active_session("transfer-1").await.is_none());
 }
 
 #[tokio::test]

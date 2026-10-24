@@ -80,6 +80,7 @@ use crate::facade::host_event::{ClipboardHostEvent, ClipboardOriginKind, HostEve
 /// `SnapshotReconstructor` at facade construction. Shared by the
 /// inbound / resend / restore paths ([`ActiveClipboardDeps`]) and the pull
 /// serve path ([`ActiveClipboardPullServeFacadeDeps`]).
+#[derive(Clone)]
 pub struct ClipboardSnapshotDeps {
     pub entry_repo: Arc<dyn GetClipboardEntryPort>,
     pub selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,

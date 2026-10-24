@@ -2,7 +2,7 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-use super::super::OperationCompletion;
+use super::super::{complete_operation, CompletionResult, OperationCompletion};
 use super::complete_clipboard_receive_failure;
 use crate::wire_enum;
 
@@ -10,17 +10,91 @@ tokio::task_local! {
     static RECEIVE: ClipboardReceiveObservation;
 }
 
-/// 仅跨既有接收队列保存第一次失败；不能查询业务阶段或参与回执决定。
+/// 跨原接收队列与处理任务携带诊断事实，不提供阶段查询，也不参与业务回执。
 #[derive(Clone, Default)]
-pub struct ClipboardReceiveObservation(Arc<Mutex<Option<ClipboardReceiveFailure>>>);
+pub struct ClipboardReceiveObservation(Arc<Mutex<ReceiveFacts>>);
+
+#[derive(Default)]
+struct ReceiveFacts {
+    failure: Option<ClipboardReceiveFailure>,
+    partial: bool,
+    cancelled: bool,
+    retry_completion: Option<Box<dyn FnOnce(ClipboardRetryOutcome) + Send>>,
+}
+
+/// 只有完整流程负责人能提交结局；这些固定诊断类别不参与业务结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardRetryOutcome {
+    Succeeded,
+    Partial,
+    Cancelled,
+    Deferred,
+    Rejected,
+    Skipped,
+    Failed(ClipboardReceiveFailure),
+}
+
+impl Drop for ReceiveFacts {
+    fn drop(&mut self) {
+        // 任务异常退出或准入未交接时仍结束在线记录，不能留下永远运行的root。
+        if let Some(completion) = self.retry_completion.take() {
+            completion(ClipboardRetryOutcome::Failed(
+                self.failure.unwrap_or(ClipboardReceiveFailure::ApplyFailed),
+            ));
+        }
+    }
+}
 
 impl ClipboardReceiveObservation {
+    /// Engine提供完成记录，原Application任务持有唯一实际结算责任。
+    pub fn with_retry_completion(
+        completion: impl FnOnce(ClipboardRetryOutcome) + Send + 'static,
+    ) -> Self {
+        Self(Arc::new(Mutex::new(ReceiveFacts {
+            retry_completion: Some(Box::new(completion)),
+            failure: None,
+            partial: false,
+            cancelled: false,
+        })))
+    }
+
+    pub fn finish_retry(&self, outcome: ClipboardRetryOutcome) {
+        let (completion, outcome) = {
+            let mut facts = self.0.lock().unwrap_or_else(|error| error.into_inner());
+            let outcome = match outcome {
+                ClipboardRetryOutcome::Succeeded if facts.cancelled => {
+                    ClipboardRetryOutcome::Cancelled
+                }
+                ClipboardRetryOutcome::Succeeded if facts.partial => ClipboardRetryOutcome::Partial,
+                other => other,
+            };
+            (facts.retry_completion.take(), outcome)
+        };
+        if let Some(completion) = completion {
+            completion(outcome);
+        }
+    }
+
     pub fn capture() -> Self {
         RECEIVE.try_with(Clone::clone).unwrap_or_default()
     }
 
     pub async fn scope<F: Future>(&self, future: F) -> F::Output {
         RECEIVE.scope(self.clone(), future).await
+    }
+
+    /// 回执保持原值；完整接收负责人已描述的部分／取消事实只影响记录。
+    pub fn finish_success(&self, mut completion: OperationCompletion) {
+        let facts = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        completion.result = if facts.cancelled {
+            CompletionResult::Cancelled
+        } else if facts.partial {
+            CompletionResult::Partial
+        } else {
+            completion.result
+        };
+        drop(facts);
+        complete_operation(completion);
     }
 
     pub fn finish_failure(
@@ -32,6 +106,7 @@ impl ClipboardReceiveObservation {
             .0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+            .failure
             .take();
         let failure = if fallback == ClipboardReceiveFailure::ApplicationRejected {
             failure.unwrap_or(fallback)
@@ -48,9 +123,21 @@ pub fn describe_clipboard_receive_failure(failure: ClipboardReceiveFailure) {
             .0
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if slot.is_none() {
-            *slot = Some(failure);
+        if slot.failure.is_none() {
+            slot.failure = Some(failure);
         }
+    });
+}
+
+/// 由原接收负责人在业务提交后描述事实，不读取或暴露业务状态。
+pub fn describe_clipboard_receive_partial(cancelled: bool) {
+    let _ = RECEIVE.try_with(|observation| {
+        let mut facts = observation
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        facts.partial = true;
+        facts.cancelled |= cancelled;
     });
 }
 
@@ -93,6 +180,52 @@ wire_enum! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retry_completion_follows_the_original_task_and_is_settled_once() {
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let recorded = outcomes.clone();
+        let observation = ClipboardReceiveObservation::with_retry_completion(move |outcome| {
+            recorded.lock().unwrap().push(outcome);
+        });
+        let owner = observation.clone();
+        tokio::spawn(async move {
+            owner
+                .scope(async {
+                    describe_clipboard_receive_partial(true);
+                })
+                .await;
+            // 准入调用方已经离开；原任务仍持有实际结算权。
+            owner.finish_retry(ClipboardRetryOutcome::Succeeded);
+            owner.finish_retry(ClipboardRetryOutcome::Succeeded);
+        })
+        .await
+        .unwrap();
+        drop(observation);
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![ClipboardRetryOutcome::Cancelled]
+        );
+    }
+
+    #[test]
+    fn abandoning_the_last_owner_finishes_the_record_without_claiming_success() {
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let recorded = outcomes.clone();
+        let observation = ClipboardReceiveObservation::with_retry_completion(move |outcome| {
+            recorded.lock().unwrap().push(outcome);
+        });
+        let owner = observation.clone();
+        drop(observation);
+        assert!(outcomes.lock().unwrap().is_empty());
+        drop(owner);
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![ClipboardRetryOutcome::Failed(
+                ClipboardReceiveFailure::ApplyFailed
+            )]
+        );
+    }
 
     #[test]
     fn admission_check_failures_have_fixed_local_fields() {

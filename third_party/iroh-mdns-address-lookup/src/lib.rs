@@ -81,7 +81,7 @@ use tokio::sync::{
     Mutex,
     mpsc::{self, error::TrySendError},
 };
-use tracing::{Instrument, debug, error, info_span, trace, warn};
+use tracing::{Dispatch, Instrument, debug, dispatcher, error, info_span, trace, warn};
 
 /// The n0 local service name.
 const N0_SERVICE_NAME: &str = "irohv1";
@@ -454,8 +454,10 @@ impl MdnsAddressLookup {
                 }
             }
         };
-        let handle =
-            task::spawn(address_lookup_fut.instrument(info_span!("swarm-discovery.actor")));
+        // 后台actor不继承短期建链span，也不在取消析构时跨subscriber释放其parent。
+        let handle = task::spawn(
+            address_lookup_fut.instrument(info_span!(parent: None, "swarm-discovery.actor")),
+        );
         Ok(Self {
             handle: Arc::new(Mutex::new(Some(AbortOnDropHandle::new(handle)))),
             sender: send,
@@ -532,8 +534,8 @@ impl MdnsAddressLookup {
                 discoverer = discoverer.with_addrs(addr.0, addr.1);
             }
         }
-        discoverer
-            .spawn(rt)
+        // acto会在创建时保存当前span；长期发现工作不能保存启动请求的parent。
+        dispatcher::with_default(&Dispatch::none(), || discoverer.spawn(rt))
             .map_err(|e| AddressLookupBuilderError::from_err("mdns", e))
     }
 

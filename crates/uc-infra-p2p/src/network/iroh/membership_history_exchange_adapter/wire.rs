@@ -118,6 +118,7 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncRead, ReadBuf};
+    use uc_application::deps::ConnectivityError;
     use uc_core::membership::MembershipHistoryAckV3;
 
     struct Receive(Cursor<Vec<u8>>);
@@ -130,7 +131,14 @@ mod tests {
             AsyncRead::poll_read(Pin::new(&mut self.0), cx, buffer)
         }
     }
-    impl PeerReceiveStream for Receive {}
+    impl PeerReceiveStream for Receive {
+        fn id(&self) -> u64 {
+            0
+        }
+        fn stop(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+            Err(ConnectivityError::Stopped)
+        }
+    }
 
     #[tokio::test]
     async fn busy_and_rejected_statuses_keep_the_original_business_classification() {

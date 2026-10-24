@@ -1,4 +1,3 @@
-use diesel::connection::Connection;
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Binary, Integer, Nullable};
@@ -183,9 +182,10 @@ impl<E: DbExecutor> SqliteSpaceAdmissionState<E> {
         conn: &mut SqliteConnection,
         now_ms: i64,
     ) -> Result<LoadedRecoveryIndex, SpaceAdmissionStateStoreError> {
-        // Legacy migration must acquire write eligibility before the recovery read transaction.
+        // 旧格式迁移先完成；扫描本身也可能重建缺失摘要，必须在读取快照前取得写资格。
+        // 否则其他连接提交后，SQLite 无法将原读快照升级为写事务，首次恢复会被延期。
         self.load_metadata_on(conn)?;
-        conn.transaction(|conn| {
+        conn.immediate_transaction(|conn| {
             if self.load_metadata_on(conn)?.is_none() {
                 return Ok(LoadedRecoveryIndex {
                     joiners: Vec::new(),

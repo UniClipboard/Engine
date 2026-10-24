@@ -17,6 +17,8 @@ pub enum ConnectivityError {
     ResourceClosed(#[source] tokio::sync::AcquireError),
     #[error("connection result channel closed")]
     ResultClosed(#[source] tokio::sync::watch::error::RecvError),
+    #[error("inbound connection result channel closed")]
+    InboundResultClosed(#[source] tokio::sync::oneshot::error::RecvError),
     #[error("connection task failed")]
     Task(#[source] std::sync::Arc<tokio::task::JoinError>),
     #[error("single-exchange connection already used")]
@@ -41,6 +43,12 @@ pub enum ConnectivityError {
     Stream(#[source] Box<dyn Error + Send + Sync>),
     #[error("shared connection acquisition failed")]
     Shared(#[source] std::sync::Arc<ConnectivityError>),
+    #[error("connection local work settlement failed")]
+    Settlement {
+        #[source]
+        primary: Box<ConnectivityError>,
+        additional: Box<ConnectivityError>,
+    },
 }
 
 impl fmt::Debug for ConnectivityError {
@@ -56,6 +64,10 @@ impl ConnectivityError {
                 true
             }
             Self::Shared(source) => source.is_admission_read_failure(),
+            Self::Settlement {
+                primary,
+                additional,
+            } => primary.is_admission_read_failure() || additional.is_admission_read_failure(),
             _ => false,
         }
     }
@@ -84,6 +96,7 @@ impl ErrorClass for ConnectivityError {
             Self::Stopped => "connection_stopped",
             Self::ResourceClosed(_) => "connection_resource_closed",
             Self::ResultClosed(_) => "connection_result_closed",
+            Self::InboundResultClosed(_) => "inbound_connection_result_closed",
             Self::Task(_) => "connection_task_failed",
             Self::ExchangeAlreadyUsed => "connection_exchange_already_used",
             Self::Denied => "connection_admission_denied",
@@ -96,6 +109,7 @@ impl ErrorClass for ConnectivityError {
             Self::Admission(_) => "connection_admission_failed",
             Self::Stream(_) => "connection_stream_failed",
             Self::Shared(source) => source.class(),
+            Self::Settlement { .. } => "connection_settlement_failed",
         }
     }
 }

@@ -28,6 +28,19 @@ pub trait InboundAdmissionFence: Send + Sync {
     fn check_current(&self, peer: &DeviceId) -> Result<(), ConnectivityError>;
 }
 
+/// 身份解析后、成员读取之前交接准入额度；失败时不得继续读取成员或登记连接。
+pub trait InboundIdentityReservation: Send + Sync {
+    fn identified(&self, peer: DeviceId) -> Result<(), ConnectivityError>;
+}
+impl InboundIdentityReservation for Option<Box<dyn InboundAdmissionFence>> {
+    fn identified(&self, peer: DeviceId) -> Result<(), ConnectivityError> {
+        if let Some(fence) = self {
+            fence.check_current(&peer)?;
+        }
+        Ok(())
+    }
+}
+
 /// 复用会话唯一身份、准入和撤销登记；不向协议调用方暴露步骤。
 #[async_trait]
 pub trait SessionConnectionAdmissionPort: Send + Sync {
@@ -38,6 +51,7 @@ pub trait SessionConnectionAdmissionPort: Send + Sync {
     async fn adopt_inbound(
         &self,
         connection: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError>;
 }
 

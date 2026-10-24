@@ -7,6 +7,8 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use uc_core::ports::clipboard::{
@@ -22,7 +24,10 @@ use uc_core::{
     crypto::aad,
     crypto::domain::{Aad, Ciphertext},
     ids::{EventId, RepresentationId},
-    ports::{security::BlobCipherPort, ClipboardRepresentationStore},
+    ports::{
+        security::{BlobCipherError, BlobCipherPort},
+        ClipboardRepresentationStore,
+    },
     BlobId,
 };
 use uc_observability_contract::{log_fields::log_id, uc_debug, uc_trace, uc_warn};
@@ -39,6 +44,24 @@ impl DecryptingClipboardRepresentationRepository {
         blob_cipher: Arc<dyn BlobCipherPort>,
     ) -> Self {
         Self { inner, blob_cipher }
+    }
+}
+
+/// 批量读取只交付全部认证后的资料；保留每项原始失败，不把密文交给业务调用方。
+#[derive(Debug)]
+struct InlineDecryptionFailures(Vec<BlobCipherError>);
+
+impl Display for InlineDecryptionFailures {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str("inline representations could not be authenticated")
+    }
+}
+
+impl Error for InlineDecryptionFailures {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.0
+            .first()
+            .map(|source| source as &(dyn Error + 'static))
     }
 }
 
@@ -172,7 +195,7 @@ impl ClipboardRepresentationStore for DecryptingClipboardRepresentationRepositor
         let input_count = reps.len();
         let mut decrypted_count = 0usize;
         let mut decrypted_bytes = 0usize;
-        let mut failed = 0usize;
+        let mut failures = Vec::new();
         let mut result = Vec::with_capacity(reps.len());
         for rep in reps {
             if let Some(ref encrypted_bytes) = rep.inline_data {
@@ -197,25 +220,21 @@ impl ClipboardRepresentationStore for DecryptingClipboardRepresentationRepositor
                             rep.last_error,
                         )?);
                     }
-                    Err(_) => {
-                        // 与历史行为对齐:解密失败时返回原始（密文）数据,
-                        // 让上层决定如何处理（一般会跳过该 representation）。
-                        failed += 1;
-                        result.push(rep);
-                    }
+                    Err(source) => failures.push(source),
                 }
             } else {
                 result.push(rep);
             }
         }
-        if failed > 0 {
+        if !failures.is_empty() {
             // 每次调用聚合成一条：只含数量，不含事件与 representation 标识、字节或错误正文。
             uc_warn!(
                 error_kind = "inline_decrypt",
-                failed = failed,
+                failed = failures.len(),
                 representations = input_count,
-                "inline representation decryption failed; returning the stored bytes unchanged"
+                "inline representation decryption failed; refusing unauthenticated batch"
             );
+            return Err(InlineDecryptionFailures(failures).into());
         }
         if decrypted_count > 0 {
             uc_debug!(
@@ -472,7 +491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inline_decrypt_failures_are_recorded_once_per_call_with_counts_only() {
+    async fn inline_decrypt_failures_refuse_the_batch_and_record_counts_only() {
         let logs = CapturedLogs::default();
         let _guard = logs.install();
         let repository = DecryptingClipboardRepresentationRepository::new(
@@ -480,19 +499,46 @@ mod tests {
             Arc::new(RejectingCipher),
         );
 
-        let representations = ClipboardRepresentationStore::get_representations_for_event(
+        let failure = ClipboardRepresentationStore::get_representations_for_event(
             &repository,
             &EventId::from("event-1"),
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(representations.len(), 2);
+        assert!(failure.chain().any(|source| matches!(
+            source.downcast_ref::<BlobCipherError>(),
+            Some(BlobCipherError::InvalidCiphertext { .. })
+        )));
+        let failures = failure.downcast_ref::<InlineDecryptionFailures>().unwrap();
+        assert_eq!(failures.0.len(), 2);
+        assert!(failures.0.iter().all(|source| source.source().is_some()));
         assert_eq!(logs.count("inline representation decryption failed"), 1);
         assert!(logs.output().contains("error_kind=\"inline_decrypt\""));
         assert!(logs.output().contains("failed=2"));
         assert!(!logs.output().contains("PRIVATE"));
         assert!(!logs.output().contains("rep-1"));
         assert!(!logs.output().contains("event-1"));
+    }
+
+    #[tokio::test]
+    async fn intent_port_preserves_authentication_failure_through_storage_error() {
+        let repository = DecryptingClipboardRepresentationRepository::new(
+            Arc::new(FixedRepresentations(vec![inline("rep")])),
+            Arc::new(RejectingCipher),
+        );
+        let failure = ListRepresentationsForEventPort::get_representations_for_event(
+            &repository,
+            &EventId::from("event"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(&failure, ClipboardRepositoryError::Storage(_)));
+        assert!(failure.source().is_some());
+        let failure = anyhow::Error::new(failure);
+        assert!(failure.chain().any(|source| matches!(
+            source.downcast_ref::<BlobCipherError>(),
+            Some(BlobCipherError::InvalidCiphertext { .. })
+        )));
     }
 }

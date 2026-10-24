@@ -14,10 +14,10 @@ pub use runtime::{
     CustomRelayMutationRejection, CustomRelayMutationResult, Device, EntryNotResendableReason,
     InvitationAvailability, InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus,
     JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle,
-    PeerConnectionRefresh, RejectedConfigImport, RelayEntrySource, RelayOverview,
-    RelayOverviewEntry, RelayRoutingMode, RelaySaveResult, ResendEntryOutcome, SendReport,
-    SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
-    WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
+    PeerConnectionRefresh, ReceiveItem, ReceiveProgress, ReceiveRetryOutcome, RejectedConfigImport,
+    RelayEntrySource, RelayOverview, RelayOverviewEntry, RelayRoutingMode, RelaySaveResult,
+    ResendEntryOutcome, SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState,
+    WorkspaceConvergence, WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();

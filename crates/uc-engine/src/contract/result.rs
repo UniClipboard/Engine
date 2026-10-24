@@ -5,6 +5,7 @@ use uc_application::facade::{
     AdmissionReadFailureCategory, AdmissionRecoveryAction as ReadRecoveryAction,
     AdmissionRecoveryStage as ReadRecoveryStage,
 };
+use uc_observability_contract::wire_enum;
 
 use super::{EngineError, ResendEntryOutcome, SendReportSummary};
 use crate::{
@@ -271,6 +272,48 @@ pub enum DeliveryFailureReasonSummary {
     Internal,
 }
 
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ReceiveItemKind {
+        Unknown => "unknown",
+        File => "file",
+        Representation => "representation",
+        DirectoryUnit => "directory_unit",
+    }
+}
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ReceiveItemFailureReason {
+        NetworkUnavailable => "network_unavailable",
+        TimedOut => "timed_out",
+        AccessDenied => "access_denied",
+        StorageUnavailable => "storage_unavailable",
+        IntegrityCheckFailed => "integrity_check_failed",
+        Interrupted => "interrupted",
+        Unknown => "unknown",
+    }
+}
+impl fmt::Display for ReceiveItemKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
+}
+impl fmt::Display for ReceiveItemFailureReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiveItemSummary {
+    pub item_id: String,
+    pub kind: ReceiveItemKind,
+    pub state: String,
+    /// 目录尚待结算时也可携带已知失败原因；父接收是否结束仍以聚合状态为准。
+    pub failure_reason: Option<ReceiveItemFailureReason>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiveProgressSummary {
     pub entry_id: String,
@@ -280,6 +323,8 @@ pub struct ReceiveProgressSummary {
     pub completed_bytes: i64,
     pub items_total: u32,
     pub items_completed: u32,
+    #[serde(default)]
+    pub items: Vec<ReceiveItemSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,21 +333,66 @@ pub struct ReceiveReadinessSummary {
     pub degraded: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EntryReceiveCancellationOutcome {
-    Cancelled,
-    NotReceiving,
-    TooLate,
-    AlreadyTerminal,
-    Superseded,
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum ReceiveRetryUnavailableReason {
+        SourceUnavailable => "source_unavailable",
+        AccessDenied => "access_denied",
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InboundTransferCancellationOutcome {
-    Cancelled,
-    NotInflight,
+impl fmt::Display for ReceiveRetryUnavailableReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum EntryReceiveRetryOutcome {
+    Accepted {
+        attempt_id: String,
+    },
+    AlreadyReceiving,
+    Superseded,
+    CancellationIncomplete,
+    Unavailable {
+        reason: ReceiveRetryUnavailableReason,
+    },
+}
+
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum EntryReceiveCancellationOutcome {
+        Cancelled => "cancelled",
+        CancellationIncomplete => "cancellation_incomplete",
+        NotReceiving => "not_receiving",
+        TooLate => "too_late",
+        AlreadyTerminal => "already_terminal",
+        Superseded => "superseded",
+    }
+}
+wire_enum! {
+    serde
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum InboundTransferCancellationOutcome {
+        Cancelled => "cancelled",
+        CancellationIncomplete => "cancellation_incomplete",
+        NotInflight => "not_inflight",
+    }
+}
+
+impl fmt::Display for EntryReceiveCancellationOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
+}
+impl fmt::Display for InboundTransferCancellationOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.wire())
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -615,6 +705,7 @@ pub enum OperationResult {
     EntryReceiveProgress(Option<ReceiveProgressSummary>),
     EntryReceiveProgressList(Vec<ReceiveProgressSummary>),
     EntryReceiveCancellation(EntryReceiveCancellationOutcome),
+    EntryReceiveRetry(EntryReceiveRetryOutcome),
     InboundTransferCancellation(InboundTransferCancellationOutcome),
     ClipboardCaptured {
         entry_id: Option<String>,
@@ -976,6 +1067,9 @@ impl fmt::Debug for OperationResult {
             Self::EntryReceiveProgressList(progress) => debug
                 .field("kind", &"entry_receive_progress_list")
                 .field("progress_count", &progress.len()),
+            Self::EntryReceiveRetry(outcome) => debug
+                .field("kind", &"entry_receive_retry")
+                .field("outcome", outcome),
             Self::EntryReceiveCancellation(outcome) => debug
                 .field("kind", &"entry_receive_cancellation")
                 .field("outcome", outcome),

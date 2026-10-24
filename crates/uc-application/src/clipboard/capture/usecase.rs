@@ -51,7 +51,8 @@ use uc_core::ports::clipboard::{
 use uc_core::ports::{
     ClipboardEventWriterPort, ClipboardRepresentationNormalizerPort, CommitInboundReceivePort,
     CompletedReceiveArtifacts, DeviceIdentityPort, InboundReceiveRecord, InboundReceiveSettlement,
-    PartialReceiveArtifacts, PartialReceiveTerminal, SelectRepresentationPolicyPort, SettingsPort,
+    PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveArtifact,
+    SelectRepresentationPolicyPort, SettingsPort,
 };
 use uc_core::{
     ClipboardChangeOrigin, ClipboardEntry, ClipboardEntryContentCategory, ClipboardEvent,
@@ -98,17 +99,35 @@ pub struct DirectoryCaptureCommitContext {
 }
 
 pub enum InboundCaptureCommitContext {
+    Progress {
+        delivered_item_ids: Vec<String>,
+        attempt_id: String,
+        artifact: ReceiveArtifact,
+    },
     Complete {
         attempt_id: String,
+        delivered_item_ids: Vec<String>,
         file_set: Option<EntryFileSet>,
         artifacts: CompletedReceiveArtifacts,
     },
     Partial {
         attempt_id: String,
+        delivered_item_ids: Vec<String>,
         terminal: PartialReceiveTerminal,
         file_set: Option<EntryFileSet>,
         artifacts: PartialReceiveArtifacts,
     },
+}
+
+impl From<DirectoryCaptureCommitContext> for InboundCaptureCommitContext {
+    fn from(directory: DirectoryCaptureCommitContext) -> Self {
+        Self::Complete {
+            attempt_id: directory.attempt_id,
+            delivered_item_ids: Vec::new(),
+            file_set: Some(directory.file_set),
+            artifacts: CompletedReceiveArtifacts::DirectoryPublished,
+        }
+    }
 }
 
 enum CaptureCommitContext {
@@ -272,36 +291,6 @@ impl CaptureClipboardUseCase {
             authoritative_hash,
             commit_mode,
             None,
-        )
-        .await
-    }
-
-    #[tracing::instrument(
-        name = "usecase.capture_clipboard.execute_directory_with_origin",
-        skip_all
-    )]
-    pub(crate) async fn execute_directory_with_origin(
-        &self,
-        snapshot: SystemClipboardSnapshot,
-        origin: ClipboardChangeOrigin,
-        preset_entry_id: EntryId,
-        authoritative_hash: Option<SnapshotHash>,
-        commit_mode: CommitMode,
-        directory_commit: DirectoryCaptureCommitContext,
-    ) -> Result<Option<CaptureOutcome>> {
-        self.execute_with_origin_internal(
-            snapshot,
-            origin,
-            Some(preset_entry_id),
-            authoritative_hash,
-            commit_mode,
-            Some(CaptureCommitContext::Inbound(
-                InboundCaptureCommitContext::Complete {
-                    attempt_id: directory_commit.attempt_id,
-                    file_set: Some(directory_commit.file_set),
-                    artifacts: CompletedReceiveArtifacts::DirectoryPublished,
-                },
-            )),
         )
         .await
     }
@@ -698,25 +687,40 @@ impl CaptureClipboardUseCase {
                                     anyhow::anyhow!("inbound receive commit port is not wired")
                                 })?;
                             let settlement = match commit_context {
+                                InboundCaptureCommitContext::Progress {
+                                    delivered_item_ids,
+                                    attempt_id,
+                                    artifact,
+                                } => InboundReceiveSettlement::Progress {
+                                    delivered_item_ids,
+                                    record,
+                                    attempt_id,
+                                    artifact,
+                                    now_ms,
+                                },
                                 InboundCaptureCommitContext::Complete {
                                     attempt_id,
+                                    delivered_item_ids,
                                     file_set,
                                     artifacts,
                                 } => InboundReceiveSettlement::Complete {
                                     record,
                                     attempt_id,
+                                    delivered_item_ids,
                                     file_set,
                                     artifacts,
                                     now_ms,
                                 },
                                 InboundCaptureCommitContext::Partial {
                                     attempt_id,
+                                    delivered_item_ids,
                                     terminal,
                                     file_set,
                                     artifacts,
                                 } => InboundReceiveSettlement::Partial {
                                     record,
                                     attempt_id,
+                                    delivered_item_ids,
                                     terminal,
                                     file_set,
                                     artifacts,

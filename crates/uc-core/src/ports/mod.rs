@@ -72,9 +72,9 @@ pub use config_migration::{
 pub use connection_channel::{ConnectionChannel, ConnectionChannelPort, ConnectionPath};
 pub use device_identity::DeviceIdentityPort;
 pub use directory_publish_log::{
-    CleanupDirectoryStagingPort, DirectoryPublishRecord, DirectoryStagingCleanupError,
-    GetDirectoryPublishRecordPort, PublishLogError, PublishPhase, RecordDirectoryPublishPort,
-    DIRECTORY_RECEIVE_STAGING_PREFIX,
+    directory_staging_area_for_root, CleanupDirectoryStagingPort, DirectoryPublishRecord,
+    DirectoryStagingCleanupError, GetDirectoryPublishRecordPort, PublishLogError, PublishPhase,
+    RecordDirectoryPublishPort, DIRECTORY_RECEIVE_STAGING_PREFIX,
 };
 pub use entry_receive_attempt::{
     AttemptError, AttemptState, BeginReceiveAttemptPort, BeginReceiveFailureOutcome,
@@ -84,15 +84,16 @@ pub use entry_receive_attempt::{
 };
 pub use errors::AppDirsError;
 pub use file_transfer::{
-    compute_aggregate_status, CancelDirectoryAttemptTransfersPort,
+    compute_aggregate_status, group_receive_items, CancelDirectoryAttemptTransfersPort,
     EnsureFileTransferPrivacyMaintenancePort, EntryReceiveProgress, EntryTransferSummary,
     ExpiredInflightTransfer, FailInflightTransfersPort, FileTransferPrivacyMaintenanceError,
     FileTransferProjectionError, FinalizeProvisionalReceivePort, FindAttemptIdForTransferPort,
     FindEntryIdForTransferPort, GetEntryReceiveProgressPort, GetEntryTransferSummaryPort,
     ListExpiredInflightTransfersPort, ListProvisionalReceivesPort, PendingInboundTransfer,
     ProvisionalInboundTransfer, ProvisionalReceiveAction, ProvisionalReceiveError,
-    ProvisionalReceiveRecovery, ReceiveItemRole, RecordReceiverTransferPort,
-    SeedProvisionalReceivePort, TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
+    ProvisionalReceiveRecovery, ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemProgress,
+    ReceiveItemRole, RecordReceiverTransferPort, SeedProvisionalReceivePort,
+    TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
 };
 pub use hidden_path::MarkHiddenPort;
 pub use host_event::{
@@ -102,9 +103,10 @@ pub use host_event::{
 };
 pub use inbound_file_target::{ReserveInboundFileTargetPort, ResolveInboundSaveDirPort};
 pub use inbound_receive_commit::{
-    CommitInboundReceivePort, CompletedReceiveArtifacts, InboundReceiveCommitError,
-    InboundReceiveRecord, InboundReceiveSettlement, NoEntryReceiveArtifacts,
-    PartialReceiveArtifacts, PartialReceiveTerminal,
+    receive_file_settlement_decision, CommitInboundReceivePort, CompletedReceiveArtifacts,
+    InboundReceiveCommitError, InboundReceiveRecord, InboundReceiveSettlement,
+    NoEntryReceiveArtifacts, PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveFileFailure,
+    ReceiveFileSettlementDecision, ReceiveFileSettlementRecord,
 };
 pub use local_identity::{LocalIdentityError, LocalIdentityPort};
 pub use mobile_sync::{

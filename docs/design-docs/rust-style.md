@@ -52,6 +52,9 @@ crate::generated_macro_entry!();
 - 修改过程中发现范围外问题时保留证据并单独处理，不顺手扩大当前变更。
 - 固定词表枚举的变体与线上取值（日志字段、诊断类别、serde 名称）必须由同一份列表生成：使用 `uc_observability_contract::wire_enum!`，不要再手写 `match self { .. => ".." }` 或让 `rename_all` 与手写映射并存。变体携带数据、取值来自外部类型的分类函数（如按错误类型分类）不适用，保持手写。
 
+结果映射或判定链不是原样转调；检查器须解析首个调用的参数边界，不能把后续 `is_some_and` 等真实处理吞进参数。
+`ErrorClass::class` 到统一 `wire()` 词表的必需 trait 适配保留；此例外不扩展到其他 trait 中的内部别名。
+
 `scripts/architecture/check-rust-style.mjs` 会拒绝本次新增或修改的仓库内部纯转调方法。真正公开的稳定入口不受这条机械检查限制，但仍需满足已有公开边界的职责要求。
 
 禁止：

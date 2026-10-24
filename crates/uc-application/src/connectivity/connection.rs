@@ -1,3 +1,5 @@
+use super::checks::checked;
+use super::lifetime::ConnectionLifetime;
 use super::manager::PeerState;
 use super::retention::{ActivityGuard, ConnectionActivity};
 use super::{
@@ -5,7 +7,7 @@ use super::{
     PeerConnection, StreamLease, StreamPair,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout_at, Instant};
@@ -15,11 +17,14 @@ use uc_core::ports::ConnectionChannel;
 
 pub(super) struct ConnectionRecord {
     pub connection: Arc<dyn PeerConnection>,
+    pub address_hint: Option<Vec<u8>>,
     pub activity: Arc<ConnectionActivity>,
     pub stop: CancellationToken,
     pub cache_cancel: CancellationToken,
-    pub presence_retention: bool,
+    pub supervise_local_work: bool,
     pub accepted_stream_timeout: Option<Duration>,
+    pub reject_excess_inbound: bool,
+    pub first_inbound_at: StdMutex<Option<Instant>>,
     pub pending: Mutex<Option<AcceptedStream>>,
     pub exchange_claimed: AtomicBool,
     pub grant: Box<dyn AdmissionGrant>,
@@ -27,13 +32,15 @@ pub(super) struct ConnectionRecord {
     pub inbound: Arc<Semaphore>,
     pub inbound_global: Arc<Semaphore>,
     pub waiting_global: Arc<Semaphore>,
+    pub inbound_direction: bool,
+    pub _lifetime: Arc<ConnectionLifetime>,
     pub _inbound_connection: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 pub(super) struct AcceptedStream {
-    pair: StreamPair,
-    activity: Arc<ActivityGuard>,
-    accepted_at: Instant,
+    pub pair: StreamPair,
+    pub activity: Arc<ActivityGuard>,
+    pub accepted_at: Instant,
 }
 
 impl Drop for ConnectionRecord {
@@ -112,7 +119,7 @@ impl ConnectionLease {
         self.open_bi_with_cancel(deadline, &CancellationToken::new())
             .await
     }
-    /// presence 的取消停止网络步骤，已启动的 grant 读取仍持许可直到实际结算。
+    /// 按协议策略停止网络步骤；受监督的 grant 读取持许可到实际结算。
     pub async fn open_bi_with_cancel(
         &self,
         deadline: Instant,
@@ -142,32 +149,15 @@ impl ConnectionLease {
         drop(waiting);
         drop(global_waiting);
         self.claim_exchange()?;
-        let checking = self.check_current();
-        tokio::pin!(checking);
-        let checked = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                if self.record.presence_retention { let _ = checking.await; }
-                return Err(ConnectivityError::Stopped);
-            }
-            result = timeout_at(deadline, &mut checking) => result,
-        };
-        match checked {
-            Ok(result) => result?,
-            Err(source) => {
-                if self.record.presence_retention {
-                    // 逻辑结束后等待真实本地工作，活动许可不能提前归还。
-                    let _ = checking.await;
-                }
-                return Err(if self.record.presence_retention {
-                    ConnectivityError::AdmissionTimedOut(source)
-                } else {
-                    ConnectivityError::TimedOut(source)
-                });
-            }
-        }
+        checked(
+            self.check_current(),
+            self.record.supervise_local_work,
+            deadline,
+            cancel,
+        )
+        .await?;
         if Instant::now() >= deadline || self.record.stop.is_cancelled() || cancel.is_cancelled() {
-            return Err(if self.record.presence_retention {
+            return Err(if self.record.supervise_local_work {
                 ConnectivityError::AdmissionDeadlineExpired
             } else {
                 ConnectivityError::DeadlineExpired
@@ -191,6 +181,91 @@ impl ConnectionLease {
                 .try_acquire_owned()
                 .map_err(ConnectivityError::Busy)?;
             return StreamLease::new(pair, self.record.clone(), vec![capacity]);
+        }
+        if self.record.reject_excess_inbound {
+            let first = *self
+                .record
+                .first_inbound_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let buffered = self.record.pending.lock().await.take();
+            let mut held_activity = None;
+            let pair = match buffered {
+                Some(accepted) => {
+                    held_activity = Some(accepted.activity);
+                    accepted.pair
+                }
+                None => {
+                    let accepting = self.record.connection.accept_bi();
+                    match first.zip(self.record.accepted_stream_timeout) {
+                        Some((start, timeout)) => timeout_at(start + timeout, accepting)
+                            .await
+                            .map_err(ConnectivityError::TimedOut)??,
+                        None => accepting.await?,
+                    }
+                }
+            };
+            let started = self
+                .record
+                .first_inbound_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .unwrap_or_else(Instant::now);
+            let mut stream = StreamLease::new(pair, self.record.clone(), Vec::new())?;
+            stream.received_at = Some(started);
+            drop(held_activity);
+            let capacity = (|| {
+                let local = self
+                    .record
+                    .inbound
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(ConnectivityError::Busy)?;
+                let global = self
+                    .record
+                    .inbound_global
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(ConnectivityError::Busy)?;
+                Ok(vec![local, global])
+            })();
+            let permits = match capacity {
+                Ok(permits) => permits,
+                Err(primary) => {
+                    return match stream.stop() {
+                        Ok(()) => Err(primary),
+                        Err(additional) => Err(ConnectivityError::Settlement {
+                            primary: Box::new(primary),
+                            additional: Box::new(additional),
+                        }),
+                    }
+                }
+            };
+            stream.attach_capacity(permits);
+            self.claim_exchange()?;
+            let deadline = started
+                + self
+                    .record
+                    .accepted_stream_timeout
+                    .ok_or(ConnectivityError::DeadlineExpired)?;
+            if let Err(primary) = checked(
+                self.check_current(),
+                self.record.supervise_local_work,
+                deadline,
+                &self.record.stop,
+            )
+            .await
+            {
+                return match stream.stop() {
+                    Ok(()) => Err(primary),
+                    Err(additional) => Err(ConnectivityError::Settlement {
+                        primary: Box::new(primary),
+                        additional: Box::new(additional),
+                    }),
+                };
+            }
+            return Ok(stream);
         }
         let local = self
             .record

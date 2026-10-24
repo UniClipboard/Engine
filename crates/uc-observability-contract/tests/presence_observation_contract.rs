@@ -18,7 +18,12 @@ fn local_read_failure_and_explicit_denial_have_distinct_exported_results() {
 
 #[test]
 fn negotiated_protocol_only_exports_the_closed_known_kinds() {
-    for protocol in ["peer_reachability_v1", "peer_reachability_v2", "other"] {
+    for protocol in [
+        "peer_reachability_v1",
+        "peer_reachability_v2",
+        "blob",
+        "other",
+    ] {
         let payload = format!(
             r#"{{"kind":"physical","record":{{"event":"negotiated","protocol":"{protocol}"}}}}"#
         );

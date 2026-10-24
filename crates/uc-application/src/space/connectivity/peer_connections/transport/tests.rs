@@ -5,8 +5,8 @@ use super::{
 };
 use crate::connectivity::{
     AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream,
-    PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation,
+    PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -44,6 +44,13 @@ impl AsyncWrite for MemorySend {
     }
 }
 impl PeerSendStream for MemorySend {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn reset(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        // 此旧协议 fixture 不提供显式停止能力；需要停止的用例使用真实 bridge。
+        Err(ConnectivityError::Stopped)
+    }
     fn finish(&mut self) -> Result<(), ConnectivityError> {
         Ok(())
     }
@@ -61,7 +68,14 @@ impl AsyncRead for MemoryReceive {
         Pin::new(&mut self.0).poll_read(cx, buf)
     }
 }
-impl PeerReceiveStream for MemoryReceive {}
+impl PeerReceiveStream for MemoryReceive {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn stop(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        Err(ConnectivityError::Stopped)
+    }
+}
 fn streams() -> StreamPair {
     (
         Box::new(MemorySend(tokio::io::sink())),
@@ -149,6 +163,7 @@ impl ConnectivityBackend for MemoryBackend {
     async fn connect(
         &self,
         target: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         let index = target
@@ -252,7 +267,9 @@ impl SessionConnectionAdmissionPort for MemoryAdmission {
     async fn adopt_inbound(
         &self,
         raw: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        reservation.identified(peer(raw.authenticated_key()[0]))?;
         Ok(Box::new(MemoryGrant {
             authority: self.0.clone(),
             peer: peer(raw.authenticated_key()[0]),

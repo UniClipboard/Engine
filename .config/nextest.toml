@@ -191,18 +191,61 @@ test-group = "process"
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 2 }
 
-# 完整双节点传输与关闭使用真实期限，独占执行，避免把其它重场景负载计入关闭验收。
+# 受管双Engine连续2×1GiB真实流式资源验收；无重试，独占宿主并给实际字节校验留出期限。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & test(/host_adapter_contract::blob_resources::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & test(/host_adapter_contract::blob_resources::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# 入站基线组合配对、去重、文件重发及双方关闭；总预算覆盖完整fixture，内部10秒断言不变。
 [[profile.default.overrides]]
 filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behavior)"
 threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 2 }
 
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behavior)"
 threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(/^testing::host_adapter_contract::receive_retry::stream_isolation::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(/^testing::host_adapter_contract::receive_retry::stream_isolation::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 2 }
 
 [[profile.default.overrides]]
 filter = "package(uc-engine) & kind(lib) & test(/^testing::host_adapter_contract::/)"
 test-group = "engine-host-contract"
+
+# 完整 fixture 包含真实 Engine 的建立与排空；绑定内部仍保留原30秒关闭预算，
+# 外层须允许该预算实际执行。设置通知用例完整清理，专用关闭测试继续验收调用期限。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & binary(search_and_settings_capabilities) & test(=concurrent_settings_updates_are_all_covered_by_notifications)"
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+[[profile.default.overrides]]
+filter = "package(uc-engine-uniffi) & binary(public_contract) & test(=pairing_methods_return_invitation_data_and_stable_join_errors)"
+test-group = "binding-contract"
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & binary(search_and_settings_capabilities) & test(=concurrent_settings_updates_are_all_covered_by_notifications)"
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine-uniffi) & binary(public_contract) & test(=pairing_methods_return_invitation_data_and_stable_join_errors)"
+test-group = "binding-contract"
+slow-timeout = { period = "30s", terminate-after = 2 }
 
 [[profile.default.overrides]]
 filter = "package(uc-engine-uniffi) & binary(public_contract)"
@@ -326,3 +369,98 @@ slow-timeout = { period = "20s", terminate-after = 3 }
 [[profile.ci.overrides]]
 filter = "package(uc-infra-p2p) & test(silent_sponsor_is_recorded_as_response_timeout_not_authentication_failure)"
 slow-timeout = { period = "20s", terminate-after = 3 }
+
+# 第七片资源基线真实传输 1GiB；独占网络组，时间预算不等同于业务停滞期限。
+[[profile.default.overrides]]
+filter = "package(uc-infra-p2p) & binary(blob_resource_baseline)"
+test-group = "real-network"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-infra-p2p) & binary(blob_resource_baseline)"
+test-group = "real-network"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# 三端真实成员／SDK授权与关闭；独占执行，测试自身保留成员及接收期限，不重试。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & test(/runtime::blob_source_authorization::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & test(/runtime::blob_source_authorization::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 1 }
+
+# 原目录探测后强杀并重启接收进程；复用既有crash的90秒期限并独占宿主。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & test(/offline_lifecycle::crash::directory_probe::/)"
+threads-required = "num-test-threads"
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & test(/offline_lifecycle::crash::directory_probe::/)"
+threads-required = "num-test-threads"
+
+
+# SDK资源验收连续两轮1GiB，流式写入与逐块核对；全局资源断言需独占宿主。
+[[profile.default.overrides]]
+filter = "package(uc-infra-p2p) & test(/managed_download_large_stream_settles_sdk_tags_and_connection/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-infra-p2p) & test(/managed_download_large_stream_settles_sdk_tags_and_connection/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+
+# 真实接收、锁定／暂停与重开；保留内部20秒断言，外层容纳完整fixture与故障清理。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & test(/receive_retry::lifecycle::/)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+# 同一用例覆盖多次启停、配置导入导出和兼容能力；独占运行并覆盖各操作原有期限。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::engine_start_builds_a_resumable_real_session)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::engine_start_builds_a_resumable_real_session)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+# 配置导入测试逐轮启停多个Engine并核验原资料；完整fixture独占且有界，内部每次关闭仍为15秒。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & binary(host_configuration_files_e2e)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & binary(host_configuration_files_e2e)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 两次真实配对、单项重试与5秒取消未完成，显式本机Collector验收独占进程。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & test(/receive_retry::observation::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & test(/receive_retry::observation::/)"
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & test(/receive_retry::lifecycle::/)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+# 显式资源验收还观察原阻塞池的真实空闲退出，保留各操作原有内部期限与零重试。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/)"
+slow-timeout = { period = "30s", terminate-after = 3 }

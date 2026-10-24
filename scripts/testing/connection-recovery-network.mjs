@@ -48,6 +48,8 @@ const peerBinary = options.get('--peer-host')
 const peerSide = Number(options.get('--peer-side') ?? 1)
 // P00 前置只使用旧库正常配对产生的资料；每次运行重新配对并复制，不写入人工资格。
 const prepairedHost = options.get('--prepaired-host')
+const blobBaseline = options.get('--blob-baseline') === '1'
+assert(!blobBaseline || prepairedHost)
 const upgradeSide = Number(options.get('--upgrade-side'))
 const presenceRole = options.get('--presence-role') ?? (upgradeSide === 0 ? 'receive' : 'initiate')
 assert(['receive', 'initiate'].includes(presenceRole))
@@ -318,7 +320,11 @@ async function transferFile(left, right, marker) {
         if (entry.content_type !== 'file') continue
         const response = await receiver.raw({ command: 'read_file', entry: entry.entry_id })
         if (!response.ok || response.ok.file_name !== displayName) continue
-        if (Buffer.from(response.ok.bytes).equals(Buffer.from(content))) return true
+        if (Buffer.from(response.ok.bytes).equals(Buffer.from(content))) {
+          receiver.expectedFiles ??= []
+          receiver.expectedFiles.push({ entry: entry.entry_id, content, displayName })
+          return true
+        }
       }
       return false
     }, 60_000, 'exact file bytes did not arrive')
@@ -613,6 +619,9 @@ async function run() {
     return
   }
   const [a, b, c] = nodes
+  // 独立文件互通格从配对前就隔离直连；恢复场景先保留未隔离的双路径基线。
+  const relayOnlyFile = mode === 'relay' && only === 'E02-file-transfer'
+  if (relayOnlyFile) for (const node of nodes) blockDirect(node)
   await requiredScenario('E01-complete-pairing', async () => {
     const created = await paired(nodes)
     return pairingProof(nodes, created)
@@ -621,12 +630,19 @@ async function run() {
     await requiredScenario('E02-text-transfer', async () => {
       await transfer(a, b, 'baseline')
       if (c) await transfer(a, c, 'baseline')
-      return { exact_text_verified: true, direction_count: c ? 4 : 2, ...(mode === 'direct' ? { paths: await selectedPaths(), ...await negotiatedPresence(a, 'peer_reachability_v2') } : {}) }
+      return { exact_text_verified: true, direction_count: c ? 4 : 2, ...(mode === 'direct' ? { paths: await selectedPaths(), ...await negotiatedProtocol(a, 'peer_reachability_v2') } : {}) }
     })
     await requiredScenario('E02-file-transfer', async () => {
       await transferFile(a, b, 'baseline')
-      return { exact_bytes_verified: true, direction_count: 2 }
+      const current = peerBinary && peerSide === 0 ? b : a
+      // 未隔离的恢复基线仅证明内容；严格路径证明在对应的隔离阶段执行。
+      const topologyProof = mode === 'relay' && !relayOnlyFile ? {} : { paths: await selectedPaths() }
+      return { exact_bytes_verified: true, direction_count: 2, direct_paths_blocked: relayOnlyFile, hosts: [a, b].map(node => node.hostIdentity), ...topologyProof, ...await negotiatedProtocol(current, 'blob') }
     })
+  }
+  if (only === 'E02-file-transfer') {
+    for (const node of nodes) await node.stop()
+    return
   }
   if (mode === 'direct') await scenario('E14-concurrent-clipboard', async () => {
     const sender = peerBinary && peerSide === 0 ? b : a
@@ -741,7 +757,8 @@ async function prepairedUpgrade() {
     await usable(nodes)
     await online(nodes, 20_000)
     await transfer(nodes[0], nodes[1], 'old-paired-baseline')
-    return { old_pairing: true, old_profile_reopen: true, exact_bidirectional_content: true, paths: await selectedPaths() }
+    if (blobBaseline) await transferFile(nodes[0], nodes[1], 'old-paired-blob-baseline')
+    return { old_pairing: true, old_profile_reopen: true, exact_bidirectional_content: true, ...(blobBaseline ? { exact_bidirectional_files: true } : {}), paths: await selectedPaths() }
   })
   const before = await Promise.all(nodes.map(node => node.call('observe')))
   const endpoints = await Promise.all(nodes.map(node => node.call('network_endpoint')))
@@ -760,12 +777,12 @@ async function prepairedUpgrade() {
   }
   await requiredScenario('P00-prepaired-upgrade', async () => {
     const upgraded = nodes[upgradeSide]
-    if (presenceRole === 'receive') {
+    if (!blobBaseline && presenceRole === 'receive') {
       upgraded.rejectPresenceEndpointIds = [endpoints[1 - upgradeSide]]
     }
     const other = nodes[1 - upgradeSide]
-    if (presenceRole === 'initiate' && other.hostIdentity?.capabilities?.includes('space-work-events')) other.rejectPresenceEndpointIds = [endpoints[upgradeSide]]
-    if (presenceRole === 'initiate' && !other.hostIdentity?.capabilities?.includes('space-work-events')) upgraded.rejectInboundPresenceEndpointIds = [endpoints[1 - upgradeSide]]
+    if (!blobBaseline && presenceRole === 'initiate' && other.hostIdentity?.capabilities?.includes('space-work-events')) other.rejectPresenceEndpointIds = [endpoints[upgradeSide]]
+    if (!blobBaseline && presenceRole === 'initiate' && !other.hostIdentity?.capabilities?.includes('space-work-events')) upgraded.rejectInboundPresenceEndpointIds = [endpoints[1 - upgradeSide]]
     const order = presenceRole === 'initiate' ? [upgraded, other] : [other, upgraded]
     const sessions = []
     records.at(-1).proof = { sessions }
@@ -782,13 +799,27 @@ async function prepairedUpgrade() {
       members: JSON.stringify(value.devices) === JSON.stringify(after[index].devices),
       content: JSON.stringify(value.history) === JSON.stringify(after[index].history),
     }))
-    records.at(-1).proof = { sessions, upgraded_side: upgradeSide, presence_role: presenceRole, retained, independent_original_copies: true }
+    records.at(-1).proof = { sessions, upgraded_side: upgradeSide, ...(blobBaseline ? { blob_roles: ['download', 'provide'] } : { presence_role: presenceRole }), retained, independent_original_copies: true }
     assert(retained.every(row => row.identity && row.transport_identity && row.members && row.content), 'original paired state changed during single-side upgrade')
     await online(nodes, 92_000)
-    await until(async () => { const facts = await upgraded.call('connections'); records.at(-1).proof.direction = { incoming: facts.incoming, outgoing: facts.outgoing }; return presenceRole === 'receive' ? facts.incoming > 0 && facts.outgoing === 0 : facts.outgoing > 0 }, 35_000, 'the required real presence direction was not established')
+    if (!blobBaseline) await until(async () => { const facts = await upgraded.call('connections'); records.at(-1).proof.direction = { incoming: facts.incoming, outgoing: facts.outgoing }; return presenceRole === 'receive' ? facts.incoming > 0 && facts.outgoing === 0 : facts.outgoing > 0 }, 35_000, 'the required real presence direction was not established')
     await transfer(nodes[0], nodes[1], 'single-side-upgrade')
-    return { ...records.at(-1).proof, exact_bidirectional_content: true, paths: await selectedPaths(), hosts: nodes.map(node => node.hostIdentity), ...await negotiatedPresence(upgraded, options.get('--presence-protocol') ?? 'peer_reachability_v1') }
+    if (blobBaseline) {
+      // 读取正常旧库接收并落盘的原文件，不能只证明升级后的新消息可达。
+      for (const node of nodes) for (const file of node.expectedFiles ?? []) {
+        const restored = await node.call('read_file', { entry: file.entry })
+        assert.equal(restored.file_name, file.displayName, 'old file display metadata changed')
+        assert(Buffer.from(restored.bytes).equals(Buffer.from(file.content)), 'old received bytes changed on upgrade')
+      }
+      await transferFile(nodes[0], nodes[1], 'single-side-blob-upgrade')
+    }
+    return { ...records.at(-1).proof, exact_bidirectional_content: true,
+      ...(blobBaseline ? { original_received_files_readable: true, exact_bidirectional_files: true } : {}),
+      paths: await selectedPaths(), hosts: nodes.map(node => node.hostIdentity),
+      ...await negotiatedProtocol(upgraded, blobBaseline ? 'blob' : (options.get('--presence-protocol') ?? 'peer_reachability_v1')) }
+
   })
+  if (blobBaseline) return
   // 初始角色已经用真实连接证明；故障前恢复默认双向主动能力，不限制旧端的恢复方式。
   for (const node of nodes) {
     if (node.rejectInboundPresenceEndpointIds) {
@@ -837,35 +868,41 @@ async function prepairedUpgrade() {
 
 }
 
-async function negotiatedPresence(node, expected) {
+async function negotiatedProtocol(node, expected) {
   await node.call('flush')
   const facts = []
   for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
     for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
       try {
         const fields = JSON.parse(line).fields ?? {}
-        if (fields['event.name'] === 'connection.protocol.negotiated' && fields.protocol?.startsWith('peer_reachability_')) facts.push(fields.protocol)
+        if (fields['event.name'] === 'connection.protocol.negotiated' && typeof fields.protocol === 'string') facts.push(fields.protocol)
       } catch {}
     }
   }
-  assert(facts.includes(expected), 'actual negotiated presence ALPN was not observed')
+  assert(facts.includes(expected), 'actual negotiated protocol was not observed')
   return { negotiated_protocol: expected, actual_handshake_observed: true }
 }
 
 async function selectedPaths() {
   const expected = mode === 'relay' ? 'relay' : 'direct'
   const paths = []
-  await until(async () => {
-    paths.length = 0
-    for (const node of nodes) {
-      const peers = await node.call('peers')
-      for (const peer of nodes.filter(peer => peer !== node)) {
-        const row = peers.find(row => row.peer_id === peer.id)
-        paths.push({ node: node.label, peer: peer.label, selected_path: row?.channel })
+  try {
+    await until(async () => {
+      paths.length = 0
+      for (const node of nodes) {
+        const peers = await node.call('peers')
+        for (const peer of nodes.filter(peer => peer !== node)) {
+          const row = peers.find(row => row.peer_id === peer.id)
+          paths.push({ node: node.label, peer: peer.label, selected_path: row?.channel })
+        }
       }
-    }
-    return paths.every(row => row.selected_path === expected)
-  }, 5000, 'actual selected path did not match the isolated topology')
+      return paths.every(row => row.selected_path === expected)
+    }, 5000, 'actual selected path did not match the isolated topology')
+  } catch (error) {
+    // 失败现场只保留固定路径分类与测试端角色，不输出对端身份或地址。
+    const observed = paths.map(row => `${row.node}->${row.peer}:${['direct', 'relay', 'offline', 'unknown'].includes(row.selected_path) ? row.selected_path : 'unavailable'}`).join(',')
+    throw new Error(`${error.message}; expected=${expected}, observed=${observed}`, { cause: error })
+  }
   return paths
 }
 
@@ -1031,7 +1068,7 @@ async function relayScenarios(a, b) {
   await online(nodes, 20_000)
   await requiredScenario('E02-relay-only-text-transfer', async () => {
     await transfer(a, b, 'relay-only-baseline')
-    return { direct_paths_blocked: directDropPackets > 0, exact_text_verified: true, direction_count: 2, paths: await selectedPaths(), ...await negotiatedPresence(a, 'peer_reachability_v2') }
+    return { direct_paths_blocked: directDropPackets > 0, exact_text_verified: true, direction_count: 2, paths: await selectedPaths(), ...await negotiatedProtocol(a, 'peer_reachability_v2') }
   })
   await requiredScenario('E02-relay-only-file-transfer', async () => {
     await transferFile(a, b, 'relay-only-baseline')
@@ -1185,7 +1222,7 @@ finally {
   rmSync(root, { recursive: true, force: true })
   const binaries = [binary, prepairedHost, legacyBinary, peerBinary, relayBinary, relayBinaryB, restartBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
-  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}${prepairedHost ? ` --prepaired-host ${prepairedHost} --upgrade-side ${upgradeSide} --presence-role ${presenceRole} --presence-protocol ${options.get('--presence-protocol') ?? 'peer_reachability_v1'}` : ''}${peerBinary ? ` --peer-host ${peerBinary} --peer-side ${peerSide}` : ''}`
+  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}${blobBaseline ? ' --blob-baseline' : ''}${prepairedHost ? ` --prepaired-host ${prepairedHost} --upgrade-side ${upgradeSide} --presence-role ${presenceRole} --presence-protocol ${options.get('--presence-protocol') ?? 'peer_reachability_v1'}` : ''}${peerBinary ? ` --peer-host ${peerBinary} --peer-side ${peerSide}` : ''}`
   const timingCompletedAt = performance.now()
   const scenarioStartedAt = firstScenarioStartedAt ?? cleanupStartedAt
   const timings = {

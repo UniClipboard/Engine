@@ -8,7 +8,9 @@
 // Types use String for transfer_id / entry_id to keep the receiver projection
 // DTOs decoupled from id value objects across crate boundaries.
 
+use super::entry_receive_attempt::AttemptState;
 use async_trait::async_trait;
+use std::collections::HashSet;
 
 /// Failure while completing the one-shot privacy maintenance required after
 /// migrating receiver transfer persistence from plaintext to ciphertext.
@@ -81,6 +83,7 @@ impl std::fmt::Display for TrackedFileTransferStatus {
 /// Input for seeding a pending transfer record from clipboard metadata.
 #[derive(Debug, Clone)]
 pub struct PendingInboundTransfer {
+    pub item_role: Option<ReceiveItemRole>,
     pub transfer_id: String,
     pub entry_id: String,
     pub attempt_id: Option<String>,
@@ -194,16 +197,121 @@ pub struct EntryTransferSummary {
     pub transfer_ids: Vec<String>,
 }
 
-/// Current aggregate progress for any remote inbound receive attempt.
+/// 接收项的业务单元；目录始终按完整原始单元呈现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveItemKind {
+    /// 历史记录未保存类型资料；不得根据名称或路径推断。
+    Unknown,
+    File,
+    Representation,
+    DirectoryUnit,
+}
+
+/// 接收失败的固定原因，不携带底层错误正文或来源资料。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveItemFailureReason {
+    NetworkUnavailable,
+    TimedOut,
+    AccessDenied,
+    StorageUnavailable,
+    IntegrityCheckFailed,
+    Interrupted,
+    Unknown,
+}
+
+/// 可供宿主选择的接收项；身份绑定本次查询的 attempt。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiveItemProgress {
+    pub item_id: String,
+    pub kind: ReceiveItemKind,
+    pub status: TrackedFileTransferStatus,
+    /// 目录仍待父结算时可保留已知成员失败；该原因本身不表示父尝试已经结束。
+    pub failure_reason: Option<ReceiveItemFailureReason>,
+}
+
+/// 目录完整性由 attempt 的终态决定，不能由最后一个成员完成替代。
+pub fn group_receive_items(
+    state: AttemptState,
+    directory: bool,
+    mut items: Vec<ReceiveItemProgress>,
+    delivered: &HashSet<String>,
+) -> Vec<ReceiveItemProgress> {
+    items.sort_by(|left, right| left.item_id.cmp(&right.item_id));
+    if !directory {
+        // 下载完成仍需保存；已经交付的继承项不因新尝试接收中而退回传输态。
+        if !state.is_terminal() {
+            for item in &mut items {
+                if item.status == TrackedFileTransferStatus::Completed
+                    && !delivered.contains(&item.item_id)
+                {
+                    item.status = TrackedFileTransferStatus::Transferring;
+                }
+            }
+        }
+        if state.is_terminal() {
+            for item in &mut items {
+                if matches!(
+                    item.status,
+                    TrackedFileTransferStatus::Pending | TrackedFileTransferStatus::Transferring
+                ) || (item.status == TrackedFileTransferStatus::Completed
+                    && state != AttemptState::Completed
+                    && !delivered.contains(&item.item_id))
+                {
+                    if state == AttemptState::Cancelled {
+                        item.status = TrackedFileTransferStatus::Cancelled;
+                    } else {
+                        item.status = TrackedFileTransferStatus::Failed;
+                        item.failure_reason = Some(ReceiveItemFailureReason::Interrupted);
+                    }
+                }
+            }
+        }
+        return items;
+    }
+    let status = match state {
+        AttemptState::Completed => TrackedFileTransferStatus::Completed,
+        AttemptState::Failed => TrackedFileTransferStatus::Failed,
+        AttemptState::Cancelled => TrackedFileTransferStatus::Cancelled,
+        AttemptState::Receiving
+        | AttemptState::Committing
+        | AttemptState::Cancelling
+        | AttemptState::Failing => TrackedFileTransferStatus::Transferring,
+    };
+    let member_failure = items
+        .iter()
+        .filter(|item| item.status == TrackedFileTransferStatus::Failed)
+        .filter_map(|item| item.failure_reason)
+        .find(|reason| *reason != ReceiveItemFailureReason::Unknown);
+    // 目录仍等待原成员终态或清理交接时，可展示已知失败，但不能据此终结父尝试。
+    let failure_reason = match status {
+        TrackedFileTransferStatus::Failed => {
+            Some(member_failure.unwrap_or(ReceiveItemFailureReason::Unknown))
+        }
+        TrackedFileTransferStatus::Transferring => member_failure,
+        _ => None,
+    };
+    vec![ReceiveItemProgress {
+        item_id: "directory_unit".to_owned(),
+        kind: ReceiveItemKind::DirectoryUnit,
+        status,
+        failure_reason,
+    }]
+}
+
+/// 当前接收尝试的成员聚合；目录成员计数与可选择的整个目录单元分开。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryReceiveProgress {
     pub entry_id: String,
     pub attempt_id: String,
     pub state: crate::ports::entry_receive_attempt::AttemptState,
     pub total_bytes: i64,
+    /// 已经交付的成员字节；网络完成但尚未保存的成员不计入。
     pub completed_bytes: i64,
+    /// 当前尝试的成员数；目录仍按成员统计。
     pub items_total: u32,
+    /// Core业务判定已经完成的成员数，保持与保存事实一致。
     pub items_completed: u32,
+    pub items: Vec<ReceiveItemProgress>,
 }
 
 /// Expired in-flight record with cleanup target.
@@ -354,4 +462,96 @@ pub fn compute_aggregate_status(
         return Some(TrackedFileTransferStatus::Cancelled);
     }
     Some(TrackedFileTransferStatus::Completed)
+}
+
+#[cfg(test)]
+mod receive_item_tests {
+    use super::*;
+
+    fn completed(id: &str) -> ReceiveItemProgress {
+        ReceiveItemProgress {
+            item_id: id.into(),
+            kind: ReceiveItemKind::File,
+            status: TrackedFileTransferStatus::Completed,
+            failure_reason: None,
+        }
+    }
+
+    #[test]
+    fn delivered_item_does_not_reenter_transfer_while_new_download_still_needs_commit() {
+        let proof = HashSet::from(["saved".to_owned()]);
+        let result = group_receive_items(
+            AttemptState::Receiving,
+            false,
+            vec![completed("saved"), completed("downloaded")],
+            &proof,
+        );
+        assert_eq!(result[0].item_id, "downloaded");
+        assert_eq!(result[0].status, TrackedFileTransferStatus::Transferring);
+        assert_eq!(result[1].status, TrackedFileTransferStatus::Completed);
+        let directory = group_receive_items(
+            AttemptState::Receiving,
+            true,
+            vec![completed("saved")],
+            &proof,
+        );
+        assert_eq!(directory[0].kind, ReceiveItemKind::DirectoryUnit);
+        assert_eq!(directory[0].status, TrackedFileTransferStatus::Transferring);
+    }
+
+    #[test]
+    fn directory_keeps_known_failure_while_waiting_for_parent_settlement() {
+        for state in [
+            AttemptState::Receiving,
+            AttemptState::Committing,
+            AttemptState::Failing,
+            AttemptState::Cancelling,
+        ] {
+            let directory = group_receive_items(
+                state,
+                true,
+                vec![ReceiveItemProgress {
+                    item_id: "member".into(),
+                    kind: ReceiveItemKind::File,
+                    status: TrackedFileTransferStatus::Failed,
+                    failure_reason: Some(ReceiveItemFailureReason::StorageUnavailable),
+                }],
+                &HashSet::new(),
+            );
+            assert_eq!(directory[0].status, TrackedFileTransferStatus::Transferring);
+            assert_eq!(
+                directory[0].failure_reason,
+                Some(ReceiveItemFailureReason::StorageUnavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn unstarted_items_follow_terminal_attempt_without_erasing_prior_delivery() {
+        for state in [AttemptState::Failed, AttemptState::Cancelled] {
+            let result = group_receive_items(
+                state,
+                false,
+                vec![
+                    completed("saved"),
+                    ReceiveItemProgress {
+                        item_id: "unstarted".into(),
+                        kind: ReceiveItemKind::File,
+                        status: TrackedFileTransferStatus::Pending,
+                        failure_reason: None,
+                    },
+                ],
+                &HashSet::from(["saved".into()]),
+            );
+            assert_eq!(result[0].status, TrackedFileTransferStatus::Completed);
+            assert_eq!(
+                result[1].status,
+                if state == AttemptState::Cancelled {
+                    TrackedFileTransferStatus::Cancelled
+                } else {
+                    TrackedFileTransferStatus::Failed
+                }
+            );
+        }
+    }
 }

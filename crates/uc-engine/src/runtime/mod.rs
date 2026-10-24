@@ -1,3 +1,5 @@
+#[cfg(all(test, feature = "dev-tools"))]
+mod blob_source_authorization;
 mod census;
 mod dispatch;
 mod host_clipboard;

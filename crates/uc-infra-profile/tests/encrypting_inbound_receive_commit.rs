@@ -44,6 +44,7 @@ impl BlobCipherPort for RecordingCipher {
 #[derive(Default)]
 struct RecordingCommit {
     inline_data: Mutex<Vec<Vec<u8>>>,
+    deliveries: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -53,9 +54,36 @@ impl CommitInboundReceivePort for RecordingCommit {
         settlement: &InboundReceiveSettlement,
     ) -> Result<(), InboundReceiveCommitError> {
         let record = match settlement {
-            InboundReceiveSettlement::Complete { record, .. }
-            | InboundReceiveSettlement::Partial { record, .. } => record,
-            InboundReceiveSettlement::NoEntry { .. } => return Ok(()),
+            InboundReceiveSettlement::Progress {
+                record,
+                delivered_item_ids,
+                ..
+            } => {
+                self.deliveries
+                    .lock()
+                    .unwrap()
+                    .extend(delivered_item_ids.clone());
+                record
+            }
+            InboundReceiveSettlement::Complete {
+                record,
+                delivered_item_ids,
+                ..
+            }
+            | InboundReceiveSettlement::Partial {
+                record,
+                delivered_item_ids,
+                ..
+            } => {
+                self.deliveries
+                    .lock()
+                    .unwrap()
+                    .extend(delivered_item_ids.clone());
+                record
+            }
+            InboundReceiveSettlement::NoEntry { .. }
+            | InboundReceiveSettlement::FileFailed { .. }
+            | InboundReceiveSettlement::FileCleaned { .. } => return Ok(()),
         };
         let representations = match record {
             InboundReceiveRecord::Create {
@@ -120,6 +148,7 @@ async fn atomic_inbound_commit_encrypts_inline_payload_before_storage() {
 
     commit
         .commit_inbound_receive(&InboundReceiveSettlement::Complete {
+            delivered_item_ids: vec!["saved-item".into()],
             record: record(),
             attempt_id: "attempt-1".to_owned(),
             file_set: None,
@@ -133,11 +162,49 @@ async fn atomic_inbound_commit_encrypts_inline_payload_before_storage() {
         inner.inline_data.lock().unwrap().as_slice(),
         &[b"encrypted:hello".to_vec()]
     );
+    assert_eq!(inner.deliveries.lock().unwrap().as_slice(), &["saved-item"]);
     assert_eq!(
         cipher.aads.lock().unwrap().as_slice(),
         &[uc_core::crypto::aad::for_inline(
             &EventId::from("event-1"),
             &RepresentationId::from("rep-1"),
+        )]
+    );
+}
+
+#[tokio::test]
+async fn progress_commit_encrypts_inline_payload_and_preserves_delivered_artifact_identity() {
+    use uc_core::ports::{ReceiveArtifact, ReceiveArtifactOwnership};
+    let inner = Arc::new(RecordingCommit::default());
+    let cipher = Arc::new(RecordingCipher {
+        aads: Mutex::new(Vec::new()),
+    });
+    let commit = EncryptingInboundReceiveCommit::new(inner.clone(), cipher.clone());
+    commit
+        .commit_inbound_receive(&InboundReceiveSettlement::Progress {
+            delivered_item_ids: vec!["saved-item".into()],
+            record: record(),
+            attempt_id: "attempt-1".into(),
+            artifact: ReceiveArtifact {
+                item_id: "saved-item".into(),
+                staged_path: "PRIVATE_PATH".into(),
+                final_path: "PRIVATE_PATH".into(),
+                ownership: ReceiveArtifactOwnership::ManagedStaging,
+            },
+            now_ms: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        inner.inline_data.lock().unwrap().as_slice(),
+        &[b"encrypted:hello".to_vec()]
+    );
+    assert_eq!(inner.deliveries.lock().unwrap().as_slice(), &["saved-item"]);
+    assert_eq!(
+        cipher.aads.lock().unwrap().as_slice(),
+        &[uc_core::crypto::aad::for_inline(
+            &EventId::from("event-1"),
+            &RepresentationId::from("rep-1")
         )]
     );
 }

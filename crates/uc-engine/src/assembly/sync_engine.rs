@@ -9,6 +9,12 @@ use super::observability::{self, observe_peer_reachability};
 mod outbound_progress;
 #[cfg(all(test, feature = "dev-tools"))]
 use crate::testing::active_pull_publication::{decorate_blob, decorate_preparation};
+#[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+use crate::testing::directory_probe;
+#[cfg(all(test, feature = "dev-tools"))]
+use crate::testing::receive_exports;
+#[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+use crate::testing::receive_streams;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,12 +34,12 @@ use crate::dev::{
 };
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
-    ApplicationSpaceAdapters, ApplyGroupUpdatePort, ClipboardReceiverPort, ConnectivityManager,
-    ConnectivityPolicy, GroupUpdateEndpoint, GroupUpdateLocalWorkPort, GroupUpdateReceiverPort,
-    GroupUpdateWirePort, HistoryWirePort, IdleRetentionPolicy, LifecycleError,
-    MembershipHistoryReceiver, MembershipHistoryTransport, PeerIdentityDirectoryPort,
-    PeerReachabilityTransport, PeerReachabilityTransportPorts, SpaceAdmissionAdapters,
-    SpaceMembershipAdapters, SpaceRuntimeAdapters,
+    ApplicationSpaceAdapters, ApplyGroupUpdatePort, BlobDownloadResources, BlobTransport,
+    ClipboardReceiverPort, ConnectivityManager, ConnectivityPolicy, GroupUpdateEndpoint,
+    GroupUpdateLocalWorkPort, GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort,
+    IdleRetentionPolicy, LifecycleError, MembershipHistoryReceiver, MembershipHistoryTransport,
+    PeerIdentityDirectoryPort, PeerReachabilityTransport, PeerReachabilityTransportPorts,
+    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::file_transfer::FileTransferCancellationReason;
@@ -46,6 +52,7 @@ use uc_infra_local::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
 use uc_infra_p2p::network::iroh::{
+    blob_exchange::IrohBlobSourceResolver,
     connectivity::{ConnectivityProfile, PeerReachabilityWire},
     group_update_adapter::{GroupUpdateWire, IrohGroupUpdateAdapter, SessionGroupUpdateLocalWork},
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
@@ -339,13 +346,50 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.fingerprint),
     )?;
 
-    // Slice 3 Phase 1:同一节点装第五个 ALPN(iroh-blobs)。BlobReference
-    // 是 sqlite 仓储,不跟 router 绑定;这里只拿传输 port。
-    let BlobHandlers { blob_transfer } = builder
-        .install_blobs(space_setup.iroh_blob_store_dir.clone())
+    #[cfg(all(test, feature = "dev-tools"))]
+    let outbound_progress_reporter = receive_exports::decorate_reporter(
+        &space_setup.iroh_blob_store_dir,
+        outbound_progress_reporter,
+    );
+
+    // 同一存储上的交换能力交给唯一 Application 负责人；Router 不再由 SDK 自管。
+    // SQLite 引用与纯本地存储能力交给 transfer，完整条目提交仍归既有接收权威。
+    let blob_connectivity = builder.connectivity_deps(
+        ConnectivityProfile::Blob,
+        Arc::clone(&space_setup.peer_addr_repo),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
+        Arc::clone(&space_setup.fingerprint),
+        Arc::clone(&peer_reachability),
+    );
+    #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+    let stream_fixture_path = space_setup.iroh_blob_store_dir.clone();
+    let BlobHandlers {
+        blob_transfer,
+        transport: blob_transport,
+        read_store: blob_read_store,
+    } = builder
+        .install_blobs(
+            space_setup.iroh_blob_store_dir.clone(),
+            move |exchange, lifecycle| {
+                #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+                let exchange = receive_streams::decorate(&stream_fixture_path, exchange);
+                BlobTransport::new(
+                    blob_connectivity.backend,
+                    blob_connectivity.admission,
+                    exchange,
+                    lifecycle,
+                )
+            },
+        )
         .await?;
     #[cfg(all(test, feature = "dev-tools"))]
     let blob_transfer = decorate_blob(&space_setup.iroh_blob_store_dir, blob_transfer);
+    #[cfg(all(test, feature = "dev-tools"))]
+    let blob_read_store =
+        receive_exports::decorate(&space_setup.iroh_blob_store_dir, blob_read_store);
+
+    let blob_read_store = observability::observe_blob_exports(blob_read_store);
 
     // Application 先构造认证 endpoint；Space 持续维护要等 Router 就绪后
     // 才由 ApplicationRuntime 启动。
@@ -529,6 +573,9 @@ pub async fn prepare_sync_session(
     #[cfg(not(feature = "lan-compat"))]
     let mobile_device_repo: Arc<dyn uc_core::ports::FindMobileDeviceByIdPort> =
         Arc::new(UnavailableMobileDeviceLookup);
+    let directory_publisher = FsAtomicPublisher::new();
+    #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+    let directory_publisher = directory_probe::decorate(directory_publisher);
     let clipboard =
         crate::assembly::observability::observe_clipboard(ApplicationClipboardAdapters {
             peer_addresses: Arc::clone(&space_setup.peer_addr_repo),
@@ -539,7 +586,7 @@ pub async fn prepare_sync_session(
             mobile_device_repo,
             active_receiver: active_clipboard_receiver,
             active_dispatch: active_clipboard_dispatch,
-            active_pull_publisher: FsAtomicPublisher::new(),
+            active_pull_publisher: directory_publisher,
             active_pull_target_reserver: FsInboundFileTarget::new(Arc::clone(
                 &space_setup.settings,
             )),
@@ -547,6 +594,14 @@ pub async fn prepare_sync_session(
             staging_cleanup: FsDirectoryStagingCleaner::new(),
         });
     let application_network = application.assemble_network(ApplicationNetworkAdapters {
+        blob_downloads: Arc::new(BlobDownloadResources {
+            transport: blob_transport,
+            store: blob_read_store,
+            source: Arc::new(IrohBlobSourceResolver::new(
+                space_setup.peer_access.clone(),
+                space_setup.fingerprint.clone(),
+            )),
+        }),
         blob_transfer: Arc::clone(&blob_transfer),
         blob_reference: Arc::clone(&space_setup.blob_reference_repo),
         outbound_progress_reporter: Arc::clone(&outbound_progress_reporter),

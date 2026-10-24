@@ -36,6 +36,7 @@ use crate::operations::history::history::{
 use crate::operations::history::receive::{
     execute_cancel_entry_receive, execute_cancel_inbound_transfer,
     execute_list_entry_receive_progress, execute_query_entry_receive_progress,
+    execute_retry_entry_receive,
 };
 use crate::operations::history::resend::execute_resend_entry;
 use crate::operations::history::resource::{
@@ -566,6 +567,9 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::ListEntryReceiveProgress => {
                     execute_list_entry_receive_progress(self.current_facade().await?.as_ref()).await
                 }
+                Operation::RetryEntryReceive(input) => {
+                    execute_retry_entry_receive(self.current_facade().await?.as_ref(), input).await
+                }
                 Operation::CancelEntryReceive(input) => {
                     execute_cancel_entry_receive(self.current_facade().await?.as_ref(), input).await
                 }
@@ -754,6 +758,7 @@ impl EngineRuntime for ProductionRuntime {
                 .current_facade()
                 .await?
                 .fetch_blob(FetchBlobCommand {
+                    cancellation: CancellationToken::new(),
                     ticket: BlobTicket::from_bytes(ticket),
                     entry_id: EntryId::from_string(entry_id),
                     transfer_context: None,

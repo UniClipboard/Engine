@@ -51,8 +51,11 @@ use crate::space::{
     SpaceRuntimeAdapters, SpaceSessionDeps, SpaceTransitionDeps,
 };
 use crate::transfer::blob::facade::BlobTransferDeps;
+use crate::transfer::blob::transport::BlobDownloadResources;
 use crate::transfer::file::assembly::FileTransferAssembly;
-use crate::transfer::file::assembly::{FileTransferAssemblyDeps, ReceiveCancellationDeps};
+use crate::transfer::file::assembly::{
+    FileTransferAssemblyDeps, InboundMaterializerDeps, ReceiveActionsDeps,
+};
 use crate::transfer::file::timeout_runtime::FileTransferTimeoutRuntime;
 use crate::transfer::receive::reconciliation::EnsureReceiveReadyPort;
 
@@ -101,6 +104,7 @@ pub struct ApplicationClipboardAdapters {
 
 /// Engine 一次提交给 Application 的网络 adapter 集合。
 pub struct ApplicationNetworkAdapters {
+    pub blob_downloads: Arc<BlobDownloadResources>,
     pub blob_transfer: Arc<dyn BlobTransferPort>,
     pub blob_reference: Arc<dyn BlobReferenceRepositoryPort>,
     pub outbound_progress_reporter: Arc<dyn OutboundProgressReporterPort>,
@@ -415,11 +419,13 @@ impl ApplicationAssembly {
         let ApplicationNetworkAdapters {
             blob_transfer,
             blob_reference,
+            blob_downloads,
             outbound_progress_reporter,
             space,
             clipboard,
         } = adapters;
         let blob = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
+            downloads: blob_downloads,
             hash: Arc::clone(&self.deps.system.hash),
             blob_transfer: Arc::clone(&blob_transfer),
             blob_reference,
@@ -504,7 +510,7 @@ impl ApplicationAssembly {
             active_pull_hidden_marker,
             staging_cleanup,
         } = clipboard;
-        let clipboard_sync = Arc::new(self.file_transfer.with_receive_cancellation(
+        let clipboard_sync = Arc::new(self.file_transfer.with_receive_actions(
             ClipboardSyncFacade::new(ClipboardSyncDeps {
                 peer_addr_repo: Arc::clone(&peer_addresses),
                 member_repo: Arc::clone(&self.deps.device.member_repo),
@@ -525,7 +531,16 @@ impl ApplicationAssembly {
                 mobile_device_repo,
                 host_event_bus: Arc::clone(&self.deps.host_event_bus),
             }),
-            ReceiveCancellationDeps {
+            ReceiveActionsDeps {
+                retry: self.clipboard.receive_retry_deps(
+                    InboundMaterializerDeps {
+                        fetcher: blob.clone(),
+                        publisher: active_pull_publisher.clone(),
+                        target_reserver: active_pull_target_reserver.clone(),
+                        hidden_marker: active_pull_hidden_marker.clone(),
+                    },
+                    member_scope.clone(),
+                ),
                 staging_cleanup,
                 blob_transfer: Arc::clone(&blob),
             },

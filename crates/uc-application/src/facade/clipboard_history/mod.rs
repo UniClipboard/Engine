@@ -1,3 +1,6 @@
+pub use crate::clipboard::history::clear_history::HistoryDeletionTargetsPort;
+use crate::deps::ReadEntryResourceSnapshotPort;
+use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,9 +20,9 @@ use uc_core::ports::{
 
 use crate::deps::{ClipboardEntryPorts, ClipboardRepresentationPorts};
 use uc_core::{
-    ClipboardEntry, ClipboardEvent, ClipboardSelection, ClipboardSelectionDecision, MimeType,
-    ObservedClipboardRepresentation, PayloadAvailability, PersistedClipboardRepresentation,
-    SelectionPolicyVersion, SystemClipboardSnapshot,
+    ClipboardEntry, ClipboardEvent, ClipboardRepositoryError, ClipboardSelection,
+    ClipboardSelectionDecision, MimeType, ObservedClipboardRepresentation, PayloadAvailability,
+    PersistedClipboardRepresentation, SelectionPolicyVersion, SystemClipboardSnapshot,
 };
 
 use crate::clipboard::history::{
@@ -57,6 +60,8 @@ pub use crate::clipboard::history_tags::{
 /// wiring deps and pass it once to `ClipboardHistoryFacade::new`. The facade
 /// then owns the use cases internally; no per-call gateway adapter is needed.
 pub struct ClipboardHistoryFacadeDeps {
+    pub resource_snapshot: Arc<dyn ReadEntryResourceSnapshotPort>,
+    pub(crate) receive_work: Arc<ReceiveWorkRegistry>,
     pub file_references: Arc<dyn HistoryFileReferencePort>,
     pub entry_ports: ClipboardEntryPorts,
     pub selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
@@ -113,6 +118,8 @@ pub struct ClipboardHistoryFacade {
 impl ClipboardHistoryFacade {
     pub fn new(deps: ClipboardHistoryFacadeDeps) -> Self {
         let ClipboardHistoryFacadeDeps {
+            resource_snapshot,
+            receive_work,
             file_references,
             entry_ports,
             selection_repo,
@@ -135,10 +142,11 @@ impl ClipboardHistoryFacade {
         let ClipboardEntryPorts {
             get: entry_get,
             list: entry_list,
+            list_for_deletion,
             save: entry_save,
             touch: _entry_touch,
             set_favorite: entry_set_favorite,
-            delete: entry_delete,
+            delete: _,
             delete_with_receive_state: entry_delete_with_receive_state,
             find_by_snapshot_hash: _entry_find,
             get_snapshot_hash: _entry_snapshot_hash,
@@ -182,13 +190,7 @@ impl ClipboardHistoryFacade {
             payload_resolver.clone(),
         );
 
-        let resource_uc = GetEntryResourceUseCase::new(
-            entry_get.clone(),
-            selection_repo.clone(),
-            rep_get.clone(),
-            rep_list_for_event.clone(),
-            payload_resolver,
-        );
+        let resource_uc = GetEntryResourceUseCase::new(resource_snapshot, payload_resolver);
 
         let mut toggle_favorite_uc = ToggleFavoriteClipboardEntryUseCase::new(entry_set_favorite);
         if let Some(idx) = search_index.clone() {
@@ -197,12 +199,10 @@ impl ClipboardHistoryFacade {
 
         let mut delete_uc = DeleteClipboardEntryUseCase::from_ports(
             entry_get.clone(),
-            entry_delete.clone(),
-            selection_repo.clone(),
-            event_writer.clone(),
+            entry_delete_with_receive_state,
             rep_list_for_event.clone(),
-        )
-        .with_receive_state_delete(entry_delete_with_receive_state);
+            receive_work.clone(),
+        );
         if let Some(dir) = file_cache_dir.clone() {
             delete_uc = delete_uc.with_file_cache_dir(dir);
         }
@@ -214,23 +214,8 @@ impl ClipboardHistoryFacade {
         }
         let delete_uc = Arc::new(delete_uc);
 
-        let mut clear_uc = ClearClipboardHistoryUseCase::from_ports(
-            entry_list.clone(),
-            entry_get.clone(),
-            entry_delete.clone(),
-            selection_repo.clone(),
-            event_writer.clone(),
-            rep_list_for_event.clone(),
-        );
-        if let Some(dir) = file_cache_dir.clone() {
-            clear_uc = clear_uc.with_file_cache_dir(dir);
-        }
-        if let Some(idx) = search_index.clone() {
-            clear_uc = clear_uc.with_search_index(idx);
-        }
-        if let Some(bt) = blob_transfer.clone() {
-            clear_uc = clear_uc.with_blob_transfer(bt);
-        }
+        let clear_uc =
+            ClearClipboardHistoryUseCase::new(list_for_deletion, delete_uc.clone(), receive_work);
 
         // cleanup 只在装配方传入了 file_cache_dir 时才有意义：没有 cache
         // 目录就没有可扫描的文件。retention no longer depends on
@@ -242,24 +227,14 @@ impl ClipboardHistoryFacade {
         let cleanup_uc = file_cache_dir.clone().map(|dir| {
             // Clone cache_fs here since reconcile (built below) takes ownership
             // of the original. All of cleanup's on-disk work routes through it.
-            let mut uc = CleanupExpiredFilesUseCase::new(
+            CleanupExpiredFilesUseCase::new(
                 settings,
                 dir,
                 entry_list.clone(),
-                entry_get.clone(),
-                entry_delete.clone(),
-                selection_repo.clone(),
-                event_writer.clone(),
+                delete_uc.clone(),
                 rep_list_for_event.clone(),
                 cache_fs.clone(),
-            );
-            if let Some(idx) = search_index.clone() {
-                uc = uc.with_search_index(idx);
-            }
-            if let Some(bt) = blob_transfer.clone() {
-                uc = uc.with_blob_transfer(bt);
-            }
-            uc
+            )
         });
 
         let retention_uc = EnforceRetentionPolicyUseCase::new(
@@ -269,23 +244,7 @@ impl ClipboardHistoryFacade {
         );
 
         let reconcile_uc = file_cache_dir.map(|dir| {
-            let mut uc = ReconcileMissingFilesUseCase::new(
-                dir,
-                file_references,
-                entry_get,
-                entry_delete,
-                selection_repo,
-                event_writer,
-                rep_list_for_event,
-                cache_fs,
-            );
-            if let Some(idx) = search_index {
-                uc = uc.with_search_index(idx);
-            }
-            if let Some(bt) = blob_transfer {
-                uc = uc.with_blob_transfer(bt);
-            }
-            uc
+            ReconcileMissingFilesUseCase::new(dir, file_references, delete_uc.clone(), cache_fs)
         });
 
         Self {
@@ -552,7 +511,12 @@ impl ClipboardHistoryFacade {
         })?;
         Ok(ClearHistoryResultView {
             deleted_count: result.deleted_count,
-            failed_entries: result.failed_entries,
+            // discarded-source[contract-boundary]: 完整负责人已记录固定失败分类，公开结果不包含下层错误正文。
+            failed_entries: result
+                .failed_entries
+                .into_iter()
+                .map(|(entry, _)| (entry, "entry_delete_failed".into()))
+                .collect(),
         })
     }
 }
@@ -634,6 +598,12 @@ fn retention_to_view(result: RetentionEnforcementResult) -> RetentionEnforcement
 }
 
 fn map_history_error(err: anyhow::Error) -> ClipboardHistoryError {
+    if matches!(
+        err.downcast_ref::<ClipboardRepositoryError>(),
+        Some(ClipboardRepositoryError::NotFound(_))
+    ) {
+        return ClipboardHistoryError::NotFound;
+    }
     let message = err.to_string();
     let lower = message.to_lowercase();
     if lower.contains("not found") {

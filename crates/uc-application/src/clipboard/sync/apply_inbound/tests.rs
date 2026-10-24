@@ -1,6 +1,19 @@
+use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::sync::{Arc, Mutex};
 
+mod availability;
+mod directory_failure;
+mod directory_settlement;
+mod generation;
+mod item_results;
 mod lifecycle;
+mod manual_retry;
+mod output_preparation;
+mod receive_work;
+mod representation_settlement;
+mod result_query;
+mod retry_material;
+mod selection;
 
 use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
 use anyhow::Result;
@@ -14,6 +27,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::clipboard::write::ClipboardWriteIntent;
+use crate::facade::blob_transfer::BlobTransferError;
 use crate::facade::host_event::{
     ClipboardHostEvent, ClipboardOriginKind, EmitError, HostEvent, HostEventBus,
     HostEventEmitterPort,
@@ -25,13 +39,14 @@ use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::blob::{BlobDigest, BlobTicket, PlaintextHash};
 use uc_core::ports::clipboard::{FindEntryIdBySnapshotHashPort, TouchClipboardEntryPort};
 use uc_core::ports::{
-    AttemptError, AttemptState, BeginReceiveAttemptPort, BeginReceiveFailureOutcome,
-    BeginReceiveFailurePort, BeginReceiveOutcome, ClaimReceiveCommitPort, ClockPort,
-    CommitInboundReceivePort, EntryReceiveAttempt, FinalizeProvisionalReceivePort,
-    GetEntryAttemptPort, InboundReceiveCommitError, InboundReceiveSettlement,
-    ProvisionalReceiveAction, ProvisionalReceiveError, PublishLogError, PublishPhase,
-    ReceiveItemRole, RecordDirectoryPublishPort, RequestReceiveCancellationOutcome,
-    RequestReceiveCancellationPort,
+    receive_file_settlement_decision, AttemptError, AttemptState, BeginReceiveAttemptPort,
+    BeginReceiveFailureOutcome, BeginReceiveFailurePort, BeginReceiveOutcome,
+    ClaimReceiveCommitPort, ClockPort, CommitInboundReceivePort, EntryReceiveAttempt,
+    FinalizeProvisionalReceivePort, GetEntryAttemptPort, InboundReceiveCommitError,
+    InboundReceiveSettlement, NoEntryReceiveArtifacts, ProvisionalReceiveAction,
+    ProvisionalReceiveError, PublishLogError, PublishPhase, ReceiveFileSettlementDecision,
+    ReceiveFileSettlementRecord, ReceiveItemRole, RecordDirectoryPublishPort,
+    RequestReceiveCancellationOutcome, RequestReceiveCancellationPort, TrackedFileTransferStatus,
 };
 use uc_core::{
     FileDisplayMetadata, FileDisplayMetadataEntry, MimeType, ObservedClipboardRepresentation,
@@ -43,17 +58,17 @@ use crate::clipboard::sync::payload_codec::{
     encode_snapshot_with_blob_refs_to_v3_bytes, V3BlobRef,
 };
 
-use super::materializer::{
-    compute_file_set_component, sweep_inbound_staging, verify_file_set_identity,
-    FileCacheBlobMaterializer, InboundBlobFetcher, InboundBlobMaterializer, InboundFileSetManifest,
-    InboundFileSetMember, MaterializeOutcome, MaterializeResult, RollbackOutcome,
-};
 use super::ports::{InboundCapture, InboundSnapshotRebuild, InboundWrite};
 use super::usecase::{
     ApplyInboundClipboardUseCase, InboundApplyCommonDeps, InboundReceiveAttemptDeps,
     InteractiveReceiveDeps, StoreOnlyPullDeps,
 };
 use super::{ApplyInboundError, ApplyInboundInput, ApplyOutcome};
+use crate::transfer::receive::materialization::{
+    compute_file_set_component, sweep_inbound_staging, verify_file_set_identity,
+    FileCacheBlobMaterializer, InboundBlobFetcher, InboundBlobMaterializer, InboundFileSetManifest,
+    InboundFileSetMember, MaterializeOutcome, MaterializeResult, ReceiveWorkPlan,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
@@ -199,6 +214,10 @@ struct AttemptGate {
     retry_calls: AtomicUsize,
     claim_calls: AtomicUsize,
     commit_calls: AtomicUsize,
+    file_failures: Mutex<Vec<(String, uc_core::ports::ReceiveFileFailure)>>,
+    fail_file_settlement: AtomicBool,
+    fail_begin_failure: AtomicBool,
+    failure_begin_calls: AtomicUsize,
     phases: Mutex<Vec<PublishPhase>>,
     root_maps: Mutex<Vec<Vec<(PathBuf, PathBuf)>>>,
 }
@@ -215,6 +234,10 @@ impl AttemptGate {
             retry_calls: AtomicUsize::new(0),
             claim_calls: AtomicUsize::new(0),
             commit_calls: AtomicUsize::new(0),
+            file_failures: Mutex::new(Vec::new()),
+            fail_file_settlement: AtomicBool::new(false),
+            fail_begin_failure: AtomicBool::new(false),
+            failure_begin_calls: AtomicUsize::new(0),
             phases: Mutex::new(Vec::new()),
             root_maps: Mutex::new(Vec::new()),
         })
@@ -307,6 +330,53 @@ impl CommitInboundReceivePort for AttemptGate {
     ) -> std::result::Result<(), InboundReceiveCommitError> {
         self.commit_calls.fetch_add(1, Ordering::SeqCst);
         let (attempt_id, expected, terminal) = match settlement {
+            InboundReceiveSettlement::FileFailed {
+                artifact, failure, ..
+            } => {
+                assert_eq!(
+                    receive_file_settlement_decision(
+                        Some(*self.state.lock().unwrap()),
+                        ReceiveFileSettlementRecord::Tracked {
+                            network: TrackedFileTransferStatus::Completed,
+                            delivered: false
+                        },
+                        Some(*failure)
+                    ),
+                    ReceiveFileSettlementDecision::Allowed
+                );
+                if self.fail_file_settlement.load(Ordering::SeqCst) {
+                    return Err(InboundReceiveCommitError::Backend(Box::new(
+                        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    )));
+                }
+                self.file_failures
+                    .lock()
+                    .unwrap()
+                    .push((artifact.item_id.clone(), *failure));
+                return Ok(());
+            }
+            InboundReceiveSettlement::FileCleaned { .. } => {
+                assert_eq!(
+                    receive_file_settlement_decision(
+                        Some(*self.state.lock().unwrap()),
+                        ReceiveFileSettlementRecord::Tracked {
+                            network: TrackedFileTransferStatus::Failed,
+                            delivered: false
+                        },
+                        None
+                    ),
+                    ReceiveFileSettlementDecision::Allowed
+                );
+                if self.fail_file_settlement.load(Ordering::SeqCst) {
+                    return Err(InboundReceiveCommitError::Backend(Box::new(
+                        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    )));
+                }
+                return Ok(());
+            }
+            InboundReceiveSettlement::Progress { attempt_id, .. } => {
+                (attempt_id, AttemptState::Receiving, AttemptState::Receiving)
+            }
             InboundReceiveSettlement::Complete { attempt_id, .. } => (
                 attempt_id,
                 AttemptState::Committing,
@@ -336,6 +406,18 @@ impl CommitInboundReceivePort for AttemptGate {
             return Err(InboundReceiveCommitError::AttemptStateMismatch);
         }
         let mut state = self.state.lock().unwrap();
+        // 原子port的同终态只读确认；真实SQLite／AEAD规则另由持久契约测试覆盖。
+        if *state == terminal
+            && matches!(
+                settlement,
+                InboundReceiveSettlement::NoEntry {
+                    artifacts: NoEntryReceiveArtifacts::None,
+                    ..
+                }
+            )
+        {
+            return Ok(());
+        }
         if *state != expected {
             return Err(InboundReceiveCommitError::AttemptStateMismatch);
         }
@@ -352,6 +434,12 @@ impl BeginReceiveFailurePort for AttemptGate {
         attempt_id: &str,
         _now_ms: i64,
     ) -> std::result::Result<BeginReceiveFailureOutcome, AttemptError> {
+        self.failure_begin_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_begin_failure.load(Ordering::SeqCst) {
+            return Err(AttemptError::Backend(Box::new(std::io::Error::from(
+                std::io::ErrorKind::ReadOnlyFilesystem,
+            ))));
+        }
         let is_current = self.attempt_id.lock().unwrap().as_str() == attempt_id;
         let mut state = self.state.lock().unwrap();
         if is_current && matches!(*state, AttemptState::Receiving | AttemptState::Committing) {
@@ -376,6 +464,8 @@ impl RequestReceiveCancellationPort for AttemptGate {
         if is_current && *state == AttemptState::Receiving {
             *state = AttemptState::Cancelling;
             Ok(RequestReceiveCancellationOutcome::Requested)
+        } else if is_current && *state == AttemptState::Cancelling {
+            Ok(RequestReceiveCancellationOutcome::AlreadyCancelling)
         } else {
             Ok(RequestReceiveCancellationOutcome::Superseded)
         }
@@ -554,38 +644,62 @@ mockall::mock! {
     pub BlobMaterializer {}
     #[async_trait]
     impl InboundBlobMaterializer for BlobMaterializer {
-        async fn materialize(
-            &self,
-            from_device: DeviceId,
-            receiver_entry_id: EntryId,
-            snapshot: SystemClipboardSnapshot,
-            blob_refs: Vec<V3BlobRef>,
-            file_set_manifest: Option<InboundFileSetManifest>,
-            attempt_id: Option<String>,
-            expected_snapshot_hash: Option<String>,
-        ) -> Result<MaterializeResult>;
+        async fn materialize_plan(&self, plan: ReceiveWorkPlan) -> Result<MaterializeResult>;
     }
 }
 
+/// 模拟只处理已准备的文件；适配层实际执行生产命令中的异步目标准备。
+pub struct TestPreparedFileFetch {
+    pub cancellation: tokio_util::sync::CancellationToken,
+    pub ticket: BlobTicket,
+    pub entry_id: EntryId,
+    pub target_path: PathBuf,
+    pub transfer_context: Option<crate::facade::blob_transfer::FetchTransferContext>,
+}
 mockall::mock! {
-    pub BlobFetcher {}
-    #[async_trait]
-    impl InboundBlobFetcher for BlobFetcher {
-        async fn fetch_blob(
-            &self,
-            command: crate::facade::blob_transfer::FetchBlobCommand,
-        ) -> Result<crate::facade::blob_transfer::FetchBlobResult>;
-
-        async fn fetch_blob_to_path(
-            &self,
-            command: crate::facade::blob_transfer::FetchBlobToPathCommand,
-        ) -> Result<crate::facade::blob_transfer::FetchBlobToPathResult>;
-
-        async fn record_unfetched_failure(
-            &self,
-            context: crate::facade::blob_transfer::FetchTransferContext,
-            reason: uc_core::file_transfer::FileTransferFailureReason,
-        );
+    pub BlobFetcher {
+        async fn fetch_blob(&self, command: crate::facade::blob_transfer::FetchBlobCommand) -> Result<crate::facade::blob_transfer::FetchBlobResult>;
+        async fn fetch_blob_to_path(&self, command: TestPreparedFileFetch) -> Result<crate::facade::blob_transfer::FetchBlobToPathResult>;
+        async fn record_unfetched_failure(&self, context: crate::facade::blob_transfer::FetchTransferContext, reason: uc_core::file_transfer::FileTransferFailureReason);
+    }
+}
+#[async_trait]
+impl InboundBlobFetcher for MockBlobFetcher {
+    async fn fetch_blob(
+        &self,
+        command: crate::facade::blob_transfer::FetchBlobCommand,
+    ) -> Result<crate::facade::blob_transfer::FetchBlobResult> {
+        MockBlobFetcher::fetch_blob(self, command).await
+    }
+    async fn fetch_blob_to_path(
+        &self,
+        command: crate::facade::blob_transfer::FetchBlobToPathCommand,
+    ) -> Result<crate::facade::blob_transfer::FetchBlobToPathResult> {
+        if command.cancellation.is_cancelled() {
+            return Err(BlobTransferError::Cancelled.into());
+        }
+        let target_path = command.target_path.prepare().await?;
+        if command.cancellation.is_cancelled() {
+            return Err(BlobTransferError::Cancelled.into());
+        }
+        MockBlobFetcher::fetch_blob_to_path(
+            self,
+            TestPreparedFileFetch {
+                cancellation: command.cancellation,
+                ticket: command.ticket,
+                entry_id: command.entry_id,
+                target_path,
+                transfer_context: command.transfer_context,
+            },
+        )
+        .await
+    }
+    async fn record_unfetched_failure(
+        &self,
+        context: crate::facade::blob_transfer::FetchTransferContext,
+        reason: uc_core::file_transfer::FileTransferFailureReason,
+    ) {
+        MockBlobFetcher::record_unfetched_failure(self, context, reason).await;
     }
 }
 
@@ -652,6 +766,8 @@ async fn store_only_pull_persists_without_a_clipboard_write_dependency() {
 
     let use_case = ApplyInboundClipboardUseCase::store_only_pull(StoreOnlyPullDeps {
         common: InboundApplyCommonDeps {
+            receive_retry: None,
+            receive_work: Arc::new(ReceiveWorkRegistry::default()),
             entry_repo: Arc::new(repo),
             capture: Arc::new(capture),
             blob_materializer: Arc::new(materializer),
@@ -949,9 +1065,9 @@ async fn materialize_failure_finalizes_attempt_and_emits_failed_state() {
         .returning(|_| Ok(None));
     let mut materializer = MockBlobMaterializer::new();
     materializer
-        .expect_materialize()
+        .expect_materialize_plan()
         .times(1)
-        .returning(|_, _, _, _, _, _, _| Err(anyhow::anyhow!("network unavailable")));
+        .returning(|_| Err(anyhow::anyhow!("network unavailable")));
     let capture = MockCapture::new();
     let mut write = MockWrite::new();
     write.expect_write().times(0);
@@ -1482,30 +1598,23 @@ async fn materializes_blob_refs_before_capture_and_write() {
 
     let mut materializer = MockBlobMaterializer::new();
     materializer
-        .expect_materialize()
+        .expect_materialize_plan()
         .times(1)
-        .withf(
-            move |_from_device,
-                  _receiver_entry_id,
-                  snapshot,
-                  refs,
-                  manifest,
-                  _attempt_id,
-                  _expected_hash| {
-                assert!(manifest.is_none());
-                snapshot.representations[0].expect_inline_bytes()
-                    == b"file:///sender/original.txt\n"
-                    && refs == &vec![blob_ref.clone()]
-            },
-        )
-        .returning(
-            |_from_device, _receiver_entry_id, mut snapshot, _, _, _attempt_id, _expected_hash| {
-                snapshot.representations[0]
-                    .set_inline_bytes(b"file:///local/cache/original.txt\n".to_vec())
-                    .unwrap();
-                Ok(MaterializeResult::complete(snapshot))
-            },
-        );
+        .withf(move |plan| {
+            let snapshot = &plan.snapshot;
+            let refs = &plan.blob_refs;
+            let manifest = &plan.file_set_manifest;
+            assert!(manifest.is_none());
+            snapshot.representations[0].expect_inline_bytes() == b"file:///sender/original.txt\n"
+                && refs == &vec![blob_ref.clone()]
+        })
+        .returning(|plan| {
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
+            snapshot.representations[0]
+                .set_inline_bytes(b"file:///local/cache/original.txt\n".to_vec())
+                .unwrap();
+            Ok(MaterializeResult::complete(snapshot))
+        });
 
     let assert_local_file = |snapshot: &SystemClipboardSnapshot| {
         snapshot.representations[0].expect_inline_bytes() == b"file:///local/cache/original.txt\n"
@@ -1580,16 +1689,20 @@ async fn partial_materialize_persists_entry_but_skips_os_write() {
     // materializer 模拟用户中途 cancel:返回 partial,snapshot 里 file-list rep
     // 已被重写为带 uniclip-missing:// 占位,missing 列表非空。
     let mut materializer = MockBlobMaterializer::new();
-    materializer.expect_materialize().times(1).returning(
-        |_from_device, _receiver_entry_id, mut snapshot, _, _, _attempt_id, _expected_hash| {
+    materializer
+        .expect_materialize_plan()
+        .times(1)
+        .returning(|plan| {
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
             snapshot.representations[0]
                 .set_inline_bytes(
                     b"uniclip-missing:///big.iso?size=950000000&reason=cancelled".to_vec(),
                 )
                 .unwrap();
             Ok(MaterializeResult {
+                completed: Vec::new(),
                 snapshot,
-                missing: vec![super::materializer::MissingFileRef {
+                missing: vec![crate::transfer::receive::materialization::MissingFileRef {
                     filename: "big.iso".to_string(),
                     size_bytes: 950_000_000,
                 }],
@@ -1601,8 +1714,7 @@ async fn partial_materialize_persists_entry_but_skips_os_write() {
                 has_receive_artifacts: false,
                 receive_artifacts: Vec::new(),
             })
-        },
-    );
+        });
 
     // capture 必须被调:partial entry 也要落库。
     let mut capture = MockCapture::new();
@@ -1679,8 +1791,11 @@ async fn partial_materialize_does_not_register_dedup_entry() {
     // 第一次 partial,第二次成功(模拟用户取消后重传成功)。
     let mut materializer = MockBlobMaterializer::new();
     let call_count = std::sync::atomic::AtomicUsize::new(0);
-    materializer.expect_materialize().times(2).returning(
-        move |_from_device, _receiver_entry_id, mut snapshot, _, _, _attempt_id, _expected_hash| {
+    materializer
+        .expect_materialize_plan()
+        .times(2)
+        .returning(move |plan| {
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
             let n = call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n == 0 {
                 snapshot.representations[0]
@@ -1689,8 +1804,9 @@ async fn partial_materialize_does_not_register_dedup_entry() {
                     )
                     .unwrap();
                 Ok(MaterializeResult {
+                    completed: Vec::new(),
                     snapshot,
-                    missing: vec![super::materializer::MissingFileRef {
+                    missing: vec![crate::transfer::receive::materialization::MissingFileRef {
                         filename: "retry.iso".to_string(),
                         size_bytes: 100,
                     }],
@@ -1708,8 +1824,7 @@ async fn partial_materialize_does_not_register_dedup_entry() {
                     .unwrap();
                 Ok(MaterializeResult::complete(snapshot))
             }
-        },
-    );
+        });
 
     // capture 必须被调两次:第一次 partial entry + 第二次 complete entry。
     // 如果 dedup 把第二次 silently skip,capture 只会被调一次,这个 times(2)
@@ -1788,7 +1903,7 @@ async fn file_cache_blob_materializer_preserves_filename_in_local_uri_list() {
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     let rewritten = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             EntryId::from("entry-receiver"),
             snapshot,
@@ -1796,7 +1911,7 @@ async fn file_cache_blob_materializer_preserves_filename_in_local_uri_list() {
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("materialize should succeed");
 
@@ -1879,7 +1994,7 @@ async fn file_cache_blob_materializer_aligns_display_metadata_with_local_filenam
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     let rewritten = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             EntryId::from("entry-receiver"),
             snapshot,
@@ -1887,7 +2002,7 @@ async fn file_cache_blob_materializer_aligns_display_metadata_with_local_filenam
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("materialize should succeed");
 
@@ -1959,7 +2074,7 @@ async fn file_cache_blob_materializer_logs_do_not_include_declared_filename() {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-log-redaction"),
             EntryId::from("receiver-log-redaction"),
             snapshot,
@@ -1967,7 +2082,7 @@ async fn file_cache_blob_materializer_logs_do_not_include_declared_filename() {
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("materialize should succeed");
 
@@ -2041,7 +2156,7 @@ async fn directory_materializer_rebuilds_nested_tree_and_empty_directory() {
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             receiver_entry_id.clone(),
             snapshot,
@@ -2049,7 +2164,7 @@ async fn directory_materializer_rebuilds_nested_tree_and_empty_directory() {
             Some(manifest),
             None,
             None,
-        )
+        ))
         .await
         .expect("directory materialize");
 
@@ -2140,7 +2255,7 @@ async fn directory_materializer_preserves_mixed_top_level_file_and_directory() {
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
 
     materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             receiver_entry_id.clone(),
             snapshot,
@@ -2148,7 +2263,7 @@ async fn directory_materializer_preserves_mixed_top_level_file_and_directory() {
             Some(manifest),
             None,
             None,
-        )
+        ))
         .await
         .expect("mixed roots should materialize");
 
@@ -2388,7 +2503,7 @@ async fn directory_materializer_removes_staging_and_exposes_nothing_on_failure()
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     let error = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             receiver_entry_id.clone(),
             snapshot,
@@ -2396,7 +2511,7 @@ async fn directory_materializer_removes_staging_and_exposes_nothing_on_failure()
             Some(manifest),
             None,
             None,
-        )
+        ))
         .await
         .expect_err("directory failure must fail the whole entry");
 
@@ -2456,7 +2571,7 @@ async fn directory_materializer_suffixes_existing_and_same_paste_root_names() {
         cache_dir.path().to_path_buf(),
     );
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             receiver_entry_id,
             snapshot,
@@ -2464,7 +2579,7 @@ async fn directory_materializer_suffixes_existing_and_same_paste_root_names() {
             Some(manifest),
             None,
             None,
-        )
+        ))
         .await
         .expect("empty directory set should materialize");
 
@@ -2527,7 +2642,7 @@ async fn directory_materializer_restores_executable_permission() {
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             receiver_entry_id.clone(),
             snapshot,
@@ -2535,7 +2650,7 @@ async fn directory_materializer_restores_executable_permission() {
             Some(manifest),
             None,
             None,
-        )
+        ))
         .await
         .unwrap();
 
@@ -2598,7 +2713,7 @@ async fn directory_materializer_keeps_executable_member_as_regular_windows_file(
         });
 
     test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf())
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             receiver_entry_id.clone(),
             snapshot,
@@ -2606,7 +2721,7 @@ async fn directory_materializer_keeps_executable_member_as_regular_windows_file(
             Some(manifest),
             None,
             None,
-        )
+        ))
         .await
         .unwrap();
 
@@ -2691,7 +2806,7 @@ async fn file_cache_blob_materializer_redirects_to_reserved_user_dir() {
             dir: user_dir_path.clone(),
         }));
     let rewritten = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             EntryId::from("entry-receiver"),
             snapshot,
@@ -2699,7 +2814,7 @@ async fn file_cache_blob_materializer_redirects_to_reserved_user_dir() {
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("materialize should succeed");
 
@@ -2771,7 +2886,7 @@ async fn file_cache_blob_materializer_removes_reserved_placeholder_on_fetch_erro
             dir: user_dir_path.clone(),
         }));
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             EntryId::from("entry-receiver"),
             snapshot,
@@ -2779,7 +2894,7 @@ async fn file_cache_blob_materializer_removes_reserved_placeholder_on_fetch_erro
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("partial materialize should succeed (fetch error is soft)");
 
@@ -2840,7 +2955,7 @@ async fn file_cache_blob_materializer_inlines_representation_bound_blob_into_rep
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     let materialized = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             EntryId::from("entry-receiver"),
             snapshot,
@@ -2848,7 +2963,7 @@ async fn file_cache_blob_materializer_inlines_representation_bound_blob_into_rep
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("representation-bound materialize should succeed");
 
@@ -2910,7 +3025,7 @@ async fn file_cache_blob_materializer_rejects_out_of_bounds_representation_index
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     let err = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-x"),
             EntryId::from("entry-receiver"),
             snapshot,
@@ -2918,7 +3033,7 @@ async fn file_cache_blob_materializer_rejects_out_of_bounds_representation_index
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect_err("out-of-bounds index should fail");
     assert!(
@@ -2988,7 +3103,7 @@ async fn file_cache_blob_materializer_partial_on_cancel_mid_batch() {
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-sender"),
             EntryId::from("entry-receiver"),
             snapshot,
@@ -2996,7 +3111,7 @@ async fn file_cache_blob_materializer_partial_on_cancel_mid_batch() {
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("partial materialize should succeed (no real error)");
 
@@ -3061,7 +3176,7 @@ async fn file_cache_blob_materializer_partial_on_cancel_first_file() {
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-sender"),
             EntryId::from("entry-receiver"),
             snapshot,
@@ -3069,7 +3184,7 @@ async fn file_cache_blob_materializer_partial_on_cancel_first_file() {
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("first-file cancel still yields Ok(partial)");
 
@@ -3119,7 +3234,7 @@ async fn file_cache_blob_materializer_partial_on_rep_cancel_no_files() {
 
     let materializer = test_materializer(Arc::new(fetcher), cache_dir.path().to_path_buf());
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-sender"),
             EntryId::from("entry-receiver"),
             snapshot,
@@ -3127,7 +3242,7 @@ async fn file_cache_blob_materializer_partial_on_rep_cancel_no_files() {
             None,
             None,
             None,
-        )
+        ))
         .await
         .expect("rep-only cancel yields Ok(partial)");
 
@@ -3283,14 +3398,16 @@ async fn partial_match_is_upgraded_in_place_by_complete_delivery() {
         });
 
     let mut materializer = MockBlobMaterializer::new();
-    materializer.expect_materialize().times(1).returning(
-        |_from_device, _receiver_entry_id, mut snapshot, _, _, _attempt_id, _expected_hash| {
+    materializer
+        .expect_materialize_plan()
+        .times(1)
+        .returning(|plan| {
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
             snapshot.representations[0]
                 .set_inline_bytes(b"file:///local/cache/payload.bin\n".to_vec())
                 .unwrap();
             Ok(MaterializeResult::complete(snapshot))
-        },
-    );
+        });
 
     // The replace route drives capture under the existing partial id (via the
     // `replace_with_identity` default → `capture`); the mock echoes that id back
@@ -3337,7 +3454,7 @@ async fn available_match_is_skipped_before_download() {
 
     // Materializer present but must never run (skip happens pre-download).
     let mut materializer = MockBlobMaterializer::new();
-    materializer.expect_materialize().times(0);
+    materializer.expect_materialize_plan().times(0);
     let capture = MockCapture::new(); // capture must not be called
     let mut write = MockWrite::new();
     write.expect_write().times(0);
@@ -3383,16 +3500,20 @@ async fn partial_delivery_does_not_replace_existing_partial() {
         });
 
     let mut materializer = MockBlobMaterializer::new();
-    materializer.expect_materialize().times(1).returning(
-        |_from_device, _receiver_entry_id, mut snapshot, _, _, _attempt_id, _expected_hash| {
+    materializer
+        .expect_materialize_plan()
+        .times(1)
+        .returning(|plan| {
+            let (_, _, mut snapshot, _, _, _, _, _, _) = plan.into_parts();
             snapshot.representations[0]
                 .set_inline_bytes(
                     b"uniclip-missing:///payload.bin?size=10&reason=cancelled".to_vec(),
                 )
                 .unwrap();
             Ok(MaterializeResult {
+                completed: Vec::new(),
                 snapshot,
-                missing: vec![super::materializer::MissingFileRef {
+                missing: vec![crate::transfer::receive::materialization::MissingFileRef {
                     filename: "payload.bin".to_string(),
                     size_bytes: 10,
                 }],
@@ -3404,8 +3525,7 @@ async fn partial_delivery_does_not_replace_existing_partial() {
                 has_receive_artifacts: false,
                 receive_artifacts: Vec::new(),
             })
-        },
-    );
+        });
 
     let capture = MockCapture::new(); // must not be called
     let mut write = MockWrite::new();
@@ -3842,7 +3962,7 @@ async fn materialize_two_roots(
 ) -> Result<MaterializeResult> {
     let (blob_refs, manifest, snapshot) = two_root_payload();
     materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-pub"),
             EntryId::from(entry_id),
             snapshot,
@@ -3850,7 +3970,7 @@ async fn materialize_two_roots(
             Some(manifest),
             None,
             None,
-        )
+        ))
         .await
 }
 
@@ -3868,7 +3988,7 @@ async fn directory_identity_is_verified_before_first_publication() {
     let (blob_refs, manifest, snapshot) = two_root_payload();
 
     let error = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-integrity"),
             EntryId::from("entry-integrity"),
             snapshot,
@@ -3876,7 +3996,7 @@ async fn directory_identity_is_verified_before_first_publication() {
             Some(manifest),
             None,
             Some("blake3v1:deadbeef".to_string()),
-        )
+        ))
         .await
         .expect_err("mismatched identity must fail before promotion");
 
@@ -3903,7 +4023,7 @@ async fn cancelled_attempt_stops_before_first_member_fetch() {
     let (blob_refs, manifest, snapshot) = two_root_payload();
 
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-cancelled"),
             EntryId::from("entry-cancelled"),
             snapshot,
@@ -3911,7 +4031,7 @@ async fn cancelled_attempt_stops_before_first_member_fetch() {
             Some(manifest),
             Some("attempt-1".to_owned()),
             None,
-        )
+        ))
         .await;
 
     assert!(result.is_err());
@@ -3943,7 +4063,7 @@ async fn cancelled_member_does_not_mark_remaining_members_failed() {
     let (blob_refs, manifest, snapshot) = two_root_payload();
 
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-cancelled"),
             EntryId::from("entry-cancelled-member"),
             snapshot,
@@ -3951,7 +4071,7 @@ async fn cancelled_member_does_not_mark_remaining_members_failed() {
             Some(manifest),
             Some("attempt-1".to_owned()),
             None,
-        )
+        ))
         .await;
 
     assert!(result.is_err());
@@ -3977,7 +4097,7 @@ async fn cancellation_after_all_members_still_wins_before_promotion() {
     let (blob_refs, manifest, snapshot) = two_root_payload();
 
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-cancelled"),
             EntryId::from("entry-cancelled-late"),
             snapshot,
@@ -3985,7 +4105,7 @@ async fn cancellation_after_all_members_still_wins_before_promotion() {
             Some(manifest),
             Some("attempt-1".to_owned()),
             None,
-        )
+        ))
         .await;
 
     assert!(result.is_err());
@@ -4041,7 +4161,7 @@ async fn directory_representation_blob_belongs_to_the_directory_attempt() {
         gated_directory_materializer(fetcher, cache_dir.path(), save_dir.path(), publisher, gate);
 
     let result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-with-image"),
             EntryId::from("entry-with-image"),
             snapshot,
@@ -4049,7 +4169,7 @@ async fn directory_representation_blob_belongs_to_the_directory_attempt() {
             Some(manifest),
             Some("attempt-1".to_owned()),
             None,
-        )
+        ))
         .await;
 
     assert!(result.is_ok());
@@ -4072,7 +4192,7 @@ async fn promotion_is_confirmed_before_first_final_path_move() {
     let (blob_refs, manifest, snapshot) = two_root_payload();
 
     let mut result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-promote"),
             EntryId::from("entry-promote"),
             snapshot,
@@ -4080,7 +4200,7 @@ async fn promotion_is_confirmed_before_first_final_path_move() {
             Some(manifest),
             Some("attempt-1".to_owned()),
             None,
-        )
+        ))
         .await
         .expect("promotion winner may publish");
 
@@ -4091,11 +4211,8 @@ async fn promotion_is_confirmed_before_first_final_path_move() {
         *gate.phases.lock().unwrap(),
         vec![PublishPhase::Staging, PublishPhase::Publishing]
     );
-    let publication = result.take_publication().expect("published roots");
-    assert!(matches!(
-        publication.rollback().await,
-        RollbackOutcome::Clean
-    ));
+    let mut publication = result.take_publication().expect("published roots");
+    publication.rollback().await.expect("rollback completes");
 }
 
 #[tokio::test]
@@ -4115,7 +4232,7 @@ async fn gated_publication_updates_recovery_log_before_collision_retry() {
     let (blob_refs, manifest, snapshot) = two_root_payload();
 
     let mut result = materializer
-        .materialize(
+        .materialize_plan(ReceiveWorkPlan::new(
             DeviceId::new("peer-race"),
             EntryId::from("entry-race-gated"),
             snapshot,
@@ -4123,7 +4240,7 @@ async fn gated_publication_updates_recovery_log_before_collision_retry() {
             Some(manifest),
             Some("attempt-1".to_owned()),
             None,
-        )
+        ))
         .await
         .expect("collision retry should preserve the receive");
 
@@ -4136,11 +4253,8 @@ async fn gated_publication_updates_recovery_log_before_collision_retry() {
         Some("alpha (1)")
     );
     drop(root_maps);
-    let publication = result.take_publication().expect("published roots");
-    assert!(matches!(
-        publication.rollback().await,
-        RollbackOutcome::Clean
-    ));
+    let mut publication = result.take_publication().expect("published roots");
+    publication.rollback().await.expect("rollback completes");
 }
 
 /// AC: no intermediate artifact — not even an empty directory — appears at the
@@ -4191,7 +4305,8 @@ async fn directory_publication_leaves_the_final_path_empty_until_it_completes() 
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
     assert_eq!(visible_names(save_dir.path()), vec!["alpha", "beta"]);
     // Staging is gone once committed.
     assert_eq!(
@@ -4223,7 +4338,8 @@ async fn directory_publication_takes_the_next_name_rather_than_replacing_a_folde
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
 
     assert_eq!(
         visible_names(save_dir.path()),
@@ -4262,7 +4378,8 @@ async fn directory_publication_retries_onto_a_free_name_after_losing_a_race() {
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
 
     // The racer holds `alpha`; our root stepped aside to `alpha (1)`.
     assert_eq!(
@@ -4397,7 +4514,8 @@ async fn directory_publication_falls_back_to_managed_storage_when_the_volume_can
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
 
     // Nothing was written to the user's folder, not even a probe leftover.
     assert_eq!(std::fs::read_dir(save_dir.path()).unwrap().count(), 0);
@@ -4435,7 +4553,8 @@ async fn directory_publication_still_lands_when_no_volume_supports_no_replace() 
         .take_publication()
         .expect("publication")
         .commit()
-        .await;
+        .await
+        .expect("cleanup staging");
 
     // The user's folder was declined — its volume cannot protect what is in
     // it — and the content landed in managed storage regardless.
@@ -4476,7 +4595,7 @@ async fn rollback_withdraws_on_a_volume_without_no_replace() {
         .rollback()
         .await;
 
-    assert_eq!(outcome, RollbackOutcome::Clean);
+    assert!(outcome.is_ok());
     let managed = cache_dir.path().join("iroh-blobs").join("entry-nofs-rb");
     assert_eq!(visible_names(&managed), Vec::<String>::new());
 }
@@ -4503,7 +4622,8 @@ async fn the_no_replace_probe_is_not_repeated_per_receive() {
             .take_publication()
             .expect("publication")
             .commit()
-            .await;
+            .await
+            .expect("cleanup staging");
     }
 
     assert_eq!(
@@ -4567,7 +4687,7 @@ async fn apply_inbound_does_not_replace_an_existing_nonterminal_attempt() {
         .times(1)
         .returning(|_| Ok(None));
     let mut materializer = MockBlobMaterializer::new();
-    materializer.expect_materialize().times(0);
+    materializer.expect_materialize_plan().times(0);
     let gate = AttemptGate::new(AttemptState::Receiving, None);
 
     let use_case = ApplyInboundClipboardUseCase::new(
@@ -4616,9 +4736,9 @@ async fn explicit_directory_cancellation_emits_cancelled_not_failed() {
         .returning(|_| Ok(None));
     let mut materializer = MockBlobMaterializer::new();
     materializer
-        .expect_materialize()
+        .expect_materialize_plan()
         .times(1)
-        .returning(|_, _, _, _, _, _, _| {
+        .returning(|_| {
             Err(anyhow::Error::from(
                 crate::facade::blob_transfer::BlobTransferError::Cancelled,
             ))

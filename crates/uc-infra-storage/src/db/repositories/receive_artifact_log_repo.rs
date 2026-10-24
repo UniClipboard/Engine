@@ -23,7 +23,7 @@ pub struct DieselReceiveArtifactLogRepository<E> {
     protection: ReceiveArtifactProtection,
 }
 
-enum ReceiveArtifactProtection {
+pub(super) enum ReceiveArtifactProtection {
     Legacy {
         derive_subkey: Arc<dyn DeriveSpaceSubkeyPort>,
         current_profile: Arc<dyn CurrentProfilePort>,
@@ -82,7 +82,7 @@ impl ReceiveArtifactProtection {
         Ok(ReceiveArtifactCipher::new(key))
     }
 
-    async fn seal(
+    pub(super) async fn seal(
         &self,
         entry_id: &str,
         attempt_id: &str,
@@ -100,7 +100,7 @@ impl ReceiveArtifactProtection {
         .map_err(|error| ReceiveArtifactLogError::Backend(error.into()))
     }
 
-    async fn open(
+    pub(super) async fn open(
         &self,
         entry_id: &str,
         attempt_id: &str,

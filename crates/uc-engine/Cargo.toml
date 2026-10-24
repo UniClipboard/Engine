@@ -22,7 +22,8 @@ async-trait = "0.1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+# RUSTSEC-2026-0386：稳定入口要求已修复版本，避免宿主继续锁定旧 Tokio。
+tokio = { version = "1.53.3", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7"
 tracing = "0.1"
 thiserror = "2.0"
@@ -49,13 +50,16 @@ chrono = { version = "0.4", features = ["serde"] }
 diesel = { version = "2.3.5", features = ["sqlite"] }
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs"] }
 prost = "0.14"
+# 资源回归预热已存在的进程级 CPU 池，不把一次初始化算作 Engine 泄漏。
+rayon = "1"
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 toml = "1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uc-infra-p2p = { path = "../uc-infra-p2p", features = ["test-util"] }
 uc-infra-profile = { path = "../uc-infra-profile", features = ["test-util"] }
 uc-testkit = { path = "../../tests/uc-testkit" }
 wiremock = "0.6"

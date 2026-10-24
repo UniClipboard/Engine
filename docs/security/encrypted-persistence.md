@@ -31,6 +31,8 @@
 
 持久业务密文的保护上下文必须不可变。V3 正常读取通过密文中的随机 `ContentKeyId` 从 profile 加密 key vault 解析实际 `ProtectionGroupId` 和 epoch，purpose 由所属持久化 adapter 固定，不得使用当前活动 `SpaceId` 选择历史密钥。`ProtectionGroupId`、`SpaceId`、purpose 和 catalog 映射不得作为新增明文密文头或索引字段落盘；完整上下文必须参与 AEAD 认证。
 
+按事件批量读取表示时，所有 inline 负载都必须通过对应事件和表示身份的 AEAD 认证后才能交付。任一认证失败则整批返回带完整 source chain 的失败，不能把原密文当业务正文或伪造缺失项。删除及清空在读取失败时保留原条目、接收状态和文件引用，修复原资料后通过原动作重试；日志只记录固定分类和数量。
+
 V1/V2 旧格式只允许在一次性、原子、可恢复的 profile storage upgrade 内读取。升级完成后正常路径只写 V3；切换 Space 复用 profile 数据 generation，不得通过批量解密和重加密历史内容完成安全状态切换。
 
 发布前应使用代表性明文探针运行 `scripts/security/scan-plaintext-probe.sh`。扫描器只报告命中的文件，不输出探针内容。

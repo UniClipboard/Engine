@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use uc_application::deps::{
     AdmissionAttempt, AdmissionGrant, ConnectivityError, HistoryConnectionRetentionPort,
-    HistoryPeerBindingPort, InboundAdmissionFence, PeerConnection, PeerIdentityDirectoryPort,
-    SessionConnectionAdmissionPort,
+    HistoryPeerBindingPort, InboundAdmissionFence, InboundIdentityReservation, PeerConnection,
+    PeerIdentityDirectoryPort, SessionConnectionAdmissionPort,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::MembershipHistoryMessage;
@@ -183,12 +183,14 @@ impl SessionConnectionAdmissionPort for HistoryConnectionAdmission {
     async fn adopt_inbound(
         &self,
         connection: Arc<dyn PeerConnection>,
+        reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
         let peer = self
             .identity
             .resolve(&connection.authenticated_key())
             .await
             .map_err(|source| ConnectivityError::Admission(Box::new(source)))?;
+        reservation.identified(peer)?;
         self.register(peer, self.connections.epoch(&peer), connection, true)
     }
 }

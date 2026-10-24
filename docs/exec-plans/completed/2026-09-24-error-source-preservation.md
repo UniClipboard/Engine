@@ -23,7 +23,7 @@
    中的 `anyhow!(error.to_string())` 让 SQLite `BUSY` 无法被识别，结论只能停在推断
    （见 [049 计划](049-single-owner-space-membership-rewrite.md)失败诊断表）。
 2. **流程判断失效。** 生产代码依据 source chain 做分支，例如
-   [`is_cancel_error`](../../../crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs) 查找
+   [`is_cancel_error`](../../../crates/uc-application/src/transfer/receive/materialization/workflow.rs) 查找
    `BlobTransferError::Cancelled`，[`session_supervisor/lifecycle.rs`](../../../crates/uc-engine/src/runtime/session_supervisor/lifecycle.rs)
    查找 `TaskShutdownReport` 与 `EngineError`。中间任何一层字符串化，取消就会被当作普通失败，超时会被报成内部错误。
 3. **隐私边界被穿透。** 把错误拼进文本时，常一并拼入路径、标签值或内容片段（清单 S3 中的 `path.display()`、`{parent:?}`，

@@ -1,7 +1,7 @@
 use super::{
     AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityBackend,
-    ConnectivityError, ConnectivityManager, ConnectivityPolicy, PeerConnection, PeerReceiveStream,
-    PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
+    ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation,
+    PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,6 +15,13 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::ConnectionChannel;
 
 impl PeerSendStream for Sink {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn reset(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        // 此旧协议 fixture 不提供显式停止能力；需要停止的用例使用真实 bridge。
+        Err(ConnectivityError::Stopped)
+    }
     fn settled(&mut self) -> futures::future::BoxFuture<'_, Result<(), ConnectivityError>> {
         Box::pin(async { Ok(()) })
     }
@@ -22,7 +29,14 @@ impl PeerSendStream for Sink {
         Ok(())
     }
 }
-impl PeerReceiveStream for Empty {}
+impl PeerReceiveStream for Empty {
+    fn id(&self) -> u64 {
+        0
+    }
+    fn stop(&mut self, _code: u64) -> Result<(), ConnectivityError> {
+        Err(ConnectivityError::Stopped)
+    }
+}
 struct TestConnection {
     id: usize,
     mode: ConnectionMode,
@@ -82,6 +96,7 @@ impl ConnectivityBackend for Backend {
     async fn connect(
         &self,
         _: DeviceId,
+        _address_hint: Option<Vec<u8>>,
         _cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
         let id = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -178,6 +193,7 @@ impl SessionConnectionAdmissionPort for Admission {
     async fn adopt_inbound(
         &self,
         _: Arc<dyn PeerConnection>,
+        _reservation: &dyn InboundIdentityReservation,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
         panic!("outbound fixture")
     }
@@ -204,9 +220,10 @@ fn request(
     let manager = manager.clone();
     tokio::spawn(async move {
         manager
+            .request(DeviceId::new("peer"))
             .connect(
-                DeviceId::new("peer"),
                 Instant::now() + Duration::from_secs(seconds),
+                &CancellationToken::new(),
             )
             .await
     })
@@ -219,6 +236,218 @@ async fn started(backend: &Backend, calls: usize) {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn request_created_before_external_queue_cannot_rejoin_with_a_new_epoch_or_cached_connection()
+{
+    let (manager, backend, epoch) =
+        fixture(ConnectionMode::Multiplexed, ConnectivityPolicy::default());
+    let old = manager.request(DeviceId::new("peer"));
+    let copied = old.clone();
+    epoch.fetch_add(2, Ordering::SeqCst);
+    let cancel = CancellationToken::new();
+    for request in [&old, &copied] {
+        assert!(matches!(
+            request
+                .connect(Instant::now() + Duration::from_secs(10), &cancel)
+                .await,
+            Err(ConnectivityError::Denied)
+        ));
+    }
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+    let fresh = request(&manager, 10);
+    started(&backend, 1).await;
+    backend.gate.add_permits(1);
+    let connection = fresh
+        .await
+        .expect("fresh request task")
+        .expect("current request");
+    assert!(matches!(
+        old.connect(Instant::now() + Duration::from_secs(10), &cancel)
+            .await,
+        Err(ConnectivityError::Denied)
+    ));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    drop(connection);
+    manager.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(start_paused = true)]
+async fn request_created_before_session_close_cannot_start_after_reactivation() {
+    let (manager, backend, _) = fixture(ConnectionMode::Multiplexed, ConnectivityPolicy::default());
+    let old = manager.request(DeviceId::new("peer"));
+    manager.disconnect_all().await.expect("close session");
+    let result = old
+        .connect(
+            Instant::now() + Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(result, Err(ConnectivityError::Stopped)));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+    let fresh = request(&manager, 10);
+    started(&backend, 1).await;
+    backend.gate.add_permits(1);
+    drop(
+        fresh
+            .await
+            .expect("fresh task")
+            .expect("reactivated session"),
+    );
+    manager.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(start_paused = true)]
+async fn supervised_shared_dial_keeps_other_waiters_when_one_cancels_or_expires() {
+    for expire in [false, true] {
+        let (manager, backend, _) = fixture(
+            ConnectionMode::Multiplexed,
+            ConnectivityPolicy {
+                supervise_local_work: true,
+                ..ConnectivityPolicy::default()
+            },
+        );
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let owner = manager.clone();
+        let mut first = tokio::spawn(async move {
+            owner
+                .request(DeviceId::new("peer"))
+                .connect(Instant::now() + Duration::from_secs(1), &token)
+                .await
+        });
+        started(&backend, 1).await;
+        let following = request(&manager, 10);
+        tokio::task::yield_now().await;
+        if expire {
+            tokio::time::advance(Duration::from_secs(1)).await;
+        } else {
+            cancel.cancel();
+        }
+        tokio::task::yield_now().await;
+        let std::task::Poll::Ready(result) = futures::poll!(&mut first) else {
+            panic!("one waiter waited for its sibling's dial");
+        };
+        let Err(error) = result.expect("first waiter task") else {
+            panic!("stopped waiter received a connection");
+        };
+        assert!(if expire {
+            matches!(error, ConnectivityError::TimedOut(_))
+        } else {
+            matches!(error, ConnectivityError::Stopped)
+        });
+        assert!(!following.is_finished());
+        backend.gate.add_permits(1);
+        let connection = following
+            .await
+            .expect("sibling task")
+            .expect("sibling dial preserved");
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        drop(connection);
+        manager.shutdown().await.expect("shutdown");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn last_waiter_keeps_capacity_and_backend_failure_until_real_settlement() {
+    struct FailingBackend {
+        entered: Semaphore,
+        finish: Semaphore,
+    }
+    #[async_trait]
+    impl ConnectivityBackend for FailingBackend {
+        async fn connect(
+            &self,
+            _: DeviceId,
+            _address_hint: Option<Vec<u8>>,
+            _: CancellationToken,
+        ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+            self.entered.add_permits(1);
+            self.finish
+                .acquire()
+                .await
+                .expect("backend finish")
+                .forget();
+            Err(ConnectivityError::Backend(Box::new(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            ))))
+        }
+    }
+    for expire in [false, true] {
+        let backend = Arc::new(FailingBackend {
+            entered: Semaphore::new(0),
+            finish: Semaphore::new(0),
+        });
+        let manager = ConnectivityManager::new(
+            backend.clone(),
+            Arc::new(Admission(Arc::new(AtomicUsize::new(0)))),
+            ConnectivityPolicy {
+                supervise_local_work: true,
+                flights_per_session: 1,
+                ..ConnectivityPolicy::default()
+            },
+        );
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let owner = manager.clone();
+        let mut first = tokio::spawn(async move {
+            owner
+                .request(DeviceId::new("peer"))
+                .connect(Instant::now() + Duration::from_secs(1), &token)
+                .await
+        });
+        backend
+            .entered
+            .acquire()
+            .await
+            .expect("backend entered")
+            .forget();
+        if expire {
+            tokio::time::advance(Duration::from_secs(1)).await;
+        } else {
+            cancel.cancel();
+        }
+        tokio::task::yield_now().await;
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(matches!(
+            manager
+                .request(DeviceId::new("other"))
+                .connect(
+                    Instant::now() + Duration::from_secs(1),
+                    &CancellationToken::new(),
+                )
+                .await,
+            Err(ConnectivityError::Busy(_)),
+        ));
+        backend.finish.add_permits(1);
+        let Err(ConnectivityError::Settlement {
+            primary,
+            additional,
+        }) = first.await.expect("waiter task")
+        else {
+            panic!("backend failure after logical stop was lost");
+        };
+        assert!(if expire {
+            matches!(*primary, ConnectivityError::TimedOut(_))
+        } else {
+            matches!(*primary, ConnectivityError::Stopped)
+        });
+        let ConnectivityError::Shared(source) = *additional else {
+            panic!("shared source lost");
+        };
+        let ConnectivityError::Backend(source) = source.as_ref() else {
+            panic!("backend source lost");
+        };
+        assert_eq!(
+            source
+                .downcast_ref::<std::io::Error>()
+                .expect("original IO error")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
 }
 
 #[tokio::test]
@@ -310,9 +539,10 @@ async fn waiter_capacity_is_bounded_and_cancellation_returns_capacity() {
     started(&backend, 1).await;
     assert!(matches!(
         manager
+            .request(DeviceId::new("peer"))
             .connect(
-                DeviceId::new("peer"),
-                Instant::now() + Duration::from_secs(1)
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new()
             )
             .await,
         Err(ConnectivityError::Busy(_))
@@ -400,9 +630,10 @@ async fn shutdown_closes_leased_connections_in_both_modes() {
         manager.shutdown().await.unwrap();
         assert!(backend.connections.lock().unwrap()[0].is_closed());
         assert!(manager
+            .request(DeviceId::new("peer"))
             .connect(
-                DeviceId::new("peer"),
-                Instant::now() + Duration::from_secs(1)
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new()
             )
             .await
             .is_err());
@@ -426,6 +657,7 @@ async fn backend_panic_reaches_waiter_and_repeated_shutdown_retains_source() {
         async fn connect(
             &self,
             _: DeviceId,
+            _address_hint: Option<Vec<u8>>,
             _cancel: CancellationToken,
         ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
             panic!("private-panic-sentinel")
@@ -437,9 +669,10 @@ async fn backend_panic_reaches_waiter_and_repeated_shutdown_retains_source() {
         ConnectivityPolicy::default(),
     );
     let error = manager
+        .request(DeviceId::new("peer"))
         .connect(
-            DeviceId::new("peer"),
             Instant::now() + Duration::from_secs(1),
+            &CancellationToken::new(),
         )
         .await
         .err()
@@ -506,6 +739,7 @@ async fn old_request_cannot_borrow_a_new_epoch_active_connection() {
         async fn adopt_inbound(
             &self,
             _: Arc<dyn PeerConnection>,
+            _reservation: &dyn InboundIdentityReservation,
         ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
             panic!("outbound-only fixture")
         }
@@ -526,9 +760,9 @@ async fn old_request_cannot_borrow_a_new_epoch_active_connection() {
     let runtime = tokio::runtime::Handle::current();
     let old_manager = manager.clone();
     let old = std::thread::spawn(move || {
-        runtime.block_on(old_manager.connect(
-            DeviceId::new("peer"),
+        runtime.block_on(old_manager.request(DeviceId::new("peer")).connect(
             Instant::now() + Duration::from_secs(5),
+            &CancellationToken::new(),
         ))
     });
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -541,9 +775,10 @@ async fn old_request_cannot_borrow_a_new_epoch_active_connection() {
     epoch.store(1, Ordering::SeqCst);
     backend.gate.add_permits(1);
     let new = manager
+        .request(DeviceId::new("peer"))
         .connect(
-            DeviceId::new("peer"),
             Instant::now() + Duration::from_secs(5),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -600,6 +835,7 @@ async fn completed_dials_racing_shutdown_cannot_escape_the_owner() {
         async fn adopt_inbound(
             &self,
             _: Arc<dyn PeerConnection>,
+            _reservation: &dyn InboundIdentityReservation,
         ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
             panic!("outbound-only fixture")
         }
@@ -688,6 +924,7 @@ async fn cancelled_adoption_closes_a_connection_retained_by_the_backend() {
         async fn adopt_inbound(
             &self,
             _: Arc<dyn PeerConnection>,
+            _reservation: &dyn InboundIdentityReservation,
         ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
             panic!("outbound-only fixture")
         }
@@ -723,7 +960,11 @@ async fn idle_retention_reuses_across_requests_and_expires_after_last_activity()
     backend.gate.add_permits(2);
     let target = DeviceId::new("history-peer");
     let first = manager
-        .connect(target, Instant::now() + Duration::from_secs(10))
+        .request(target)
+        .connect(
+            Instant::now() + Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     manager.retain(&first).await.unwrap();
@@ -732,7 +973,11 @@ async fn idle_retention_reuses_across_requests_and_expires_after_last_activity()
     tokio::time::advance(Duration::from_secs(29)).await;
     assert!(!backend.connections.lock().unwrap()[0].is_closed());
     let second = manager
-        .connect(target, Instant::now() + Duration::from_secs(10))
+        .request(target)
+        .connect(
+            Instant::now() + Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
@@ -789,12 +1034,20 @@ async fn retention_capacity_does_not_evict_active_requests() {
     );
     backend.gate.add_permits(3);
     let first = manager
-        .connect(DeviceId::new("a"), Instant::now() + Duration::from_secs(10))
+        .request(DeviceId::new("a"))
+        .connect(
+            Instant::now() + Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(manager.retain(&first).await.unwrap());
     let second = manager
-        .connect(DeviceId::new("b"), Instant::now() + Duration::from_secs(10))
+        .request(DeviceId::new("b"))
+        .connect(
+            Instant::now() + Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(!manager.retain(&second).await.unwrap());
@@ -803,7 +1056,11 @@ async fn retention_capacity_does_not_evict_active_requests() {
     assert!(backend.connections.lock().unwrap()[1].is_closed());
     drop(first);
     let third = manager
-        .connect(DeviceId::new("c"), Instant::now() + Duration::from_secs(10))
+        .request(DeviceId::new("c"))
+        .connect(
+            Instant::now() + Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(manager.retain(&third).await.unwrap());
@@ -903,9 +1160,10 @@ async fn refreshing_dead_transport_preserves_the_original_request_revocation_fen
         fixture(ConnectionMode::Multiplexed, ConnectivityPolicy::default());
     backend.gate.add_permits(2);
     let lease = manager
+        .request(DeviceId::new("peer"))
         .connect(
-            DeviceId::new("peer"),
             Instant::now() + Duration::from_secs(10),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -913,7 +1171,11 @@ async fn refreshing_dead_transport_preserves_the_original_request_revocation_fen
     epoch.store(1, Ordering::SeqCst);
     assert!(matches!(
         manager
-            .refresh(&lease, Instant::now() + Duration::from_secs(10))
+            .refresh(
+                lease,
+                Instant::now() + Duration::from_secs(10),
+                &CancellationToken::new()
+            )
             .await,
         Err(ConnectivityError::Denied)
     ));
@@ -939,9 +1201,10 @@ async fn evicting_reuse_keeps_a_brother_stream_until_its_own_completion() {
     );
     backend.gate.add_permits(2);
     let lease = manager
+        .request(DeviceId::new("peer"))
         .connect(
-            DeviceId::new("peer"),
             Instant::now() + Duration::from_secs(10),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -953,9 +1216,10 @@ async fn evicting_reuse_keeps_a_brother_stream_until_its_own_completion() {
     manager.evict(&lease);
     assert!(!backend.connections.lock().unwrap()[0].is_closed());
     let replacement = manager
+        .request(DeviceId::new("peer"))
         .connect(
-            DeviceId::new("peer"),
             Instant::now() + Duration::from_secs(10),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1074,42 +1338,51 @@ async fn expired_inbound_queue_discards_only_its_stream_and_returns_capacity() {
 
 #[tokio::test]
 async fn local_work_keeps_exchange_capacity_after_network_stream_is_dropped() {
-    let (manager, _, epoch) = fixture(
-        ConnectionMode::Multiplexed,
-        ConnectivityPolicy {
-            inbound_per_session: 1,
-            ..ConnectivityPolicy::default()
-        },
-    );
-    let (closed, _) = watch::channel(false);
-    let raw = Arc::new(TestConnection {
-        id: 987,
-        mode: ConnectionMode::Multiplexed,
-        closed,
-    });
-    let pending = manager
-        .accept_pending(raw, Instant::now() + Duration::from_secs(10))
-        .await
-        .unwrap();
-    let (connection, stream) = pending
-        .bind(Box::new(Grant {
-            epoch: 0,
-            current: epoch,
-            peer: DeviceId::new("peer"),
-        }))
-        .await
-        .unwrap();
-    let work = stream.hold_for_work();
-    drop(stream);
-    let mut following = Box::pin(connection.accept_bi());
-    assert!(
-        futures::poll!(&mut following).is_pending(),
-        "started local work still owns the only exchange slot"
-    );
-    drop(work);
-    let following = following.await.unwrap();
-    drop(following);
-    manager.shutdown().await.unwrap();
+    for split in [false, true] {
+        let (manager, _, epoch) = fixture(
+            ConnectionMode::Multiplexed,
+            ConnectivityPolicy {
+                inbound_per_session: 1,
+                ..ConnectivityPolicy::default()
+            },
+        );
+        let (closed, _) = watch::channel(false);
+        let raw = Arc::new(TestConnection {
+            id: 987,
+            mode: ConnectionMode::Multiplexed,
+            closed,
+        });
+        let pending = manager
+            .accept_pending(raw, Instant::now() + Duration::from_secs(10))
+            .await
+            .unwrap();
+        let (connection, stream) = pending
+            .bind(Box::new(Grant {
+                epoch: 0,
+                current: epoch,
+                peer: DeviceId::new("peer"),
+            }))
+            .await
+            .unwrap();
+        let work = if split {
+            let (parts, work) = stream.into_parts();
+            drop(parts);
+            work
+        } else {
+            let work = stream.hold_for_work();
+            drop(stream);
+            work
+        };
+        let mut following = Box::pin(connection.accept_bi());
+        assert!(
+            futures::poll!(&mut following).is_pending(),
+            "started local work still owns the only exchange slot"
+        );
+        drop(work);
+        let following = following.await.unwrap();
+        drop(following);
+        manager.shutdown().await.unwrap();
+    }
 }
 
 /// 单首轮能力与保留生命周期分开：FIN 后租约继续存活，不能再开第二次首轮流。
@@ -1121,9 +1394,10 @@ async fn retained_single_exchange_survives_fin_until_its_owner_releases_it() {
     );
     backend.gate.add_permits(1);
     let lease = manager
+        .request(DeviceId::new("peer"))
         .connect(
-            DeviceId::new("peer"),
             Instant::now() + Duration::from_secs(1),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1274,11 +1548,8 @@ async fn presence_cancelled_acquisition_waits_for_real_work_before_returning_fli
         let cancel = cancel.clone();
         async move {
             manager
-                .connect_with_cancel(
-                    DeviceId::new("one"),
-                    Instant::now() + Duration::from_secs(20),
-                    &cancel,
-                )
+                .request(DeviceId::new("one"))
+                .connect(Instant::now() + Duration::from_secs(20), &cancel)
                 .await
         }
     });
@@ -1290,9 +1561,10 @@ async fn presence_cancelled_acquisition_waits_for_real_work_before_returning_fli
     assert!(!job.is_finished());
     assert!(matches!(
         manager
+            .request(DeviceId::new("two"))
             .connect(
-                DeviceId::new("two"),
-                Instant::now() + Duration::from_secs(1)
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new()
             )
             .await,
         Err(ConnectivityError::Busy(_))
@@ -1305,13 +1577,95 @@ async fn presence_cancelled_acquisition_waits_for_real_work_before_returning_fli
     assert!(backend.connections.lock().unwrap()[0].is_closed());
     backend.gate.add_permits(1);
     let lease = manager
+        .request(DeviceId::new("two"))
         .connect(
-            DeviceId::new("two"),
             Instant::now() + Duration::from_secs(1),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
     assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
     drop(lease);
     manager.shutdown().await.unwrap();
+}
+
+#[path = "inbound_tests.rs"]
+mod inbound;
+
+#[path = "lifetime_tests.rs"]
+mod lifetime;
+
+#[tokio::test]
+async fn identity_lookup_scope_cannot_gain_a_fresh_grant_after_revocation_or_session_restart() {
+    struct Fence {
+        epoch: usize,
+        current: Arc<AtomicUsize>,
+    }
+    impl super::InboundAdmissionFence for Fence {
+        fn check_current(&self, _: &DeviceId) -> Result<(), ConnectivityError> {
+            if self.current.load(Ordering::SeqCst) == self.epoch {
+                Ok(())
+            } else {
+                Err(ConnectivityError::Denied)
+            }
+        }
+    }
+    struct ScopedAdmission(Arc<AtomicUsize>);
+    #[async_trait]
+    impl SessionConnectionAdmissionPort for ScopedAdmission {
+        fn inbound_fence(&self) -> Option<Box<dyn super::InboundAdmissionFence>> {
+            Some(Box::new(Fence {
+                epoch: self.0.load(Ordering::SeqCst),
+                current: self.0.clone(),
+            }))
+        }
+        fn begin(&self, target: DeviceId) -> Box<dyn AdmissionAttempt> {
+            Admission(self.0.clone()).begin(target)
+        }
+        async fn adopt_inbound(
+            &self,
+            _: Arc<dyn PeerConnection>,
+            _: &dyn InboundIdentityReservation,
+        ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+            panic!("outbound scope fixture")
+        }
+    }
+    let (_, backend, epoch) = fixture(ConnectionMode::Multiplexed, ConnectivityPolicy::default());
+    let manager = ConnectivityManager::new(
+        backend.clone(),
+        Arc::new(ScopedAdmission(epoch.clone())),
+        ConnectivityPolicy::default(),
+    );
+    let before_identity = manager.freeze_request();
+    epoch.store(1, Ordering::SeqCst);
+    assert!(matches!(
+        before_identity.bind(DeviceId::new("peer"), Vec::new()),
+        Err(ConnectivityError::Denied)
+    ));
+    let before_queue = manager
+        .freeze_request()
+        .bind(DeviceId::new("peer"), Vec::new())
+        .expect("current request");
+    epoch.store(2, Ordering::SeqCst);
+    assert!(matches!(
+        before_queue
+            .connect(
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new()
+            )
+            .await,
+        Err(ConnectivityError::Denied)
+    ));
+    let old_session = manager.freeze_request();
+    manager.disconnect_all().await.expect("restart session");
+    assert!(matches!(
+        old_session.bind(DeviceId::new("peer"), Vec::new()),
+        Err(ConnectivityError::Stopped)
+    ));
+    assert_eq!(
+        backend.calls.load(Ordering::SeqCst),
+        0,
+        "old request must never dial under renewed authority"
+    );
+    manager.shutdown().await.expect("shutdown");
 }

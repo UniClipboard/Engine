@@ -20,6 +20,7 @@
 | 配对设备 | 发起一次加入尝试 | 加入成功、拒绝、取消、失败或等待恢复；不把旧成员尚未确认写成全部完成 |
 | 复制并同步 | 接受一次本机复制通知 | 本机保存及各目标接收、保存结果；对方系统剪贴板写入独立结算 |
 | 手动发送或重新发送 | 用户明确发起发送 | 各目标成功、失败或等待重试；文件块与单个网络包不是独立业务动作 |
+| 手动重试接收失败项 | 用户明确选择失败项重试 | 实际保存完成、部分完成、取消、拒绝或来源不可用；准入接受不算接收完成 |
 | 修改成员关系 | 添加、移除成员或选择设备组 | 本机变更结果与其他成员确认情况分别表达，未确认不能算全部完成 |
 | 恢复成员一致性 | 上线、重启恢复或重试触发实际恢复工作 | 已一致、发现冲突、仍待确认或恢复失败 |
 | 恢复连接或会话 | 明确开始一次恢复尝试 | 恢复可用、失败或延期 |
@@ -53,6 +54,7 @@
   不额外制造一串独立的“生命周期成功”。
 - 关闭超时、任务异常退出等进入运行诊断，必须说明具体动作和失败类别，不能只写 `session_lifecycle`。
   任务异常退出统一由等待该任务的负责人调用 `record_task_join_failure`，以固定 `task.kind` 写入健康记录；
+  Blob 受管交换及关闭监督任务为 `blob_transport_worker`；
   剪贴板投递记录、入站系统写入、活跃剪贴板收敛、延后排空、配对 mDNS 转发与移动端出站分发分别为 `clipboard_delivery_record`、`clipboard_inbound_os_write`、`active_clipboard_converge`、`clipboard_deferred_drain`、`pairing_mdns_forward`、`mobile_outbound_dispatch`；
   Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；成员维护的一轮动作为 `membership_maintenance_round`，活跃剪贴板必需 worker 为 `active_clipboard_worker`，移动端绑定的引擎 worker 线程为 `mobile_worker`，Engine 启动任务为 `engine_startup`，出站进度翻译任务为 `outbound_progress_translator`，设备发现订阅及共用 mDNS 服务的任务异常退出为 `peer_discovery`，普通剪贴板共享拨号任务为 `clipboard_connectivity_worker`，设备可达性准入、连接监督及范围读取任务为 `presence_connectivity_worker`，成员历史连接任务为 `membership_history_connectivity_worker`。
 - 真正执行的后台恢复可以成为独立动作，但要说明上线、重启、重试等固定触发原因，以及实际恢复结果。
@@ -128,6 +130,7 @@ Jaeger Deep Dependency Graph 只用于辅助查看跨端调用关系，不替代
 | 降噪后错误只剩孤立片段 | 只隐藏成功或父节点，没有先确认完整动作边界。 | 空工作被省略时不留下悬空关联日志；正常清理降噪后仍能查看超时和任务异常。 |
 | 失败记录只有 `reason="unknown"` | 上游转换把错误字符串化或丢弃，分类器沿 source chain 找不到具体类型；补日志字段无济于事。见[错误来源与日志字段](#错误来源与日志字段)。 | 用真实下层错误（如 SQLite `BUSY`、IO 权限拒绝）走完整转换路径，断言记录中的固定分类值。 |
 | 测试单跑通过，并行却偶发失败 | 用全局“最新一条”选择记录，误取其他测试的调用。 | 按本次调用确切的 TraceId/SpanId 选择两端记录，不靠时间邻近或放宽超时掩盖串错。 |
+| SDK独立runtime或长期actor出现不存在的span ID | 显式parent ID只在所属subscriber中有效；SDK线程不能用全局subscriber解释请求方parent，长期actor不能保存启动请求的parent。 | SDK本地存储future的创建和驱动隔离请求parent，领域完成记录仍在外层；同时用全局与请求subscriber复现，并断言启动span先于后台发现停止结束。 |
 
 验收按四层推进：结果分类测试、真实导出与隐私检查、真实 Engine 流程、可视化列表与详情。
 除父子关系外，还要对比 span 时长与同一节点、同一 operation 的完成日志，避免拿嵌套清理日志当作动作结束证据。
@@ -247,6 +250,11 @@ Engine 原样装饰既有完整能力，不解析消息。Infra 只根据已有�
 Clipboard 的宿主复制在既有完整调用处创建 `clipboard.copy_and_sync`；Engine 在既有保存与系统剪贴板能力上记录
 `clipboard.persist`、`clipboard.write_system`，不读取业务标识或编排内部步骤。发送端每个目标任务、接收广播交接和后台系统写入
 都由 Application 延续不可读取的 `ObservationContext`。它只保存不可记录的在线父身份，不持有原 span，不持久化，不参与业务判断。
+用户单独发起失败项重试时，Engine只装饰既有完整重试能力，建立独立的 `clipboard.retry_receive` 在线业务记录；
+`Accepted` 仅交接完成权，原Application接收监督任务在实际输出、提交或失败结算完成后提交固定结局。
+接收的已提交部分／取消事实由同一不透明上下文跨原处理任务传递，既有回执保持原值；记录不得把部分保存压成整体成功。
+本地完整文件输出能力的 `clipboard.export_file` 是诊断子节点，存储失败保留固定类别，不输出内容摘要、文件名或路径；
+它不代表业务提交成功，也不因正常清理生成新的业务入口。重试不延长旧发送记录，不新增持久关联字段或业务阶段查询。
 Application 专用的 `ClipboardReceiverPort` 从 Core 移回接收模块，仍只有原订阅方法；广播容量、串行消费、回执、超时和关闭语义不变。
 `ClipboardDelivery` 是队列任务信封，Core `InboundClipboard` 原样放在其中，Core 仍无观测字段或依赖。
 
@@ -478,6 +486,10 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 解码时拒绝未知字段、值和不符的事件名/级别，再展开为可读字段写入文件。该内部 payload 不是任意
 正文，也不原样写入诊断文件；系统日志中的编码只包含同一组固定分类。远程入口忽略这个本地 target，
 不将正常路由计为远程隐私拒收。
+
+实际握手完成的 `connection.protocol.negotiated` 只输出封闭类别：可达性v1／v2、`blob`或`other`。
+`blob`由固定SDK的ALPN匹配产生；不记录任意ALPN原文，不新增业务入口，未知协议继续归`other`。
+该记录仅进入本地连接诊断，远程入口仍忽略整个`uc.connectivity`，不扩大Collector字段。
 
 入站对端拒绝另以本地运行诊断 `peer.inbound.rejected` 记录固定协议和原因。展开字段仅有 `event.name`、
 `direction=inbound`、`protocol`、`uc.outcome=rejected`、`error.phase` 和 `error.reason`；不含对端标识、

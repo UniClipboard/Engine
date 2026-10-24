@@ -62,7 +62,7 @@
 | [`crates/uc-application/src/clipboard/history/clear_history.rs`](../../../crates/uc-application/src/clipboard/history/clear_history.rs) | 159 | 1 |  |
 | [`crates/uc-application/src/clipboard/history/delete_entry.rs`](../../../crates/uc-application/src/clipboard/history/delete_entry.rs) | 103, 112, 121, 130 | 4 |  |
 | [`crates/uc-application/src/clipboard/history/retention_policy.rs`](../../../crates/uc-application/src/clipboard/history/retention_policy.rs) | 148 | 1 |  |
-| [`crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs`](../../../crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs) | 935, 1248, 1353, 1368, 1966, 1998, 2302 | 7 |  |
+| [`crates/uc-application/src/transfer/receive/materialization/workflow.rs`](../../../crates/uc-application/src/transfer/receive/materialization/workflow.rs) | 935, 1248, 1353, 1368, 1966, 1998, 2302 | 7 | 历史审查行号；实现已迁入 transfer 并拆分 |
 | [`crates/uc-application/src/clipboard/sync/payload_codec.rs`](../../../crates/uc-application/src/clipboard/sync/payload_codec.rs) | 101, 122, 134, 136, 172, 216, 265, 336, 351, 356, 361, 365, 452, 456, 470, 484, 485, 502, 505, 512, 520, 528 | 22 |  |
 | [`crates/uc-application/src/space/lifecycle/initialize_space/use_case.rs`](../../../crates/uc-application/src/space/lifecycle/initialize_space/use_case.rs) | 320 | 1 |  |
 | [`crates/uc-engine/src/assembly/host.rs`](../../../crates/uc-engine/src/assembly/host.rs) | 102 | 1 |  |
@@ -128,7 +128,7 @@
 | [`crates/uc-application/src/clipboard/sync/snapshot_from_entry.rs`](../../../crates/uc-application/src/clipboard/sync/snapshot_from_entry.rs) | 201 | 1 |  |
 | [`crates/uc-application/src/facade/clipboard_capture/mod.rs`](../../../crates/uc-application/src/facade/clipboard_capture/mod.rs) | 91, 146, 165, 208 | 4 |  |
 | [`crates/uc-application/src/facade/clipboard_history/mod.rs`](../../../crates/uc-application/src/facade/clipboard_history/mod.rs) | 342, 347, 368, 416, 475, 496, 513, 522, 619 | 9 |  |
-| [`crates/uc-application/src/facade/clipboard/cancel_entry_receive.rs`](../../../crates/uc-application/src/facade/clipboard/cancel_entry_receive.rs) | 27, 105, 122, 171, 181, 198 | 6 |  |
+| [条目取消模块（原门面用例）](../../../crates/uc-application/src/transfer/receive/cancellation/mod.rs) | 27, 105, 122, 171, 181, 198 | 6 | 历史审查行号；实现现已迁移并按职责拆分 |
 | [`crates/uc-application/src/facade/clipboard/facade.rs`](../../../crates/uc-application/src/facade/clipboard/facade.rs) | 280, 292, 302, 480, 508, 541 | 6 |  |
 | [`crates/uc-application/src/facade/roster/facade.rs`](../../../crates/uc-application/src/facade/roster/facade.rs) | 98, 104, 116, 126, 196, 214, 227, 241, 250 | 9 |  |
 | [`crates/uc-application/src/search/coordinator.rs`](../../../crates/uc-application/src/search/coordinator.rs) | 774 | 1 |  |
@@ -475,7 +475,7 @@
 | [`crates/uc-application/src/clipboard/sync/active_state/reconcile.rs`](../../../crates/uc-application/src/clipboard/sync/active_state/reconcile.rs) | 140 | 1 |  |
 | [`crates/uc-application/src/clipboard/sync/active_state/restore_broadcast_worker.rs`](../../../crates/uc-application/src/clipboard/sync/active_state/restore_broadcast_worker.rs) | 134 | 1 |  |
 | [`crates/uc-application/src/clipboard/sync/active_state/serve_pull.rs`](../../../crates/uc-application/src/clipboard/sync/active_state/serve_pull.rs) | 115, 156, 162, 182, 205, 230, 234 | 7 |  |
-| [`crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs`](../../../crates/uc-application/src/clipboard/sync/apply_inbound/materializer.rs) | 393, 399, 522, 565, 917, 1195, 1509, 1897, 1901 | 9 |  |
+| [`crates/uc-application/src/transfer/receive/materialization/workflow.rs`](../../../crates/uc-application/src/transfer/receive/materialization/workflow.rs) | 393, 399, 522, 565, 917, 1195, 1509, 1897, 1901 | 9 | 历史审查行号；实现已迁入 transfer 并拆分 |
 | [`crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs`](../../../crates/uc-application/src/clipboard/sync/apply_inbound/usecase.rs) | 455, 482, 816, 837, 876, 1144, 1565 | 7 |  |
 | [`crates/uc-application/src/clipboard/sync/dispatch_entry/delivery.rs`](../../../crates/uc-application/src/clipboard/sync/dispatch_entry/delivery.rs) | 123, 164, 242 | 3 |  |
 | [`crates/uc-application/src/clipboard/sync/dispatch_entry/header.rs`](../../../crates/uc-application/src/clipboard/sync/dispatch_entry/header.rs) | 64 | 1 |  |

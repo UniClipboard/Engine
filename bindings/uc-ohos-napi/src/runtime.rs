@@ -7,20 +7,23 @@ use napi::Status;
 use napi_derive::napi;
 use uc_engine::observability::uc_warn;
 use uc_engine::{
-    CancelJoinSpaceInput, ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput,
-    ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig,
-    EngineError, EngineEvent, EngineState, EventStream, ExportEntryInput, HostFileHandle,
-    InvitationAvailability, JoinSpaceInput, Operation, OperationResult, OperationTerminal,
-    RecoverSessionInput, RefreshReason, RemoveMemberInput, RestoreClipboardInput, SecretString,
-    SendFilesInput, SendImageInput, SendReportSummary, SendTextInput, StartupLifecycle,
-    StartupLifecycleInput, StartupProgress,
+    CancelEntryReceiveInput, CancelInboundTransferInput, CancelJoinSpaceInput,
+    ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput, ClipboardRestoreMode,
+    ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent,
+    EngineState, EntryReceiveProgressInput, EntryReceiveRetryOutcome, EventStream,
+    ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
+    OperationResult, OperationTerminal, ReceiveProgressSummary, RecoverSessionInput, RefreshReason,
+    RemoveMemberInput, RestoreClipboardInput, RetryEntryReceiveInput, SecretString, SendFilesInput,
+    SendImageInput, SendReportSummary, SendTextInput, StartupLifecycle, StartupLifecycleInput,
+    StartupProgress, TransferCancellationReason,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhRelayOverview,
-    OhRelayOverviewEntry, OhSendReport, OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhReceiveItem,
+    OhReceiveProgress, OhReceiveRetryOutcome, OhRelayOverview, OhRelayOverviewEntry, OhSendReport,
+    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -465,6 +468,101 @@ impl OhEngine {
             .map_err(engine_error)?;
         match result {
             OperationResult::ClipboardCaptured { entry_id } => Ok(entry_id),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    /// 接受后实际接收由Engine持有，宿主不编排获取和提交。
+    #[napi]
+    pub async fn retry_entry_receive(
+        &self,
+        entry_id: String,
+        expected_attempt_id: String,
+        item_ids: Vec<String>,
+    ) -> napi::Result<OhReceiveRetryOutcome> {
+        match self
+            .engine
+            .execute(Operation::RetryEntryReceive(RetryEntryReceiveInput {
+                entry_id,
+                expected_attempt_id,
+                item_ids,
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EntryReceiveRetry(outcome) => Ok(receive_retry(outcome)),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    /// 用户取消整个接收尝试；保留 Engine 的明确结果。
+    #[napi]
+    pub async fn cancel_entry_receive(
+        &self,
+        entry_id: String,
+        attempt_id: String,
+    ) -> napi::Result<String> {
+        match self
+            .engine
+            .execute(Operation::CancelEntryReceive(CancelEntryReceiveInput {
+                entry_id,
+                attempt_id,
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EntryReceiveCancellation(outcome) => Ok(outcome.to_string()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    /// 用户主动取消单项；固定使用 LocalUser 原因。
+    #[napi]
+    pub async fn cancel_inbound_transfer(&self, transfer_id: String) -> napi::Result<String> {
+        match self
+            .engine
+            .execute(Operation::CancelInboundTransfer(
+                CancelInboundTransferInput {
+                    transfer_id,
+                    reason: TransferCancellationReason::LocalUser,
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::InboundTransferCancellation(outcome) => Ok(outcome.to_string()),
+            _ => Err(unexpected_result()),
+        }
+    }
+
+    #[napi]
+    pub async fn query_entry_receive_progress(
+        &self,
+        entry_id: String,
+    ) -> napi::Result<Option<OhReceiveProgress>> {
+        match self
+            .engine
+            .execute(Operation::QueryEntryReceiveProgress(
+                EntryReceiveProgressInput { entry_id },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EntryReceiveProgress(progress) => Ok(progress.map(receive_progress)),
+            _ => Err(unexpected_result()),
+        }
+    }
+    #[napi]
+    pub async fn list_entry_receive_progress(&self) -> napi::Result<Vec<OhReceiveProgress>> {
+        match self
+            .engine
+            .execute(Operation::ListEntryReceiveProgress)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EntryReceiveProgressList(progress) => {
+                Ok(progress.into_iter().map(receive_progress).collect())
+            }
             _ => Err(unexpected_result()),
         }
     }
@@ -1295,3 +1393,45 @@ fn relay_mode_name(mode: uc_engine::RelayRoutingMode) -> &'static str {
         uc_engine::RelayRoutingMode::Disabled => "disabled",
     }
 }
+
+fn receive_retry(outcome: EntryReceiveRetryOutcome) -> OhReceiveRetryOutcome {
+    let (status, attempt_id, reason) = match outcome {
+        EntryReceiveRetryOutcome::Accepted { attempt_id } => ("accepted", Some(attempt_id), None),
+        EntryReceiveRetryOutcome::AlreadyReceiving => ("already_receiving", None, None),
+        EntryReceiveRetryOutcome::Superseded => ("superseded", None, None),
+        EntryReceiveRetryOutcome::CancellationIncomplete => ("cancellation_incomplete", None, None),
+        EntryReceiveRetryOutcome::Unavailable { reason } => {
+            ("unavailable", None, Some(reason.to_string()))
+        }
+    };
+    OhReceiveRetryOutcome {
+        status: status.into(),
+        attempt_id,
+        reason,
+    }
+}
+
+fn receive_progress(progress: ReceiveProgressSummary) -> OhReceiveProgress {
+    OhReceiveProgress {
+        entry_id: progress.entry_id,
+        attempt_id: progress.attempt_id,
+        state: progress.state,
+        total_bytes: progress.total_bytes.to_string(),
+        completed_bytes: progress.completed_bytes.to_string(),
+        items_total: progress.items_total,
+        items_completed: progress.items_completed,
+        items: progress
+            .items
+            .into_iter()
+            .map(|item| OhReceiveItem {
+                item_id: item.item_id,
+                kind: item.kind.to_string(),
+                state: item.state,
+                failure_reason: item.failure_reason.map(|reason| reason.to_string()),
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod receive_tests;

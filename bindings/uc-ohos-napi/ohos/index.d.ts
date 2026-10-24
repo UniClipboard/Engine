@@ -235,6 +235,31 @@ export interface OhSpaceCreated {
   identityFingerprint: string
 }
 
+export interface OhReceiveItem {
+  itemId: string
+  kind: string
+  state: string
+  failureReason?: string
+}
+
+export interface OhReceiveRetryOutcome {
+  status: string
+  attemptId?: string
+  reason?: string
+}
+
+export interface OhReceiveProgress {
+  entryId: string
+  attemptId: string
+  state: string
+  /** 十进制字节数，保持整数精度。 */
+  totalBytes: string
+  completedBytes: string
+  itemsTotal: number
+  itemsCompleted: number
+  items: OhReceiveItem[]
+}
+
 export interface OhActiveClipboard {
   entryId: string
   activatedBy: string
@@ -262,6 +287,14 @@ export interface OhEngine {
   querySharedDeviceRefresh(requestId: string): Promise<OhSharedDeviceRefresh | null>
   removeMember(deviceId: string): Promise<OhMemberRemoval>
   queryMemberRemoval(): Promise<OhMemberRemoval>
+  /** 只提交完整重试意图；accepted 表示新尝试已接受，最终结果通过接收进度查询。 */
+  retryEntryReceive(entryId: string, expectedAttemptId: string, itemIds: string[]): Promise<OhReceiveRetryOutcome>
+  /** 取消整个接收尝试；cancellation_incomplete 表示实际清理仍在进行。 */
+  cancelEntryReceive(entryId: string, attemptId: string): Promise<string>
+  /** 用户主动取消单项；cancellation_incomplete 不等于已取消。 */
+  cancelInboundTransfer(transferId: string): Promise<string>
+  queryEntryReceiveProgress(entryId: string): Promise<OhReceiveProgress | null>
+  listEntryReceiveProgress(): Promise<OhReceiveProgress[]>
   queryActiveClipboard(): Promise<OhActiveClipboard | null>
   lifecycleState(): Promise<string>
   suspend(): Promise<void>

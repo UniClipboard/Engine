@@ -1,29 +1,27 @@
-use std::collections::HashMap;
+use super::work::ReceiveWorkRegistry;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use tokio::sync::{Mutex, Notify};
 use tracing::instrument;
 use uc_core::ids::EntryId;
 use uc_core::ports::{
-    AttemptState, BeginReceiveFailureOutcome, BeginReceiveFailurePort, CleanupReceiveArtifactsPort,
-    ClockPort, CommitInboundReceivePort, FinalizeProvisionalReceivePort,
-    GetDirectoryPublishRecordPort, GetEntryAttemptPort, InboundReceiveSettlement,
-    ListNonTerminalAttemptsPort, ListProvisionalReceivesPort, ListUnsettledReceiveArtifactsPort,
-    NoEntryReceiveArtifacts, PartialReceiveTerminal, ProvisionalReceiveAction, ReceiveArtifact,
-    ReceiveArtifactOwnership,
+    directory_staging_area_for_root, AttemptState, BeginReceiveFailureOutcome,
+    BeginReceiveFailurePort, CleanupReceiveArtifactsPort, ClockPort, CommitInboundReceivePort,
+    FinalizeProvisionalReceivePort, GetDirectoryPublishRecordPort, GetEntryAttemptPort,
+    InboundReceiveSettlement, ListNonTerminalAttemptsPort, ListProvisionalReceivesPort,
+    ListUnsettledReceiveArtifactsPort, NoEntryReceiveArtifacts, PartialReceiveTerminal,
+    ProvisionalReceiveAction, PublishPhase, ReceiveArtifact, ReceiveArtifactOwnership,
+    RecordDirectoryPublishPort,
 };
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_error, uc_info, uc_warn,
 };
 
 pub struct ReceiveReadinessCoordinator {
-    ready: AtomicBool,
-    notify: Notify,
-    recovery_lock: Mutex<()>,
+    work: Arc<ReceiveWorkRegistry>,
     degraded_reason: RwLock<Option<String>>,
 }
 
@@ -37,45 +35,74 @@ pub struct ReceiveReadinessStatus {
 pub enum ReceiveReadinessError {
     #[error("receive recovery failed")]
     Recovery(#[source] anyhow::Error),
+    #[error("receive shutdown failed")]
+    Stop(#[source] anyhow::Error),
 }
 
 #[async_trait]
 pub trait EnsureReceiveReadyPort: Send + Sync {
     async fn ensure_receive_ready(&self) -> Result<(), ReceiveReadinessError>;
-    fn close_receive_gate(&self);
+    /// 封住旧世代并等待已接受的接收实际结算；成功后才允许撤下所需密钥。
+    async fn close_receive_gate(&self) -> Result<(), ReceiveReadinessError>;
     fn receive_readiness_status(&self) -> ReceiveReadinessStatus;
 }
 
 impl ReceiveReadinessCoordinator {
     pub fn new() -> Self {
+        let work = Arc::new(ReceiveWorkRegistry::default());
+        work.close();
         Self {
-            ready: AtomicBool::new(false),
-            notify: Notify::new(),
-            recovery_lock: Mutex::new(()),
+            work,
             degraded_reason: RwLock::new(None),
         }
     }
 
-    pub fn mark_ready(&self) {
+    #[cfg(test)]
+    pub(crate) fn mark_ready(&self) {
+        let generation = self.work.generation();
+        self.work.open(&generation);
+        self.publish_ready();
+    }
+
+    fn publish_ready(&self) {
         *self
             .degraded_reason
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        self.ready.store(true, Ordering::Release);
-        self.notify.notify_waiters();
+        self.work.changed.notify_waiters();
     }
 
     pub fn mark_not_ready(&self) {
-        self.ready.store(false, Ordering::Release);
+        self.work.close();
+    }
+
+    /// 锁定等维护动作关闭原世代，等所有已开始工作结算后再交还能力。
+    pub(crate) async fn close(&self) -> Result<(), ReceiveReadinessError> {
+        self.mark_not_ready();
+        let mut scope = self
+            .work
+            .drain_scope()
+            .await
+            .map_err(|source| ReceiveReadinessError::Stop(source.into()))?;
+        scope
+            .stop()
+            .await
+            .map_err(|source| ReceiveReadinessError::Stop(source.into()))?;
+        scope.complete();
+        Ok(())
     }
 
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.work.is_open()
+    }
+
+    pub(crate) fn work_registry(&self) -> Arc<ReceiveWorkRegistry> {
+        self.work.clone()
     }
 
     pub async fn wait_ready(&self) {
         while !self.is_ready() {
-            let notified = self.notify.notified();
+            let notified = self.work.changed.notified();
             if self.is_ready() {
                 return;
             }
@@ -106,14 +133,18 @@ impl ReceiveReadinessCoordinator {
             return Ok(());
         }
 
-        let _guard = self.recovery_lock.lock().await;
+        let _guard = self.work.recovery_lease().await;
         if self.is_ready() {
             return Ok(());
         }
 
+        let generation = self.work.generation();
         match recover().await {
             Ok(()) => {
-                self.mark_ready();
+                if !self.work.open(&generation) {
+                    return Err(anyhow!("receive recovery was superseded by gate closure"));
+                }
+                self.publish_ready();
                 Ok(())
             }
             Err(error) => {
@@ -122,11 +153,12 @@ impl ReceiveReadinessCoordinator {
                     io_error_kind = io_error_kind(error.as_ref()),
                     "receive readiness recovery failed; receive gate stays closed"
                 );
-                self.mark_not_ready();
-                *self
-                    .degraded_reason
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+                if self.work.close_if_current(&generation) {
+                    *self
+                        .degraded_reason
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+                }
                 Err(error)
             }
         }
@@ -144,6 +176,7 @@ pub struct ReconcileReceiveAttemptsUseCase {
     list_attempts: Arc<dyn ListNonTerminalAttemptsPort>,
     list_artifacts: Arc<dyn ListUnsettledReceiveArtifactsPort>,
     get_directory_publish: Arc<dyn GetDirectoryPublishRecordPort>,
+    record_directory_publish: Arc<dyn RecordDirectoryPublishPort>,
     begin_failure: Arc<dyn BeginReceiveFailurePort>,
     cleanup_artifacts: Arc<dyn CleanupReceiveArtifactsPort>,
     list_provisional: Arc<dyn ListProvisionalReceivesPort>,
@@ -159,6 +192,7 @@ impl ReconcileReceiveAttemptsUseCase {
         list_attempts: Arc<dyn ListNonTerminalAttemptsPort>,
         list_artifacts: Arc<dyn ListUnsettledReceiveArtifactsPort>,
         get_directory_publish: Arc<dyn GetDirectoryPublishRecordPort>,
+        record_directory_publish: Arc<dyn RecordDirectoryPublishPort>,
         begin_failure: Arc<dyn BeginReceiveFailurePort>,
         cleanup_artifacts: Arc<dyn CleanupReceiveArtifactsPort>,
         list_provisional: Arc<dyn ListProvisionalReceivesPort>,
@@ -171,6 +205,7 @@ impl ReconcileReceiveAttemptsUseCase {
             list_attempts,
             list_artifacts,
             get_directory_publish,
+            record_directory_publish,
             begin_failure,
             cleanup_artifacts,
             list_provisional,
@@ -295,23 +330,74 @@ impl ReconcileReceiveAttemptsUseCase {
                 .as_ref()
                 .map(|record| record.artifacts.clone())
                 .unwrap_or_default();
+            let mut staging_areas = HashSet::new();
             if let Some(directory) = self
                 .get_directory_publish
                 .get_publish_record(&attempt.entry_id, &attempt.current_attempt_id)
                 .await
                 .map_err(anyhow::Error::new)?
             {
-                cleanup.extend(directory.root_map.into_iter().enumerate().map(
-                    |(index, (staged_path, final_path))| ReceiveArtifact {
+                // 所有已撤回根的staging证明必须保留到零可见根持久化成功。
+                // 否则NoEntry失败后的恢复会把用户新建的同名目标误认作旧输出。
+                for (staged_path, final_path) in &directory.root_map {
+                    let area = directory_staging_area_for_root(staged_path)?;
+                    staging_areas.insert(area.clone());
+                    if directory.partial_visible_roots != Some(0)
+                        && directory.phase != PublishPhase::Staging
+                        && !tokio::fs::try_exists(staged_path).await?
+                    {
+                        tokio::fs::create_dir_all(&area).await?;
+                        if tokio::fs::try_exists(final_path).await? {
+                            // 目标在原尝试独占的私有staging中，尚未释放给其他动作。
+                            tokio::fs::rename(final_path, staged_path).await?;
+                        } else {
+                            // 空标记也须跨失败保留，防止后续重用的目标被重新认领。
+                            tokio::fs::create_dir(staged_path).await?;
+                        }
+                    }
+                    for artifact in &mut cleanup {
+                        if artifact.final_path == *final_path {
+                            artifact.ownership = ReceiveArtifactOwnership::UserDestination;
+                        }
+                    }
+                }
+                if directory.partial_visible_roots != Some(0) {
+                    self.record_directory_publish
+                        .record_partial(
+                            &attempt.entry_id,
+                            &attempt.current_attempt_id,
+                            0,
+                            self.clock.now_ms(),
+                        )
+                        .await?;
+                }
+                for (index, (staged_path, final_path)) in directory.root_map.into_iter().enumerate()
+                {
+                    cleanup.push(ReceiveArtifact {
                         item_id: format!("directory-root-{index}"),
                         staged_path,
                         final_path,
                         ownership: ReceiveArtifactOwnership::UserDestination,
-                    },
-                ));
+                    });
+                }
             }
             self.cleanup_artifacts
                 .cleanup_receive_artifacts(&cleanup)
+                .await
+                .map_err(anyhow::Error::new)?;
+
+            let areas = staging_areas
+                .into_iter()
+                .enumerate()
+                .map(|(index, path)| ReceiveArtifact {
+                    item_id: format!("directory-area-{index}"),
+                    staged_path: path.clone(),
+                    final_path: path,
+                    ownership: ReceiveArtifactOwnership::ManagedStaging,
+                })
+                .collect::<Vec<_>>();
+            self.cleanup_artifacts
+                .cleanup_receive_artifacts(&areas)
                 .await
                 .map_err(anyhow::Error::new)?;
 
@@ -355,19 +441,163 @@ impl ReconcileReceiveAttemptsUseCase {
 
 #[cfg(test)]
 mod tests {
+    use super::super::work::ReceiveWorkError;
+    use std::error::Error;
+    use std::io::{self, ErrorKind};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::time::Duration;
+    use tokio::time::timeout;
 
     use async_trait::async_trait;
     use uc_core::ports::{
         AttemptError, DirectoryPublishRecord, EntryReceiveAttempt, InboundReceiveCommitError,
-        ProvisionalReceiveError, ProvisionalReceiveRecovery, PublishLogError,
+        ProvisionalReceiveError, ProvisionalReceiveRecovery, PublishLogError, PublishPhase,
         ReceiveArtifactLogError, ReceiveArtifactPhase, ReceiveArtifactRecord,
-        ReceiveArtifactResolution,
+        ReceiveArtifactResolution, DIRECTORY_RECEIVE_STAGING_PREFIX,
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn complete_close_waits_for_all_receives_and_never_opens_or_revives_the_old_generation() {
+        let readiness = ReceiveReadinessCoordinator::new();
+        readiness.mark_ready();
+        let registry = readiness.work_registry();
+        let a = registry.action();
+        let b = registry.action();
+        let preparing = registry.action();
+        a.register(&EntryId::from("a"), "a").unwrap();
+        b.register(&EntryId::from("b"), "b").unwrap();
+        let mut closing = Box::pin(readiness.close());
+        assert!(timeout(Duration::from_millis(10), closing.as_mut())
+            .await
+            .is_err());
+        assert!(a.cancellation().is_cancelled() && b.cancellation().is_cancelled());
+        assert!(preparing.cancellation().is_cancelled());
+        assert!(!readiness.is_ready());
+        let during = registry.action();
+        assert!(during.cancellation().is_cancelled());
+        a.finish(Ok(()));
+        drop(preparing);
+        assert!(timeout(Duration::from_millis(10), closing.as_mut())
+            .await
+            .is_err());
+        b.finish(Ok(()));
+        closing.await.unwrap();
+        assert!(!readiness.is_ready(), "实际排空不授予重新接收资格");
+        readiness.ensure_ready(|| async { Ok(()) }).await.unwrap();
+        assert!(readiness.is_ready());
+        assert!(a.register(&EntryId::from("old"), "old").is_err());
+        assert!(during.register(&EntryId::from("during"), "during").is_err());
+        let new = registry.action();
+        new.register(&EntryId::from("new"), "new").unwrap();
+        new.finish(Ok(()));
+    }
+
+    #[tokio::test]
+    async fn complete_close_preserves_the_original_settlement_source_and_keeps_admission_closed() {
+        let readiness = ReceiveReadinessCoordinator::new();
+        readiness.mark_ready();
+        let registry = readiness.work_registry();
+        let action = registry.action();
+        action.register(&EntryId::from("entry"), "attempt").unwrap();
+        let mut closing = Box::pin(readiness.close());
+        assert!(timeout(Duration::from_millis(10), closing.as_mut())
+            .await
+            .is_err());
+        action.finish(Err(Arc::new(ReceiveWorkError::Action(
+            io::Error::from(ErrorKind::StorageFull).into(),
+        ))));
+        let error = closing.await.unwrap_err();
+        assert!(Error::source(&error).is_some());
+        let ReceiveReadinessError::Stop(source) = error else {
+            panic!("排空失败不能冒充恢复失败")
+        };
+        assert!(source.chain().any(|source| source
+            .downcast_ref::<io::Error>()
+            .is_some_and(|source| source.kind() == ErrorKind::StorageFull)));
+        assert!(!readiness.is_ready());
+        assert!(registry
+            .action()
+            .register(&EntryId::from("blocked"), "blocked")
+            .is_err());
+        drop(action);
+        readiness.close().await.unwrap();
+        assert!(!readiness.is_ready());
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_run_inside_an_accepted_history_clear() {
+        let readiness = ReceiveReadinessCoordinator::new();
+        readiness.mark_ready();
+        let registry = readiness.work_registry();
+        let mut scope = registry.drain_scope().await.unwrap();
+        let called = AtomicUsize::new(0);
+        let mut waiter = Box::pin(readiness.wait_ready());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), waiter.as_mut())
+                .await
+                .is_err()
+        );
+        let mut recovery = Box::pin(readiness.ensure_ready(|| async {
+            called.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), recovery.as_mut())
+                .await
+                .is_err()
+        );
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+        scope.stop().await.unwrap();
+        scope.complete();
+        drop(scope);
+        recovery.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap();
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn history_clear_seals_prepares_before_waiting_for_an_existing_recovery() {
+        let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+        let registry = readiness.work_registry();
+        let preparing = registry.action();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let running = {
+            let readiness = readiness.clone();
+            tokio::spawn(async move {
+                readiness
+                    .ensure_ready(|| async {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        started.await.unwrap();
+        let mut clearing = Box::pin(registry.drain_scope());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), clearing.as_mut())
+                .await
+                .is_err()
+        );
+        assert!(preparing.cancellation().is_cancelled());
+        release.send(()).unwrap();
+        running.await.unwrap().unwrap();
+        assert!(!readiness.is_ready());
+        let mut scope = clearing.await.unwrap();
+        drop(preparing);
+        scope.stop().await.unwrap();
+        scope.complete();
+        drop(scope);
+        assert!(readiness.is_ready());
+    }
 
     #[tokio::test]
     async fn readiness_waiters_open_only_after_reconciliation_succeeds() {
@@ -436,10 +666,76 @@ mod tests {
             .expect("waiter task must succeed");
     }
 
+    #[tokio::test]
+    async fn closing_gate_during_recovery_cannot_reopen_it_or_readmit_old_actions() {
+        let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+        let work = readiness.work_registry();
+        let old = work.action();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let recovering = {
+            let readiness = readiness.clone();
+            tokio::spawn(async move {
+                readiness
+                    .ensure_ready(|| async {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        waiting.await.unwrap();
+        readiness.mark_not_ready();
+        release.send(()).unwrap();
+        assert!(recovering.await.unwrap().is_err());
+        assert!(!readiness.is_ready());
+        assert!(old.register(&EntryId::from("entry"), "late").is_err());
+        readiness.ensure_ready(|| async { Ok(()) }).await.unwrap();
+        assert!(readiness.is_ready());
+        assert!(old.register(&EntryId::from("entry"), "still-late").is_err());
+        let current = work.action();
+        assert!(current.register(&EntryId::from("entry"), "current").is_ok());
+        assert!(!current.cancellation().is_cancelled());
+        current.finish(Ok(()));
+    }
+
+    #[tokio::test]
+    async fn superseded_recovery_failure_cannot_cancel_the_next_generations_waiting_action() {
+        let readiness = Arc::new(ReceiveReadinessCoordinator::new());
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let recovering = {
+            let readiness = readiness.clone();
+            tokio::spawn(async move {
+                readiness
+                    .ensure_ready(|| async {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Err(anyhow!("old recovery failure"))
+                    })
+                    .await
+            })
+        };
+        waiting.await.unwrap();
+        readiness.mark_not_ready();
+        let current = readiness.work_registry().action();
+        release.send(()).unwrap();
+        assert!(recovering.await.unwrap().is_err());
+        assert!(!current.cancellation().is_cancelled());
+        assert!(readiness.degraded_reason().is_none());
+        readiness.ensure_ready(|| async { Ok(()) }).await.unwrap();
+        assert!(current.register(&EntryId::from("entry"), "current").is_ok());
+        current.finish(Ok(()));
+    }
+
     struct Store {
         attempt: EntryReceiveAttempt,
         artifact: ReceiveArtifactRecord,
         include_artifact: bool,
+        directory: Mutex<Option<DirectoryPublishRecord>>,
+        fail_commit_once: std::sync::atomic::AtomicBool,
+        fail_partial_once: std::sync::atomic::AtomicBool,
         provisional: Mutex<Vec<ProvisionalReceiveRecovery>>,
         finalized_provisional: AtomicUsize,
         commit_calls: AtomicUsize,
@@ -509,7 +805,42 @@ mod tests {
             _entry_id: &str,
             _attempt_id: &str,
         ) -> Result<Option<DirectoryPublishRecord>, PublishLogError> {
-            Ok(None)
+            Ok(self.directory.lock().unwrap().clone())
+        }
+    }
+
+    #[async_trait]
+    impl RecordDirectoryPublishPort for Store {
+        async fn record_phase(
+            &self,
+            _entry_id: &str,
+            _attempt_id: &str,
+            _phase: PublishPhase,
+            _root_map: &[(PathBuf, PathBuf)],
+            _now_ms: i64,
+        ) -> Result<(), PublishLogError> {
+            unreachable!("恢复只更新撤回检查点")
+        }
+
+        async fn record_partial(
+            &self,
+            _entry_id: &str,
+            _attempt_id: &str,
+            visible_roots: u32,
+            _now_ms: i64,
+        ) -> Result<(), PublishLogError> {
+            if self.fail_partial_once.swap(false, Ordering::SeqCst) {
+                return Err(PublishLogError::Backend(Box::new(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                ))));
+            }
+            self.directory
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .partial_visible_roots = Some(visible_roots);
+            Ok(())
         }
     }
 
@@ -539,6 +870,11 @@ mod tests {
                 }
             ));
             self.commit_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_commit_once.swap(false, Ordering::SeqCst) {
+                return Err(InboundReceiveCommitError::Backend(Box::new(
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                )));
+            }
             Ok(())
         }
     }
@@ -629,6 +965,9 @@ mod tests {
                 updated_at_ms: 1,
             },
             include_artifact: true,
+            directory: Mutex::new(None),
+            fail_commit_once: std::sync::atomic::AtomicBool::new(false),
+            fail_partial_once: std::sync::atomic::AtomicBool::new(false),
             provisional: Mutex::new(Vec::new()),
             finalized_provisional: AtomicUsize::new(0),
             commit_calls: AtomicUsize::new(0),
@@ -637,6 +976,7 @@ mod tests {
 
     fn use_case(store: Arc<Store>) -> ReconcileReceiveAttemptsUseCase {
         ReconcileReceiveAttemptsUseCase::new(
+            store.clone(),
             store.clone(),
             store.clone(),
             store.clone(),
@@ -710,6 +1050,9 @@ mod tests {
                 updated_at_ms: 1,
             },
             include_artifact: false,
+            directory: Mutex::new(None),
+            fail_commit_once: std::sync::atomic::AtomicBool::new(false),
+            fail_partial_once: std::sync::atomic::AtomicBool::new(false),
             provisional: Mutex::new(vec![ProvisionalReceiveRecovery {
                 transfer_id: "mobile-orphan".to_owned(),
                 cached_path: Some(staged_uri),
@@ -734,5 +1077,105 @@ mod tests {
         assert!(use_case(store.clone()).execute().await.is_err());
         assert!(path.exists());
         assert_eq!(store.commit_calls.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn directory_restart_cleanup_preserves_reused_names_and_removes_only_owned_outputs() {
+        for zero_visible in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let area = root
+                .path()
+                .join(format!("{DIRECTORY_RECEIVE_STAGING_PREFIX}fixture"));
+            let staged_alpha = area.join("alpha");
+            let staged_beta = area.join("beta");
+            let alpha = root.path().join("alpha");
+            let beta = root.path().join("beta");
+            tokio::fs::create_dir_all(&alpha).await.unwrap();
+            tokio::fs::create_dir_all(&beta).await.unwrap();
+            tokio::fs::write(alpha.join("new.txt"), b"new alpha")
+                .await
+                .unwrap();
+            if zero_visible {
+                tokio::fs::write(beta.join("new.txt"), b"new beta")
+                    .await
+                    .unwrap();
+            } else {
+                tokio::fs::create_dir_all(&staged_alpha).await.unwrap();
+                tokio::fs::write(staged_alpha.join("old.txt"), b"withdrawn original")
+                    .await
+                    .unwrap();
+                tokio::fs::write(beta.join("old.txt"), b"owned original")
+                    .await
+                    .unwrap();
+            }
+            let store = store(AttemptState::Failing, root.path().join("absent-artifact"));
+            *store.directory.lock().unwrap() = Some(DirectoryPublishRecord {
+                entry_id: "entry-1".into(),
+                attempt_id: "attempt-1".into(),
+                phase: PublishPhase::Publishing,
+                root_map: vec![(staged_alpha, alpha.clone()), (staged_beta, beta.clone())],
+                partial_visible_roots: Some(if zero_visible { 0 } else { 1 }),
+                landed: false,
+            });
+            assert_eq!(use_case(store).execute().await.unwrap(), 1);
+            assert_eq!(
+                tokio::fs::read(alpha.join("new.txt")).await.unwrap(),
+                b"new alpha"
+            );
+            if zero_visible {
+                assert_eq!(
+                    tokio::fs::read(beta.join("new.txt")).await.unwrap(),
+                    b"new beta"
+                );
+            } else {
+                assert!(!beta.exists(), "仍由旧尝试拥有的未撤回根必须清理");
+            }
+            assert!(!area.exists(), "原目录staging区域也须在放行新接收前清理");
+        }
+    }
+    #[tokio::test]
+    async fn directory_recovery_commit_failure_never_recleans_names_reused_before_the_next_recovery(
+    ) {
+        for fail_checkpoint in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let area = root
+                .path()
+                .join(format!("{DIRECTORY_RECEIVE_STAGING_PREFIX}retry"));
+            let staged = area.join("root");
+            let target = root.path().join("root");
+            tokio::fs::create_dir_all(&target).await.unwrap();
+            tokio::fs::write(target.join("original.txt"), b"old receive")
+                .await
+                .unwrap();
+            let store = store(AttemptState::Failing, root.path().join("absent-artifact"));
+            *store.directory.lock().unwrap() = Some(DirectoryPublishRecord {
+                entry_id: "entry-1".into(),
+                attempt_id: "attempt-1".into(),
+                phase: PublishPhase::Publishing,
+                root_map: vec![(staged, target.clone())],
+                partial_visible_roots: Some(1),
+                landed: false,
+            });
+            if fail_checkpoint {
+                store.fail_partial_once.store(true, Ordering::SeqCst);
+            } else {
+                store.fail_commit_once.store(true, Ordering::SeqCst);
+            }
+            let recovery = use_case(store);
+            assert!(
+                recovery.execute().await.is_err(),
+                "真实清理后的NoEntry拒绝必须返回失败"
+            );
+            assert!(!target.exists());
+            tokio::fs::create_dir_all(&target).await.unwrap();
+            tokio::fs::write(target.join("new.txt"), b"new user data")
+                .await
+                .unwrap();
+            assert_eq!(recovery.execute().await.unwrap(), 1);
+            assert_eq!(
+                tokio::fs::read(target.join("new.txt")).await.unwrap(),
+                b"new user data",
+                "后续恢复不能再次触碰已清理后重用的名称"
+            );
+        }
     }
 }

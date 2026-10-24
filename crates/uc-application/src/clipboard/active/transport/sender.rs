@@ -6,6 +6,7 @@ use crate::connectivity::{ConnectivityError, ConnectivityManager};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::time::{timeout_at, Instant};
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::DeviceId;
@@ -30,7 +31,11 @@ impl ActiveClipboardDispatchPort for ActiveStateSender {
     ) -> Result<(), ActiveClipboardDispatchError> {
         let deadline = Instant::now() + ACTIVE_EXCHANGE_TIMEOUT;
         timeout_at(deadline, async {
-            let connection = self.manager.connect(*target, deadline).await?;
+            let connection = self
+                .manager
+                .request(*target)
+                .connect(deadline, &CancellationToken::new())
+                .await?;
             let mut stream = connection.open_bi(deadline).await?;
             self.wire.write_state(stream.send.as_mut(), state).await?;
             connection.check_current().await?;

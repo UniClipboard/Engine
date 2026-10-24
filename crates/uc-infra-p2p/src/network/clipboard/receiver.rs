@@ -278,7 +278,7 @@ impl ClipboardReceiverAdapter {
             if matches!(ack, AckCode::Rejected | AckCode::Incompatible) {
                 operation_observation.finish_failure(failure, completion);
             } else {
-                complete_operation(completion);
+                operation_observation.finish_success(completion);
             }
 
             // 独立流发送持久接受结果；其他流不等待本次结算。

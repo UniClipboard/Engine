@@ -182,6 +182,33 @@ pub struct OhWorkspaceConvergence {
 }
 
 #[napi(object)]
+pub struct OhReceiveRetryOutcome {
+    pub status: String,
+    pub attempt_id: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
+pub struct OhReceiveItem {
+    pub item_id: String,
+    pub kind: String,
+    pub state: String,
+    pub failure_reason: Option<String>,
+}
+#[napi(object)]
+pub struct OhReceiveProgress {
+    pub entry_id: String,
+    pub attempt_id: String,
+    pub state: String,
+    /// 十进制整数串，避免 JavaScript 数值精度损失。
+    pub total_bytes: String,
+    pub completed_bytes: String,
+    pub items_total: u32,
+    pub items_completed: u32,
+    pub items: Vec<OhReceiveItem>,
+}
+
+#[napi(object)]
 pub struct OhActiveClipboard {
     pub entry_id: String,
     pub activated_by: String,

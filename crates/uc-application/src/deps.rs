@@ -3,7 +3,14 @@
 //! 定义 Application 对象图所需的依赖分组。这些类型只负责打包必需参数，
 //! 不提供分步构建、默认值或隐式装配逻辑，因此不是 Builder。
 
+use crate::clipboard::history::clear_history::HistoryDeletionTargetsPort;
+pub use crate::clipboard::history::resource_snapshot::{
+    EntryResourceReadError, EntryResourceSnapshot, ReadEntryResourceSnapshotPort,
+};
 use crate::clipboard::history_tags::{HistoryEntryTagReaderPort, HistoryTagStorePort};
+pub use crate::transfer::receive::retry::{
+    BeginReceiveRetryInput, BeginReceiveRetryPort, ReceiveRetryItem, ReceiveRetryItemState,
+};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort};
@@ -144,7 +151,6 @@ pub use crate::space::{
     SpaceMembershipRecord,
 };
 pub use crate::space::{SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters};
-pub use crate::transfer::file::assembly::ReceiveCancellationDeps;
 pub use crate::transfer::file::facade::FileTransferFacadeDeps;
 pub use crate::transfer::file::lifecycle::FileTransferLifecycleDeps;
 pub use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
@@ -164,6 +170,8 @@ pub struct ClipboardEntryPorts {
     pub get: Arc<dyn GetClipboardEntryPort>,
     /// 以倒序分页方式列出剪贴板条目。
     pub list: Arc<dyn ListClipboardEntriesPort>,
+    /// 清空覆盖的历史与接收状态标识，不读取正文。
+    pub list_for_deletion: Arc<dyn HistoryDeletionTargetsPort>,
     /// 原子保存条目及其表示选择决策。
     pub save: Arc<dyn SaveClipboardEntryPort>,
     /// 更新已有条目的最后活跃时间。
@@ -210,6 +218,8 @@ pub struct ClipboardRepresentationPorts {
 /// 剪贴板领域端口组。
 #[derive(Clone)]
 pub struct ClipboardPorts {
+    /// 一致读取资源所需的当前选择及认证后表示。
+    pub resource_snapshot: Arc<dyn ReadEntryResourceSnapshotPort>,
     pub history_file_references:
         Arc<dyn crate::facade::clipboard_history::HistoryFileReferencePort>,
     /// 读取平台剪贴板快照的端口。
@@ -388,6 +398,8 @@ pub struct DirectoryReceivePorts {
     pub get_publish: Arc<dyn GetDirectoryPublishRecordPort>,
     /// 开始首次接收，或在重投时替换精确匹配的已终结 attempt。
     pub begin_receive: Arc<dyn BeginReceiveAttemptPort>,
+    /// 原子接受手动重试及其完整逐项初态。
+    pub begin_retry: Arc<dyn BeginReceiveRetryPort>,
     /// 将精确匹配且正在接收的 attempt 领取为提交结算负责人。
     pub claim_commit: Arc<dyn ClaimReceiveCommitPort>,
     /// 请求取消接收 attempt，但不直接完成结算。
@@ -575,10 +587,20 @@ pub use crate::space::{
 
 pub use crate::connectivity::{
     AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionProtocol,
-    ConnectivityBackend, ConnectivityError, ConnectivityManager, ConnectivityPolicy,
-    IdleRetentionPolicy, InboundAdmissionFence, InboundConnectionError, PeerConnection,
-    PeerReceiveStream, PeerSendStream, PendingInboundLease, SessionConnectionAdmissionPort,
-    StreamLease, StreamPair,
+    ConnectionRequest, ConnectivityBackend, ConnectivityError, ConnectivityManager,
+    ConnectivityPolicy, IdleRetentionPolicy, InboundAdmissionFence, InboundAdmissionPolicy,
+    InboundConnectionError, InboundIdentityReservation, PeerConnection, PeerReceiveStream,
+    PeerSendStream, PendingInboundLease, SessionConnectionAdmissionPort, StreamLease, StreamPair,
+    StreamWorkLease,
+};
+
+// 测试装配参数只经被动依赖入口公开，不进入业务门面白名单。
+#[cfg(feature = "test-support")]
+pub use crate::transfer::blob::facade::BlobTransferDeps;
+pub use crate::transfer::blob::transport::{
+    BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, BlobExchangePort,
+    BlobReadStorePort, BlobReceived, BlobRetainedContent, BlobShutdownWait, BlobSource,
+    BlobSourcePort, BlobStoreLifecyclePort, BlobTransport, BlobValidatedProgress,
 };
 
 pub use crate::space::{

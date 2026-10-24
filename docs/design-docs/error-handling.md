@@ -6,6 +6,8 @@ Application 对依赖、存储、网络、系统或密码能力失败进行稳�
 `#[source] source: anyhow::Error`，或携带另一个实现 `std::error::Error` 的具体 source。
 构造方式遵循 `crates/uc-application/src/error.rs`，不得为了 `Clone`、`Copy`、`Eq` 或简化匹配丢弃来源。
 
+生命周期失败汇总只有在主原因和全部附加原因均为等待期限结束时，才可使用期限分类；嵌套的既有报告、共享报告和固定 context 不改变这一性质；任务终止报告只有确实发生等待超时且没有任务异常退出时才归入期限。任一层包含真实参与者失败时，须保留该失败及完整来源，不能被另一项超时遮住。
+
 纯业务判断在没有下层异常时可以返回普通枚举或明确结果，不得伪造 `anyhow::Error`。一旦失败来自被调用能力，
 必须保留完整 source chain 与 backtrace。
 

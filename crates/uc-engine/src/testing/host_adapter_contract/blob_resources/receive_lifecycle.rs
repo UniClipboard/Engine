@@ -1,0 +1,145 @@
+//! 复用同一/proc采样，在真实生命周期验收中检查原进程资源回到基线。
+use super::{current_num_threads, thread_groups, Resources};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+use uc_infra_p2p::network::iroh::test_support::blob_native_handle_counts;
+
+static REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
+pub(in super::super) struct ReceiveResourceBaseline {
+    before_shared_cpu_pool: Resources,
+    initial: Resources,
+    initial_fd_kinds: BTreeMap<&'static str, usize>,
+    initial_thread_groups: BTreeMap<&'static str, usize>,
+    closed_before_case_drop: Option<Resources>,
+    directory: PathBuf,
+    case: String,
+    native_handles_initial: (usize, usize),
+    native_handles_before_case_drop: Option<(usize, usize)>,
+}
+
+impl ReceiveResourceBaseline {
+    pub(in super::super) fn capture() -> Option<Self> {
+        let directory = std::env::var_os("UC_RECEIVE_RESOURCE_EVIDENCE_DIR")?;
+        let before_shared_cpu_pool = Resources::read().expect("读取原生资源冷基线");
+        // 进程共享池有意常驻；同时保留冷计数，不把SDK私有线程预先算入基线。
+        current_num_threads();
+        Some(Self {
+            before_shared_cpu_pool,
+            initial: Resources::read().expect("读取原生资源基线"),
+            initial_fd_kinds: fd_kinds(),
+            initial_thread_groups: thread_groups().expect("读取原生线程类别基线"),
+            closed_before_case_drop: None,
+            native_handles_initial: blob_native_handle_counts(),
+            native_handles_before_case_drop: None,
+            directory: PathBuf::from(directory),
+            case: std::thread::current()
+                .name()
+                .unwrap_or("unknown_test")
+                .to_owned(),
+        })
+    }
+
+    pub(in super::super) fn record_before_case_drop(&mut self) {
+        self.native_handles_before_case_drop = Some(blob_native_handle_counts());
+        self.closed_before_case_drop = Some(Resources::read().expect("读取SDK关闭后的资源"));
+    }
+
+    pub(in super::super) async fn verify_after_shutdown(self) {
+        let closed = Resources::read().expect("读取关闭后的原生资源");
+        let started = Instant::now();
+        let mut after_idle;
+        let settled;
+        loop {
+            after_idle = Resources::read().expect("读取原生资源空闲收尾");
+            let at_baseline = after_idle.fds <= self.initial.fds
+                && after_idle.threads <= self.initial.threads
+                && after_idle.runtime_tasks <= self.initial.runtime_tasks
+                && blob_native_handle_counts().1 == self.native_handles_initial.1;
+            if at_baseline || started.elapsed() >= Duration::from_secs(45) {
+                settled = at_baseline;
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        let report = serde_json::json!({
+            "case": self.case,
+            "before_shared_cpu_pool": self.before_shared_cpu_pool,
+            "initial": self.initial,
+            "initial_fd_kinds": self.initial_fd_kinds,
+            "initial_thread_groups": self.initial_thread_groups,
+            "fd_kinds_after_idle": fd_kinds(),
+            "thread_groups_after_idle": thread_groups().expect("读取原生线程收尾类别"),
+            "closed_before_case_drop": self.closed_before_case_drop.expect("必须已完成原Engine关闭"),
+            "closed": closed,
+            "closed_after_idle": after_idle,
+            "idle_settlement_ms": started.elapsed().as_millis(),
+            "fd_return_to_initial_verified": after_idle.fds <= self.initial.fds,
+            "thread_return_to_initial_verified": after_idle.threads <= self.initial.threads,
+            "runtime_tasks_return_to_initial_verified": after_idle.runtime_tasks <= self.initial.runtime_tasks,
+            "no_sampler_task": true,
+            "resource_settlement_verified": settled,
+            "tag_counts_observed": false,
+            "quota_counts_observed": false,
+            "native_blob_connection_counts_observed": true,
+            "native_handles_initial": self.native_handles_initial,
+            "native_handles_before_case_drop": self.native_handles_before_case_drop,
+            "native_handles_after_idle": blob_native_handle_counts(),
+            "actual_native_blob_handles_observed": blob_native_handle_counts().0 > self.native_handles_initial.0,
+            "native_blob_handles_returned_to_initial": blob_native_handle_counts().1 == self.native_handles_initial.1,
+        });
+        std::fs::create_dir_all(&self.directory).expect("创建资源证据目录");
+        let sequence = REPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = self.directory.join(format!(
+            "receive-lifecycle-{}-{sequence}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&report).expect("编码资源计数"),
+        )
+        .expect("保存资源计数");
+        assert!(
+            blob_native_handle_counts().0 > self.native_handles_initial.0,
+            "必须实际观察到原生blob句柄，不能把空计数当验收"
+        );
+        assert!(
+            settled,
+            "实际生命周期结束后FD、线程与任务必须回到基线；原始计数已保留"
+        );
+    }
+}
+
+// 仅输出固定技术类别；/proc链接中的真实文件名、路径和地址不会进入证据。
+fn fd_kinds() -> BTreeMap<&'static str, usize> {
+    let mut groups = BTreeMap::new();
+    for entry in std::fs::read_dir("/proc/self/fd").expect("读取原生FD类别") {
+        let entry = entry.expect("读取原生FD记录");
+        let kind = match std::fs::read_link(entry.path()) {
+            Ok(target) => {
+                let target = target.to_string_lossy();
+                if target == "anon_inode:[eventpoll]" {
+                    "eventpoll"
+                } else if target == "anon_inode:[eventfd]" {
+                    "eventfd"
+                } else if target.starts_with("socket:[") {
+                    "socket"
+                } else if target.starts_with("pipe:[") {
+                    "pipe"
+                } else if target.starts_with("anon_inode:") {
+                    "other_anonymous"
+                } else {
+                    "file_or_directory"
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "closed_during_sample",
+            Err(error) => panic!("读取原生FD类别失败：{:?}", error.kind()),
+        };
+        *groups.entry(kind).or_default() += 1;
+    }
+    groups
+}

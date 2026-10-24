@@ -1006,7 +1006,22 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
         completed_bytes: 40,
         items_total: 2,
         items_completed: 1,
+        items: vec![uc_engine::ReceiveItemSummary {
+            item_id: "stable-item".into(),
+            kind: uc_engine::ReceiveItemKind::File,
+            state: "failed".into(),
+            failure_reason: Some(uc_engine::ReceiveItemFailureReason::IntegrityCheckFailed),
+        }],
     };
+    let mut serialized = serde_json::to_value(&progress).unwrap();
+    assert_eq!(serialized["items"][0]["kind"], "file");
+    assert_eq!(
+        serialized["items"][0]["failure_reason"],
+        "integrity_check_failed"
+    );
+    serialized.as_object_mut().unwrap().remove("items");
+    let legacy: uc_engine::ReceiveProgressSummary = serde_json::from_value(serialized).unwrap();
+    assert!(legacy.items.is_empty());
     assert_eq!(
         uc_engine::OperationResult::EntryReceiveProgress(Some(progress.clone())),
         uc_engine::OperationResult::EntryReceiveProgress(Some(progress.clone()))
@@ -1022,23 +1037,41 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
                 completed_bytes: 40,
                 items_total: 2,
                 items_completed: 1,
+                items: vec![uc_engine::ReceiveItemSummary {
+                    item_id: "stable-item".into(),
+                    kind: uc_engine::ReceiveItemKind::File,
+                    state: "failed".into(),
+                    failure_reason: Some(uc_engine::ReceiveItemFailureReason::IntegrityCheckFailed),
+                }],
             },
         ])
     );
 
     let receive_outcomes = [
         uc_engine::EntryReceiveCancellationOutcome::Cancelled,
+        uc_engine::EntryReceiveCancellationOutcome::CancellationIncomplete,
         uc_engine::EntryReceiveCancellationOutcome::NotReceiving,
         uc_engine::EntryReceiveCancellationOutcome::TooLate,
         uc_engine::EntryReceiveCancellationOutcome::AlreadyTerminal,
         uc_engine::EntryReceiveCancellationOutcome::Superseded,
     ];
-    assert_eq!(receive_outcomes.len(), 5);
+    assert_eq!(receive_outcomes.len(), 6);
     let transfer_outcomes = [
         uc_engine::InboundTransferCancellationOutcome::Cancelled,
+        uc_engine::InboundTransferCancellationOutcome::CancellationIncomplete,
         uc_engine::InboundTransferCancellationOutcome::NotInflight,
     ];
-    assert_eq!(transfer_outcomes.len(), 2);
+    assert_eq!(transfer_outcomes.len(), 3);
+    assert_eq!(
+        serde_json::to_value(uc_engine::EntryReceiveCancellationOutcome::CancellationIncomplete)
+            .expect("entry cancellation encoding"),
+        serde_json::json!("cancellation_incomplete")
+    );
+    assert_eq!(
+        serde_json::to_value(uc_engine::InboundTransferCancellationOutcome::CancellationIncomplete)
+            .expect("transfer cancellation encoding"),
+        serde_json::json!("cancellation_incomplete")
+    );
 }
 
 #[test]
@@ -1971,4 +2004,63 @@ fn device_summary_debug_output_redacts_display_name() {
     assert!(!debug.contains("Private Phone Name"));
     assert!(debug.contains("device-1"));
     assert!(debug.contains("online"));
+}
+
+#[test]
+fn receive_retry_has_one_operation_and_preserves_all_business_results() {
+    use uc_engine::{
+        EntryReceiveRetryOutcome, ReceiveRetryUnavailableReason, RetryEntryReceiveInput,
+    };
+    let operation = uc_engine::Operation::RetryEntryReceive(RetryEntryReceiveInput {
+        entry_id: "entry".into(),
+        expected_attempt_id: "old".into(),
+        item_ids: vec!["item".into()],
+    });
+    assert_eq!(
+        operation.kind(),
+        uc_engine::OperationKind::RetryEntryReceive
+    );
+    assert_eq!(
+        serde_json::to_value(operation.kind()).unwrap(),
+        "retry_entry_receive"
+    );
+    for (result, expected) in [
+        (
+            EntryReceiveRetryOutcome::Accepted {
+                attempt_id: "new".into(),
+            },
+            serde_json::json!({"kind":"accepted", "attempt_id":"new"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::AlreadyReceiving,
+            serde_json::json!({"kind":"already_receiving"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::Superseded,
+            serde_json::json!({"kind":"superseded"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::CancellationIncomplete,
+            serde_json::json!({"kind":"cancellation_incomplete"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::Unavailable {
+                reason: ReceiveRetryUnavailableReason::SourceUnavailable,
+            },
+            serde_json::json!({"kind":"unavailable", "reason":"source_unavailable"}),
+        ),
+        (
+            EntryReceiveRetryOutcome::Unavailable {
+                reason: ReceiveRetryUnavailableReason::AccessDenied,
+            },
+            serde_json::json!({"kind":"unavailable", "reason":"access_denied"}),
+        ),
+    ] {
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            serde_json::from_value::<EntryReceiveRetryOutcome>(encoded).unwrap(),
+            result
+        );
+    }
 }

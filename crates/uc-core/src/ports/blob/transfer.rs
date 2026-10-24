@@ -1,5 +1,4 @@
-//! `BlobTransferPort` — publish / fetch ciphertext + local reference
-//! management.
+//! 密文发布、票据解释及本地引用管理；获取与停止归完整接收流程。
 //!
 //! Business model:
 //!
@@ -8,10 +7,6 @@
 //!   shareable store, receive a stable local identity ([`BlobDigest`]);
 //!   mint an out-of-band retrieval credential ([`BlobTicket`]) when a peer
 //!   needs to pull it.
-//! * **Consumer side** ([`BlobTransferPort::digest_of`] +
-//!   [`BlobTransferPort::fetch`]) — resolve a credential's content identity
-//!   locally (skip the fetch when already held), otherwise retrieve the
-//!   ciphertext via the credential's embedded sources.
 //! * **Reference management** ([`BlobTransferPort::tag`] /
 //!   [`BlobTransferPort::untag`] / [`BlobTransferPort::has`]) — declare /
 //!   release that some business object holds a ciphertext, query whether
@@ -62,9 +57,7 @@ impl BlobDigest {
 /// * First ask "which ciphertext does this credential point to?"
 ///   ([`BlobTransferPort::digest_of`]) — used to skip redundant pulls when
 ///   the local store already holds the referenced ciphertext.
-/// * Then retrieve the ciphertext itself ([`BlobTransferPort::fetch`]) —
-///   the storage adapter opens whatever connection the credential's
-///   embedded source(s) describe.
+/// * 再由完整接收流程解释来源并获取密文，存储端口不建连或停止对端。
 ///
 /// The credential contains **neither the ciphertext itself nor any
 /// decryption key**; decryption goes through
@@ -180,9 +173,9 @@ pub trait BlobProgressSink: Send + Sync {
     async fn report(&self, bytes_transferred: u64, total_bytes: Option<u64>);
 }
 
-/// Blob transfer capability: publish / retrieve / lifecycle management.
+/// 本地密文发布、凭据和引用管理；网络获取及停止归完整接收流程。
 ///
-/// See module-level docs for the producer / consumer / reference split.
+/// 发布和引用规则见模块说明。
 /// This port does **not** perform encryption or decryption — the bytes on
 /// every method boundary are ciphertext, and cryptographic operations go
 /// through [`BlobCipherPort`](crate::ports::security::BlobCipherPort).
@@ -241,61 +234,6 @@ pub trait BlobTransferPort: Send + Sync {
     /// one. The credential carries at minimum "content identity + at
     /// least one reachable source".
     async fn issue_ticket(&self, digest: &BlobDigest) -> Result<BlobTicket, BlobError>;
-
-    // ── Consumer side ──
-
-    /// Retrieve a ciphertext given its credential. If the local store
-    /// already holds the referenced ciphertext the adapter may serve
-    /// it directly; otherwise it pulls via the credential's embedded
-    /// sources. Resume-on-interrupt and integrity verification are the
-    /// adapter's concern — callers only see "got it" or "didn't".
-    ///
-    /// `progress` 可选:传入时 adapter 会在拉取过程中按字节阈值/时间窗
-    /// 节流上报已传输字节数;不需要进度时传 `None`。本地命中时不会上报
-    /// 任何进度(直接返回缓存)。
-    async fn fetch(
-        &self,
-        ticket: &BlobTicket,
-        progress: Option<&dyn BlobProgressSink>,
-    ) -> Result<Bytes, BlobError>;
-
-    /// Retrieve a ciphertext and write it directly to `target_path`,
-    /// streaming from the local store rather than materialising the full
-    /// payload as `Bytes` in memory. The semantics around credential
-    /// resolution, retries, integrity verification, and `progress` are
-    /// identical to [`fetch`](Self::fetch); the only difference is the
-    /// destination — adapters that back a content-addressed disk store
-    /// (e.g. iroh-blobs) SHOULD use a reflink / file-clone to land the
-    /// blob at `target_path` so peak memory stays bounded regardless of
-    /// blob size.
-    ///
-    /// Returns the [`BlobDigest`] the credential resolved to, so callers
-    /// can record references / dedup mappings without re-hashing the
-    /// just-written file.
-    async fn fetch_to_path(
-        &self,
-        ticket: &BlobTicket,
-        target_path: &std::path::Path,
-        progress: Option<&dyn BlobProgressSink>,
-    ) -> Result<BlobDigest, BlobError>;
-
-    /// Best-effort: abort any in-flight `fetch` / `fetch_to_path`
-    /// currently delivering the ciphertext for `ticket`.
-    ///
-    /// Concurrent fetches for the same ticket may fail with
-    /// [`BlobError::Unavailable`] after this returns. Idempotent —
-    /// calling on a ticket that is not currently being fetched (no
-    /// active transport to tear down) returns `Ok(())`.
-    ///
-    /// This is a release-only operation: it does not remove any
-    /// already-stored ciphertext, does not touch tags, and does not
-    /// affect future fetch attempts for the same ticket.
-    ///
-    /// Adapter contract: if the transport is incidentally shared by
-    /// fetches against unrelated tickets, those fetches may also
-    /// observe a transient failure. Callers should treat such failures
-    /// as recoverable (a retry establishes a fresh transport).
-    async fn shutdown_inflight_fetch(&self, ticket: &BlobTicket) -> Result<(), BlobError>;
 
     // ── Lifecycle ──
 

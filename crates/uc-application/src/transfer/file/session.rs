@@ -70,7 +70,11 @@ impl ReceiverTransferHandleRegistry {
 #[derive(Default)]
 struct SessionState {
     last_progress_bytes: Option<u64>,
-    terminal_event: Option<FileTransferEvent>,
+    started_stored: bool,
+    started_published: bool,
+    terminal_intent: Option<FileTransferEvent>,
+    terminal_stored: bool,
+    terminal_published: bool,
 }
 
 pub struct ReceiverTransferHandle {
@@ -97,6 +101,7 @@ impl ReceiverTransferHandle {
         publisher: Arc<dyn FileTransferEventPublisherPort>,
         registry: Weak<ReceiverTransferHandleRegistry>,
         last_progress_bytes: Option<u64>,
+        started: bool,
     ) -> Self {
         Self {
             descriptor,
@@ -105,9 +110,56 @@ impl ReceiverTransferHandle {
             registry,
             state: Mutex::new(SessionState {
                 last_progress_bytes,
-                terminal_event: None,
+                started_stored: started,
+                started_published: started,
+                terminal_intent: None,
+                terminal_stored: false,
+                terminal_published: false,
             }),
         }
+    }
+
+    pub(crate) async fn start(&self) -> Result<(), FileTransferApplicationError> {
+        let mut state = self.state.lock().await;
+        self.ensure_active(&state)?;
+        if let Err(error) = self.store_started(&mut state).await {
+            // 准备失败已确定；关闭不能把同一原任务的失败改写成取消。
+            state.terminal_intent = Some(FileTransferEvent::failed(
+                self.transfer_id(),
+                &self.descriptor.peer_id,
+                FileTransferFailureReason::StorageUnavailable,
+                None,
+            ));
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn store_started(
+        &self,
+        state: &mut SessionState,
+    ) -> Result<(), FileTransferApplicationError> {
+        let event = FileTransferEvent::started(
+            self.transfer_id(),
+            &self.descriptor.peer_id,
+            &self.descriptor.filename,
+            self.descriptor.file_size,
+        );
+        if !state.started_stored {
+            self.store
+                .append(event.clone())
+                .await
+                .map_err(FileTransferApplicationError::Store)?;
+            state.started_stored = true;
+        }
+        if !state.started_published {
+            self.publisher
+                .publish(event)
+                .await
+                .map_err(FileTransferApplicationError::Publish)?;
+            state.started_published = true;
+        }
+        Ok(())
     }
 
     pub fn transfer_id(&self) -> &str {
@@ -199,37 +251,41 @@ impl ReceiverTransferHandle {
         event: FileTransferEvent,
     ) -> Result<FileTransferEvent, FileTransferApplicationError> {
         let mut state = self.state.lock().await;
-        if let Some(existing) = state.terminal_event.as_ref() {
-            return if existing == &event {
-                Ok(existing.clone())
-            } else {
-                Err(FileTransferApplicationError::TransferAlreadyFinished {
+        if let Some(existing) = state.terminal_intent.as_ref() {
+            if existing != &event {
+                return Err(FileTransferApplicationError::TransferAlreadyFinished {
                     transfer_id: self.transfer_id().to_owned(),
-                })
-            };
+                });
+            }
+        } else {
+            // 意图先封住后续进度和不同终态；失败时仍由同一原任务恢复该意图。
+            state.terminal_intent = Some(event.clone());
         }
-
-        self.store
-            .append(event.clone())
-            .await
-            .map_err(FileTransferApplicationError::Store)?;
-        state.terminal_event = Some(event.clone());
-        let publish_result = self
-            .publisher
-            .publish(event.clone())
-            .await
-            .map_err(FileTransferApplicationError::Publish);
+        self.store_started(&mut state).await?;
+        if !state.terminal_stored {
+            self.store
+                .append(event.clone())
+                .await
+                .map_err(FileTransferApplicationError::Store)?;
+            state.terminal_stored = true;
+        }
+        if !state.terminal_published {
+            self.publisher
+                .publish(event.clone())
+                .await
+                .map_err(FileTransferApplicationError::Publish)?;
+            state.terminal_published = true;
+        }
         drop(state);
 
         if let Some(registry) = self.registry.upgrade() {
             registry.remove(self.transfer_id(), self).await;
         }
-        publish_result?;
         Ok(event)
     }
 
     fn ensure_active(&self, state: &SessionState) -> Result<(), FileTransferApplicationError> {
-        if state.terminal_event.is_some() {
+        if state.terminal_intent.is_some() {
             Err(FileTransferApplicationError::TransferAlreadyFinished {
                 transfer_id: self.transfer_id().to_owned(),
             })

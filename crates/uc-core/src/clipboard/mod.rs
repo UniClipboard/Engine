@@ -16,6 +16,7 @@ mod mime;
 mod origin;
 mod payload_availability;
 mod policy;
+mod receive_deletion;
 mod repository_error;
 mod selection;
 mod snapshot;
@@ -43,6 +44,7 @@ pub use file_set::{
 };
 pub use policy::ClipboardSelection;
 pub use policy::*;
+pub use receive_deletion::{check_receive_deletion, ReceiveDeletionRefusal};
 pub use repository_error::ClipboardRepositoryError;
 pub use selection::*;
 pub use snapshot::*;

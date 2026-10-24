@@ -1,5 +1,9 @@
+use super::super::blobs::BLOBS_ALPN;
 use super::super::conn_path::connection_channel;
 use super::super::observed_connections::close_reason;
+use super::super::session_generation::{begin_session_local_work, SessionLocalWork};
+#[cfg(feature = "test-util")]
+use super::super::test_support::register_blob_connection;
 use super::stream::wrap;
 use async_trait::async_trait;
 use iroh::endpoint::{Connection, Side};
@@ -25,6 +29,7 @@ use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_RE
 
 pub(crate) struct IrohPeerConnection {
     native: Connection,
+    _session_work: Option<SessionLocalWork>,
     unreachable: AtomicBool,
     close_recorded: AtomicBool,
     liveness: Option<(
@@ -34,7 +39,19 @@ pub(crate) struct IrohPeerConnection {
 }
 impl IrohPeerConnection {
     pub(crate) fn wrap(connection: Connection) -> Arc<dyn PeerConnection> {
+        #[cfg(feature = "test-util")]
+        register_blob_connection(&connection);
+        let session_work = if connection.alpn() == BLOBS_ALPN {
+            let work = begin_session_local_work();
+            if work.is_none() {
+                connection.close(0u32.into(), b"session_retired");
+            }
+            work
+        } else {
+            None
+        };
         Arc::new(Self {
+            _session_work: session_work,
             native: connection,
             unreachable: AtomicBool::new(false),
             close_recorded: AtomicBool::new(false),
@@ -70,7 +87,10 @@ impl IrohPeerConnection {
         target: DeviceId,
         events: broadcast::Receiver<PeerReachabilityChanged>,
     ) -> Arc<dyn PeerConnection> {
+        #[cfg(feature = "test-util")]
+        register_blob_connection(&connection);
         Arc::new(Self {
+            _session_work: None,
             native: connection,
             unreachable: AtomicBool::new(false),
             close_recorded: AtomicBool::new(false),
@@ -92,6 +112,7 @@ impl PeerConnection for IrohPeerConnection {
             MULTIPLEXED_CLIPBOARD_ALPN
                 | MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN
                 | PEER_REACHABILITY_ALPN
+                | BLOBS_ALPN
         ) {
             ConnectionMode::Multiplexed
         } else if self.native.alpn() == LEGACY_PEER_REACHABILITY_ALPN {
@@ -102,6 +123,7 @@ impl PeerConnection for IrohPeerConnection {
     }
     fn protocol(&self) -> ConnectionProtocol {
         match self.native.alpn() {
+            BLOBS_ALPN => ConnectionProtocol::Blob,
             PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV2,
             LEGACY_PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV1,
             MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,

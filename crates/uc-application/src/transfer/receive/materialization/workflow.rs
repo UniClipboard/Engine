@@ -1,21 +1,25 @@
-//! 入站 blob 本地化抽象 + 默认实现。
-//!
-//! `InboundBlobMaterializer` 把 V3 envelope 解码出来的 `V3BlobRef` 列表落地:
-//! - representation-bound blob 写回 `snapshot.representations[i].bytes`(图片 /
-//!   大二进制走这条);
-//! - free-standing 文件写到 `cache_dir/iroh-blobs/<entry_id>/<filename>`,
-//!   再把 file-list rep 改写成本机 `file://` URI。
-//!
-//! `InboundBlobFetcher` 是 facade 适配层,生产环境就是 `BlobTransferFacade`,
-//! 测试用 mockall 替身。
+//! 接收计划的文件物化、目录发布及本地产物结算。
 
+use super::super::identity::{directory_member_transfer_id, directory_representation_transfer_id};
+use super::cleanup::{output_cleanup_failure, remove_uncommitted_output};
+use super::directory_publication::{
+    directory_rollback_failure, publish_via, DirectoryRollbackJournal, PublishMode,
+};
+use super::output::{FileOutputJournal, FileOutputPreparation, PreparedReceiveOutput};
+use super::progress::FileProgressSnapshot;
+use super::reuse::validate_selection;
+use super::{receive_member_totals, ReceiveOutputFailure, ReceivedItem, ReceivedOutput};
+use super::{DirectoryPublication, FileProgressCommitError, ReceiveFailureSettlementError};
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use uc_core::ports::TrackedFileTransferStatus;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context, Error as SourceError, Result};
 use async_trait::async_trait;
 
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use uc_core::clipboard::{
@@ -23,7 +27,7 @@ use uc_core::clipboard::{
     FileDisplayMetadataEntry, FileSetMemberKind, FileSetMemberLocation, HashAlgorithm,
     FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME, IMAGE_FROM_FILE_FORMAT,
 };
-use uc_core::file_transfer::FileTransferFailureReason;
+use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::atomic_publish::{AtomicPublishPort, PublishError};
 use uc_core::ports::hidden_path::MarkHiddenPort;
@@ -32,9 +36,9 @@ use uc_core::ports::inbound_file_target::{
 };
 use uc_core::ports::{
     AttemptState, ClaimReceiveCommitPort, ClockPort, GetEntryAttemptPort, PublishPhase,
-    ReceiveArtifact, ReceiveArtifactOwnership, ReceiveArtifactPhase, ReceiveArtifactRecord,
-    ReceiveArtifactResolution, RecordDirectoryPublishPort, RecordReceiveArtifactsPort,
-    DIRECTORY_RECEIVE_STAGING_PREFIX,
+    ReceiveArtifact, ReceiveArtifactPhase, ReceiveArtifactRecord, ReceiveArtifactResolution,
+    ReceiveFileFailure, ReceiveItemFailureReason, ReceiveItemRole, RecordDirectoryPublishPort,
+    RecordReceiveArtifactsPort, DIRECTORY_RECEIVE_STAGING_PREFIX,
 };
 use uc_core::{MimeType, ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uc_observability_contract::{
@@ -45,10 +49,17 @@ use uc_observability_contract::{
 
 use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::facade::blob_transfer::{
-    BatchPosition, BlobTransferError, BlobTransferFacade, FetchBlobCommand, FetchBlobResult,
-    FetchBlobToPathCommand, FetchBlobToPathResult, FetchTransferContext,
+    BatchPosition, BlobTransferError, FetchBlobCommand, FetchBlobToPathCommand,
+    FetchTransferContext,
 };
-use crate::transfer::blob::fetch_failure_reason;
+use crate::transfer::blob::facade::FetchTerminalFailure;
+use crate::transfer::blob::{fetch_failure_reason, BlobOutputPreparationError};
+
+use super::{
+    InboundBlobFetcher, InboundBlobMaterializer, InboundFileSetManifest, InboundFileSetMember,
+    MaterializeOutcome, MaterializeResult, MissingFileRef, ReceiveWorkPlan,
+};
+use crate::transfer::receive::batch::ReceiveBatch;
 
 /// 判断 fetcher 返回的 anyhow 错误是否来自 `BlobTransferError::Cancelled`。
 /// 仅 `BlobTransferFacade` 这一条生产路径保留 thiserror chain;mock 路径
@@ -56,9 +67,12 @@ use crate::transfer::blob::fetch_failure_reason;
 pub fn is_cancel_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
-            .downcast_ref::<BlobTransferError>()
-            .map(|bte| matches!(bte, BlobTransferError::Cancelled))
-            .unwrap_or(false)
+            .downcast_ref::<FetchTerminalFailure>()
+            .is_some_and(|failure| failure.status == TrackedFileTransferStatus::Cancelled)
+            || cause
+                .downcast_ref::<BlobTransferError>()
+                .map(|bte| matches!(bte, BlobTransferError::Cancelled))
+                .unwrap_or(false)
     })
 }
 
@@ -71,229 +85,19 @@ pub(crate) fn is_directory_cancel_error(error: &anyhow::Error) -> bool {
         })
 }
 
-/// 描述一份未完成 materialize 的 file blob。`reason` 由 file_transfer
-/// projection 单独承载(P1-10 落地),此处只表达"这个文件在 partial entry
-/// 里是缺失的"+ 元数据,前端按 filename + size 渲染。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MissingFileRef {
-    pub filename: String,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboundFileSetManifest {
-    pub members: Vec<InboundFileSetMember>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboundFileSetMember {
-    pub root_index: u32,
-    pub root_name: String,
-    pub root_is_file: bool,
-    pub relative_path: String,
-    pub kind: FileSetMemberKind,
-    pub blob_ref_index: Option<u32>,
-}
-
-pub struct ReceiveWorkPlan {
-    from_device: DeviceId,
-    receiver_entry_id: EntryId,
-    snapshot: SystemClipboardSnapshot,
-    blob_refs: Vec<V3BlobRef>,
-    file_set_manifest: Option<InboundFileSetManifest>,
-    attempt_id: Option<String>,
-    expected_snapshot_hash: Option<String>,
-    original_blob_indices: Vec<usize>,
-}
-
-impl ReceiveWorkPlan {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        from_device: DeviceId,
-        receiver_entry_id: EntryId,
-        snapshot: SystemClipboardSnapshot,
-        blob_refs: Vec<V3BlobRef>,
-        file_set_manifest: Option<InboundFileSetManifest>,
-        attempt_id: Option<String>,
-        expected_snapshot_hash: Option<String>,
-    ) -> Self {
-        let original_blob_indices = (0..blob_refs.len()).collect();
-        Self {
-            from_device,
-            receiver_entry_id,
-            snapshot,
-            blob_refs,
-            file_set_manifest,
-            attempt_id,
-            expected_snapshot_hash,
-            original_blob_indices,
-        }
-    }
-
-    fn into_parts(
-        self,
-    ) -> (
-        DeviceId,
-        EntryId,
-        SystemClipboardSnapshot,
-        Vec<V3BlobRef>,
-        Option<InboundFileSetManifest>,
-        Option<String>,
-        Option<String>,
-    ) {
-        debug_assert_eq!(self.original_blob_indices.len(), self.blob_refs.len());
-        (
-            self.from_device,
-            self.receiver_entry_id,
-            self.snapshot,
-            self.blob_refs,
-            self.file_set_manifest,
-            self.attempt_id,
-            self.expected_snapshot_hash,
-        )
-    }
-}
-
-/// `InboundBlobMaterializer::materialize` 的返回值。
-///
-/// `is_partial()` 是"该 snapshot 不完整"的权威信号 —— 调用方据此跳过
-/// OS clipboard write 与 dedup 登记。`missing` 单独列出 file-rep 阶段
-/// 未完成文件的元数据,供前端渲染占位卡片用。
-///
-/// **关键不变量**:`is_partial()` 不等于 `!missing.is_empty()`。rep-bound
-/// blob(图片 / 大二进制)被 cancel 时,materializer 会从 `snapshot.
-/// representations` 中删除未完成的 rep —— 这本身已经让 snapshot 半残,
-/// 但 `missing` 只用于 *file* 列表,如果 envelope 没有 file_refs,
-/// `missing` 仍是空。仅靠 `!missing.is_empty()` 判定会把这种情况误判
-/// 为 complete,把半残 snapshot 当真相落入 dedup 表 + OS 剪贴板。
-#[derive(Debug)]
-pub struct MaterializeResult {
-    pub snapshot: SystemClipboardSnapshot,
-    pub missing: Vec<MissingFileRef>,
-    /// 真正的"是否 partial"标志。`complete()` 置 false,`finalize_partial`
-    /// 置 true。`pub(crate)` 让 crate 内的 mock 测试能构造,外部调用方
-    /// 统一通过 `is_partial()` 读,避免新调用方又掉进"missing 空 ⇒
-    /// complete"陷阱。
-    pub(crate) partial: bool,
-    pub(crate) outcome: MaterializeOutcome,
-    /// Present when this result put directory roots at their final location.
-    ///
-    /// Those roots are visible but provisional: the caller owes them either a
-    /// [`DirectoryPublication::commit`] once the entry is durably recorded, or
-    /// a [`DirectoryPublication::rollback`] on any path that abandons the
-    /// entry. Take it with [`Self::take_publication`] and settle it on every
-    /// branch — dropping it leaves user-visible roots with nothing behind them.
-    pub(crate) publication: Option<DirectoryPublication>,
-    /// Receiver-local manifest for a fully materialized directory. Paths refer
-    /// only to this device's published roots and are sealed by the commit port.
-    pub(crate) directory_file_set: Option<EntryFileSet>,
-    pub(crate) has_receive_artifacts: bool,
-    pub(crate) receive_artifacts: Vec<ReceiveArtifact>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MaterializeOutcome {
-    Complete,
-    PartialCancelled,
-    PartialFailed,
-}
-
-impl MaterializeResult {
-    pub fn complete(snapshot: SystemClipboardSnapshot) -> Self {
-        Self {
-            snapshot,
-            missing: Vec::new(),
-            partial: false,
-            outcome: MaterializeOutcome::Complete,
-            publication: None,
-            directory_file_set: None,
-            has_receive_artifacts: false,
-            receive_artifacts: Vec::new(),
-        }
-    }
-
-    pub fn is_partial(&self) -> bool {
-        self.partial
-    }
-
-    pub fn outcome(&self) -> MaterializeOutcome {
-        self.outcome
-    }
-
-    /// Take ownership of the publication this result is holding, if any.
-    pub fn take_publication(&mut self) -> Option<DirectoryPublication> {
-        self.publication.take()
-    }
-
-    pub(crate) fn take_receive_artifacts(&mut self) -> Vec<ReceiveArtifact> {
-        std::mem::take(&mut self.receive_artifacts)
-    }
-}
-
-#[async_trait]
-pub trait InboundBlobMaterializer: Send + Sync {
-    async fn materialize_plan(&self, plan: ReceiveWorkPlan) -> Result<MaterializeResult> {
-        let (
-            from_device,
-            receiver_entry_id,
-            snapshot,
-            blob_refs,
-            file_set_manifest,
-            attempt_id,
-            expected_snapshot_hash,
-        ) = plan.into_parts();
-        self.materialize(
-            from_device,
-            receiver_entry_id,
-            snapshot,
-            blob_refs,
-            file_set_manifest,
-            attempt_id,
-            expected_snapshot_hash,
-        )
-        .await
-    }
-
-    /// `receiver_entry_id` 是 ApplyInbound 在流程入口生成的接收端 entry_id,
-    /// 用作所有 blob 拉取的 transfer_id —— 让占位卡片、进度事件和最终
-    /// `NewContent` 共享同一个标识,前端无需做合并映射。
-    ///
-    /// 返回 [`MaterializeResult`]:`missing.is_empty()` 表示全量成功;否则
-    /// 是 partial(用户在中途 cancel 了 inbound transfer),`snapshot` 仅包
-    /// 含已成功落地的 representation,缺失的 file blob 用 `uniclip-missing://`
-    /// URI 表达,`missing` 列出元数据供前端展示与调用方判定。
-    async fn materialize(
-        &self,
-        from_device: DeviceId,
-        receiver_entry_id: EntryId,
-        snapshot: SystemClipboardSnapshot,
-        blob_refs: Vec<V3BlobRef>,
-        file_set_manifest: Option<InboundFileSetManifest>,
-        attempt_id: Option<String>,
-        expected_snapshot_hash: Option<String>,
-    ) -> Result<MaterializeResult>;
-}
-
-#[async_trait]
-pub trait InboundBlobFetcher: Send + Sync {
-    /// In-memory fetch path — used by representation-bound blobs (e.g.
-    /// oversized images that we splice back into `snapshot.representations`).
-    async fn fetch_blob(&self, command: FetchBlobCommand) -> Result<FetchBlobResult>;
-
-    /// Streaming fetch path — used by free-standing files. The blob is
-    /// written directly to `command.target_path` (reflink on CoW
-    /// filesystems) so receiving a 1 GiB clipboard transfer no longer
-    /// routes the full plaintext through `Bytes`. GH#487 Phase 2.
-    async fn fetch_blob_to_path(
-        &self,
-        command: FetchBlobToPathCommand,
-    ) -> Result<FetchBlobToPathResult>;
-
-    async fn record_unfetched_failure(
-        &self,
-        _context: FetchTransferContext,
-        _reason: FileTransferFailureReason,
-    ) {
+/// 首次获取错误不等于原任务已结束；表示和目录沿同一实际终态屏障交接。
+async fn wait_for_fetch_terminal(source: Option<&SourceError>, batch: &ReceiveBatch, item: &str) {
+    let Some(error) = source else {
+        return;
+    };
+    let terminal = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<FetchTerminalFailure>())
+        .cloned();
+    if let Some(terminal) = terminal {
+        batch.unsettled_fetch_failure(item, is_cancel_error(error), error);
+        // 原任务保留许可与内容保护；取消等待不能越过已开始的本地终态结算。
+        terminal.wait_settled().await;
     }
 }
 
@@ -426,200 +230,6 @@ pub async fn sweep_inbound_staging(dirs: &[PathBuf]) -> usize {
         uc_info!(count = swept, "swept inbound staging areas left by a crash");
     }
     swept
-}
-
-/// Directory roots that are visible at their final location but not yet
-/// permanent.
-///
-/// Publication is not the commit point. A receive is only "all there" once its
-/// entry is durably recorded, and verification or persistence can still fail
-/// after the roots have landed — so the ability to take them back must outlive
-/// publication itself. That is what this handle is: it stays alive until the
-/// receive either commits or gives up.
-pub struct DirectoryPublication {
-    publisher: Arc<dyn AtomicPublishPort>,
-    staging: PathBuf,
-    mode: PublishMode,
-    /// `(final path, the staging path it was published from)`, in publication
-    /// order. The staging name is free again once published, so withdrawing is
-    /// the same move run backwards.
-    published: Vec<(PathBuf, PathBuf)>,
-    settled: bool,
-}
-
-/// Which guarantee a destination needs when roots land on it.
-///
-/// The two destinations differ in what lives around them, and that — not the
-/// volume — is what decides the guarantee.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PublishMode {
-    /// The destination holds the user's own files. A name we did not put there
-    /// may appear at any moment, so the move itself has to refuse an occupied
-    /// name; checking first and moving second would leave a window in which we
-    /// destroy someone's folder.
-    NoReplace,
-    /// The destination is ours alone and scoped to one receive, so the only
-    /// name that can appear is one we chose. Nothing is at risk, and demanding
-    /// a guarantee the volume may not offer would cost the receive for nothing.
-    IntoFreeName,
-}
-
-/// What a rollback managed to achieve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RollbackOutcome {
-    /// Every root was withdrawn; the final location holds nothing from this
-    /// receive.
-    Clean,
-    /// Some roots could not be withdrawn and are still visible to the user.
-    ///
-    /// Carries only a count. The roots' names are the sender's content and
-    /// must not travel into plaintext logs or columns.
-    PartialPublication { visible_roots: usize },
-}
-
-impl std::fmt::Debug for DirectoryPublication {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Names and paths withheld deliberately — see `RollbackOutcome`.
-        f.debug_struct("DirectoryPublication")
-            .field("root_count", &self.published.len())
-            .field("settled", &self.settled)
-            .finish()
-    }
-}
-
-/// Run one move under `mode`'s guarantee.
-async fn publish_via(
-    publisher: &dyn AtomicPublishPort,
-    mode: PublishMode,
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> Result<(), PublishError> {
-    match mode {
-        PublishMode::NoReplace => publisher.publish_no_replace(source, destination).await,
-        PublishMode::IntoFreeName => publisher.publish_into_free_name(source, destination).await,
-    }
-}
-
-impl DirectoryPublication {
-    fn new(publisher: Arc<dyn AtomicPublishPort>, staging: PathBuf, mode: PublishMode) -> Self {
-        Self {
-            publisher,
-            staging,
-            mode,
-            published: Vec::new(),
-            settled: false,
-        }
-    }
-
-    fn record(&mut self, final_path: PathBuf, staged_from: PathBuf) {
-        self.published.push((final_path, staged_from));
-    }
-
-    pub fn root_count(&self) -> usize {
-        self.published.len()
-    }
-
-    /// Make the publication permanent and drop the assembly area.
-    pub async fn commit(mut self) {
-        self.settled = true;
-        discard_staging(&self.staging).await;
-    }
-
-    /// Take every root back out of the final location.
-    ///
-    /// Withdrawal is a same-volume rename into an assembly area whose names are
-    /// free, so it succeeds in all but extreme cases. Whatever is withdrawn is
-    /// then discarded along with the staging area: the receive is over and its
-    /// content has no entry to belong to.
-    pub async fn rollback(mut self) -> RollbackOutcome {
-        self.settled = true;
-        let mut stuck = 0usize;
-        // Reverse order, undoing the most recent first.
-        for (final_path, staged_from) in self.published.iter().rev() {
-            if let Err(err) =
-                publish_via(self.publisher.as_ref(), self.mode, final_path, staged_from).await
-            {
-                uc_warn!(
-                    error_kind = "directory_root_withdraw",
-                    io_error_kind = io_error_kind(&err),
-                    "failed to withdraw a published directory root"
-                );
-                stuck += 1;
-            }
-        }
-        discard_staging(&self.staging).await;
-
-        if stuck == 0 {
-            uc_debug!(
-                root_count = self.published.len(),
-                "withdrew every published directory root"
-            );
-            RollbackOutcome::Clean
-        } else {
-            uc_warn!(
-                visible_roots = stuck,
-                "some published directory roots could not be withdrawn and remain visible"
-            );
-            RollbackOutcome::PartialPublication {
-                visible_roots: stuck,
-            }
-        }
-    }
-}
-
-impl Drop for DirectoryPublication {
-    fn drop(&mut self) {
-        if !self.settled {
-            // Nothing can be undone from here: withdrawal is async and Drop is
-            // not. Make the omission visible instead of hiding it — the roots
-            // stay visible to the user with no entry behind them.
-            uc_warn!(
-                root_count = self.published.len(),
-                "directory publication dropped without commit or rollback; roots remain visible"
-            );
-        }
-    }
-}
-
-/// Remove an assembly area, tolerating its absence.
-async fn discard_staging(staging: &std::path::Path) {
-    match tokio::fs::remove_dir_all(staging).await {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => uc_warn!(
-            error_kind = "staging_area_discard",
-            io_error_kind = io_error_kind(&err),
-            "failed to discard an inbound staging area"
-        ),
-    }
-}
-
-#[async_trait]
-impl InboundBlobFetcher for BlobTransferFacade {
-    async fn fetch_blob(&self, command: FetchBlobCommand) -> Result<FetchBlobResult> {
-        // 保留 thiserror 类型链:materializer 用 `is_cancel_error` downcast
-        // 判断是否 user-cancel,与真正的 fetch 失败区分对待。
-        BlobTransferFacade::fetch_blob(self, command)
-            .await
-            .map_err(anyhow::Error::from)
-    }
-
-    async fn fetch_blob_to_path(
-        &self,
-        command: FetchBlobToPathCommand,
-    ) -> Result<FetchBlobToPathResult> {
-        BlobTransferFacade::fetch_blob_to_path(self, command)
-            .await
-            .map_err(anyhow::Error::from)
-    }
-
-    async fn record_unfetched_failure(
-        &self,
-        context: FetchTransferContext,
-        reason: FileTransferFailureReason,
-    ) {
-        BlobTransferFacade::record_unfetched_failure(self, context, reason).await;
-    }
 }
 
 #[derive(Clone)]
@@ -810,16 +420,47 @@ impl FileCacheBlobMaterializer {
 
 #[async_trait]
 impl InboundBlobMaterializer for FileCacheBlobMaterializer {
-    async fn materialize(
-        &self,
-        from_device: DeviceId,
-        receiver_entry_id: EntryId,
-        mut snapshot: SystemClipboardSnapshot,
-        blob_refs: Vec<V3BlobRef>,
-        file_set_manifest: Option<InboundFileSetManifest>,
-        attempt_id: Option<String>,
-        expected_snapshot_hash: Option<String>,
-    ) -> Result<MaterializeResult> {
+    async fn materialize_plan(&self, plan: ReceiveWorkPlan) -> Result<MaterializeResult> {
+        let progress = plan.progress.clone();
+        let selection = plan.selection.clone();
+        let original_blob_indices = plan.original_blob_indices.clone();
+        let (
+            from_device,
+            receiver_entry_id,
+            mut snapshot,
+            blob_refs,
+            file_set_manifest,
+            attempt_id,
+            expected_snapshot_hash,
+            cancellation,
+            batch,
+        ) = plan.into_parts();
+        if let Some(selection) = &selection {
+            validate_selection(
+                selection,
+                &blob_refs,
+                file_set_manifest.is_some(),
+                &snapshot,
+                &self.cache_dir,
+                &cancellation,
+            )
+            .await?;
+        }
+        let rep_blob_indices = blob_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, blob)| blob.representation_index.is_some())
+            .map(|(index, _)| original_blob_indices[index])
+            .collect::<Vec<_>>();
+        let file_blob_indices = blob_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, blob)| blob.representation_index.is_none())
+            .map(|(index, _)| original_blob_indices[index])
+            .collect::<Vec<_>>();
+        let mut completed = Vec::new();
+        let (count, total) = receive_member_totals(&blob_refs, file_set_manifest.as_ref());
+        batch.plan(count, total);
         if blob_refs.is_empty() && file_set_manifest.is_none() {
             return Ok(MaterializeResult::complete(snapshot));
         }
@@ -837,9 +478,7 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             .into_iter()
             .partition(|r| r.representation_index.is_some());
 
-        // Flat payload blobs share one receiver transfer id. BatchPosition lets
-        // the blob facade create one session, reuse it across fetches, and only
-        // settle it after the last blob.
+        // 每项独立结算；BatchPosition 只保留旧兼容接缝的位置，整批通知由接收动作汇总。
         let batch_total = rep_refs.len() + file_refs.len();
         let mut batch_idx = 0usize;
 
@@ -850,12 +489,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         // - `missing_files`:file_refs 阶段被取消的文件元数据,用于:
         //   (a) 在 file-list rep 中以 `uniclip-missing://` URI 占位;
         //   (b) 返回给上层做"是否 partial"判定。
-        // - `partial`: set when cancel or fetch error occurs; remaining blobs
-        //   are marked missing and no further fetches are attempted.
+        // - `partial` 汇总任何缺失项；独立文件失败／单项取消继续，整计划取消才封后续项。
         let mut incomplete_rep_idxs: Vec<usize> = Vec::new();
         let mut missing_files: Vec<MissingFileRef> = Vec::new();
         let mut partial = false;
         let mut partial_outcome = MaterializeOutcome::PartialFailed;
+        let mut item_failed = false;
 
         // 1. Hydrate representation-bound blobs back into the snapshot.
         //
@@ -872,6 +511,15 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             })
             .collect::<Result<Vec<_>>>()?;
         for (loop_idx, blob_ref) in rep_refs.into_iter().enumerate() {
+            if cancellation.is_cancelled() && (selection.is_none() || file_set_manifest.is_some()) {
+                if file_set_manifest.is_some() {
+                    return Err(BlobTransferError::Cancelled.into());
+                }
+                incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
+                partial = true;
+                partial_outcome = MaterializeOutcome::PartialCancelled;
+                break;
+            }
             let entry_id = blob_ref.entry_id.clone();
             let advertised_size = blob_ref.size_bytes;
             let idx = blob_ref
@@ -885,48 +533,77 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 "materialize: fetching representation-bound blob"
             );
 
-            // transfer_id 用接收端的 receiver_entry_id —— 与 file_refs
-            // 路径保持一致,确保占位卡片 / 进度事件 / 最终 entry 共享同
-            // 一个 ID(协议层 transfer_id == receiver_entry_id)。
-            // `blob_ref.entry_id` 是发送端 id,只用于 iroh tag。
-            // filename: rep-bound blob 没有显式文件名,留空让 receiver
-            // projection 的 filename 字段保持空(dashboard 显示 mime/size
-            // 兜底)。
-            // outbound_*: 反向进度回报上下文 —— transfer_id 用 sender 的
-            // entry_id(V3BlobRef.entry_id),target 用消息来源 device,
-            // 两者让 sender UI 能定位本地 entry 并接收实时字节进度。
-            let transfer_context = match attempt_id.as_deref() {
-                Some(attempt_id) => directory_representation_transfer_context(
-                    &receiver_entry_id,
-                    attempt_id,
-                    loop_idx,
-                    &blob_ref,
-                    &from_device,
-                    position_in_batch(batch_idx, batch_total),
-                ),
-                None => FetchTransferContext {
-                    transfer_id: receiver_entry_id.as_ref().to_string(),
-                    entry_id: receiver_entry_id.as_ref().to_string(),
-                    attempt_id: None,
-                    peer_id: from_device.as_str().to_string(),
-                    total_bytes: Some(advertised_size),
-                    filename: String::new(),
-                    outbound_transfer_id: Some(blob_ref.entry_id.as_ref().to_string()),
-                    outbound_target: Some(from_device),
-                    batch_position: position_in_batch(batch_idx, batch_total),
-                    individual_lifecycle: false,
-                },
-            };
+            // 表示项以原始表示位置区分，通知仍聚合到来源条目。
+            let mut transfer_context = directory_representation_transfer_context(
+                &receiver_entry_id,
+                attempt_id.as_deref(),
+                idx as usize,
+                &blob_ref,
+                &from_device,
+                position_in_batch(batch_idx, batch_total),
+            );
+            transfer_context.batch = Some(batch.clone());
+            let item_id = transfer_context.transfer_id.clone();
             batch_idx += 1;
-            let fetched = match self
+            let original_index = rep_blob_indices[loop_idx];
+            if let Some(selection) = &selection {
+                if let Some(item) = selection.landed.get(&original_index) {
+                    batch.item_result(
+                        &item_id,
+                        item.bytes,
+                        OutboundProgressStatus::Completed,
+                        None,
+                    );
+                    completed.push(item.clone());
+                    continue;
+                }
+                if !selection.selected.contains(&original_index) {
+                    incomplete_rep_idxs.push(idx as usize);
+                    partial = true;
+                    if let Some(previous) = selection.unselected.get(&original_index) {
+                        batch.inherit_result(&item_id, previous);
+                        if previous.status == TrackedFileTransferStatus::Cancelled {
+                            if !item_failed {
+                                partial_outcome = MaterializeOutcome::PartialCancelled;
+                            }
+                        } else {
+                            item_failed = true;
+                            partial_outcome = MaterializeOutcome::PartialFailed;
+                        }
+                    } else {
+                        item_failed = true;
+                        batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
+                    }
+                    continue;
+                }
+            }
+            if cancellation.is_cancelled() {
+                incomplete_rep_idxs.push(idx as usize);
+                partial = true;
+                if !item_failed {
+                    partial_outcome = MaterializeOutcome::PartialCancelled;
+                }
+                batch.item_result(
+                    &item_id,
+                    0,
+                    OutboundProgressStatus::Cancelled {
+                        reason: FileTransferCancellationReason::LocalUser,
+                    },
+                    None,
+                );
+                continue;
+            }
+            let outcome = self
                 .fetcher
                 .fetch_blob(FetchBlobCommand {
+                    cancellation: cancellation.clone(),
                     ticket: blob_ref.ticket,
                     entry_id: blob_ref.entry_id.clone(),
                     transfer_context: Some(transfer_context),
                 })
-                .await
-            {
+                .await;
+            wait_for_fetch_terminal(outcome.as_ref().err(), batch.as_ref(), &item_id).await;
+            let fetched = match outcome {
                 Ok(v) => v,
                 Err(e) if is_cancel_error(&e) => {
                     // Cancel:当前 + 后续 rep_refs 都没 fetch,把这部分 idx 全数
@@ -936,9 +613,37 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         representation_index = idx,
                         "materialize: representation-bound blob fetch cancelled, marking partial"
                     );
-                    incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
+                    if file_set_manifest.is_some() {
+                        batch.item_result(
+                            &item_id,
+                            0,
+                            OutboundProgressStatus::Cancelled {
+                                reason: FileTransferCancellationReason::LocalUser,
+                            },
+                            None,
+                        );
+                        return Err(e.context("fetch directory representation"));
+                    }
+                    if selection.is_some() {
+                        incomplete_rep_idxs.push(idx as usize);
+                    } else {
+                        incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
+                    }
+                    batch.item_result(
+                        &item_id,
+                        0,
+                        OutboundProgressStatus::Cancelled {
+                            reason: FileTransferCancellationReason::LocalUser,
+                        },
+                        Some(e),
+                    );
                     partial = true;
-                    partial_outcome = MaterializeOutcome::PartialCancelled;
+                    if !item_failed {
+                        partial_outcome = MaterializeOutcome::PartialCancelled;
+                    }
+                    if selection.is_some() {
+                        continue;
+                    }
                     break;
                 }
                 Err(e) => {
@@ -950,7 +655,13 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                         io_error_kind = io_error_kind(e.as_ref()),
                         "materialize: representation-bound blob fetch failed, marking partial"
                     );
+                    if file_set_manifest.is_some() {
+                        batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
+                        return Err(e.context("fetch directory representation"));
+                    }
                     incomplete_rep_idxs.extend(pending_rep_idxs[loop_idx..].iter().copied());
+                    batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, Some(e));
+                    item_failed = true;
                     partial = true;
                     break;
                 }
@@ -964,8 +675,21 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 )
             })?;
             let fetched_len = fetched.plaintext.len();
+            completed.push(ReceivedItem {
+                blob_index: original_index,
+                plaintext_hash: *fetched.plaintext_hash.as_bytes(),
+                bytes: fetched_len as u64,
+                output: ReceivedOutput::Representation(rep.id.clone()),
+            });
             rep.set_inline_bytes(fetched.plaintext.to_vec())
                 .context("materialize: failed to set inline bytes")?;
+            batch.item_result(
+                &item_id,
+                fetched_len as u64,
+                OutboundProgressStatus::Completed,
+                None,
+            );
+
             uc_info!(
                 entry_id = log_id(&entry_id),
                 representation_index = idx,
@@ -974,35 +698,24 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             );
         }
 
-        // Rep-refs stage partial (cancel or error): skip all file_refs fetches,
-        // mark them missing, finalize via the partial path.
-        if partial {
-            if file_set_manifest.is_some() {
-                return Err(anyhow!("directory representation blob fetch failed"));
-            }
-            for blob_ref in file_refs.iter() {
-                missing_files.push(MissingFileRef {
-                    filename: blob_ref
-                        .filename
-                        .clone()
-                        .unwrap_or_else(|| format!("blob-{}", blob_ref.entry_id.as_ref())),
-                    size_bytes: blob_ref.size_bytes,
-                });
-            }
-            return Ok(finalize_partial(
-                snapshot,
-                &incomplete_rep_idxs,
-                Vec::new(),
-                missing_files,
-                &from_device,
-                partial_outcome,
-                false,
-                Vec::new(),
-            ));
-        }
-
         if file_refs.is_empty() && file_set_manifest.is_none() {
-            return Ok(MaterializeResult::complete(snapshot));
+            return if partial {
+                Ok(finalize_partial(
+                    snapshot,
+                    &incomplete_rep_idxs,
+                    Vec::new(),
+                    missing_files,
+                    &from_device,
+                    partial_outcome,
+                    false,
+                    Vec::new(),
+                    completed,
+                ))
+            } else {
+                let mut result = MaterializeResult::complete(snapshot);
+                result.completed = completed;
+                Ok(result)
+            };
         }
 
         if let Some(manifest) = file_set_manifest {
@@ -1017,14 +730,31 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                     expected_snapshot_hash.as_deref(),
                     batch_idx,
                     batch_total,
+                    &cancellation,
+                    &batch,
                 )
                 .await;
         }
 
         // 2. Free-standing files: existing cache_dir + file-list rewrite path.
         let mut local_paths = Vec::with_capacity(file_refs.len());
+        let mut completed_file_refs = Vec::with_capacity(file_refs.len());
         let mut file_content_digests: Vec<[u8; 32]> = Vec::with_capacity(file_refs.len());
         let mut used_names = HashSet::new();
+        if let Some(selection) = &selection {
+            for item in selection.landed.values() {
+                if let ReceivedOutput::File(artifact) = &item.output {
+                    if let Some(name) = artifact
+                        .final_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                    {
+                        used_names.insert(name.to_owned());
+                    }
+                }
+            }
+        }
+        let used_names = Arc::new(Mutex::new(used_names));
         let blob_ref_total = file_refs.len();
         let mut receive_artifacts = Vec::with_capacity(file_refs.len());
         let mut artifact_journaled = false;
@@ -1034,11 +764,24 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         // 看到当前正在 fetch 的那一个 file 名,丢失批中其他未传文件元数据。
         let mut file_idx = 0usize;
         while file_idx < file_refs.len() {
+            if cancellation.is_cancelled() && selection.is_none() {
+                for remaining in &file_refs[file_idx..] {
+                    missing_files.push(MissingFileRef {
+                        filename: remaining
+                            .filename
+                            .clone()
+                            .unwrap_or_else(|| format!("blob-{}", remaining.entry_id.as_ref())),
+                        size_bytes: remaining.size_bytes,
+                    });
+                }
+                partial = true;
+                partial_outcome = MaterializeOutcome::PartialCancelled;
+                break;
+            }
             let idx = file_idx;
             let blob_ref = file_refs[idx].clone();
             let entry_id = blob_ref.entry_id.clone();
             let advertised_size = blob_ref.size_bytes;
-            let declared_name = blob_ref.filename.clone();
             uc_debug!(
                 idx = idx,
                 total = blob_ref_total,
@@ -1047,201 +790,312 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 "materialize: fetching blob"
             );
 
-            // transfer_id 用接收端的 entry_id ——
-            // ApplyInbound 已在流程入口预生成,贯穿到 capture 后的 NewContent。
-            // 即便 envelope 含多个 blob_ref,也共享同一 transfer_id:前端按
-            // 累计字节数显示总进度即可。`blob_ref.entry_id` 是发送端 id,
-            // 仅用于 iroh tag,不参与前端关联。
-            // filename: 用 sender 声明的原始文件名(blob_ref.filename),
-            // dashboard 直接显示;真正落盘后的去重文件名由 BlobTransferFacade
-            // 用 target_path 写进 cached_path,两者职责分离。
-            // outbound_*: 反向进度回报。transfer_id 用 sender 的 entry_id
-            // 让 sender UI 定位本地 entry,target 是消息来源 device。
-            let transfer_context = match attempt_id.as_deref() {
-                Some(attempt_id) => directory_member_transfer_context(
-                    &receiver_entry_id,
-                    Some(attempt_id),
-                    idx,
-                    &blob_ref,
-                    &from_device,
-                    position_in_batch(batch_idx, batch_total),
-                ),
-                None => FetchTransferContext {
-                    transfer_id: receiver_entry_id.as_ref().to_string(),
-                    entry_id: receiver_entry_id.as_ref().to_string(),
-                    attempt_id: None,
-                    peer_id: from_device.as_str().to_string(),
-                    total_bytes: Some(advertised_size),
-                    filename: declared_name.clone().unwrap_or_default(),
-                    outbound_transfer_id: Some(blob_ref.entry_id.as_ref().to_string()),
-                    outbound_target: Some(from_device),
-                    batch_position: position_in_batch(batch_idx, batch_total),
-                    individual_lifecycle: false,
-                },
-            };
+            // 项身份绑定接收条目、尝试和原始位置，不以名称或来源摘要去重。
+            let mut transfer_context = directory_member_transfer_context(
+                &receiver_entry_id,
+                attempt_id.as_deref(),
+                idx,
+                &blob_ref,
+                &from_device,
+                position_in_batch(batch_idx, batch_total),
+            );
+            transfer_context.batch = Some(batch.clone());
+            let item_id = transfer_context.transfer_id.clone();
             batch_idx += 1;
 
-            // Resolve the destination for this file. When a user save
-            // directory is configured and usable, write the file there (flat,
-            // collision-suffixed) so the user can operate on it directly;
-            // otherwise fall back to the managed cache layout. Files written
-            // outside the cache dir are user-owned and never removed by
-            // retention cleanup or entry deletion.
-            // Pass the declared name through as-is (empty when absent); the
-            // adapter owns the single fallback-name source of truth, so we do
-            // not duplicate a literal here.
-            let reserved = match self.target_reserver.as_ref() {
-                Some(reserver) => {
-                    reserver
-                        .reserve_target(blob_ref.filename.as_deref().unwrap_or_default())
-                        .await
+            let original_index = file_blob_indices[idx];
+            if let Some(selection) = &selection {
+                if let Some(item) = selection.landed.get(&original_index) {
+                    let ReceivedOutput::File(artifact) = &item.output else {
+                        return Err(anyhow!("reused receive output is not a file"));
+                    };
+                    local_paths.push(artifact.final_path.clone());
+                    file_content_digests.push(item.plaintext_hash);
+                    completed_file_refs.push(blob_ref.clone());
+                    completed.push(item.clone());
+                    batch.item_result(
+                        &item_id,
+                        item.bytes,
+                        OutboundProgressStatus::Completed,
+                        None,
+                    );
+                    file_idx += 1;
+                    continue;
                 }
-                None => None,
-            };
-            // A reserved path is an empty placeholder the adapter atomically
-            // created to win the name; if the fetch never completes we must
-            // delete it (see `remove_reserved_placeholder`). When true, `path`
-            // below IS that placeholder. Managed-cache paths need no cleanup.
-            let from_reserver = reserved.is_some();
-
-            let path = match reserved {
-                Some(user_path) => user_path,
-                None => {
-                    // GH#487 Phase 2: pre-create cache dir and stream the blob
-                    // directly to the target file. The previous code did
-                    // `fetch_blob -> Bytes -> tokio::fs::write`, which on a
-                    // 800 MB transfer wasted ~20s materialising the full
-                    // plaintext in memory and writing to disk a second time
-                    // (the iroh store already had a copy from BAO
-                    // verification). `fetch_blob_to_path` collapses both into a
-                    // single `Blobs::export` call (reflink on APFS / Btrfs /
-                    // ReFS).
-                    let entry_dir = self
-                        .cache_dir
-                        .join("iroh-blobs")
-                        .join(sanitize_path_segment(blob_ref.entry_id.as_ref()));
-                    tokio::fs::create_dir_all(&entry_dir).await?;
-
-                    let filename =
-                        managed_filename(blob_ref.filename.as_deref(), idx, &mut used_names);
-                    entry_dir.join(filename)
-                }
-            };
-            receive_artifacts.push(ReceiveArtifact {
-                item_id: transfer_context.transfer_id.clone(),
-                staged_path: path.clone(),
-                final_path: path.clone(),
-                ownership: if from_reserver {
-                    ReceiveArtifactOwnership::UserDestination
-                } else {
-                    ReceiveArtifactOwnership::ManagedStaging
-                },
-            });
-            match self
-                .record_receive_artifacts(
-                    &receiver_entry_id,
-                    attempt_id.as_deref(),
-                    &receive_artifacts,
-                )
-                .await
-            {
-                Ok(recorded) => artifact_journaled |= recorded,
-                Err(error) => {
-                    if from_reserver {
-                        remove_reserved_placeholder(&path).await;
+                if !selection.selected.contains(&original_index) {
+                    missing_files.push(MissingFileRef {
+                        filename: blob_ref
+                            .filename
+                            .clone()
+                            .unwrap_or_else(|| format!("blob-{}", blob_ref.entry_id.as_ref())),
+                        size_bytes: blob_ref.size_bytes,
+                    });
+                    partial = true;
+                    if let Some(previous) = selection.unselected.get(&original_index) {
+                        batch.inherit_result(&item_id, previous);
+                        if previous.status == TrackedFileTransferStatus::Cancelled {
+                            if !item_failed {
+                                partial_outcome = MaterializeOutcome::PartialCancelled;
+                            }
+                        } else {
+                            item_failed = true;
+                            partial_outcome = MaterializeOutcome::PartialFailed;
+                        }
+                    } else {
+                        item_failed = true;
+                        batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, None);
                     }
-                    return Err(error);
+                    file_idx += 1;
+                    continue;
                 }
             }
 
-            let fetched =
-                match self
-                    .fetcher
-                    .fetch_blob_to_path(FetchBlobToPathCommand {
-                        ticket: blob_ref.ticket,
-                        entry_id: blob_ref.entry_id.clone(),
-                        target_path: path.clone(),
-                        transfer_context: Some(transfer_context),
-                    })
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) if is_cancel_error(&e) => {
-                        // A cancelled fetch never runs the store-export step, so
-                        // a reserved user-dir placeholder stays as a 0-byte file.
-                        // The transfer layer does not remove it (cancel only
-                        // tears down the connection), so we delete it here to
-                        // keep the user's save directory clean. The current +
-                        // file_refs[idx+1..] entries go to missing; break to
-                        // finalize.
-                        if from_reserver {
-                            remove_reserved_placeholder(&path).await;
-                        }
-                        receive_artifacts.pop();
-                        artifact_journaled |= self
-                            .record_receive_artifacts(
-                                &receiver_entry_id,
-                                attempt_id.as_deref(),
-                                &receive_artifacts,
-                            )
-                            .await?;
-                        uc_warn!(
-                            idx = idx,
-                            total = blob_ref_total,
-                            entry_id = log_id(&entry_id),
-                            "materialize: blob fetch cancelled, marking partial"
-                        );
-                        for remaining in &file_refs[idx..] {
-                            missing_files.push(MissingFileRef {
-                                filename: remaining.filename.clone().unwrap_or_else(|| {
-                                    format!("blob-{}", remaining.entry_id.as_ref())
-                                }),
-                                size_bytes: remaining.size_bytes,
-                            });
-                        }
-                        partial = true;
-                        partial_outcome = MaterializeOutcome::PartialCancelled;
-                        break;
-                    }
-                    Err(e) => {
-                        // Non-cancel failure (network drop, export error, ...).
-                        // Same reasoning as the cancel arm: remove the reserved
-                        // placeholder / partial file so it does not linger in
-                        // the user's save directory (which retention and entry
-                        // deletion never touch) or block the name for a retry.
-                        if from_reserver {
-                            remove_reserved_placeholder(&path).await;
-                        }
-                        receive_artifacts.pop();
-                        artifact_journaled |= self
-                            .record_receive_artifacts(
-                                &receiver_entry_id,
-                                attempt_id.as_deref(),
-                                &receive_artifacts,
-                            )
-                            .await?;
-                        uc_warn!(
-                            idx = idx,
-                            total = blob_ref_total,
-                            entry_id = log_id(&entry_id),
-                            size_bytes = advertised_size,
-                            error_kind = "blob_fetch",
-                            io_error_kind = io_error_kind(e.as_ref()),
-                            "materialize: blob fetch failed, marking partial"
-                        );
-                        for remaining in &file_refs[idx..] {
-                            missing_files.push(MissingFileRef {
-                                filename: remaining.filename.clone().unwrap_or_else(|| {
-                                    format!("blob-{}", remaining.entry_id.as_ref())
-                                }),
-                                size_bytes: remaining.size_bytes,
-                            });
-                        }
-                        partial = true;
-                        break;
-                    }
-                };
+            if cancellation.is_cancelled() {
+                missing_files.push(MissingFileRef {
+                    filename: blob_ref
+                        .filename
+                        .clone()
+                        .unwrap_or_else(|| format!("blob-{}", blob_ref.entry_id.as_ref())),
+                    size_bytes: blob_ref.size_bytes,
+                });
+                partial = true;
+                if !item_failed {
+                    partial_outcome = MaterializeOutcome::PartialCancelled;
+                }
+                batch.item_result(
+                    &item_id,
+                    0,
+                    OutboundProgressStatus::Cancelled {
+                        reason: FileTransferCancellationReason::LocalUser,
+                    },
+                    None,
+                );
+                file_idx += 1;
+                continue;
+            }
 
+            if progress.is_some() {
+                batch.require_file_commit(&item_id);
+            }
+            let receipt = Arc::new(Mutex::new(PreparedReceiveOutput::default()));
+            let journal = match (
+                self.receive_artifact_log.as_ref(),
+                attempt_id.as_ref(),
+                self.directory_attempts.as_ref(),
+            ) {
+                (Some(log), Some(attempt_id), Some(ports)) => Some(FileOutputJournal {
+                    log: log.clone(),
+                    clock: ports.clock.clone(),
+                    entry_id: receiver_entry_id.as_ref().to_owned(),
+                    attempt_id: attempt_id.clone(),
+                    previous: receive_artifacts.clone(),
+                }),
+                _ => None,
+            };
+            let target_path = FileOutputPreparation {
+                target_reserver: self.target_reserver.clone(),
+                managed_parent: self
+                    .cache_dir
+                    .join("iroh-blobs")
+                    .join(sanitize_path_segment(blob_ref.entry_id.as_ref())),
+                filename: blob_ref.filename.clone(),
+                index: idx,
+                used_names: used_names.clone(),
+                item_id: item_id.clone(),
+                journal,
+            }
+            .into_target(receipt.clone());
+            let fetched = self
+                .fetcher
+                .fetch_blob_to_path(FetchBlobToPathCommand {
+                    cancellation: cancellation.clone(),
+                    ticket: blob_ref.ticket,
+                    entry_id: blob_ref.entry_id.clone(),
+                    target_path,
+                    transfer_context: Some(transfer_context),
+                })
+                .await;
+            let (artifact, journaled) = {
+                let mut receipt = receipt.lock().unwrap_or_else(PoisonError::into_inner);
+                (receipt.artifact.take(), receipt.journaled)
+            };
+            artifact_journaled |= journaled;
+            if let Some(artifact) = &artifact {
+                receive_artifacts.push(artifact.clone());
+            }
+            let path = artifact
+                .as_ref()
+                .map(|artifact| artifact.final_path.clone());
+            let fetched = match fetched {
+                Ok(v) => v,
+                Err(error)
+                    if error
+                        .chain()
+                        .any(|source| source.is::<BlobOutputPreparationError>()) =>
+                {
+                    if let Some(path) = &path {
+                        if let Err(cleanup) = remove_uncommitted_output(path).await {
+                            return Err(output_cleanup_failure(
+                                progress.as_deref(),
+                                artifact.as_ref(),
+                                ReceiveOutputFailure::PreparationFailure,
+                                &receive_artifacts,
+                                artifact_journaled,
+                                cleanup,
+                                error,
+                            ));
+                        }
+                    }
+                    return Err(error);
+                }
+                Err(e) if is_cancel_error(&e) => {
+                    // 只移除本项预留；单项取消继续其余文件，整计划停止才终止循环。
+                    if let Some(path) = &path {
+                        if let Err(cleanup) = remove_uncommitted_output(path).await {
+                            return Err(output_cleanup_failure(
+                                progress.as_deref(),
+                                artifact.as_ref(),
+                                ReceiveOutputFailure::after_fetch(&e, true),
+                                &receive_artifacts,
+                                artifact_journaled,
+                                cleanup,
+                                e,
+                            ));
+                        }
+                        if let (Some(progress), Some(artifact)) =
+                            (progress.as_deref(), artifact.as_ref())
+                        {
+                            if let Err(settlement) = progress
+                                .clean_file(artifact, true, &receive_artifacts, &e)
+                                .await
+                            {
+                                return Err(ReceiveFailureSettlementError {
+                                    cause: e,
+                                    settlement,
+                                }
+                                .into());
+                            }
+                            receive_artifacts.pop();
+                        } else {
+                            receive_artifacts.pop();
+                            artifact_journaled |= self
+                                .record_receive_artifacts(
+                                    &receiver_entry_id,
+                                    attempt_id.as_deref(),
+                                    &receive_artifacts,
+                                )
+                                .await?;
+                        }
+                    }
+                    uc_warn!(
+                        idx = idx,
+                        total = blob_ref_total,
+                        entry_id = log_id(&entry_id),
+                        "materialize: blob fetch cancelled, marking partial"
+                    );
+                    batch.item_result(
+                        &item_id,
+                        0,
+                        OutboundProgressStatus::Cancelled {
+                            reason: FileTransferCancellationReason::LocalUser,
+                        },
+                        Some(e),
+                    );
+                    let end = if cancellation.is_cancelled() && selection.is_none() {
+                        file_refs.len()
+                    } else {
+                        idx + 1
+                    };
+                    for remaining in &file_refs[idx..end] {
+                        missing_files.push(MissingFileRef {
+                            filename: remaining
+                                .filename
+                                .clone()
+                                .unwrap_or_else(|| format!("blob-{}", remaining.entry_id.as_ref())),
+                            size_bytes: remaining.size_bytes,
+                        });
+                    }
+                    partial = true;
+                    if !item_failed {
+                        partial_outcome = MaterializeOutcome::PartialCancelled;
+                    }
+                    file_idx += 1;
+                    if cancellation.is_cancelled() && selection.is_none() {
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    // Non-cancel failure (network drop, export error, ...).
+                    // Same reasoning as the cancel arm: remove the reserved
+                    // placeholder / partial file so it does not linger in
+                    // the user's save directory (which retention and entry
+                    // deletion never touch) or block the name for a retry.
+                    if let Some(path) = &path {
+                        if let Err(cleanup) = remove_uncommitted_output(path).await {
+                            return Err(output_cleanup_failure(
+                                progress.as_deref(),
+                                artifact.as_ref(),
+                                ReceiveOutputFailure::after_fetch(&e, false),
+                                &receive_artifacts,
+                                artifact_journaled,
+                                cleanup,
+                                e,
+                            ));
+                        }
+                        if let (Some(progress), Some(artifact)) =
+                            (progress.as_deref(), artifact.as_ref())
+                        {
+                            if let Err(settlement) = progress
+                                .clean_file(artifact, false, &receive_artifacts, &e)
+                                .await
+                            {
+                                return Err(ReceiveFailureSettlementError {
+                                    cause: e,
+                                    settlement,
+                                }
+                                .into());
+                            }
+                            receive_artifacts.pop();
+                        } else {
+                            receive_artifacts.pop();
+                            artifact_journaled |= self
+                                .record_receive_artifacts(
+                                    &receiver_entry_id,
+                                    attempt_id.as_deref(),
+                                    &receive_artifacts,
+                                )
+                                .await?;
+                        }
+                    }
+                    uc_warn!(
+                        idx = idx,
+                        total = blob_ref_total,
+                        entry_id = log_id(&entry_id),
+                        size_bytes = advertised_size,
+                        error_kind = "blob_fetch",
+                        io_error_kind = io_error_kind(e.as_ref()),
+                        "materialize: blob fetch failed, marking partial"
+                    );
+                    missing_files.push(MissingFileRef {
+                        filename: blob_ref
+                            .filename
+                            .clone()
+                            .unwrap_or_else(|| format!("blob-{}", blob_ref.entry_id.as_ref())),
+                        size_bytes: blob_ref.size_bytes,
+                    });
+                    batch.item_result(&item_id, 0, OutboundProgressStatus::Failed, Some(e));
+                    item_failed = true;
+                    partial = true;
+                    partial_outcome = MaterializeOutcome::PartialFailed;
+                    file_idx += 1;
+                    continue;
+                }
+            };
+
+            let artifact =
+                artifact.ok_or_else(|| anyhow!("successful receive has no prepared output"))?;
+            let path = artifact.final_path.clone();
             uc_info!(
                 idx = idx,
                 total = blob_ref_total,
@@ -1249,14 +1103,111 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 bytes_written = fetched.bytes_written,
                 "materialize: blob cached to local path (streaming)"
             );
+            let item = ReceivedItem {
+                blob_index: original_index,
+                plaintext_hash: *fetched.plaintext_hash.as_bytes(),
+                bytes: fetched.bytes_written,
+                output: ReceivedOutput::File(artifact.clone()),
+            };
+            if let Some(progress) = &progress {
+                batch.item_materialized(&item_id, fetched.bytes_written);
+                let mut candidate = completed.clone();
+                candidate.push(item.clone());
+                let saved = async {
+                    if !batch.begin_file_commit(&item_id) {
+                        return Err(BlobTransferError::Cancelled.into());
+                    }
+                    let saved = FileProgressSnapshot::new(
+                        &snapshot,
+                        &incomplete_rep_idxs,
+                        &file_refs,
+                        &file_blob_indices,
+                        &candidate,
+                        selection.as_deref(),
+                        &from_device,
+                    )?;
+                    progress
+                        .persist_file(saved.snapshot, &saved.completed, &artifact)
+                        .await
+                }
+                .await;
+                if let Err(source) = saved {
+                    let error = anyhow::Error::new(FileProgressCommitError(source));
+                    let failure = if cancellation.is_cancelled() || is_cancel_error(&error) {
+                        ReceiveFileFailure::Cancelled
+                    } else {
+                        ReceiveFileFailure::Failed(ReceiveItemFailureReason::StorageUnavailable)
+                    };
+                    if let Err(cleanup) = remove_uncommitted_output(&path).await {
+                        progress.defer_output_cleanup(
+                            &artifact,
+                            ReceiveOutputFailure::FileCommit(failure),
+                            &receive_artifacts,
+                            artifact_journaled,
+                            &error,
+                        );
+                        return Err(ReceiveFailureSettlementError {
+                            cause: error,
+                            settlement: cleanup.into(),
+                        }
+                        .into());
+                    }
+                    if let Err(settlement) = progress
+                        .fail_file(&artifact, failure, &receive_artifacts)
+                        .await
+                    {
+                        return Err(ReceiveFailureSettlementError {
+                            cause: error,
+                            settlement,
+                        }
+                        .into());
+                    }
+                    receive_artifacts.pop();
+                    missing_files.push(MissingFileRef {
+                        filename: file_refs[idx].filename.clone().unwrap_or_else(|| {
+                            format!("blob-{}", file_refs[idx].entry_id.as_ref())
+                        }),
+                        size_bytes: advertised_size,
+                    });
+                    let status = if cancellation.is_cancelled() || is_cancel_error(&error) {
+                        if !item_failed {
+                            partial_outcome = MaterializeOutcome::PartialCancelled;
+                        }
+                        OutboundProgressStatus::Cancelled {
+                            reason: FileTransferCancellationReason::LocalUser,
+                        }
+                    } else {
+                        item_failed = true;
+                        partial_outcome = MaterializeOutcome::PartialFailed;
+                        OutboundProgressStatus::Failed
+                    };
+                    batch.item_result(&item_id, fetched.bytes_written, status, Some(error));
+                    partial = true;
+                    file_idx += 1;
+                    continue;
+                }
+                // 数据库已原子解除该产物责任，之后的新日志不得重新纳入它。
+                receive_artifacts.pop();
+                batch.item_saved(&item_id, fetched.bytes_written);
+            } else {
+                batch.item_result(
+                    &item_id,
+                    fetched.bytes_written,
+                    OutboundProgressStatus::Completed,
+                    None,
+                );
+            }
+            completed.push(item);
             file_content_digests.push(*fetched.plaintext_hash.as_bytes());
             local_paths.push(path);
+            completed_file_refs.push(file_refs[idx].clone());
             file_idx += 1;
         }
 
+        snapshot.file_content_digests = file_content_digests;
         if partial {
-            // The break collected current + remaining file_refs into
-            // missing_files. Finalize the partial entry.
+            // 只有已完成文件进入本机显示元数据；缺失项独立保留原始资料。
+            rewrite_file_display_metadata(&mut snapshot, &local_paths, &completed_file_refs)?;
             return Ok(finalize_partial(
                 snapshot,
                 &incomplete_rep_idxs,
@@ -1266,11 +1217,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                 partial_outcome,
                 artifact_journaled,
                 receive_artifacts,
+                completed,
             ));
-        }
-
-        if !file_content_digests.is_empty() {
-            snapshot.file_content_digests = file_content_digests;
         }
 
         let uri_list = local_file_uri_list(&local_paths)?;
@@ -1354,11 +1302,12 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
         let mut result = MaterializeResult::complete(snapshot);
         result.has_receive_artifacts = artifact_journaled;
         result.receive_artifacts = receive_artifacts;
+        result.completed = completed;
         Ok(result)
     }
 }
 
-fn rewrite_file_display_metadata(
+pub(super) fn rewrite_file_display_metadata(
     snapshot: &mut SystemClipboardSnapshot,
     local_paths: &[PathBuf],
     file_refs: &[V3BlobRef],
@@ -1428,6 +1377,8 @@ impl FileCacheBlobMaterializer {
         expected_snapshot_hash: Option<&str>,
         mut batch_idx: usize,
         batch_total: usize,
+        cancellation: &CancellationToken,
+        batch: &Arc<ReceiveBatch>,
     ) -> Result<MaterializeResult> {
         if attempt_id.is_some() && self.directory_attempts.is_none() {
             return Err(anyhow!(
@@ -1438,149 +1389,223 @@ impl FileCacheBlobMaterializer {
             return Err(anyhow!("directory manifest has no members"));
         }
 
-        let plan = self.open_publication(&receiver_entry_id).await?;
-
-        let result = self
-            .build_and_publish_directory(
-                &from_device,
+        if cancellation.is_cancelled() {
+            return Err(BlobTransferError::Cancelled.into());
+        }
+        let (plan, mut publication) = self
+            .open_publication(
                 &receiver_entry_id,
-                &blob_refs,
                 &manifest,
                 attempt_id.as_deref(),
-                expected_snapshot_hash,
-                &mut snapshot,
-                &plan,
-                &mut batch_idx,
-                batch_total,
+                batch.as_ref(),
             )
-            .await;
+            .await?;
+
+        let result: Result<_> = async {
+            let (root_paths, member_digests) = self
+                .build_and_publish_directory(
+                    &from_device,
+                    &receiver_entry_id,
+                    &blob_refs,
+                    &manifest,
+                    attempt_id.as_deref(),
+                    expected_snapshot_hash,
+                    &mut snapshot,
+                    &plan,
+                    &mut publication,
+                    &mut batch_idx,
+                    batch_total,
+                    cancellation,
+                    batch,
+                )
+                .await?;
+            build_received_entry_file_set(&manifest, &member_digests, &blob_refs, &root_paths)
+        }
+        .await;
 
         match result {
-            Ok((publication, root_paths, member_digests)) => {
-                let directory_file_set = match build_received_entry_file_set(
-                    &manifest,
-                    &member_digests,
-                    &blob_refs,
-                    &root_paths,
-                ) {
-                    Ok(file_set) => file_set,
-                    Err(error) => {
-                        return match publication.rollback().await {
-                            RollbackOutcome::Clean => Err(error),
-                            RollbackOutcome::PartialPublication { visible_roots } => Err(error
-                                .context(format!(
-                                    "manifest build rollback left {visible_roots} root(s) visible"
-                                ))),
-                        };
-                    }
+            Ok(directory_file_set) => Ok(MaterializeResult {
+                completed: Vec::new(),
+                snapshot,
+                missing: Vec::new(),
+                partial: false,
+                outcome: MaterializeOutcome::Complete,
+                publication: Some(publication),
+                directory_file_set: Some(directory_file_set),
+                has_receive_artifacts: false,
+                receive_artifacts: Vec::new(),
+            }),
+            Err(cause) => {
+                let error = match publication.rollback().await {
+                    Ok(()) => cause,
+                    Err(settlement) => directory_rollback_failure(cause, settlement),
                 };
-                // The staging area stays until the caller settles the
-                // publication: rollback needs somewhere to put the roots back.
-                Ok(MaterializeResult {
-                    snapshot,
-                    missing: Vec::new(),
-                    partial: false,
-                    outcome: MaterializeOutcome::Complete,
-                    publication: Some(publication),
-                    directory_file_set: Some(directory_file_set),
-                    has_receive_artifacts: false,
-                    receive_artifacts: Vec::new(),
-                })
-            }
-            Err(err) => {
-                // Anything published was already withdrawn inside
-                // `build_and_publish_directory`; this only clears the area.
-                discard_staging(&plan.staging).await;
-                Err(err)
+                // 物理清理成功也须保留原责任，直到父NoEntry实际提交成功。
+                batch.retain_directory_rollback(publication);
+                Err(error)
             }
         }
     }
 
-    /// Choose where the roots will land, and open the assembly area beside them.
-    ///
-    /// The area is a sibling of the final destination, which is what makes
-    /// publication a same-volume rename — the atomicity the whole design rests
-    /// on.
-    ///
-    /// The user's save directory is only usable if its volume can refuse an
-    /// occupied name, because the user's own folders live there; a volume that
-    /// cannot is declined in favour of managed storage. Managed storage itself
-    /// asks for no such thing — see [`PublishMode::IntoFreeName`] — so it is
-    /// always available and this never fails for want of a volume.
-    async fn open_publication(&self, receiver_entry_id: &EntryId) -> Result<PublishPlan> {
-        let staging_name = staging_dir_name(receiver_entry_id);
-
-        // Preferred destination: the folder the user configured.
-        if let Some(resolver) = &self.save_dir_resolver {
-            if let Some(save_dir) = resolver.resolve_save_dir().await {
-                let staging = save_dir.join(&staging_name);
-                match self
-                    .open_staging_area(&staging, PublishMode::NoReplace)
-                    .await
+    /// 候选暂存区从首次打开起即归原责任；实际清理完成后才能切换目标卷。
+    async fn open_publication(
+        &self,
+        receiver_entry_id: &EntryId,
+        manifest: &InboundFileSetManifest,
+        attempt_id: Option<&str>,
+        batch: &ReceiveBatch,
+    ) -> Result<(PublishPlan, DirectoryPublication)> {
+        let mut roots = BTreeMap::<u32, (String, bool)>::new();
+        let mut root_member_counts = BTreeMap::<u32, usize>::new();
+        for member in &manifest.members {
+            validate_manifest_member(member)?;
+            *root_member_counts.entry(member.root_index).or_default() += 1;
+            match roots.get(&member.root_index) {
+                Some((existing_name, existing_is_file))
+                    if existing_name != &member.root_name
+                        || *existing_is_file != member.root_is_file =>
                 {
-                    Ok(true) => {
-                        return Ok(PublishPlan {
-                            dest_parent: save_dir,
-                            staging,
-                            mode: PublishMode::NoReplace,
-                        })
-                    }
-                    Ok(false) => {
-                        // The volume would let us replace someone's folder
-                        // without noticing. Decline it and use managed storage:
-                        // the content still lands, just not where the user
-                        // asked. This is the same fallback the reserver's
-                        // `None` already expresses for free-standing files.
-                        uc_info!(
-                            "auto-save volume cannot publish without replacing; \
-                             using managed storage for this directory"
-                        );
-                    }
-                    Err(err) => {
-                        uc_warn!(
-                            error_kind = "auto_save_staging_open",
-                            io_error_kind = io_error_kind(err.as_ref()),
-                            "could not open a staging area in the auto-save dir; \
-                             using managed storage for this directory"
-                        );
-                    }
+                    return Err(anyhow!(
+                        "directory root {} has conflicting names",
+                        member.root_index
+                    ));
+                }
+                _ => {
+                    roots.insert(
+                        member.root_index,
+                        (member.root_name.clone(), member.root_is_file),
+                    );
                 }
             }
         }
+        for (root_index, (_, root_is_file)) in &roots {
+            if *root_is_file && root_member_counts.get(root_index) != Some(&1) {
+                return Err(anyhow!("top-level file root must have exactly one member"));
+            }
+        }
 
-        // Fallback: the managed cache layout, on the app's own volume. This
-        // parent is ours and scoped to this one receive, so no probe gates it:
-        // the volume need only be able to move within itself. Requiring more
-        // would strand directory sync entirely on exFAT, NFS and the like —
-        // which is exactly where a portable install tends to live.
-        let dest_parent = self
-            .cache_dir
-            .join("iroh-blobs")
-            .join(sanitize_path_segment(receiver_entry_id.as_ref()));
-        tokio::fs::create_dir_all(&dest_parent).await?;
-        let staging = dest_parent.join(&staging_name);
-        self.open_staging_area(&staging, PublishMode::IntoFreeName)
-            .await?;
-        Ok(PublishPlan {
-            dest_parent,
-            staging,
-            mode: PublishMode::IntoFreeName,
-        })
+        let staging_name = staging_dir_name(receiver_entry_id);
+        let mut candidates = Vec::with_capacity(2);
+        if let Some(resolver) = &self.save_dir_resolver {
+            if let Some(save_dir) = resolver.resolve_save_dir().await {
+                candidates.push((save_dir, PublishMode::NoReplace));
+            }
+        }
+        candidates.push((
+            self.cache_dir
+                .join("iroh-blobs")
+                .join(sanitize_path_segment(receiver_entry_id.as_ref())),
+            PublishMode::IntoFreeName,
+        ));
+        'candidate: for (dest_parent, mode) in candidates {
+            let staging = dest_parent.join(&staging_name);
+            let mut claimed = HashSet::new();
+            let mut plans = Vec::new();
+            for (root_index, (root_name, _)) in &roots {
+                let sanitized_name = sanitize_root_name(root_name);
+                let desired = match resolve_nonconflicting_root_path(
+                    &dest_parent,
+                    &sanitized_name,
+                    &claimed,
+                )
+                .await
+                {
+                    Ok(desired) => desired,
+                    Err(cause)
+                        if mode == PublishMode::NoReplace
+                            && cause.downcast_ref::<io::Error>().is_some() =>
+                    {
+                        // discarded-source[fallback]: 尚未创建产物或写入候选日志，由受管目标继续接收。
+                        uc_warn!(
+                            error_kind = "auto_save_staging_open",
+                            io_error_kind = io_error_kind(cause.as_ref()),
+                            "could not plan auto-save directory output; using managed storage for this directory"
+                        );
+                        continue 'candidate;
+                    }
+                    Err(cause) => return Err(cause),
+                };
+                claimed.insert(desired.clone());
+                plans.push((
+                    *root_index,
+                    staging_root(&staging, *root_index, root_name),
+                    desired,
+                    sanitized_name,
+                ));
+            }
+            // 先保存完整密文映射，再创建或探测；重启不依赖当前保存目录。
+            if let (Some(ports), Some(attempt_id)) = (&self.directory_attempts, attempt_id) {
+                let root_map = plans
+                    .iter()
+                    .map(|(_, source, desired, _)| (source.clone(), desired.clone()))
+                    .collect::<Vec<_>>();
+                ports
+                    .publish_log
+                    .record_phase(
+                        receiver_entry_id.as_ref(),
+                        attempt_id,
+                        PublishPhase::Staging,
+                        &root_map,
+                        ports.clock.now_ms(),
+                    )
+                    .await
+                    .map_err(anyhow::Error::new)?;
+            }
+            let plan = PublishPlan {
+                staging,
+                dest_parent,
+                mode,
+                roots: roots.clone(),
+                root_plans: plans,
+            };
+            let mut publication =
+                DirectoryPublication::new(Arc::clone(&self.publisher), plan.staging.clone(), mode);
+            let opened = self.open_staging_area(&plan.staging, mode).await;
+            let unsupported = matches!(&opened, Ok(false));
+            let cause = match opened {
+                Ok(true) => {
+                    if let (Some(ports), Some(attempt_id)) = (&self.directory_attempts, attempt_id)
+                    {
+                        publication.set_journal(DirectoryRollbackJournal {
+                            record: ports.publish_log.clone(),
+                            clock: ports.clock.clone(),
+                            entry: receiver_entry_id.as_ref().to_owned(),
+                            attempt: attempt_id.to_owned(),
+                        });
+                    }
+                    return Ok((plan, publication));
+                }
+                Ok(false) => anyhow!("directory publication requires no-replace support"),
+                Err(cause) => cause,
+            };
+            // 此候选仍是Staging，尚无已发布目标；清理不写部分发布事实。
+            // 旧暂存区实际消失后，新候选才可替换同一恢复日志。
+            if let Err(settlement) = publication.rollback().await {
+                batch.retain_directory_rollback(publication);
+                return Err(directory_rollback_failure(cause, settlement));
+            }
+            if mode == PublishMode::IntoFreeName {
+                // 清理已成功也保留同一责任，直到原父尝试的NoEntry实际交接。
+                batch.retain_directory_rollback(publication);
+                return Err(cause);
+            }
+            if unsupported {
+                uc_info!("auto-save volume cannot publish without replacing; using managed storage for this directory");
+            } else {
+                // discarded-source[fallback]: 原候选已实际清理；受管目标继续承担完整接收。
+                uc_warn!(
+                    error_kind = "auto_save_staging_open",
+                    io_error_kind = io_error_kind(cause.as_ref()),
+                    "could not open an auto-save staging area; using managed storage for this directory"
+                );
+            }
+        }
+        Err(anyhow!("directory publication has no usable candidate"))
     }
 
-    /// Create the assembly area and report whether it can carry `mode`.
-    ///
-    /// [`PublishMode::IntoFreeName`] asks nothing of the volume and always
-    /// answers `true`. [`PublishMode::NoReplace`] is probed against the real
-    /// filesystem, and the area is removed again when the answer is `false`,
-    /// leaving no trace.
-    async fn open_staging_area(
-        &self,
-        staging: &std::path::Path,
-        mode: PublishMode,
-    ) -> Result<bool> {
-        // A same-id leftover can only be debris from an earlier crashed
-        // receive: this id belongs to the receive happening right now.
+    /// 只打开并探测；所有失败清理由候选暂存区的原持有者统一承担。
+    async fn open_staging_area(&self, staging: &Path, mode: PublishMode) -> Result<bool> {
+        // 相同条目ID的旧暂存区只属于本次接收；先清除崩溃残留再创建。
         if tokio::fs::try_exists(staging).await? {
             tokio::fs::remove_dir_all(staging).await?;
         }
@@ -1588,19 +1613,10 @@ impl FileCacheBlobMaterializer {
         if let Some(marker) = &self.hidden_marker {
             marker.mark_hidden(staging).await;
         }
-
         if mode == PublishMode::IntoFreeName {
             return Ok(true);
         }
-
-        // Probe inside the area rather than in the destination folder: same
-        // volume, same answer, but the check itself never appears next to the
-        // user's files.
-        if self.supports_no_replace_cached(staging).await {
-            return Ok(true);
-        }
-        discard_staging(staging).await;
-        Ok(false)
+        Ok(self.supports_no_replace_cached(staging).await)
     }
 
     /// Answer the volume-support question once per destination.
@@ -1648,90 +1664,40 @@ impl FileCacheBlobMaterializer {
         expected_snapshot_hash: Option<&str>,
         snapshot: &mut SystemClipboardSnapshot,
         plan: &PublishPlan,
+        publication: &mut DirectoryPublication,
         batch_idx: &mut usize,
         batch_total: usize,
-    ) -> Result<(
-        DirectoryPublication,
-        BTreeMap<u32, PathBuf>,
-        BTreeMap<u32, [u8; 32]>,
-    )> {
+        cancellation: &CancellationToken,
+        batch: &Arc<ReceiveBatch>,
+    ) -> Result<(BTreeMap<u32, PathBuf>, BTreeMap<u32, [u8; 32]>)> {
+        if cancellation.is_cancelled() {
+            return Err(BlobTransferError::Cancelled.into());
+        }
         let staging_base = plan.staging.as_path();
-        let mut roots = BTreeMap::<u32, (String, bool)>::new();
-        let mut root_member_counts = BTreeMap::<u32, usize>::new();
-        for member in &manifest.members {
-            validate_manifest_member(member)?;
-            *root_member_counts.entry(member.root_index).or_default() += 1;
-            match roots.get(&member.root_index) {
-                Some((existing_name, existing_is_file))
-                    if existing_name != &member.root_name
-                        || *existing_is_file != member.root_is_file =>
-                {
-                    return Err(anyhow!(
-                        "directory root {} has conflicting names",
-                        member.root_index
-                    ));
-                }
-                _ => {
-                    roots.insert(
-                        member.root_index,
-                        (member.root_name.clone(), member.root_is_file),
-                    );
-                }
-            }
-        }
-        for (root_index, (_, root_is_file)) in &roots {
-            if *root_is_file && root_member_counts.get(root_index) != Some(&1) {
-                return Err(anyhow!("top-level file root must have exactly one member"));
-            }
-        }
+        let roots = &plan.roots;
+        let plans = plan.root_plans.clone();
+        let mut claimed = plans
+            .iter()
+            .map(|(_, _, desired, _)| desired.clone())
+            .collect();
 
-        for (root_index, (root_name, root_is_file)) in &roots {
+        for (root_index, (root_name, root_is_file)) in roots {
             if !root_is_file {
                 tokio::fs::create_dir_all(staging_root(staging_base, *root_index, root_name))
                     .await?;
             }
         }
 
-        // Resolve and durably record every staged-to-final root before any
-        // member fetch starts. Cancellation and crash recovery can therefore
-        // clean this attempt without reconstructing sender-private names.
-        let mut claimed = HashSet::new();
-        let mut plans = Vec::new();
-        for (root_index, (root_name, _)) in &roots {
-            let sanitized_name = sanitize_root_name(root_name);
-            let desired =
-                resolve_nonconflicting_root_path(&plan.dest_parent, &sanitized_name, &claimed)
-                    .await?;
-            claimed.insert(desired.clone());
-            plans.push((
-                *root_index,
-                staging_root(staging_base, *root_index, root_name),
-                desired,
-                sanitized_name,
-            ));
-        }
-        if let (Some(ports), Some(attempt_id)) = (&self.directory_attempts, attempt_id) {
-            let root_map = plans
-                .iter()
-                .map(|(_, source, desired, _)| (source.clone(), desired.clone()))
-                .collect::<Vec<_>>();
-            ports
-                .publish_log
-                .record_phase(
-                    receiver_entry_id.as_ref(),
-                    attempt_id,
-                    PublishPhase::Staging,
-                    &root_map,
-                    ports.clock.now_ms(),
-                )
-                .await
-                .map_err(anyhow::Error::new)?;
-        }
-
         let mut member_digests = BTreeMap::new();
         for (member_index, member) in manifest.members.iter().enumerate() {
+            if cancellation.is_cancelled() {
+                return Err(BlobTransferError::Cancelled.into());
+            }
             self.ensure_attempt_active(receiver_entry_id, attempt_id)
                 .await?;
+            if cancellation.is_cancelled() {
+                return Err(BlobTransferError::Cancelled.into());
+            }
             let root = staging_root(staging_base, member.root_index, &member.root_name);
             let target = if member.root_is_file {
                 root.clone()
@@ -1759,7 +1725,7 @@ impl FileCacheBlobMaterializer {
                     if let Some(parent) = target.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    let context = directory_member_transfer_context(
+                    let mut context = directory_member_transfer_context(
                         receiver_entry_id,
                         attempt_id,
                         member_index,
@@ -1767,17 +1733,21 @@ impl FileCacheBlobMaterializer {
                         from_device,
                         position_in_batch(*batch_idx, batch_total),
                     );
+                    context.batch = Some(batch.clone());
+                    let item_id = context.transfer_id.clone();
                     *batch_idx += 1;
-                    let fetched = match self
+                    let outcome = self
                         .fetcher
                         .fetch_blob_to_path(FetchBlobToPathCommand {
+                            cancellation: cancellation.clone(),
                             ticket: blob_ref.ticket.clone(),
                             entry_id: blob_ref.entry_id.clone(),
-                            target_path: target.clone(),
+                            target_path: target.clone().into(),
                             transfer_context: Some(context),
                         })
-                        .await
-                    {
+                        .await;
+                    wait_for_fetch_terminal(outcome.as_ref().err(), batch.as_ref(), &item_id).await;
+                    let fetched = match outcome {
                         Ok(fetched) => fetched,
                         Err(err) => {
                             if is_cancel_error(&err) {
@@ -1817,11 +1787,23 @@ impl FileCacheBlobMaterializer {
                     if member.kind == FileSetMemberKind::Executable {
                         restore_executable_permission(&target).await?;
                     }
+                    batch.item_result(
+                        &item_id,
+                        fetched.bytes_written,
+                        OutboundProgressStatus::Completed,
+                        None,
+                    );
                     member_digests.insert(index as u32, *fetched.plaintext_hash.as_bytes());
                 }
             }
+            if cancellation.is_cancelled() {
+                return Err(BlobTransferError::Cancelled.into());
+            }
             self.ensure_attempt_active(receiver_entry_id, attempt_id)
                 .await?;
+            if cancellation.is_cancelled() {
+                return Err(BlobTransferError::Cancelled.into());
+            }
         }
         self.ensure_attempt_active(receiver_entry_id, attempt_id)
             .await?;
@@ -1871,8 +1853,6 @@ impl FileCacheBlobMaterializer {
             _ => None,
         };
 
-        let mut publication =
-            DirectoryPublication::new(Arc::clone(&self.publisher), plan.staging.clone(), plan.mode);
         let mut published_paths = BTreeMap::new();
         for (root_index, source, desired, sanitized_name) in plans {
             let publish_result = if let Some((ports, attempt_id)) = gated_attempt {
@@ -1907,51 +1887,10 @@ impl FileCacheBlobMaterializer {
                     published_paths.insert(root_index, final_path.clone());
                     publication.record(final_path, source);
                 }
-                Err(err) => {
-                    // Compensating rollback: a paste is all roots or none, so
-                    // take back the ones that made it before giving up.
-                    let outcome = publication.rollback().await;
-                    return Err(match outcome {
-                        RollbackOutcome::Clean => err,
-                        RollbackOutcome::PartialPublication { visible_roots } => {
-                            if let Some((ports, attempt_id)) = gated_attempt {
-                                match u32::try_from(visible_roots) {
-                                    Ok(visible_roots) => {
-                                        if let Err(record_error) = ports
-                                            .publish_log
-                                            .record_partial(
-                                                receiver_entry_id.as_ref(),
-                                                attempt_id,
-                                                visible_roots,
-                                                ports.clock.now_ms(),
-                                            )
-                                            .await
-                                        {
-                                            uc_warn!(
-                                                error_kind = "partial_publication_record",
-                                                io_error_kind = io_error_kind(&record_error),
-                                                "failed to record partial directory publication"
-                                            );
-                                        }
-                                    }
-                                    Err(error) => {
-                                        uc_warn!(
-                                            error_kind = "root_count_overflow",
-                                            io_error_kind = io_error_kind(&error),
-                                            "partial directory root count exceeds u32"
-                                        );
-                                    }
-                                }
-                            }
-                            err.context(format!(
-                                "partial_publication: {visible_roots} root(s) left visible"
-                            ))
-                        }
-                    });
-                }
+                Err(err) => return Err(err),
             }
         }
-        Ok((publication, published_paths, member_digests))
+        Ok((published_paths, member_digests))
     }
 }
 
@@ -1963,6 +1902,8 @@ struct PublishPlan {
     staging: PathBuf,
     /// The guarantee `dest_parent` needs, decided by whose files live there.
     mode: PublishMode,
+    roots: BTreeMap<u32, (String, bool)>,
+    root_plans: Vec<(u32, PathBuf, PathBuf, String)>,
 }
 
 async fn publish_gated_root(
@@ -2055,6 +1996,8 @@ fn directory_member_transfer_context(
     batch_position: BatchPosition,
 ) -> FetchTransferContext {
     FetchTransferContext {
+        item_role: ReceiveItemRole::File,
+        batch: None,
         transfer_id: directory_member_transfer_id(receiver_entry_id, attempt_id, member_index),
         entry_id: receiver_entry_id.as_ref().to_owned(),
         attempt_id: attempt_id.map(str::to_owned),
@@ -2068,49 +2011,24 @@ fn directory_member_transfer_context(
     }
 }
 
-fn directory_member_transfer_id(
-    receiver_entry_id: &EntryId,
-    attempt_id: Option<&str>,
-    member_index: usize,
-) -> String {
-    match attempt_id {
-        Some(attempt_id) => format!(
-            "{}:attempt:{attempt_id}:member:{member_index}",
-            receiver_entry_id.as_ref()
-        ),
-        None => format!("{}:member:{member_index}", receiver_entry_id.as_ref()),
-    }
-}
-
-fn directory_representation_transfer_id(
-    entry_id: &EntryId,
-    attempt_id: &str,
-    representation_index: usize,
-) -> String {
-    format!(
-        "{}:attempt:{}:representation:{}",
-        entry_id.as_ref(),
-        attempt_id,
-        representation_index
-    )
-}
-
 fn directory_representation_transfer_context(
     receiver_entry_id: &EntryId,
-    attempt_id: &str,
+    attempt_id: Option<&str>,
     representation_index: usize,
     blob_ref: &V3BlobRef,
     from_device: &DeviceId,
     batch_position: BatchPosition,
 ) -> FetchTransferContext {
     FetchTransferContext {
+        item_role: ReceiveItemRole::Representation,
+        batch: None,
         transfer_id: directory_representation_transfer_id(
             receiver_entry_id,
             attempt_id,
             representation_index,
         ),
         entry_id: receiver_entry_id.as_ref().to_owned(),
-        attempt_id: Some(attempt_id.to_owned()),
+        attempt_id: attempt_id.map(str::to_owned),
         peer_id: from_device.as_str().to_owned(),
         total_bytes: Some(blob_ref.size_bytes),
         filename: String::new(),
@@ -2374,7 +2292,7 @@ fn rewrite_file_list(
 ///   场景:rep_refs 被全删 + envelope 没有自带任何不需要 fetch 的 rep),
 ///   mint 一条 `text/plain` 兜底 rep,描述这是一次 cancelled transfer,
 ///   保证 `CaptureClipboardUseCase::has_supported_representation` 返回 true。
-fn finalize_partial(
+pub(super) fn finalize_partial(
     mut snapshot: SystemClipboardSnapshot,
     incomplete_rep_idxs: &[usize],
     completed_paths: Vec<PathBuf>,
@@ -2383,6 +2301,7 @@ fn finalize_partial(
     outcome: MaterializeOutcome,
     has_receive_artifacts: bool,
     receive_artifacts: Vec<ReceiveArtifact>,
+    completed: Vec<ReceivedItem>,
 ) -> MaterializeResult {
     // 倒序删除 incomplete rep(顺序 -> 倒序保 idx 仍有效)。
     let mut sorted_idxs: Vec<usize> = incomplete_rep_idxs.to_vec();
@@ -2464,6 +2383,7 @@ fn finalize_partial(
         "materialize: finalized partial result"
     );
     MaterializeResult {
+        completed,
         snapshot,
         missing: missing_files,
         partial: true,
@@ -2565,7 +2485,7 @@ fn is_file_list_representation(rep: &ObservedClipboardRepresentation) -> bool {
         || rep.format_id.eq_ignore_ascii_case("public.file-url")
 }
 
-fn managed_filename(
+pub(super) fn managed_filename(
     candidate: Option<&str>,
     idx: usize,
     used_names: &mut HashSet<String>,
@@ -2621,29 +2541,6 @@ fn position_in_batch(idx: usize, total: usize) -> BatchPosition {
         BatchPosition::Last
     } else {
         BatchPosition::Middle
-    }
-}
-
-/// Best-effort removal of a reserved user-directory placeholder after a failed
-/// fetch.
-///
-/// `reserve_target` atomically creates an empty placeholder to claim the name;
-/// when the fetch is cancelled or errors before the store-export step, that
-/// placeholder (or a cross-volume partial copy) is left behind. Files under the
-/// user's save directory are never reclaimed by retention cleanup or entry
-/// deletion, so an orphan would linger forever and force the next same-named
-/// file to a ` (n)` suffix. `NotFound` is expected (export may already have
-/// consumed the placeholder) and stays silent; other errors only warn — this
-/// runs on an already-failed path and a second failure should not disturb it.
-async fn remove_reserved_placeholder(path: &std::path::Path) {
-    if let Err(err) = tokio::fs::remove_file(path).await {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            uc_warn!(
-                error_kind = "reserved_placeholder_remove",
-                io_error_kind = io_error_kind(&err),
-                "materialize: failed to remove reserved placeholder after fetch failure"
-            );
-        }
     }
 }
 
