@@ -49,3 +49,6 @@ pub use projection::{
     ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
     ProgressProjectionRegistry, ProgressProjectionWorker,
 };
+
+mod connectivity;
+pub use connectivity::transfer_progress_connectivity_policy;

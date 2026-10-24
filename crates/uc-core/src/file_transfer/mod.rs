@@ -24,7 +24,7 @@ mod progress_delivery;
 pub use progress_delivery::{
     BudgetStatus, ElapsedBudget, ExchangePriority, ExchangeQueue, ExchangeRefusal,
     RetransmitEffect, RetransmitInput, RetransmitStop, TerminalLedger, TerminalRetransmit,
-    EXCHANGE_GLOBAL_ACTIVE, EXCHANGE_GLOBAL_QUEUED, TERMINAL_GLOBAL_CAPACITY,
+    EXCHANGE_GLOBAL_ACTIVE, EXCHANGE_GLOBAL_QUEUED, EXCHANGE_PEER_QUEUED, TERMINAL_GLOBAL_CAPACITY,
     TERMINAL_PEER_CAPACITY, TERMINAL_RETENTION, TERMINAL_ROUND_LIMIT,
 };
 
@@ -62,3 +62,6 @@ pub use progress_capacity::{
     ProgressProjectionCapacity, ProjectionCapacityInput, ProjectionRetention,
     PROJECTION_GLOBAL_CAPACITY, PROJECTION_PEER_CAPACITY,
 };
+
+mod progress_connections;
+pub use progress_connections::{PROGRESS_IDLE_RETENTION, PROGRESS_RETAINED_CONNECTIONS};
