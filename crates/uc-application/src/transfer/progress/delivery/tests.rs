@@ -1,10 +1,11 @@
-use super::super::ProgressTerminalDelivery;
+use super::super::ProgressExchangeService;
 use super::*;
 use crate::connectivity::ConnectivityError;
 use crate::transfer::progress::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
-    ProgressReceiveError, ProgressSourceCatalog, ProgressSourceTask, ProgressSubmission,
-    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalRoundPort,
+    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSourceCatalog,
+    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalRoundPort,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -88,7 +89,7 @@ fn authority(plans: &[(u8, u16)]) -> Arc<Authority> {
     }
     Arc::new(Authority(Mutex::new(catalog)))
 }
-fn submit(delivery: &ProgressTerminalDelivery, p: u8, n: u16) -> ProgressSubmission {
+fn submit(delivery: &ProgressExchangeService, p: u8, n: u16) -> ProgressSubmission {
     delivery
         .submit_settled(peer(p), id(p), id(99), result(n))
         .unwrap()
@@ -135,7 +136,12 @@ fn thousand_item_actual_admission_is_bounded_and_evicted_results_cannot_reenter(
     let source = authority(&[(1, 1024), (2, 1)]);
     let clock = Arc::new(Clock(AtomicU64::new(0)));
     let (tx, mut rx) = mpsc::channel(64);
-    let (delivery, _worker) = ProgressTerminalDelivery::new(clock, source, Arc::new(Offline(tx)));
+    let (delivery, _worker) = ProgressExchangeService::new(
+        clock,
+        source,
+        Arc::new(Offline(tx)),
+        Arc::new(UnusedSnapshot),
+    );
     assert_eq!(submit(&delivery, 2, 0), ProgressSubmission::Retained);
     for n in 0..1024 {
         assert_eq!(submit(&delivery, 1, n), ProgressSubmission::Retained);
@@ -162,7 +168,12 @@ fn global_actual_retention_releases_oldest_without_unbounded_history() {
     let source = authority(&[(1, 64), (2, 64), (3, 64), (4, 64), (5, 64)]);
     let clock = Arc::new(Clock(AtomicU64::new(0)));
     let (tx, _) = mpsc::channel(64);
-    let (delivery, _worker) = ProgressTerminalDelivery::new(clock, source, Arc::new(Offline(tx)));
+    let (delivery, _worker) = ProgressExchangeService::new(
+        clock,
+        source,
+        Arc::new(Offline(tx)),
+        Arc::new(UnusedSnapshot),
+    );
     for p in 1..=5 {
         for n in 0..64 {
             submit(&delivery, p, n);
@@ -179,8 +190,12 @@ async fn actual_rounds_follow_all_eight_original_slots_and_duplicate_never_resta
     let source = authority(&[(1, 1)]);
     let clock = Arc::new(Clock(AtomicU64::new(0)));
     let (tx, mut rx) = mpsc::channel(64);
-    let (delivery, worker) =
-        ProgressTerminalDelivery::new(clock.clone(), source, Arc::new(Offline(tx)));
+    let (delivery, worker) = ProgressExchangeService::new(
+        clock.clone(),
+        source,
+        Arc::new(Offline(tx)),
+        Arc::new(UnusedSnapshot),
+    );
     submit(&delivery, 1, 0);
     let stop = CancellationToken::new();
     let running = tokio::spawn(worker.run(stop.clone()));
@@ -216,13 +231,14 @@ async fn eviction_and_close_hold_all_actual_work_slots_until_real_completion() {
     let gates: HashMap<_, _> = (1..=5)
         .map(|p| (peer(p), Arc::new(Semaphore::new(0))))
         .collect();
-    let (delivery, worker) = ProgressTerminalDelivery::new(
+    let (delivery, worker) = ProgressExchangeService::new(
         clock,
         source,
         Arc::new(Held {
             events: tx,
             gates: gates.clone(),
         }),
+        Arc::new(UnusedSnapshot),
     );
     for p in 1..=4 {
         submit(&delivery, p, 0);
@@ -278,13 +294,14 @@ async fn clock_fault_retires_all_old_intents_and_recovery_cannot_readmit_them() 
     let clock = Arc::new(Clock(AtomicU64::new(0)));
     let (tx, mut rx) = mpsc::channel(64);
     let gates = HashMap::from([(peer(1), Arc::new(Semaphore::new(0)))]);
-    let (delivery, worker) = ProgressTerminalDelivery::new(
+    let (delivery, worker) = ProgressExchangeService::new(
         clock.clone(),
         source,
         Arc::new(Held {
             events: tx,
             gates: gates.clone(),
         }),
+        Arc::new(UnusedSnapshot),
     );
     submit(&delivery, 1, 0);
     submit(&delivery, 1, 1);
@@ -365,7 +382,7 @@ fn stale_worker_sample_cannot_retire_a_newer_submission_or_epoch() {
         now: Duration::from_secs(103),
         epoch: 0,
     }));
-    state.retire_before(Some(1));
+    state.retire_before(Some(1), None);
     assert_eq!(state.entries.len(), 1);
     assert!(state.entries.contains_key(&c));
 }
@@ -424,10 +441,11 @@ impl ProgressTerminalRoundPort for UntilCancelled {
 async fn round_timeout_cancels_only_that_round_and_next_slot_keeps_original_result() {
     let clock = Arc::new(Clock(AtomicU64::new(0)));
     let (tx, mut rx) = mpsc::channel(64);
-    let (delivery, worker) = ProgressTerminalDelivery::new(
+    let (delivery, worker) = ProgressExchangeService::new(
         clock.clone(),
         authority(&[(1, 1)]),
         Arc::new(UntilCancelled(tx)),
+        Arc::new(UnusedSnapshot),
     );
     submit(&delivery, 1, 0);
     let stop = CancellationToken::new();
@@ -487,13 +505,14 @@ async fn many_actual_eligible_peers_keep_exchange_queue_and_live_futures_bounded
     let gates: HashMap<_, _> = (1..=100)
         .map(|p| (peer(p), Arc::new(Semaphore::new(0))))
         .collect();
-    let (delivery, worker) = ProgressTerminalDelivery::new(
+    let (delivery, worker) = ProgressExchangeService::new(
         clock,
         authority(&plans),
         Arc::new(Held {
             events: tx,
             gates: gates.clone(),
         }),
+        Arc::new(UnusedSnapshot),
     );
     for p in 1..=100 {
         assert_eq!(submit(&delivery, p, 0), ProgressSubmission::Retained);
@@ -532,3 +551,20 @@ async fn many_actual_eligible_peers_keep_exchange_queue_and_live_futures_bounded
         .unwrap();
     assert!(rx.try_recv().is_err());
 }
+
+struct UnusedSnapshot;
+#[async_trait]
+impl ProgressSnapshotRoundPort for UnusedSnapshot {
+    async fn read_snapshot(
+        &self,
+        _: &DeviceId,
+        _: ProgressSourceTask,
+        _: &ProgressExchangeDeadline,
+        _: &CancellationToken,
+    ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
+        panic!("terminal-only fixture cannot query")
+    }
+}
+
+#[path = "query_tests.rs"]
+mod query_tests;

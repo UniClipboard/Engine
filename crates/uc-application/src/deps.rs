@@ -632,11 +632,11 @@ pub use crate::space::{
 
 pub use crate::transfer::progress::{
     CurrentProgressTaskPort, ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal,
-    ProgressBound, ProgressClaimRefusal, ProgressDeliveryWorker, ProgressExchangeDeadline,
-    ProgressProjectionSnapshot, ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask,
-    ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
-    ProgressTerminalDelivery, ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressWirePort,
-    TransferProgressProducer, TransferProgressReceiver,
+    ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline, ProgressExchangeService,
+    ProgressExchangeWorker, ProgressProjectionSnapshot, ProgressReceiveError, ProgressReceiverPort,
+    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressWirePort, TransferProgressProducer,
+    TransferProgressReceiver,
 };
 
 pub use crate::transfer::progress::{
@@ -644,3 +644,5 @@ pub use crate::transfer::progress::{
     ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotWirePort,
     TransferProgressSnapshotReader,
 };
+
+pub use crate::transfer::progress::ProgressQueryResult;
