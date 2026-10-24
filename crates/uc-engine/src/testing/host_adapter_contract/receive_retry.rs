@@ -9,7 +9,7 @@ mod stream_isolation;
 #[cfg(target_os = "linux")]
 use super::blob_resources::ReceiveResourceBaseline;
 use super::{
-    empty_engine_host, mount_engine_rendezvous, next_engine_event_matching,
+    empty_engine_host, mount_engine_rendezvous, next_engine_event_matching, persistent_engine_host,
     MemoryHostSecureStorage, ENGINE_TEST_LOCK,
 };
 use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
@@ -189,6 +189,7 @@ struct ReceiveCase {
     receiver: Engine,
     source_id: String,
     receiver_root: TempDir,
+    receiver_storage: MemoryHostSecureStorage,
     exports: Arc<ReceiveExports>,
     first: ReceiveProgressSummary,
     events: EventStream,
@@ -263,9 +264,13 @@ async fn receive_case_with_progress(
         .with_rendezvous_base_url(server.uri())
         .with_test_relay_fallback(false);
     let (source, _source_events) = Engine::start(config.clone(), host).await.unwrap();
-    let (receiver, mut events) = Engine::start(config, empty_engine_host(receiver_root.path()))
-        .await
-        .unwrap();
+    let receiver_storage = MemoryHostSecureStorage::default();
+    let (receiver, mut events) = Engine::start(
+        config,
+        persistent_engine_host(receiver_root.path(), receiver_storage.clone()),
+    )
+    .await
+    .unwrap();
     source
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("Source".into()),
@@ -408,6 +413,7 @@ async fn receive_case_with_progress(
         receiver,
         source_id,
         receiver_root,
+        receiver_storage,
         exports,
         first,
         saved,
