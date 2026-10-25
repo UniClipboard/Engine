@@ -31,7 +31,9 @@ class R2VerificationTests(unittest.TestCase):
                             + (f"Path(os.environ['MBX_STATS_REPORT']).write_text({json.dumps(report)!r}); "
                                if code == 0 else "")
                             + f"sys.exit({code})"])
+            # 快照与统计属于同一夹具，不能继承CI实际构建的快照目录。
             result = subprocess.run(command, env={**os.environ, "MBX_STATS_REPORT": str(path),
+                                                  "UC_ENGINE_MBX_STATS_DIR": str(path.parent),
                                                   "MBX_REMOTE_MODE": "read-only"},
                                     capture_output=True, text=True)
             evidence = path.with_suffix(".diagnostics.json").read_text()
