@@ -89,6 +89,12 @@ jobs:
         with:
           tool: cargo-audit@0.22.2
 
+      - name: Check pinned OPAQUE sources
+        run: node scripts/architecture/check-opaque-dependency-source.mjs
+
+      - name: Verify fixed-old OPAQUE compatibility
+        run: node scripts/testing/run-opaque-dependency-compat.mjs
+
       - name: Audit locked dependencies
         run: cargo audit --deny unsound
 
@@ -124,6 +130,14 @@ jobs:
           endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
+      - name: Retain OPAQUE compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opaque-compatibility-${{ runner.os }}
+          path: target/test-reports/opaque-compat
+          if-no-files-found: warn
 
       - name: Retain MBX compiler evidence
         if: always()
