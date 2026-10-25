@@ -85,12 +85,18 @@ impl ProgressSnapshotRoundPort for TransferProgressSnapshotReader {
             let page = match reply {
                 ProgressPageReply::Current(page) => page,
                 ProgressPageReply::Superseded(page) => {
-                    if descriptor.is_none_or(|descriptor| {
-                        page.descriptor.source != descriptor.source
-                            || page.descriptor.attempt == descriptor.attempt
-                    }) {
+                    let Some(expected) = descriptor else {
+                        return Err(ProgressReceiveError::Protocol);
+                    };
+                    if page.descriptor.source != expected.source
+                        || page.descriptor.attempt == expected.attempt
+                    {
                         return Err(ProgressReceiveError::Protocol);
                     }
+                    page.descriptor
+                        .check_revision_after(&expected)
+                        // discarded-source[core-pure-validation]: 纯修订拒绝不含下层异常，旧或冲突关联统一拒为过期。
+                        .map_err(|_| ProgressReceiveError::Stale)?;
                     return Ok(ProgressSnapshotRead::Superseded(page.descriptor));
                 }
                 ProgressPageReply::NotRetained => return Ok(ProgressSnapshotRead::NotRetained),

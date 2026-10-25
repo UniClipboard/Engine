@@ -49,6 +49,10 @@ enum Mode {
     Unsupported,
     AccessDenied,
     Superseded,
+    SupersededRegressed,
+    SupersededConflict,
+    SupersededRestart,
+    SupersededChangedPlan,
     Busy,
     RejectedStale,
     RejectedUnknownTask,
@@ -76,6 +80,10 @@ impl Mode {
                 | Self::Unsupported
                 | Self::AccessDenied
                 | Self::Superseded
+                | Self::SupersededRegressed
+                | Self::SupersededConflict
+                | Self::SupersededRestart
+                | Self::SupersededChangedPlan
                 | Self::Busy
         ) {
             1
@@ -263,7 +271,14 @@ async fn exchange(
     discover: bool,
 ) -> anyhow::Result<(Result<ProgressSnapshotRead, ProgressReceiveError>, Evidence)> {
     let rss_before = resident_bytes();
-    let fixture = if mode == Mode::Good {
+    let fixture = if matches!(
+        mode,
+        Mode::Good
+            | Mode::SupersededRegressed
+            | Mode::SupersededConflict
+            | Mode::SupersededRestart
+            | Mode::SupersededChangedPlan
+    ) {
         Network::Progress(ProfilePair::new().await?)
     } else {
         Network::Baseline(Fixture::new(1, 1, TRANSFER_PROGRESS_ALPN).await?)
@@ -320,6 +335,9 @@ async fn exchange(
             if mode == Mode::ForeignPlan {
                 current.item_count = 1023;
             }
+            if mode == Mode::SupersededChangedPlan {
+                current.item_count = 128;
+            }
             let mut page_offset = offset;
             if number == 1 {
                 match mode {
@@ -349,8 +367,22 @@ async fn exchange(
                 Mode::NotRetained => QueryResult::NotRetained,
                 Mode::Unsupported => QueryResult::Unsupported,
                 Mode::AccessDenied => QueryResult::AccessDenied,
-                Mode::Superseded => {
+                Mode::Superseded
+                | Mode::SupersededRegressed
+                | Mode::SupersededConflict
+                | Mode::SupersededRestart
+                | Mode::SupersededChangedPlan => {
                     current.scope.attempt = WireId([8; 16]);
+                    current.owner_revision = match mode {
+                        Mode::SupersededRegressed | Mode::SupersededRestart => {
+                            current.owner_revision - 1
+                        }
+                        Mode::SupersededConflict => current.owner_revision,
+                        _ => current.owner_revision + 1,
+                    };
+                    if mode == Mode::SupersededRestart {
+                        current.producer = WireId([7; 16]);
+                    }
                     QueryResult::Superseded {
                         descriptor: current,
                         page,
@@ -535,6 +567,51 @@ async fn real_pagination_faults_never_return_partial_or_falsely_complete_snapsho
     .await??;
     Ok(())
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn superseded_current_scope_cannot_regress_or_conflict_with_the_known_producer_revision(
+) -> anyhow::Result<()> {
+    timeout(Duration::from_secs(30), async {
+        for mode in [Mode::SupersededRegressed, Mode::SupersededConflict] {
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
+            assert!(
+                matches!(outcome, Err(ProgressReceiveError::Stale)),
+                "{mode:?}"
+            );
+            assert_eq!(evidence.profile, "transfer_progress");
+            assert_eq!(evidence.requests, 1);
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn superseded_current_scope_allows_a_new_plan_and_never_orders_cross_producer_revisions(
+) -> anyhow::Result<()> {
+    timeout(Duration::from_secs(30), async {
+        for mode in [Mode::SupersededRestart, Mode::SupersededChangedPlan] {
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
+            let ProgressSnapshotRead::Superseded(current) = outcome? else {
+                panic!("expected a current association without adopting the new plan");
+            };
+            assert_eq!(current.attempt, ProgressIdentity::new([8; 16]));
+            if mode == Mode::SupersededRestart {
+                assert_eq!(current.producer, ProgressIdentity::new([7; 16]));
+                assert_eq!(current.revision, 3);
+            } else {
+                assert_eq!(current.item_count, 128);
+                assert_eq!(current.revision, 5);
+            }
+            assert_eq!(evidence.profile, "transfer_progress");
+            assert_eq!(evidence.requests, 1);
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_remote_query_outcomes_remain_separate_from_exchange_failures(
 ) -> anyhow::Result<()> {

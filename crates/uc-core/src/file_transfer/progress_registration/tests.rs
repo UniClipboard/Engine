@@ -10,6 +10,35 @@ fn descriptor(producer: u8, revision: u64, attempt: u8) -> RegistrationDescripto
         item_count: 3,
     }
 }
+
+#[test]
+fn owner_revision_orders_only_one_producer_and_same_revision_freezes_the_full_descriptor() {
+    let previous = descriptor(2, 8, 3);
+    for (current, expected) in [
+        (descriptor(2, 7, 5), Err(Refusal::RevisionRegressed)),
+        (descriptor(2, 8, 5), Err(Refusal::RevisionConflict)),
+        (
+            RegistrationDescriptor {
+                item_count: 2,
+                ..previous
+            },
+            Err(Refusal::RevisionConflict),
+        ),
+        (previous, Ok(())),
+        (descriptor(2, 9, 5), Ok(())),
+        (
+            RegistrationDescriptor {
+                item_count: 2,
+                ..descriptor(2, 9, 5)
+            },
+            Ok(()),
+        ),
+        (descriptor(4, 0, 5), Ok(())),
+        (descriptor(4, u64::MAX, 5), Ok(())),
+    ] {
+        assert_eq!(current.check_revision_after(&previous), expected);
+    }
+}
 fn bind(
     owner: &mut ProgressRegistration<u8>,
     generation: u64,

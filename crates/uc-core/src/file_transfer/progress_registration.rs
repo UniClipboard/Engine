@@ -12,6 +12,22 @@ pub struct RegistrationDescriptor<I> {
     pub item_count: u16,
 }
 
+impl<I: Eq> RegistrationDescriptor<I> {
+    /// 同producer的修订不能回退或在相同修订改变描述；跨进程修订不排序。
+    /// 源条目授权、当前连接producer与原始计划校验仍由各自规则承担。
+    pub fn check_revision_after(&self, previous: &Self) -> Result<(), RegistrationRefusal> {
+        if self.producer == previous.producer {
+            if self.revision < previous.revision {
+                return Err(Refusal::RevisionRegressed);
+            }
+            if self.revision == previous.revision && self != previous {
+                return Err(Refusal::RevisionConflict);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 生命周期属于一个 Space 世代、认证设备和源条目；不得跨这些边界复用。
 /// 连接世代由完整负责人单调分配，挑战与 binding 每次重新生成且不得复用。
 /// 旧连接上的帧只能携带其原世代；不能从消息正文提供或重写世代。
@@ -155,15 +171,9 @@ impl<I: Copy + Eq> ProgressRegistration<I> {
                 {
                     return Effect::Refused(Refusal::ProducerChangedOnConnection);
                 }
-                if let Some(previous) = self
-                    .descriptor
-                    .filter(|previous| previous.producer == descriptor.producer)
-                {
-                    if descriptor.revision < previous.revision {
-                        return Effect::Refused(Refusal::RevisionRegressed);
-                    }
-                    if descriptor.revision == previous.revision && descriptor != previous {
-                        return Effect::Refused(Refusal::RevisionConflict);
+                if let Some(previous) = self.descriptor {
+                    if let Err(reason) = descriptor.check_revision_after(&previous) {
+                        return Effect::Refused(reason);
                     }
                 }
                 self.producer_on_connection = Some(descriptor.producer);
