@@ -806,3 +806,5 @@ fn legacy_blob_identity_requires_one_unambiguous_source_and_never_guesses_by_has
         .is_some());
     second.finish(Ok(()));
 }
+
+mod query_snapshot;

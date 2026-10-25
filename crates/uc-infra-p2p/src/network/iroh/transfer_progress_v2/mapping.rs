@@ -82,41 +82,7 @@ fn wire_terminal(value: ProgressTerminalNotice) -> (WireId, TaskScope, u64, Term
             attempt: WireId(value.attempt.bytes()),
         },
         value.revision,
-        TerminalResult {
-            item: LogicalItem {
-                kind: match value.result.item.kind {
-                    ProgressItemKind::File => ItemKind::File,
-                    ProgressItemKind::Representation => ItemKind::Representation,
-                    ProgressItemKind::DirectoryUnit => ItemKind::DirectoryUnit,
-                },
-                index: value.result.item.index,
-            },
-            round: value.result.round,
-            sequence: value.result.sequence,
-            result_revision: value.result.result_revision,
-            bytes: value.result.bytes,
-            total: value.result.total,
-            outcome: match value.result.outcome {
-                Outcome::Completed => TerminalOutcome::Completed,
-                Outcome::Failed(reason) => TerminalOutcome::Failed(match reason {
-                    Failure::NetworkUnavailable => FailureReason::NetworkUnavailable,
-                    Failure::TimedOut => FailureReason::TimedOut,
-                    Failure::AccessDenied => FailureReason::AccessDenied,
-                    Failure::StorageUnavailable => FailureReason::StorageUnavailable,
-                    Failure::IntegrityCheckFailed => FailureReason::IntegrityCheckFailed,
-                    Failure::Interrupted => FailureReason::Interrupted,
-                    Failure::Unknown => FailureReason::Unknown,
-                }),
-                Outcome::Cancelled(reason) => TerminalOutcome::Cancelled(match reason {
-                    Cancel::LocalUser => CancelReason::LocalUser,
-                    Cancel::RemotePeer => CancelReason::RemotePeer,
-                    Cancel::Replaced => CancelReason::Replaced,
-                    Cancel::Timeout => CancelReason::Timeout,
-                    Cancel::ConnectivityRecovery => CancelReason::ConnectivityRecovery,
-                    Cancel::Unknown => CancelReason::Unknown,
-                }),
-            },
-        },
+        wire_result(value.result),
     )
 }
 
@@ -200,26 +166,7 @@ pub(super) fn outgoing_update(value: ProgressUpdateNotice) -> Message {
             attempt: WireId(value.attempt.bytes()),
         },
         owner_revision: value.revision,
-        progress: ActiveProgress {
-            item: LogicalItem {
-                kind: match update.item.kind {
-                    ProgressItemKind::File => ItemKind::File,
-                    ProgressItemKind::Representation => ItemKind::Representation,
-                    ProgressItemKind::DirectoryUnit => ItemKind::DirectoryUnit,
-                },
-                index: update.item.index,
-            },
-            round: update.round,
-            sequence: update.sequence,
-            bytes: update.bytes,
-            total: update.total,
-            phase: match update.phase {
-                ProgressPhase::Waiting => Phase::Waiting,
-                ProgressPhase::Transferring => Phase::Transferring,
-                ProgressPhase::Processing => Phase::Processing,
-                ProgressPhase::Retrying => Phase::Retrying,
-            },
-        },
+        progress: wire_active(update),
     }
 }
 #[cfg(test)]
@@ -303,5 +250,66 @@ pub(super) fn outgoing_contact(notice: ProgressContactNotice) -> Message {
         },
         owner_revision: notice.revision,
         sequence: notice.sequence,
+    }
+}
+
+pub(super) fn wire_result(value: ProgressTerminal) -> TerminalResult {
+    TerminalResult {
+        item: LogicalItem {
+            kind: match value.item.kind {
+                ProgressItemKind::File => ItemKind::File,
+                ProgressItemKind::Representation => ItemKind::Representation,
+                ProgressItemKind::DirectoryUnit => ItemKind::DirectoryUnit,
+            },
+            index: value.item.index,
+        },
+        round: value.round,
+        sequence: value.sequence,
+        result_revision: value.result_revision,
+        bytes: value.bytes,
+        total: value.total,
+        outcome: match value.outcome {
+            Outcome::Completed => TerminalOutcome::Completed,
+            Outcome::Failed(reason) => TerminalOutcome::Failed(match reason {
+                Failure::NetworkUnavailable => FailureReason::NetworkUnavailable,
+                Failure::TimedOut => FailureReason::TimedOut,
+                Failure::AccessDenied => FailureReason::AccessDenied,
+                Failure::StorageUnavailable => FailureReason::StorageUnavailable,
+                Failure::IntegrityCheckFailed => FailureReason::IntegrityCheckFailed,
+                Failure::Interrupted => FailureReason::Interrupted,
+                Failure::Unknown => FailureReason::Unknown,
+            }),
+            Outcome::Cancelled(reason) => TerminalOutcome::Cancelled(match reason {
+                Cancel::LocalUser => CancelReason::LocalUser,
+                Cancel::RemotePeer => CancelReason::RemotePeer,
+                Cancel::Replaced => CancelReason::Replaced,
+                Cancel::Timeout => CancelReason::Timeout,
+                Cancel::ConnectivityRecovery => CancelReason::ConnectivityRecovery,
+                Cancel::Unknown => CancelReason::Unknown,
+            }),
+        },
+    }
+}
+
+pub(super) fn wire_active(value: ProgressActive) -> ActiveProgress {
+    ActiveProgress {
+        item: LogicalItem {
+            kind: match value.item.kind {
+                ProgressItemKind::File => ItemKind::File,
+                ProgressItemKind::Representation => ItemKind::Representation,
+                ProgressItemKind::DirectoryUnit => ItemKind::DirectoryUnit,
+            },
+            index: value.item.index,
+        },
+        round: value.round,
+        sequence: value.sequence,
+        bytes: value.bytes,
+        total: value.total,
+        phase: match value.phase {
+            ProgressPhase::Waiting => Phase::Waiting,
+            ProgressPhase::Transferring => Phase::Transferring,
+            ProgressPhase::Processing => Phase::Processing,
+            ProgressPhase::Retrying => Phase::Retrying,
+        },
     }
 }

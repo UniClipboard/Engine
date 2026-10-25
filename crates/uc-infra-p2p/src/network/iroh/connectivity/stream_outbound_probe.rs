@@ -1,4 +1,5 @@
 //! Application一次完整终态动作：真实接收/输出后发送，错误ACK和旧attempt不得成功。
+use super::progress_probe::UnusedSnapshotProvider;
 use super::progress_probe::{progress_budget, Fixture};
 use crate::network::iroh::blob_exchange::IrohBlobExchangeAdapter;
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
@@ -139,6 +140,7 @@ async fn serve_registration(
         progress_budget(),
         cancel,
         owner,
+        &UnusedSnapshotProvider,
     )
     .await?;
     Ok(())
@@ -206,6 +208,7 @@ async fn settled_file_single_action_registers_sends_and_observes_exact_adopted_a
                 progress_budget(),
                 &stop,
                 &owner,
+                &UnusedSnapshotProvider,
             )
             .await?;
             anyhow::Ok(())
@@ -514,6 +517,7 @@ async fn new_attempt_during_challenge_cannot_relabel_an_old_settled_result() -> 
             progress_budget(),
             &stop,
             &owner,
+            &UnusedSnapshotProvider,
         )
         .await?;
         anyhow::Ok(())

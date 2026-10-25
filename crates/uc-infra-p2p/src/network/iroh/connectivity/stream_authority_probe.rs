@@ -1,4 +1,5 @@
 //! 同一组合测试中读取实际接收use case进程的当前权威，再通过真实Iroh流登记。
+use super::progress_probe::UnusedSnapshotProvider;
 use super::progress_probe::{progress_budget, Fixture, UnusedLive};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use anyhow::ensure;
@@ -305,6 +306,7 @@ async fn registration(
             progress_budget(),
             &cancel,
             owner,
+            &UnusedSnapshotProvider,
         )
         .await
     };
@@ -358,7 +360,8 @@ async fn stale_terminal(
             generation,
             progress_budget(),
             &cancel,
-            owner
+            owner,
+            &UnusedSnapshotProvider,
         ),
         read_frame(&mut stream.receive)
     );
@@ -422,6 +425,7 @@ async fn current_receive_authority_binds_over_real_iroh_and_old_descriptors_cann
                     progress_budget(),
                     &CancellationToken::new(),
                     held.as_ref(),
+                    &UnusedSnapshotProvider,
                 )
                 .await
             });
@@ -503,6 +507,7 @@ async fn actual_receiver_restart_new_connection_retires_old_producer_and_pending
                 progress_budget(),
                 &CancellationToken::new(),
                 held.as_ref(),
+                &UnusedSnapshotProvider,
             )
             .await
         });
@@ -641,6 +646,7 @@ async fn fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again(
                     progress_budget(),
                     &CancellationToken::new(),
                     held.as_ref(),
+                    &UnusedSnapshotProvider,
                 )
                 .await
             });
@@ -730,6 +736,7 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
                     progress_budget(),
                     &stop,
                     &owner,
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
             }
@@ -776,3 +783,6 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
 
 #[path = "stream_snapshot_probe.rs"]
 mod snapshot_probe;
+
+#[path = "stream_query_provider_probe.rs"]
+mod query_provider_probe;

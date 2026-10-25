@@ -1,4 +1,5 @@
 //! 最新中间值经真实登记与Update采用；终态绕过中间值节流并永久封口。
+use super::super::progress_probe::UnusedSnapshotProvider;
 use super::*;
 use tokio::sync::mpsc;
 use uc_application::deps::{
@@ -68,6 +69,7 @@ async fn managed_live_updates_coalesce_on_real_streams_and_terminal_seals_projec
                     progress_budget(),
                     &stop,
                     &owner,
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
                 tx.send(owner.snapshot().items[0].1).await?;
@@ -187,6 +189,7 @@ async fn waiting_task_contact_uses_real_streams_and_old_sequence_cannot_renew_di
                 progress_budget(),
                 &stop,
                 &owner,
+                &UnusedSnapshotProvider,
             )
             .await?;
             anyhow::Ok(())
@@ -236,6 +239,7 @@ async fn waiting_task_contact_uses_real_streams_and_old_sequence_cannot_renew_di
                 progress_budget(),
                 &cancel,
                 &owner,
+                &UnusedSnapshotProvider,
             )
             .await?;
             anyhow::Ok(())

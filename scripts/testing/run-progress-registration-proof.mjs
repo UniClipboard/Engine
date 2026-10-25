@@ -18,6 +18,7 @@ const required = [
   'explicit_legacy_is_unsupported_but_corrupt_current_frame_keeps_exchange_failure',
   'live_receive_attempt_reports_its_failed_materialization_through_the_complete_action',
   'snapshot_probe::actual_maximum_v3_plan_survives_sixteen_real_snapshot_pages',
+  'query_provider_probe::actual_failed_receive_results_cross_sixteen_real_inbound_query_pages',
 ].map(name => prefix + name)
 function binary(packageName, targetName) {
   const built = spawnSync('just', ['cargo', 'test', '-p', packageName, '--lib', '--no-run', '--locked', '--message-format=json'], {

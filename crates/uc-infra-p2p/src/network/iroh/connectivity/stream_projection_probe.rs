@@ -1,4 +1,5 @@
 //! 全局发送投影从原意图建立，再由真实已认证流登记和采用。
+use super::super::progress_probe::UnusedSnapshotProvider;
 use super::*;
 use uc_application::deps::{
     ProgressLiveRoundPort, ProgressProjectionAdmission, ProgressProjectionKey,
@@ -45,6 +46,7 @@ async fn accepted_intent_authorizes_real_updates_and_terminal_in_the_global_regi
                     progress_budget(),
                     &stop,
                     &registry,
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
                 TransferProgressInbound::serve(
@@ -54,6 +56,7 @@ async fn accepted_intent_authorizes_real_updates_and_terminal_in_the_global_regi
                     progress_budget(),
                     &stop,
                     &registry,
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
             }
@@ -104,6 +107,7 @@ async fn accepted_intent_authorizes_real_updates_and_terminal_in_the_global_regi
                 progress_budget(),
                 &stop,
                 &registry,
+                &UnusedSnapshotProvider,
             )
             .await
             .map_err(anyhow::Error::from)
@@ -165,6 +169,7 @@ async fn delayed_real_challenge_cannot_repopulate_a_replaced_or_closed_intent() 
                     progress_budget(),
                     &server_stop,
                     &owner,
+                    &UnusedSnapshotProvider,
                 )
                 .await
             });

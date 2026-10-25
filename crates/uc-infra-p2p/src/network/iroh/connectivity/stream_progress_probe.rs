@@ -455,3 +455,17 @@ impl ProgressLiveRoundPort for UnusedLive {
         panic!("terminal/query fixture cannot publish live progress")
     }
 }
+
+/// 仅供不触发Query的通知fixture；查询证明必须使用实际接收负责人。
+pub(super) struct UnusedSnapshotProvider;
+#[async_trait]
+impl uc_application::deps::ProgressSnapshotProviderPort for UnusedSnapshotProvider {
+    async fn snapshot_page(
+        &self,
+        _: &uc_core::ids::DeviceId,
+        _: uc_application::deps::ProgressSnapshotQuery,
+    ) -> Result<uc_application::deps::ProgressPageReply, uc_application::deps::ProgressReceiveError>
+    {
+        panic!("notification fixture cannot provide query state")
+    }
+}

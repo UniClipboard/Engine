@@ -2,6 +2,7 @@
 use super::super::{
     ConnectivityProfile, IrohConnectionAdmission, IrohConnectivityBackend, IrohPeerConnection,
 };
+use super::progress_probe::UnusedSnapshotProvider;
 use crate::network::iroh::admitted_connections::AdmittedConnections;
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
@@ -255,6 +256,7 @@ async fn real_backend_progress_profile_adopts_terminal_and_reuses_current_retain
                     budget(),
                     &stop,
                     &registry,
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
             }

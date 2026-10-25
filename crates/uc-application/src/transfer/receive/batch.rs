@@ -19,6 +19,8 @@ use uc_core::ports::{
     ReceiveItemProgress, TrackedFileTransferStatus,
 };
 
+mod progress_snapshot;
+
 #[derive(Default)]
 pub(crate) struct ReceiveBatch(Mutex<State>);
 #[derive(Default)]
@@ -299,6 +301,7 @@ impl ReceiveBatch {
     pub(crate) fn facts(&self) -> ReceiveFacts {
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         ReceiveFacts {
+            settled: state.settled,
             finished: state.finished,
             items: state
                 .items
@@ -363,6 +366,15 @@ impl ReceiveBatch {
             }
             _ => OutboundProgressStatus::Failed,
         };
+        // 原完整动作已实际结束；快照必须保留与原终态通知相同的最终事实。
+        if state.settled.is_none() {
+            state.settled = match status {
+                OutboundProgressStatus::Completed => Some(AttemptState::Completed),
+                OutboundProgressStatus::Failed => Some(AttemptState::Failed),
+                OutboundProgressStatus::Cancelled { .. } => Some(AttemptState::Cancelled),
+                OutboundProgressStatus::InProgress => None,
+            };
+        }
         let bytes = state
             .items
             .values()
@@ -412,6 +424,7 @@ pub(crate) fn receive_failure_reason(error: &SourceError) -> ReceiveItemFailureR
 }
 
 pub(crate) struct ReceiveFacts {
+    settled: Option<AttemptState>,
     items: HashMap<String, Item>,
     finished: bool,
 }

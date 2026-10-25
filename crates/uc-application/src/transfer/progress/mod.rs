@@ -36,8 +36,8 @@ mod deadline_tests;
 mod snapshot;
 pub use snapshot::{
     ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotPage,
-    ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotWirePort,
-    TransferProgressSnapshotReader,
+    ProgressSnapshotProviderPort, ProgressSnapshotQuery, ProgressSnapshotRead,
+    ProgressSnapshotRoundPort, ProgressSnapshotWirePort, TransferProgressSnapshotReader,
 };
 
 pub use model::ProgressUpdateNotice;

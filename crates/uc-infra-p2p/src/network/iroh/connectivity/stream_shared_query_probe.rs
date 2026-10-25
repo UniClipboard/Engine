@@ -1,4 +1,5 @@
 //! 同一监督器的实际查询/终态交换；不可中断成员读取暂停后仍保留真实工作寿命。
+use super::progress_probe::UnusedSnapshotProvider;
 use super::progress_probe::{progress_budget, Fixture, UnusedLive};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
@@ -345,6 +346,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
                     progress_budget(),
                     &CancellationToken::new(),
                     owner.as_ref(),
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
             }

@@ -261,7 +261,44 @@ fn registration_authority_worker() {
                 "items":task.items.iter().map(|item| json!({"kind":match item.kind { ProgressItemKind::File=>"file",ProgressItemKind::Representation=>"representation",ProgressItemKind::DirectoryUnit=>"directory" },"index":item.index})).collect::<Vec<_>>()
             })
         };
-        let response = if request["op"] == "claim" {
+        let response = if request["op"] == "snapshot" {
+            use crate::transfer::progress::{
+                ProgressPageReply, ProgressSnapshotProviderPort, ProgressSnapshotQuery,
+            };
+            use uc_core::file_transfer::{ProgressItemState, ProgressTerminalOutcome};
+            let peer = DeviceId::new(request["peer"].as_str().unwrap());
+            let source =
+                ProgressIdentity::new(serde_json::from_value(request["source"].clone()).unwrap());
+            let query = ProgressSnapshotQuery {
+                source,
+                attempt: request["attempt"].as_array().map(|_| {
+                    ProgressIdentity::new(
+                        serde_json::from_value(request["attempt"].clone()).unwrap(),
+                    )
+                }),
+                offset: request["offset"].as_u64().unwrap() as u16,
+                revision: request["revision"].as_u64(),
+            };
+            match runtime.block_on(registry.snapshot_page(&peer, query)) {
+                Ok(ProgressPageReply::Current(page) | ProgressPageReply::Superseded(page)) => {
+                    json!({
+                        "task": encode(registry.current_task(&peer, source).unwrap()),
+                        "revision": page.revision, "offset": page.offset, "total":page.total,
+                        "items": page.items.into_iter().map(|state| match state {
+                            ProgressItemState::Terminal(value) => json!({
+                                "kind":match value.item.kind { ProgressItemKind::File=>"file",ProgressItemKind::Representation=>"representation",ProgressItemKind::DirectoryUnit=>"directory" },
+                                "index":value.item.index,"round":value.round,"sequence":value.sequence,
+                                "result_revision":value.result_revision,"bytes":value.bytes,"total":value.total,
+                                "failed":match value.outcome { ProgressTerminalOutcome::Failed(reason)=>Some(format!("{reason:?}")), _=>None },
+                            }),
+                            ProgressItemState::Active(_) => json!({"active":true}),
+                        }).collect::<Vec<_>>()
+                    })
+                }
+                Ok(ProgressPageReply::NotRetained) => json!({"not_retained":true}),
+                _ => panic!("settled query fixture must retain its actual result"),
+            }
+        } else if request["op"] == "claim" {
             let peer = DeviceId::new(request["peer"].as_str().unwrap());
             let source =
                 ProgressIdentity::new(serde_json::from_value(request["source"].clone()).unwrap());

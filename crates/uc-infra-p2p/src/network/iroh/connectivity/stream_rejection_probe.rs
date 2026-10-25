@@ -1,4 +1,5 @@
 //! 真实双端拒绝必须保留业务分类，不能被流结束伪装为暂时网络失败。
+use super::progress_probe::UnusedSnapshotProvider;
 use super::progress_probe::{progress_budget, Fixture};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use anyhow::{bail, ensure};
@@ -94,6 +95,7 @@ async fn register(
             progress_budget(),
             &cancel,
             owner,
+            &UnusedSnapshotProvider,
         )
         .await
     };
@@ -180,6 +182,7 @@ async fn settle(
             progress_budget(),
             &cancel,
             owner,
+            &UnusedSnapshotProvider,
         )
         .await
     };
