@@ -1,7 +1,7 @@
 //! 一个完整核对动作；调用方不拼接网络结果、逐项采用或变化发布。
 use super::{ProgressProjectionKey, ProgressProjectionRegistry};
 use crate::transfer::progress::{
-    ProgressExchangeService, ProgressQueryResult, ProgressReceiveError, ProgressSnapshotRead,
+    ProgressExchangeService, ProgressQueryResult, ProgressReceiveError,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -45,8 +45,8 @@ impl TransferProgressReconciler {
         if !self.projections.current(key, &receiver) {
             return Arc::new(Err(ProgressReceiveError::Stale));
         }
-        if let Ok(ProgressSnapshotRead::Complete(snapshot)) = result.as_ref() {
-            if let Err(error) = receiver.adopt_snapshot(descriptor, snapshot) {
+        if let Ok(reply) = result.as_ref() {
+            if let Err(error) = receiver.finish_query(descriptor, reply) {
                 return Arc::new(Err(error));
             }
             if !self.projections.publish(key, &receiver) {
