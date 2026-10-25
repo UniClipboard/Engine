@@ -55,6 +55,16 @@ Application 消息、Core 规则及 Engine facade 不获得观测字段。载体
 - Query 携带挑战、源条目、可选预期 attempt、分页 offset 与可选快照修订；QueryResult 区分 Current、Superseded、NotRetained、Unsupported、AccessDenied。
 - Rejected 仅含固定原因；实际 IO、存储或解析错误不由 codec 伪造为 NotRetained／Unsupported。
 
+### 明确拒绝与错误来源
+
+`Rejected.challenge` 是本轮关联值：登记尚未发出Challenge时回显请求source_entry，已发出Challenge后回显本轮nonce；终态回显请求binding；查询继续回显Query challenge。发送端先核对关联，再确认响应FIN，才采用固定拒绝原因。错误关联为Stale，尾随字节或畸形帧为保留原来源的协议错误，不转成Busy、UnknownTask或旧版不支持。
+
+服务端只有明确业务拒绝才发送Rejected：AccessDenied／Stale／Busy／UnknownTask分别保留原因；非法逻辑范围和冲突终态使用既有InvalidScope码。冲突不会产生TerminalAck，已采用结果保持不变；远端InvalidScope归为计划／范围拒绝。IO、时钟、存储来源或帧解析失败继续保留错误链，不伪造业务拒绝。尚未接线的生产Query提供方仍按执行计划实现。
+
+早期登记拒绝先发Rejected，等客户端不再发送描述并结束请求后再发送本端FIN，避免客户端提前释放发送半流使服务端丢失拒绝结果。已经完整读到请求FIN的交换不重复消费结束边界；每次仍检查当前准入及原预算，不重建期限。
+
+Application区分带source的Malformed与暂时Exchange失败：前者和明确访问拒绝停止该结果补发，真实IO失败及Busy只使用原有剩余预算。准入失败保留ConnectivityError分类和完整source，不再统一包成可重试的普通交换失败。这些规则不改变本地下载实际结果，也不增加协议版本、帧字段或原因码。
+
 业务接收设备来自认证连接，不信任自报设备名或地址；Space／会话世代绑定在完整负责人上下文内，不由源条目 UUID 授予访问权。
 来源设备与实际 blob provider 可以不同，这些线格式字段不将二者合并。
 

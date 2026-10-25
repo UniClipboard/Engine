@@ -18,6 +18,10 @@ pub enum ProgressReceiveError {
     Unsupported,
     #[error("unexpected progress protocol")]
     Protocol,
+    #[error("progress access denied")]
+    AccessDenied(#[source] Box<dyn Error + Send + Sync>),
+    #[error("progress message is malformed")]
+    Malformed(#[source] Box<dyn Error + Send + Sync>),
     #[error("progress task is not authorized")]
     UnknownTask,
     #[error("progress logical plan is invalid")]
@@ -37,7 +41,8 @@ impl ErrorClass for ProgressReceiveError {
             Self::Clock(source) => source.class(),
             Self::Connection(source) => source.class(),
             Self::Unsupported => "progress_protocol_unsupported",
-            Self::Protocol => "progress_protocol_invalid",
+            Self::Protocol | Self::Malformed(_) => "progress_protocol_invalid",
+            Self::AccessDenied(_) => "progress_access_denied",
             Self::UnknownTask => "progress_task_not_authorized",
             Self::InvalidPlan => "progress_plan_invalid",
             Self::Stale => "progress_binding_stale",

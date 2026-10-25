@@ -13,6 +13,8 @@ pub(super) fn retry_class(source: &ProgressReceiveError) -> RetryClass {
         | ProgressReceiveError::Clock(_)
         | ProgressReceiveError::Unsupported
         | ProgressReceiveError::Protocol
+        | ProgressReceiveError::Malformed(_)
+        | ProgressReceiveError::AccessDenied(_)
         | ProgressReceiveError::UnknownTask
         | ProgressReceiveError::InvalidPlan
         | ProgressReceiveError::Stale

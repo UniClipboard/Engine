@@ -5,7 +5,9 @@ use uc_application::deps::{
     ProgressProjectionRegistry,
 };
 use uc_core::file_transfer::{ProgressActive, ProgressFreshnessView, ProgressPhase};
-use uc_sync_protocol::transfer_progress::v2::{ProducerDescriptor, TaskScope, WireId};
+use uc_sync_protocol::transfer_progress::v2::{
+    ProducerDescriptor, RejectionReason, TaskScope, WireId,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_intent_authorizes_real_updates_and_terminal_in_the_global_registry(
@@ -204,7 +206,13 @@ async fn delayed_real_challenge_cannot_repopulate_a_replaced_or_closed_intent() 
                 serving.await?,
                 Err(ProgressReceiveError::UnknownTask)
             ));
-            assert!(read_frame(&mut client.receive).await.is_err());
+            assert!(matches!(
+                read_frame(&mut client.receive).await?.message,
+                Message::Rejected {
+                    challenge,
+                    reason: RejectionReason::UnknownTask,
+                } if challenge == nonce
+            ));
             if closing {
                 timeout(Duration::from_secs(2), &mut running).await??;
                 assert!(registry.snapshot(key).is_none());

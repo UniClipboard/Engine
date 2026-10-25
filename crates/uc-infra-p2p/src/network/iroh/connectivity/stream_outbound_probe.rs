@@ -356,7 +356,7 @@ async fn changed_ack_or_trailing_bytes_do_not_report_success() -> anyhow::Result
         .await?;
         served?;
         if trailing {
-            assert!(matches!(reported, Err(ProgressReceiveError::Exchange(_))));
+            assert!(matches!(reported, Err(ProgressReceiveError::Malformed(_))));
         } else {
             assert!(matches!(reported, Err(ProgressReceiveError::Conflict)));
         }

@@ -5,9 +5,14 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectionLease, ProgressExchangeDeadline, ProgressReceiveError, StreamLease,
 };
-use uc_sync_protocol::transfer_progress::v2::{read_frame, write_frame, Envelope, Message};
+use uc_sync_protocol::transfer_progress::v2::{
+    read_frame, write_frame, Envelope, Message, WireError, WireId,
+};
 
 pub(super) struct Exchange<'a> {
+    /// 已实际发出的登记挑战，用于拒绝响应关联；不暴露给业务调用方。
+    pub(super) registration_challenge: Option<WireId>,
+    request_ended: bool,
     stream: &'a mut StreamLease,
     connection: &'a ConnectionLease,
     deadline: &'a ProgressExchangeDeadline,
@@ -21,6 +26,8 @@ impl<'a> Exchange<'a> {
         cancel: &'a CancellationToken,
     ) -> Self {
         Self {
+            registration_challenge: None,
+            request_ended: false,
             stream,
             connection,
             deadline,
@@ -29,11 +36,12 @@ impl<'a> Exchange<'a> {
     }
     pub(super) async fn finish_send(&mut self) -> Result<(), ProgressReceiveError> {
         self.authorize().await?;
-        self.stream.send.finish().map_err(failed)
+        self.stream.send.finish()?;
+        Ok(())
     }
     async fn authorize(&mut self) -> Result<(), ProgressReceiveError> {
         // 准入读取监督至真实结束；原经过时间预算随后禁止过期网络，不丢弃实际本机工作。
-        self.connection.check_current().await.map_err(failed)?;
+        self.connection.check_current().await?;
         self.deadline.check(self.cancel)
     }
     pub(super) async fn read(&mut self) -> Result<Message, ProgressReceiveError> {
@@ -43,7 +51,7 @@ impl<'a> Exchange<'a> {
                 async {
                     Ok(read_frame(&mut self.stream.receive)
                         .await
-                        .map_err(failed)?
+                        .map_err(frame_failed)?
                         .message)
                 },
                 self.cancel,
@@ -61,7 +69,7 @@ impl<'a> Exchange<'a> {
                 async {
                     write_frame(&mut self.stream.send, &envelope)
                         .await
-                        .map_err(failed)
+                        .map_err(frame_failed)
                 },
                 self.cancel,
             )
@@ -69,6 +77,9 @@ impl<'a> Exchange<'a> {
     }
     pub(super) async fn end_request(&mut self) -> Result<(), ProgressReceiveError> {
         self.authorize().await?;
+        if self.request_ended {
+            return Ok(());
+        }
         self.deadline
             .network(
                 async {
@@ -80,15 +91,71 @@ impl<'a> Exchange<'a> {
                 },
                 self.cancel,
             )
-            .await
+            .await?;
+        self.request_ended = true;
+        Ok(())
     }
 }
 pub(super) fn failed(source: impl Error + Send + Sync + 'static) -> ProgressReceiveError {
     ProgressReceiveError::Exchange(Box::new(source))
 }
 pub(super) fn invalid() -> ProgressReceiveError {
-    failed(io::Error::new(
+    ProgressReceiveError::Malformed(Box::new(io::Error::new(
         ErrorKind::InvalidData,
         "progress exchange message order invalid",
-    ))
+    )))
+}
+
+fn frame_failed(source: WireError) -> ProgressReceiveError {
+    match &source {
+        WireError::Io(_) => failed(source),
+        _ => ProgressReceiveError::Malformed(Box::new(source)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{frame_failed, invalid};
+    use std::error::Error;
+    use std::io;
+    use uc_application::deps::ProgressReceiveError;
+    use uc_core::error_class::ErrorClass;
+    use uc_sync_protocol::transfer_progress::v2::{FrameRefusal, WireError};
+
+    #[test]
+    fn malformed_frames_and_message_order_keep_sources_separate_from_temporary_io() {
+        let malformed = frame_failed(WireError::Frame(FrameRefusal::Length));
+        assert!(matches!(malformed, ProgressReceiveError::Malformed(_)));
+        assert_eq!(malformed.class(), "progress_protocol_invalid");
+        assert!(matches!(
+            malformed.source().unwrap().downcast_ref::<WireError>(),
+            Some(WireError::Frame(FrameRefusal::Length))
+        ));
+        let order = invalid();
+        assert_eq!(order.class(), "progress_protocol_invalid");
+        assert_eq!(
+            order
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        let transient = frame_failed(WireError::Io(io::ErrorKind::TimedOut.into()));
+        assert!(matches!(transient, ProgressReceiveError::Exchange(_)));
+        let wire = transient
+            .source()
+            .unwrap()
+            .downcast_ref::<WireError>()
+            .unwrap();
+        assert_eq!(
+            wire.source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
 }

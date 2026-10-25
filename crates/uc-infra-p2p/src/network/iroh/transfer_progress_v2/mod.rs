@@ -3,6 +3,7 @@ mod io;
 mod mapping;
 mod outbound;
 mod receive;
+mod rejection;
 mod snapshot;
 pub use outbound::TransferProgressWire;
 pub use receive::TransferProgressInbound;
