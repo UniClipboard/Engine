@@ -79,6 +79,7 @@ Application 消息、Core 规则及 Engine facade 不获得观测字段。载体
 服务端只有明确业务拒绝才发送Rejected：AccessDenied／Stale／Busy／UnknownTask分别保留原因；非法逻辑范围和冲突终态使用既有InvalidScope码。冲突不会产生TerminalAck，已采用结果保持不变；远端InvalidScope归为计划／范围拒绝。IO、时钟、存储来源或帧解析失败继续保留错误链，不伪造业务拒绝。尚未接线的生产Query提供方仍按执行计划实现。
 
 早期登记拒绝先发Rejected，等客户端不再发送描述并结束请求后再发送本端FIN，避免客户端提前释放发送半流使服务端丢失拒绝结果。已经完整读到请求FIN的交换不重复消费结束边界；每次仍检查当前准入及原预算，不重建期限。
+等待FIN之前和实际读到FIN之后均核对同一原连接的当前准入及原预算。若等待期间撤销或会话退休，不得再开始Application采用或快照读取；已经开始的本机工作仍由原负责人监督到真实结束。
 
 Application区分带source的Malformed与暂时Exchange失败：前者和明确访问拒绝停止该结果补发，真实IO失败及Busy只使用原有剩余预算。准入失败保留ConnectivityError分类和完整source，不再统一包成可重试的普通交换失败。这些规则不改变本地下载实际结果，也不增加协议版本、帧字段或原因码。
 

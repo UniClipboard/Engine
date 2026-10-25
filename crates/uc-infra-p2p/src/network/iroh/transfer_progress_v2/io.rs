@@ -92,6 +92,8 @@ impl<'a> Exchange<'a> {
                 self.cancel,
             )
             .await?;
+        // FIN等待可以跨撤销或会话退休；开始本地采用／查询前重新核对原连接资格。
+        self.authorize().await?;
         self.request_ended = true;
         Ok(())
     }
