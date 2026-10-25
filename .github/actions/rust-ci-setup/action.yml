@@ -10,7 +10,7 @@ inputs:
   fast-compile-infra:
     description: >-
       仅对允许名单中的 Infra crate 取消 Cargo.toml 优化覆盖，用于已验证不依赖该优化的覆盖率作业。
-      存储 crate 保持项目定义的优化口径，原并发加密读写回归仍使用相同负载和期限。
+      存储与密码算法 crate 保持项目定义的优化口径，原真实配对、加密读写及接收取消回归仍使用相同负载和期限。
     required: false
     default: "false"
   compile-cache-r2-endpoint:
@@ -72,13 +72,14 @@ runs:
 
     # 已校验诊断栈的覆盖率作业仅对允许名单恢复 dev 默认值。
     # 存储沿用 Cargo.toml：未优化插桩会放大完整加密材料和索引维护的 CPU 成本，令原并发回归超时。
-    # 保持原读写负载、时序门限和存储实现，只为其使用同一产品优化口径。
+    # 密码算法也沿用项目优化：未优化的 OPAQUE 泛型实例化会增加配对 CPU 成本，挤占接收取消回归的外层预算。
+    # 保持原配对、读写负载、取消等待、时序门限和实现，只为其使用同一产品优化口径。
     - name: Compile uc-infra-* crates without the mobile optimization override
       if: inputs.fast-compile-infra == 'true'
       shell: bash
       run: |
         cargo_home="${CARGO_HOME:-$HOME/.cargo}"
         mkdir -p "$cargo_home"
-        for crate in local crypto security content p2p profile; do
+        for crate in local security content p2p profile; do
           printf '\n[profile.dev.package.uc-infra-%s]\nopt-level = 0\n' "$crate" >> "$cargo_home/config.toml"
         done
