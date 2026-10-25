@@ -691,3 +691,6 @@ async fn explicit_denial_and_malformed_reply_stop_actual_delivery_but_temporary_
             .unwrap();
     }
 }
+
+#[path = "retry_tests.rs"]
+mod retry_tests;
