@@ -2,7 +2,8 @@ use super::super::clock::Clock;
 use super::super::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
     ProgressLiveRoundPort, ProgressQueryResult, ProgressReceiveError, ProgressSnapshotRoundPort,
-    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTerminalRoundPort,
+    ProgressSnapshotTarget, ProgressSubmission, ProgressTaskAuthorityPort,
+    ProgressTerminalRoundPort,
 };
 use super::model::{clock_failure, Key, QueryKey};
 use super::query::QUERY_LIMIT;
@@ -143,7 +144,7 @@ impl ProgressExchangeService {
     pub async fn read_snapshot(
         &self,
         peer: DeviceId,
-        expected: ProgressSourceTask,
+        target: ProgressSnapshotTarget,
         intent: ProgressIdentity,
         cancel: &CancellationToken,
     ) -> ProgressQueryResult {
@@ -156,8 +157,11 @@ impl ProgressExchangeService {
         {
             return Arc::new(Err(ConnectivityError::Stopped.into()));
         }
-        if !valid_progress_plan(&expected.items)
-            || usize::from(expected.descriptor.item_count) != expected.items.len()
+        if !valid_progress_plan(&target.items)
+            || target.expected.is_some_and(|descriptor| {
+                descriptor.source != target.source
+                    || usize::from(descriptor.item_count) != target.items.len()
+            })
         {
             return Arc::new(Err(ProgressSnapshotRefusal::InvalidPlan.into()));
         }
@@ -183,7 +187,7 @@ impl ProgressExchangeService {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .query(peer, expected, sample, intent)
+            .query(peer, target, sample, intent)
         {
             Ok(receive) => receive,
             Err(reply) => return reply,

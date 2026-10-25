@@ -3,8 +3,8 @@ use super::UnusedLive;
 use super::{authority, id, peer, submit, Clock};
 use super::{
     CancellationToken, DeviceId, Ordering, ProgressExchangeDeadline, ProgressExchangeService,
-    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSourceTask,
-    ProgressTaskDescriptor, ProgressTerminal, ProgressTerminalRoundPort,
+    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotTarget,
+    ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminal, ProgressTerminalRoundPort,
 };
 use super::{ElapsedClockError, ElapsedClockPort, Sample};
 use crate::connectivity::ConnectivityError;
@@ -67,7 +67,7 @@ impl ProgressSnapshotRoundPort for Held {
     async fn read_snapshot(
         &self,
         peer: &DeviceId,
-        _: ProgressSourceTask,
+        _: ProgressSnapshotTarget,
         _: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
@@ -134,7 +134,7 @@ fn query(
     tokio::spawn(async move {
         started.fetch_add(1, Ordering::SeqCst);
         service
-            .read_snapshot(peer(p), task(p, n), id(p), &cancel)
+            .read_snapshot(peer(p), task(p, n).into(), id(p), &cancel)
             .await
     })
 }
@@ -190,7 +190,7 @@ async fn mixed_actual_work_shares_four_slots_duplicates_share_one_read_and_cance
     }
     let overflow = timeout(
         Duration::from_secs(2),
-        service.read_snapshot(peer(3), task(3, 0), id(3), &CancellationToken::new()),
+        service.read_snapshot(peer(3), task(3, 0).into(), id(3), &CancellationToken::new()),
     )
     .await
     .unwrap();
@@ -262,7 +262,12 @@ async fn queries_use_exactly_the_existing_global_and_peer_waiting_capacity_witho
     until(|| started.load(Ordering::SeqCst) == 16).await;
     assert!(matches!(
         &*service
-            .read_snapshot(peer(5), task(5, 16), id(5), &CancellationToken::new())
+            .read_snapshot(
+                peer(5),
+                task(5, 16).into(),
+                id(5),
+                &CancellationToken::new()
+            )
             .await,
         Ok(ProgressSnapshotRead::Busy)
     ));
@@ -280,7 +285,7 @@ async fn queries_use_exactly_the_existing_global_and_peer_waiting_capacity_witho
     until(|| started.load(Ordering::SeqCst) == 64).await;
     assert!(matches!(
         &*service
-            .read_snapshot(peer(9), task(9, 0), id(9), &CancellationToken::new())
+            .read_snapshot(peer(9), task(9, 0).into(), id(9), &CancellationToken::new())
             .await,
         Ok(ProgressSnapshotRead::Busy)
     ));
@@ -405,7 +410,7 @@ async fn clock_error_keeps_its_source_and_active_query_cannot_be_revived_or_publ
     assert!(found);
     clock.0.store(1, Ordering::SeqCst);
     let duplicate = service
-        .read_snapshot(peer(1), task(1, 0), id(1), &CancellationToken::new())
+        .read_snapshot(peer(1), task(1, 0).into(), id(1), &CancellationToken::new())
         .await;
     assert!(matches!(&*duplicate, Err(ProgressReceiveError::Clock(_))));
     assert_eq!(service.inner.state.lock().unwrap().active.len(), 1);
@@ -506,7 +511,7 @@ async fn a_delayed_earlier_observer_cannot_borrow_the_later_admissions_remaining
         let service = service.clone();
         tokio::spawn(async move {
             service
-                .read_snapshot(peer(1), task(1, 0), id(1), &CancellationToken::new())
+                .read_snapshot(peer(1), task(1, 0).into(), id(1), &CancellationToken::new())
                 .await
         })
     };
@@ -514,7 +519,7 @@ async fn a_delayed_earlier_observer_cannot_borrow_the_later_admissions_remaining
     // 受控交错：较早调用已采样0但尚未取得状态锁，较后请求按2先完成准入。
     let mut newer = match service.inner.state.lock().unwrap().query(
         peer(1),
-        task(1, 0),
+        task(1, 0).into(),
         Sample {
             now: Duration::from_secs(2),
             epoch: 0,

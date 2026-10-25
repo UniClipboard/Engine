@@ -159,3 +159,148 @@ fn invalid_source_and_empty_plan_never_bind_and_consume_current_challenge() {
         Effect::Refused(Refusal::StaleChallenge)
     );
 }
+
+#[test]
+fn initial_query_confirmation_does_not_bind_notifications_and_fences_older_pending_description() {
+    let mut owner = ProgressRegistration::new(1);
+    assert_eq!(
+        owner.apply(Input::ReplaceConnection { generation: 1 }),
+        Effect::ConnectionReplaced
+    );
+    assert_eq!(
+        owner.apply(Input::Challenge {
+            generation: 1,
+            nonce: 10
+        }),
+        Effect::SendChallenge
+    );
+    let current = descriptor(2, 8, 3);
+    assert_eq!(
+        owner.apply(Input::QueryVerified {
+            descriptor: current
+        }),
+        Effect::QueryVerified
+    );
+    assert_eq!(
+        owner.apply(Input::Notification {
+            generation: 1,
+            binding: 10,
+            source: 1,
+            attempt: 3,
+            revision: 8
+        }),
+        Effect::Refused(Refusal::WrongBinding)
+    );
+    assert_eq!(
+        owner.apply(Input::Describe {
+            generation: 1,
+            nonce: 10,
+            binding: 10,
+            descriptor: descriptor(2, 7, 3)
+        }),
+        Effect::Refused(Refusal::RevisionRegressed)
+    );
+    assert_eq!(bind(&mut owner, 1, 11, current), Effect::SendBound);
+    assert_eq!(
+        owner.apply(Input::QueryVerified {
+            descriptor: current
+        }),
+        Effect::QueryVerified
+    );
+    assert_eq!(
+        owner.apply(Input::Notification {
+            generation: 1,
+            binding: 11,
+            source: 1,
+            attempt: 3,
+            revision: 8
+        }),
+        Effect::CheckNotification
+    );
+}
+#[test]
+fn query_cannot_rewrite_a_known_scope_or_confirm_a_foreign_or_empty_original_plan() {
+    let mut owner = ProgressRegistration::new(1);
+    let current = descriptor(2, 8, 3);
+    assert_eq!(
+        owner.apply(Input::QueryVerified {
+            descriptor: RegistrationDescriptor {
+                source: 9,
+                ..current
+            }
+        }),
+        Effect::Refused(Refusal::WrongSource)
+    );
+    assert_eq!(
+        owner.apply(Input::QueryVerified {
+            descriptor: RegistrationDescriptor {
+                item_count: 0,
+                ..current
+            }
+        }),
+        Effect::Refused(Refusal::EmptyPlan)
+    );
+    assert_eq!(
+        owner.apply(Input::QueryVerified {
+            descriptor: current
+        }),
+        Effect::QueryVerified
+    );
+    assert_eq!(
+        owner.apply(Input::QueryVerified {
+            descriptor: descriptor(4, 1, 5)
+        }),
+        Effect::Refused(Refusal::RevisionConflict)
+    );
+    assert_eq!(
+        owner.apply(Input::ReplaceConnection { generation: 1 }),
+        Effect::ConnectionReplaced
+    );
+    assert_eq!(
+        bind(&mut owner, 1, 10, descriptor(2, 7, 3)),
+        Effect::Refused(Refusal::RevisionRegressed)
+    );
+    assert_eq!(bind(&mut owner, 1, 11, current), Effect::SendBound);
+}
+
+#[test]
+fn matching_pending_registration_can_finish_after_initial_query_confirmation() {
+    let mut owner = ProgressRegistration::new(1);
+    let current = descriptor(2, 8, 3);
+    assert_eq!(
+        owner.apply(Input::ReplaceConnection { generation: 1 }),
+        Effect::ConnectionReplaced
+    );
+    assert_eq!(
+        owner.apply(Input::Challenge {
+            generation: 1,
+            nonce: 10
+        }),
+        Effect::SendChallenge
+    );
+    assert_eq!(
+        owner.apply(Input::QueryVerified {
+            descriptor: current
+        }),
+        Effect::QueryVerified
+    );
+    assert_eq!(
+        owner.apply(Input::Describe {
+            generation: 1,
+            nonce: 10,
+            binding: 11,
+            descriptor: current
+        }),
+        Effect::SendBound
+    );
+    assert_eq!(
+        owner.apply(Input::Notification {
+            generation: 1,
+            binding: 11,
+            source: 1,
+            attempt: 3,
+            revision: 8
+        }),
+        Effect::CheckNotification
+    );
+}

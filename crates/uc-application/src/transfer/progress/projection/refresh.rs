@@ -29,14 +29,14 @@ impl TransferProgressReconciler {
         let Some(receiver) = self.projections.receiver(key) else {
             return Arc::new(Err(ProgressReceiveError::UnknownTask));
         };
-        let (intent, expected) = match receiver.query_scope() {
+        let (intent, target) = match receiver.query_scope() {
             Ok(scope) => scope,
             Err(error) => return Arc::new(Err(error)),
         };
-        let descriptor = expected.descriptor;
+        let descriptor = target.expected;
         let result = self
             .exchanges
-            .read_snapshot(key.peer, expected, intent, cancel)
+            .read_snapshot(key.peer, target, intent, cancel)
             .await;
         // 失败不写投影，保留同一不可变结果和完整下层来源。
         if result.is_err() {

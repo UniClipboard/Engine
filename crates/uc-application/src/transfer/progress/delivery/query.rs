@@ -1,6 +1,6 @@
 use super::super::clock::Sample;
 use super::super::{
-    ElapsedClockError, ProgressReceiveError, ProgressSnapshotRead, ProgressSourceTask,
+    ElapsedClockError, ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotTarget,
 };
 use super::model::{clock_failure, Action, Job, ProgressQueryResult, QueryKey, Work};
 use super::state::State;
@@ -15,7 +15,7 @@ use uc_core::ids::DeviceId;
 const MAX_QUERY_OBSERVERS: usize = 16;
 pub(super) const QUERY_LIMIT: Duration = Duration::from_secs(5);
 pub(super) struct QueryRecord {
-    expected: ProgressSourceTask,
+    expected: ProgressSnapshotTarget,
     epoch: u64,
     deadline: Duration,
     cancel: CancellationToken,
@@ -42,7 +42,7 @@ impl State {
     pub fn query(
         &mut self,
         peer: DeviceId,
-        expected: ProgressSourceTask,
+        expected: ProgressSnapshotTarget,
         sample: Sample,
         intent: ProgressIdentity,
     ) -> Result<watch::Receiver<Option<ProgressQueryResult>>, ProgressQueryResult> {
@@ -59,7 +59,7 @@ impl State {
             .checked_add(QUERY_LIMIT)
             .filter(|deadline| *deadline > current.now)
             .ok_or_else(expired)?;
-        let key = QueryKey::query(peer, expected.descriptor, intent);
+        let key = QueryKey::query(peer, &expected, intent);
         if let Some(existing) = self.queries.get(&key) {
             if existing.expected.items != expected.items {
                 return Err(Arc::new(Err(ProgressReceiveError::InvalidPlan)));

@@ -3,6 +3,7 @@ use super::super::profile_probe::ProfilePair;
 use super::super::progress_probe::{progress_budget, Fixture};
 use super::{AuthorityProcess, SOURCE};
 use crate::network::iroh::transfer_progress_v2::TransferProgressWire;
+use anyhow::ensure;
 use std::error::Error;
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -15,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectionLease, ConnectivityError, ConnectivityManager, ElapsedClockError, ElapsedClockPort,
     ProgressExchangeDeadline, ProgressReceiveError, ProgressSnapshotRead,
-    ProgressSnapshotRoundPort, ProgressSourceTask, ProgressTaskDescriptor,
+    ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceTask, ProgressTaskDescriptor,
     TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::{
@@ -52,12 +53,18 @@ enum Mode {
     RejectedStale,
     RejectedUnknownTask,
     RejectedInvalidScope,
+    ForeignSource,
+    ForeignPlan,
 }
 impl Mode {
     fn count(self) -> usize {
         if matches!(
             self,
-            Self::RejectedStale | Self::RejectedUnknownTask | Self::RejectedInvalidScope
+            Self::RejectedStale
+                | Self::RejectedUnknownTask
+                | Self::RejectedInvalidScope
+                | Self::ForeignSource
+                | Self::ForeignPlan
         ) {
             return 1;
         }
@@ -253,6 +260,7 @@ fn resident_bytes() -> Option<u64> {
 async fn exchange(
     expected: ProgressSourceTask,
     mode: Mode,
+    discover: bool,
 ) -> anyhow::Result<(Result<ProgressSnapshotRead, ProgressReceiveError>, Evidence)> {
     let rss_before = resident_bytes();
     let fixture = if mode == Mode::Good {
@@ -293,7 +301,11 @@ async fn exchange(
             assert_eq!(source_entry.0, expected.descriptor.source.bytes());
             assert_eq!(
                 expected_attempt,
-                Some(WireId(expected.descriptor.attempt.bytes()))
+                if discover && number == 0 {
+                    None
+                } else {
+                    Some(WireId(expected.descriptor.attempt.bytes()))
+                }
             );
             assert_eq!(usize::from(offset), number * 64);
             assert_eq!(snapshot_revision, if number == 0 { None } else { Some(9) });
@@ -302,6 +314,12 @@ async fn exchange(
                 continue;
             }
             let mut current = descriptor(expected.descriptor);
+            if mode == Mode::ForeignSource {
+                current.scope.source_entry = WireId([9; 16]);
+            }
+            if mode == Mode::ForeignPlan {
+                current.item_count = 1023;
+            }
             let mut page_offset = offset;
             if number == 1 {
                 match mode {
@@ -324,7 +342,7 @@ async fn exchange(
                     9
                 },
                 offset: page_offset,
-                total: 1024,
+                total: current.item_count,
                 items,
             };
             let result = match mode {
@@ -391,7 +409,16 @@ async fn exchange(
     };
     let peer = fixture.peer();
     let (outcome, served) = tokio::join!(
-        reader.read_snapshot(&peer, expected.clone(), &budget, &stop),
+        reader.read_snapshot(
+            &peer,
+            ProgressSnapshotTarget {
+                source: expected.descriptor.source,
+                expected: (!discover).then_some(expected.descriptor),
+                items: expected.items.clone()
+            },
+            &budget,
+            &stop
+        ),
         serve
     );
     served?;
@@ -422,7 +449,7 @@ async fn actual_maximum_v3_plan_survives_sixteen_real_snapshot_pages() -> anyhow
                 }
             );
         }
-        let (outcome, evidence) = exchange(expected.clone(), Mode::Good).await?;
+        let (outcome, evidence) = exchange(expected.clone(), Mode::Good, false).await?;
         let ProgressSnapshotRead::Complete(snapshot) = outcome? else {
             panic!("all real pages must complete");
         };
@@ -469,7 +496,7 @@ async fn real_pagination_faults_never_return_partial_or_falsely_complete_snapsho
             ),
             (Mode::DuplicateItem, ProgressSnapshotRefusal::WrongItem),
         ] {
-            let (outcome, evidence) = exchange(task(), mode).await?;
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
             assert!(
                 matches!(outcome,Err(ProgressReceiveError::Snapshot(actual)) if actual==reason),
                 "{mode:?}"
@@ -483,7 +510,7 @@ async fn real_pagination_faults_never_return_partial_or_falsely_complete_snapsho
             Mode::WrongChallenge,
             Mode::Deadline,
         ] {
-            let (outcome, evidence) = exchange(task(), mode).await?;
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
             let error = match outcome {
                 Err(error) => error,
                 Ok(_) => panic!("{mode:?} cannot return a view or absence"),
@@ -519,7 +546,7 @@ async fn explicit_remote_query_outcomes_remain_separate_from_exchange_failures(
             Mode::Superseded,
             Mode::Busy,
         ] {
-            let (outcome, evidence) = exchange(task(), mode).await?;
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
             match (mode, outcome?) {
                 (Mode::NotRetained, ProgressSnapshotRead::NotRetained)
                 | (Mode::Unsupported, ProgressSnapshotRead::Unsupported)
@@ -537,7 +564,7 @@ async fn explicit_remote_query_outcomes_remain_separate_from_exchange_failures(
             Mode::RejectedUnknownTask,
             Mode::RejectedInvalidScope,
         ] {
-            let (outcome, evidence) = exchange(task(), mode).await?;
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
             assert!(matches!(
                 (mode, outcome),
                 (Mode::RejectedStale, Err(ProgressReceiveError::Stale))
@@ -551,6 +578,40 @@ async fn explicit_remote_query_outcomes_remain_separate_from_exchange_failures(
                     )
             ));
             assert_eq!(evidence.requests, 1);
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_discovery_rejects_foreign_source_plan_and_mixed_second_page_without_partial_adoption(
+) -> anyhow::Result<()> {
+    timeout(Duration::from_secs(30), async {
+        for (mode, refusal) in [
+            (
+                Mode::ForeignSource,
+                ProgressSnapshotRefusal::DescriptorChanged,
+            ),
+            (
+                Mode::ForeignPlan,
+                ProgressSnapshotRefusal::DescriptorChanged,
+            ),
+            (
+                Mode::MixedAttempt,
+                ProgressSnapshotRefusal::DescriptorChanged,
+            ),
+            (
+                Mode::MixedRevision,
+                ProgressSnapshotRefusal::RevisionChanged,
+            ),
+        ] {
+            let (outcome, _) = exchange(task(), mode, true).await?;
+            ensure!(
+                matches!(outcome,Err(ProgressReceiveError::Snapshot(reason)) if reason==refusal),
+                "initial query must reject a scope outside the original plan"
+            );
         }
         anyhow::Ok(())
     })

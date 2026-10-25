@@ -17,9 +17,9 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal,
     ProgressExchangeDeadline, ProgressExchangeService, ProgressReceiveError, ProgressSnapshotRead,
-    ProgressSnapshotRoundPort, ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort,
-    ProgressTaskDescriptor, ProgressTerminalRoundPort, TransferProgressProducer,
-    TransferProgressReceiver, TransferProgressSnapshotReader,
+    ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceTask, ProgressSubmission,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalRoundPort,
+    TransferProgressProducer, TransferProgressReceiver, TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
@@ -122,7 +122,7 @@ impl ProgressSnapshotRoundPort for Snapshot {
     async fn read_snapshot(
         &self,
         peer: &DeviceId,
-        expected: ProgressSourceTask,
+        expected: ProgressSnapshotTarget,
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
@@ -230,7 +230,11 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
     let query = {
         let service = service.clone();
         let cancel = query_cancel.clone();
-        tokio::spawn(async move { service.read_snapshot(a, task(), SOURCE, &cancel).await })
+        tokio::spawn(async move {
+            service
+                .read_snapshot(a, task().into(), SOURCE, &cancel)
+                .await
+        })
     };
     let mut incoming = first.receiving.accept_bi().await?;
     let Message::Query {
@@ -328,7 +332,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
         assert!(counts.active.lock().unwrap().contains(&a));
         let repeated = timeout(
             Duration::from_secs(2),
-            service.read_snapshot(a, task(), SOURCE, &CancellationToken::new()),
+            service.read_snapshot(a, task().into(), SOURCE, &CancellationToken::new()),
         )
         .await?;
         assert!(matches!(&*repeated, Err(_)));

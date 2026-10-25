@@ -1,17 +1,17 @@
-use super::super::{ProgressExchangeDeadline, ProgressReceiveError, ProgressSourceTask};
+use super::super::{ProgressExchangeDeadline, ProgressReceiveError, ProgressSnapshotTarget};
 use super::{ProgressPageReply, ProgressPageRequest, ProgressSnapshotQuery, ProgressSnapshotRead};
 use crate::connectivity::{ConnectionLease, StreamLease};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 
-/// 已获得原监督额度的一轮完整读取；不得另外建立查询循环、队列或重起预算。
+/// 同一监督额度内的完整读取；尚未确认的描述只能在原计划完整核验后返回，不重起预算。
 #[async_trait]
 pub trait ProgressSnapshotRoundPort: Send + Sync {
     async fn read_snapshot(
         &self,
         peer: &DeviceId,
-        expected: ProgressSourceTask,
+        target: ProgressSnapshotTarget,
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ProgressSnapshotRead, ProgressReceiveError>;
