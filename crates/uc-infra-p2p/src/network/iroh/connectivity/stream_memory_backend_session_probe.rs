@@ -67,7 +67,7 @@ enum Operation {
     Update,
     Terminal,
 }
-fn stopped(error: &ConnectivityError) -> bool {
+pub(super) fn stopped(error: &ConnectivityError) -> bool {
     match error {
         ConnectivityError::Stopped => true,
         ConnectivityError::Shared(error) => stopped(error),

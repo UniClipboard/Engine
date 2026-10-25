@@ -1,6 +1,7 @@
 use super::super::clock::Sample;
 use super::super::{
-    ElapsedClockError, ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotTarget,
+    ElapsedClockError, ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRound,
+    ProgressSnapshotTarget,
 };
 use super::model::{clock_failure, Action, Job, ProgressQueryResult, QueryKey, Work};
 use super::state::State;
@@ -19,6 +20,7 @@ pub(super) struct QueryRecord {
     epoch: u64,
     deadline: Duration,
     cancel: CancellationToken,
+    round: Option<ProgressSnapshotRound>,
     reply: watch::Sender<Option<ProgressQueryResult>>,
     queued: bool,
     sealed: bool,
@@ -45,6 +47,8 @@ impl State {
         expected: ProgressSnapshotTarget,
         sample: Sample,
         intent: ProgressIdentity,
+        cancel: CancellationToken,
+        round: ProgressSnapshotRound,
     ) -> Result<watch::Receiver<Option<ProgressQueryResult>>, ProgressQueryResult> {
         if self.closed {
             return Err(stopped());
@@ -88,7 +92,8 @@ impl State {
                 expected,
                 epoch: sample.epoch,
                 deadline,
-                cancel: CancellationToken::new(),
+                cancel,
+                round: Some(round),
                 reply,
                 queued: true,
                 sealed: false,
@@ -102,6 +107,7 @@ impl State {
             return None;
         }
         record.queued = false;
+        let round = record.round.take()?;
         let cancel = record.cancel.clone();
         self.active.insert(
             key.peer,
@@ -112,7 +118,7 @@ impl State {
             epoch: record.epoch,
             deadline: record.deadline,
             cancel,
-            action: Action::Snapshot(record.expected.clone()),
+            action: Action::Snapshot(round),
         })
     }
     pub fn query_interested(&self, key: QueryKey) -> bool {

@@ -2,9 +2,10 @@ use super::{descriptor, id, item, key, Clock, Current};
 use crate::transfer::progress::{
     ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline, ProgressExchangeService,
     ProgressLiveRoundPort, ProgressProjectionKey, ProgressProjectionRegistry, ProgressReceiveError,
-    ProgressReceiverPort, ProgressSnapshot, ProgressSnapshotRead, ProgressSnapshotRoundPort,
-    ProgressSnapshotTarget, ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
-    ProgressTerminalNotice, ProgressTerminalRoundPort, TransferProgressReconciler,
+    ProgressReceiverPort, ProgressSnapshot, ProgressSnapshotRead, ProgressSnapshotRound,
+    ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceTask,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressTerminalRoundPort, TransferProgressReconciler,
 };
 use async_trait::async_trait;
 use futures::poll;
@@ -35,41 +36,42 @@ struct Query {
     absent: AtomicBool,
     reply: Mutex<Option<ProgressSnapshotRead>>,
 }
-#[async_trait]
 impl ProgressSnapshotRoundPort for Query {
-    async fn read_snapshot(
-        &self,
-        _: &DeviceId,
+    fn read_snapshot(
+        self: Arc<Self>,
+        _: DeviceId,
         expected: ProgressSnapshotTarget,
-        _: &ProgressExchangeDeadline,
-        _: &CancellationToken,
-    ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
-        let values = self.values.lock().unwrap().clone();
-        let remote = *self.remote.lock().unwrap();
-        let revision = self.revision.load(Ordering::SeqCst);
-        let absent = self.absent.load(Ordering::SeqCst);
-        let reply = self.reply.lock().unwrap().take();
-        assert_eq!(expected.source, remote.source);
-        assert!(expected.expected.is_none_or(|expected| expected == remote));
-        assert!(expected.items.iter().copied().eq([item(0), item(1)]));
-        self.entered.notify_one();
-        self.release.acquire().await.unwrap().forget();
-        if self.fail.load(Ordering::SeqCst) {
-            return Err(ProgressReceiveError::Exchange(Box::new(io::Error::from(
-                io::ErrorKind::TimedOut,
-            ))));
-        }
-        if absent {
-            return Ok(ProgressSnapshotRead::NotRetained);
-        }
-        if let Some(reply) = reply {
-            return Ok(reply);
-        }
-        Ok(ProgressSnapshotRead::Complete(ProgressSnapshot {
-            descriptor: remote,
-            revision,
-            items: values,
-        }))
+        _: Arc<ProgressExchangeDeadline>,
+        _: CancellationToken,
+    ) -> ProgressSnapshotRound {
+        Box::pin(async move {
+            let values = self.values.lock().unwrap().clone();
+            let remote = *self.remote.lock().unwrap();
+            let revision = self.revision.load(Ordering::SeqCst);
+            let absent = self.absent.load(Ordering::SeqCst);
+            let reply = self.reply.lock().unwrap().take();
+            assert_eq!(expected.source, remote.source);
+            assert!(expected.expected.is_none_or(|expected| expected == remote));
+            assert!(expected.items.iter().copied().eq([item(0), item(1)]));
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(ProgressReceiveError::Exchange(Box::new(io::Error::from(
+                    io::ErrorKind::TimedOut,
+                ))));
+            }
+            if absent {
+                return Ok(ProgressSnapshotRead::NotRetained);
+            }
+            if let Some(reply) = reply {
+                return Ok(reply);
+            }
+            Ok(ProgressSnapshotRead::Complete(ProgressSnapshot {
+                descriptor: remote,
+                revision,
+                items: values,
+            }))
+        })
     }
 }
 impl ProgressTaskAuthorityPort for Query {

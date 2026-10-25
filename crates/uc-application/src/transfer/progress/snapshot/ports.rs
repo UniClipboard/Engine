@@ -2,19 +2,24 @@ use super::super::{ProgressExchangeDeadline, ProgressReceiveError, ProgressSnaps
 use super::{ProgressPageReply, ProgressPageRequest, ProgressSnapshotQuery, ProgressSnapshotRead};
 use crate::connectivity::{ConnectionLease, StreamLease};
 use async_trait::async_trait;
+use futures::future::BoxFuture;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 
-/// 同一监督额度内的完整读取；尚未确认的描述只能在原计划完整核验后返回，不重起预算。
-#[async_trait]
-pub trait ProgressSnapshotRoundPort: Send + Sync {
-    async fn read_snapshot(
-        &self,
-        peer: &DeviceId,
+/// 入队时同步冻结原会话；返回的完整读取只在取得实际额度后poll，不提前启动IO。
+pub type ProgressSnapshotRound =
+    BoxFuture<'static, Result<ProgressSnapshotRead, ProgressReceiveError>>;
+
+/// 尚未确认的描述只能在原计划完整核验后返回；入队和执行共用原截止与取消，不重取会话或预算。
+pub trait ProgressSnapshotRoundPort: Send + Sync + 'static {
+    fn read_snapshot(
+        self: Arc<Self>,
+        peer: DeviceId,
         target: ProgressSnapshotTarget,
-        deadline: &ProgressExchangeDeadline,
-        cancel: &CancellationToken,
-    ) -> Result<ProgressSnapshotRead, ProgressReceiveError>;
+        deadline: Arc<ProgressExchangeDeadline>,
+        cancel: CancellationToken,
+    ) -> ProgressSnapshotRound;
 }
 /// 单页交换只负责有界IO、真实连接准入、精确挑战和完整请求／响应结束。
 #[async_trait]
