@@ -137,6 +137,45 @@ def writer_regressions(documents):
     assert 'cargo build -p uc-connectivity-host -p uc-connectivity-relay --locked' in network
 
 
+def network_warmup_regressions(documents):
+    import itertools
+    network = documents['pr-check.yml'].split('  connection-recovery:\n')[1]
+    steps = {re.search(r'^      - name: (.+)$', step, re.M)[1]: step
+             for step in re.split(r'(?=^      - )', network, flags=re.M)
+             if re.search(r'^      - name: (.+)$', step, re.M)}
+    warmup = steps['Compile remaining shared network host actions']
+    publisher = steps['Publish scenario CAS snapshot']
+    condition = re.search(r'^        if: (.+)$', warmup, re.M)[1]
+    assert condition == re.search(r'^        if: (.+)$', publisher, re.M)[1]
+    # 对实际表达式逐项代入；缺失的 GitHub 上下文按空字符串处理，不能意外取得生产者资格。
+    cases = 0
+    for mode, event, ref, protected, succeeded in itertools.product(
+            ('direct', 'known-peer', 'relay', 'legacy'),
+            ('pull_request', 'workflow_dispatch', 'push', 'schedule', 'merge_group', ''),
+            ('refs/heads/main', 'refs/heads/topic', 'refs/pull/1/merge', ''),
+            (True, False, ''), (True, False)):
+        expression = condition
+        for field, value in [('matrix.mode', mode), ('github.event_name', event),
+                             ('github.ref_protected', protected), ('github.ref', ref),
+                             ('success()', succeeded)]:
+            expression = expression.replace(field, repr(value))
+        actual = bool(eval(expression.replace('&&', ' and ').replace('||', ' or '), {'__builtins__': {}}))
+        expected = (succeeded and mode == 'direct' and event in ('push', 'schedule')
+                    and ref == 'refs/heads/main' and protected is True)
+        assert actual == expected, (mode, event, ref, protected, succeeded)
+        cases += 1
+    # 真实验证没有生产者条件或 prebuilt 旁路；失败时两种证据仍保留，补编目标不缩水。
+    validation = steps['Validate connection liveness and recovery']
+    assert '        if:' not in validation and '--prebuilt' not in validation
+    assert 'run-connection-recovery-e2e.sh --suite network --repeat 1 --mode "${{ matrix.mode }}"' in validation
+    assert 'run: cargo build -p uc-connectivity-host -p uc-connectivity-relay --locked' in warmup
+    for name in ('Retain sanitized evidence', 'Retain MBX compiler evidence'):
+        assert 'if: always()' in steps[name]
+    assert network.index('Validate connection liveness and recovery') < network.index('Compile remaining shared network host actions')
+    assert network.index('Compile remaining shared network host actions') < network.index('Publish scenario CAS snapshot')
+    print(f'Network producer warmup eligibility passed: {cases} cases; real validation and evidence retained')
+
+
 def unique_matrix_artifacts(documents):
     # 证据按具体执行实例命名，不能沿用共享缓存场景；每个 workflow run 的 v4 artifact 不可覆盖。
     artifacts = {}
@@ -229,6 +268,7 @@ print(f'Snapshot-only routing passed for {len(workflows)} workflows')
 documents = {path.name: path.read_text() for path in workflows}
 writers = unique_writers(documents)
 writer_regressions(documents)
+network_warmup_regressions(documents)
 print(f'Matrix-expanded writer uniqueness passed for {len(writers)} platform/architecture/scenario keys; duplicate regressions rejected')
 
 artifact_jobs, artifact_names = unique_matrix_artifacts(documents)
