@@ -25,6 +25,10 @@ pub struct ProgressRegistration<I> {
 }
 
 pub enum RegistrationInput<I> {
+    /// 当前认证查询已完整核对原始计划；不能据此授予通知绑定。
+    QueryVerified {
+        descriptor: RegistrationDescriptor<I>,
+    },
     ReplaceConnection {
         generation: u64,
     },
@@ -61,6 +65,8 @@ pub enum RegistrationRefusal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationEffect {
+    /// 保存初始查询描述后才可发布完整事实；待完成挑战仍受该描述围栏约束，不发送Bound。
+    QueryVerified,
     /// 保存新世代后，停止旧连接交换；保留既知描述用于修订判定。
     ConnectionReplaced,
     /// 保存挑战后才可发出；同世代先前挑战不再能完成登记。
@@ -87,6 +93,25 @@ impl<I: Copy + Eq> ProgressRegistration<I> {
 
     pub fn apply(&mut self, input: RegistrationInput<I>) -> RegistrationEffect {
         match input {
+            Input::QueryVerified { descriptor } => {
+                if descriptor.source != self.source {
+                    return Effect::Refused(Refusal::WrongSource);
+                }
+                if descriptor.item_count == 0 {
+                    return Effect::Refused(Refusal::EmptyPlan);
+                }
+                if let Some(current) = self.descriptor {
+                    return if current == descriptor {
+                        Effect::QueryVerified
+                    } else {
+                        Effect::Refused(Refusal::RevisionConflict)
+                    };
+                }
+                self.binding = None;
+                self.producer_on_connection = Some(descriptor.producer);
+                self.descriptor = Some(descriptor);
+                Effect::QueryVerified
+            }
             Input::ReplaceConnection { generation } => {
                 if generation <= self.generation {
                     return Effect::Refused(Refusal::RetiredConnection);

@@ -2,7 +2,7 @@ use super::*;
 use crate::transfer::progress::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
     ProgressExchangeService, ProgressLiveRoundPort, ProgressReceiveError, ProgressSnapshotRead,
-    ProgressSnapshotRoundPort, ProgressSourceCatalog, ProgressSourceTask,
+    ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceCatalog, ProgressSourceTask,
     ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalRoundPort,
 };
 use async_trait::async_trait;
@@ -346,7 +346,7 @@ impl ProgressSnapshotRoundPort for UnusedSnapshot {
     async fn read_snapshot(
         &self,
         _: &DeviceId,
-        _: ProgressSourceTask,
+        _: ProgressSnapshotTarget,
         _: &ProgressExchangeDeadline,
         _: &CancellationToken,
     ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {

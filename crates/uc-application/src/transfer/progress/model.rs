@@ -29,6 +29,8 @@ pub struct ProgressProjectionSnapshot {
     pub summary: ProgressBatchSummary,
     pub version: u64,
     pub bound: Option<ProgressBound>,
+    /// 当前查询或登记确认的任务；查询确认本身不授予通知binding。
+    pub task: Option<ProgressTaskDescriptor>,
     pub items: Vec<(ProgressItem, Option<ProgressItemState>)>,
 }
 

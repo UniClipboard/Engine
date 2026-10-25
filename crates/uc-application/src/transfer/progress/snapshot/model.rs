@@ -1,10 +1,11 @@
-use super::super::ProgressTaskDescriptor;
-use uc_core::file_transfer::{ProgressIdentity, ProgressItemState};
+use super::super::{ProgressSourceTask, ProgressTaskDescriptor};
+use std::sync::Arc;
+use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressItemState};
 
 pub struct ProgressPageRequest {
     pub challenge: ProgressIdentity,
     pub source: ProgressIdentity,
-    pub attempt: ProgressIdentity,
+    pub attempt: Option<ProgressIdentity>,
     pub offset: u16,
     pub revision: Option<u64>,
 }
@@ -46,4 +47,21 @@ pub struct ProgressSnapshotQuery {
     pub attempt: Option<ProgressIdentity>,
     pub offset: u16,
     pub revision: Option<u64>,
+}
+
+/// 原意图完整计划约束查询范围；当前描述尚未确认时不能伪造零值描述。
+#[derive(Clone)]
+pub struct ProgressSnapshotTarget {
+    pub source: ProgressIdentity,
+    pub expected: Option<ProgressTaskDescriptor>,
+    pub items: Arc<[ProgressItem]>,
+}
+impl From<ProgressSourceTask> for ProgressSnapshotTarget {
+    fn from(task: ProgressSourceTask) -> Self {
+        Self {
+            source: task.descriptor.source,
+            expected: Some(task.descriptor),
+            items: task.items,
+        }
+    }
 }

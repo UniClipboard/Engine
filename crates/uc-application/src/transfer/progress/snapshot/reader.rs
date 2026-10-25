@@ -1,4 +1,4 @@
-use super::super::{ProgressExchangeDeadline, ProgressReceiveError, ProgressSourceTask};
+use super::super::{ProgressExchangeDeadline, ProgressReceiveError, ProgressSnapshotTarget};
 use super::{
     ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotRead,
     ProgressSnapshotRoundPort, ProgressSnapshotWirePort,
@@ -29,17 +29,22 @@ impl ProgressSnapshotRoundPort for TransferProgressSnapshotReader {
     async fn read_snapshot(
         &self,
         peer: &DeviceId,
-        expected: ProgressSourceTask,
+        target: ProgressSnapshotTarget,
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
-        let descriptor = expected.descriptor;
-        if !valid_progress_plan(&expected.items)
-            || usize::from(descriptor.item_count) != expected.items.len()
+        let mut descriptor = target.expected;
+        if !valid_progress_plan(&target.items)
+            || descriptor.is_some_and(|descriptor| {
+                descriptor.source != target.source
+                    || usize::from(descriptor.item_count) != target.items.len()
+            })
         {
             return Err(ProgressSnapshotRefusal::InvalidPlan.into());
         }
-        let mut coverage = ProgressSnapshotCoverage::new(descriptor, expected.items.to_vec())?;
+        let mut coverage = descriptor
+            .map(|descriptor| ProgressSnapshotCoverage::new(descriptor, target.items.to_vec()))
+            .transpose()?;
         deadline.check(cancel)?;
         let connection = self
             .manager
@@ -52,7 +57,7 @@ impl ProgressSnapshotRoundPort for TransferProgressSnapshotReader {
             ConnectionProtocol::TransferProgressV1 => return Ok(ProgressSnapshotRead::Unsupported),
             _ => return Err(ProgressReceiveError::Protocol),
         }
-        let mut items = Vec::with_capacity(expected.items.len());
+        let mut items = Vec::with_capacity(target.items.len());
         let mut offset = 0;
         let mut revision = None;
         loop {
@@ -66,8 +71,8 @@ impl ProgressSnapshotRoundPort for TransferProgressSnapshotReader {
                     &connection,
                     ProgressPageRequest {
                         challenge: ProgressIdentity::new(*Uuid::new_v4().as_bytes()),
-                        source: descriptor.source,
-                        attempt: descriptor.attempt,
+                        source: target.source,
+                        attempt: descriptor.map(|descriptor| descriptor.attempt),
                         offset,
                         revision,
                     },
@@ -75,15 +80,15 @@ impl ProgressSnapshotRoundPort for TransferProgressSnapshotReader {
                     cancel,
                 )
                 .await?;
-            // 实际准入／保留读取与本页使用权共存；期限失效后不继续下一页或返回快照。
             self.manager.retain(&connection).await?;
             deadline.check(cancel)?;
             let page = match reply {
                 ProgressPageReply::Current(page) => page,
                 ProgressPageReply::Superseded(page) => {
-                    if page.descriptor.source != descriptor.source
-                        || page.descriptor.attempt == descriptor.attempt
-                    {
+                    if descriptor.is_none_or(|descriptor| {
+                        page.descriptor.source != descriptor.source
+                            || page.descriptor.attempt == descriptor.attempt
+                    }) {
                         return Err(ProgressReceiveError::Protocol);
                     }
                     return Ok(ProgressSnapshotRead::Superseded(page.descriptor));
@@ -93,6 +98,20 @@ impl ProgressSnapshotRoundPort for TransferProgressSnapshotReader {
                 ProgressPageReply::AccessDenied => return Ok(ProgressSnapshotRead::AccessDenied),
                 ProgressPageReply::Busy => return Ok(ProgressSnapshotRead::Busy),
             };
+            if descriptor.is_none() {
+                if page.descriptor.source != target.source
+                    || usize::from(page.descriptor.item_count) != target.items.len()
+                {
+                    return Err(ProgressSnapshotRefusal::DescriptorChanged.into());
+                }
+                descriptor = Some(page.descriptor);
+                coverage = Some(ProgressSnapshotCoverage::new(
+                    page.descriptor,
+                    target.items.to_vec(),
+                )?);
+            }
+            let current = descriptor.ok_or(ProgressReceiveError::Protocol)?;
+            let coverage = coverage.as_mut().ok_or(ProgressReceiveError::Protocol)?;
             if page.items.is_empty() || page.items.len() > MAX_SNAPSHOT_PAGE_ITEMS {
                 return Err(ProgressSnapshotRefusal::PageSize.into());
             }
@@ -120,7 +139,7 @@ impl ProgressSnapshotRoundPort for TransferProgressSnapshotReader {
                 ProgressSnapshotEffect::Complete { revision } => {
                     items.extend(page.items);
                     return Ok(ProgressSnapshotRead::Complete(ProgressSnapshot {
-                        descriptor,
+                        descriptor: current,
                         revision,
                         items,
                     }));

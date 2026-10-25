@@ -3,7 +3,7 @@ use super::clock::{Clock, Sample};
 use super::{
     CurrentProgressTaskPort, ElapsedClockError, ElapsedClockPort, ProgressBound,
     ProgressContactNotice, ProgressProjectionSnapshot, ProgressReceiveError, ProgressReceiverPort,
-    ProgressTerminalNotice, ProgressUpdateNotice,
+    ProgressTaskDescriptor, ProgressTerminalNotice, ProgressUpdateNotice,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -32,6 +32,7 @@ struct State {
     generation: u64,
     registration: ProgressRegistration<ProgressIdentity>,
     bound: Option<ProgressBound>,
+    queried_scope: Option<ProgressTaskDescriptor>,
     snapshot_revision: Option<u64>,
     snapshot_content: Option<Vec<ProgressItemState>>,
     items: HashMap<ProgressItem, ProgressItemProjection>,
@@ -71,6 +72,7 @@ impl TransferProgressReceiver {
                 generation: 0,
                 registration: ProgressRegistration::new(source),
                 bound: None,
+                queried_scope: None,
                 snapshot_revision: None,
                 snapshot_content: None,
                 items: HashMap::new(),
@@ -94,6 +96,7 @@ impl TransferProgressReceiver {
         state.items.clear();
         state.items.shrink_to_fit();
         state.bound = None;
+        state.queried_scope = None;
         state.snapshot_revision = None;
         state.snapshot_content = None;
         state
@@ -143,6 +146,7 @@ impl TransferProgressReceiver {
             summary,
             version: state.version,
             bound: state.bound,
+            task: state.task_descriptor(),
             items,
         }
     }
@@ -287,6 +291,7 @@ impl ProgressReceiverPort for TransferProgressReceiver {
         if usize::from(descriptor.item_count) != state.plan.len() {
             return Err(ProgressReceiveError::InvalidPlan);
         }
+        let previous = state.task_descriptor();
         if state.registration.apply(RegistrationInput::Describe {
             generation,
             nonce,
@@ -296,27 +301,19 @@ impl ProgressReceiverPort for TransferProgressReceiver {
         {
             return Err(ProgressReceiveError::Stale);
         }
-        if state
-            .bound
-            .is_none_or(|previous| previous.descriptor != descriptor)
-        {
+        if previous != Some(descriptor) {
             state.snapshot_revision = None;
             state.snapshot_content = None;
         }
-        if state
-            .bound
-            .is_none_or(|previous| previous.descriptor.attempt != descriptor.attempt)
-        {
+        if previous.is_none_or(|previous| previous.attempt != descriptor.attempt) {
             state.items.clear();
             state.freshness.apply(ProgressFreshnessInput::NewAttempt);
         }
-        if state
-            .bound
-            .is_some_and(|previous| previous.descriptor.producer != descriptor.producer)
-        {
+        if previous.is_some_and(|previous| previous.producer != descriptor.producer) {
             state.freshness.apply(ProgressFreshnessInput::NewProducer);
         }
         state.bound = Some(bound);
+        state.queried_scope = None;
         state.version = state.version.saturating_add(1);
         Ok(bound)
     }

@@ -643,7 +643,8 @@ pub use crate::transfer::progress::{
 pub use crate::transfer::progress::{
     ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotPage,
     ProgressSnapshotProviderPort, ProgressSnapshotQuery, ProgressSnapshotRead,
-    ProgressSnapshotRoundPort, ProgressSnapshotWirePort, TransferProgressSnapshotReader,
+    ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSnapshotWirePort,
+    TransferProgressSnapshotReader,
 };
 
 pub use crate::transfer::progress::ProgressQueryResult;

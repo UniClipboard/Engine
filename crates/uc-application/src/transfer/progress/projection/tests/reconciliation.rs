@@ -1,10 +1,10 @@
-use super::{descriptor, item, key, Clock, Current};
+use super::{descriptor, id, item, key, Clock, Current};
 use crate::transfer::progress::{
     ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline, ProgressExchangeService,
     ProgressLiveRoundPort, ProgressProjectionKey, ProgressProjectionRegistry, ProgressReceiveError,
     ProgressReceiverPort, ProgressSnapshot, ProgressSnapshotRead, ProgressSnapshotRoundPort,
-    ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, TransferProgressReconciler,
+    ProgressSnapshotTarget, ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalNotice, ProgressTerminalRoundPort, TransferProgressReconciler,
 };
 use async_trait::async_trait;
 use futures::poll;
@@ -30,17 +30,25 @@ struct Query {
     values: Mutex<Vec<ProgressItemState>>,
     revision: AtomicU64,
     fail: AtomicBool,
+    remote: Mutex<ProgressTaskDescriptor>,
+    absent: AtomicBool,
 }
 #[async_trait]
 impl ProgressSnapshotRoundPort for Query {
     async fn read_snapshot(
         &self,
         _: &DeviceId,
-        expected: ProgressSourceTask,
+        expected: ProgressSnapshotTarget,
         _: &ProgressExchangeDeadline,
         _: &CancellationToken,
     ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
         let values = self.values.lock().unwrap().clone();
+        let remote = *self.remote.lock().unwrap();
+        let revision = self.revision.load(Ordering::SeqCst);
+        let absent = self.absent.load(Ordering::SeqCst);
+        assert_eq!(expected.source, remote.source);
+        assert!(expected.expected.is_none_or(|expected| expected == remote));
+        assert!(expected.items.iter().copied().eq([item(0), item(1)]));
         self.entered.notify_one();
         self.release.acquire().await.unwrap().forget();
         if self.fail.load(Ordering::SeqCst) {
@@ -48,9 +56,12 @@ impl ProgressSnapshotRoundPort for Query {
                 io::ErrorKind::TimedOut,
             ))));
         }
+        if absent {
+            return Ok(ProgressSnapshotRead::NotRetained);
+        }
         Ok(ProgressSnapshotRead::Complete(ProgressSnapshot {
-            descriptor: expected.descriptor,
-            revision: self.revision.load(Ordering::SeqCst),
+            descriptor: remote,
+            revision,
             items: values,
         }))
     }
@@ -110,28 +121,36 @@ struct Fixture {
     reconciler: Arc<TransferProgressReconciler>,
     query: Arc<Query>,
     key: ProgressProjectionKey,
-    bound: ProgressBound,
+    bound: Option<ProgressBound>,
     clock: Arc<Clock>,
     stop: CancellationToken,
     worker: JoinHandle<()>,
     projection_worker: JoinHandle<()>,
 }
 impl Fixture {
-    async fn new(values: Vec<ProgressItemState>) -> Self {
+    async fn new(values: Vec<ProgressItemState>, registered: bool) -> Self {
         let key = key(1, 1);
         let clock = Arc::new(Clock(AtomicU64::new(0)));
         let (registry, projection_worker) = ProgressProjectionRegistry::new(clock.clone());
         registry.accept_intent(key, vec![item(0), item(1)]).unwrap();
-        let bound = registry
-            .register(&key.peer, 1, key.source, &mut Current(descriptor(key, 2)))
-            .await
-            .unwrap();
+        let bound = if registered {
+            Some(
+                registry
+                    .register(&key.peer, 1, key.source, &mut Current(descriptor(key, 2)))
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
         let query = Arc::new(Query {
             entered: Notify::new(),
             release: Semaphore::new(0),
             values: Mutex::new(values),
             revision: AtomicU64::new(1),
             fail: AtomicBool::new(false),
+            remote: Mutex::new(descriptor(key, 2)),
+            absent: AtomicBool::new(false),
         });
         let (service, worker) = ProgressExchangeService::new(
             clock.clone(),
@@ -201,7 +220,7 @@ fn active(index: u16, sequence: u64, bytes: u64) -> ProgressItemState {
 }
 #[tokio::test]
 async fn complete_reconciliation_recovers_lost_events_and_publishes_one_complete_snapshot() {
-    let fixture = Fixture::new(vec![terminal(0), terminal(1)]).await;
+    let fixture = Fixture::new(vec![terminal(0), terminal(1)], true).await;
     let mut events = fixture.registry.subscribe();
     assert!(fixture
         .registry
@@ -231,7 +250,7 @@ async fn conflicting_later_item_rejects_whole_snapshot_without_adopting_earlier_
     if let ProgressItemState::Terminal(value) = &mut conflict {
         value.outcome = ProgressTerminalOutcome::Failed(ProgressFailureReason::Unknown);
     }
-    let fixture = Fixture::new(vec![terminal(0), conflict]).await;
+    let fixture = Fixture::new(vec![terminal(0), conflict], true).await;
     let ProgressItemState::Terminal(known) = terminal(1) else {
         unreachable!();
     };
@@ -241,10 +260,10 @@ async fn conflicting_later_item_rejects_whole_snapshot_without_adopting_earlier_
             &fixture.key.peer,
             1,
             ProgressTerminalNotice {
-                binding: fixture.bound.binding,
+                binding: fixture.bound.unwrap().binding,
                 source: fixture.key.source,
-                attempt: fixture.bound.descriptor.attempt,
-                revision: fixture.bound.descriptor.revision,
+                attempt: fixture.bound.unwrap().descriptor.attempt,
+                revision: fixture.bound.unwrap().descriptor.revision,
                 result: known,
             },
         )
@@ -268,7 +287,7 @@ async fn conflicting_later_item_rejects_whole_snapshot_without_adopting_earlier_
 #[tokio::test]
 async fn delayed_query_cannot_repopulate_replaced_removed_or_closed_intent() {
     for action in 0..3 {
-        let fixture = Fixture::new(vec![terminal(0), terminal(1)]).await;
+        let fixture = Fixture::new(vec![terminal(0), terminal(1)], true).await;
         let owner = fixture.reconciler.clone();
         let key = fixture.key;
         let querying =
@@ -309,7 +328,7 @@ async fn delayed_query_cannot_repopulate_replaced_removed_or_closed_intent() {
 }
 #[tokio::test]
 async fn repeated_snapshot_does_not_extend_contact_and_same_revision_cannot_change_its_content() {
-    let fixture = Fixture::new(vec![active(0, 1, 1), active(1, 1, 1)]).await;
+    let fixture = Fixture::new(vec![active(0, 1, 1), active(1, 1, 1)], true).await;
     assert!(fixture.refresh().await.is_ok());
     fixture.clock.0.store(60, Ordering::SeqCst);
     assert!(fixture.refresh().await.is_ok());
@@ -339,7 +358,7 @@ async fn repeated_snapshot_does_not_extend_contact_and_same_revision_cannot_chan
 }
 #[tokio::test]
 async fn failed_reconciliation_keeps_typed_source_and_never_invents_missing_data_or_downloads() {
-    let fixture = Fixture::new(vec![terminal(0), terminal(1)]).await;
+    let fixture = Fixture::new(vec![terminal(0), terminal(1)], true).await;
     fixture.query.fail.store(true, Ordering::SeqCst);
     let before = fixture.registry.snapshot(fixture.key).unwrap();
     let result = fixture.refresh().await;
@@ -363,44 +382,151 @@ async fn failed_reconciliation_keeps_typed_source_and_never_invents_missing_data
 
 #[tokio::test]
 async fn new_same_key_intent_never_shares_old_inflight_query_even_when_remote_descriptor_matches() {
-    let fixture = Fixture::new(vec![active(0, 1, 1), active(1, 1, 1)]).await;
-    let owner = fixture.reconciler.clone();
-    let key = fixture.key;
-    let old = tokio::spawn(async move { owner.refresh(key, &CancellationToken::new()).await });
-    timeout(Duration::from_secs(2), fixture.query.entered.notified())
-        .await
-        .unwrap();
-    fixture.registry.remove(key);
-    fixture
-        .registry
-        .accept_intent(key, vec![item(0), item(1)])
-        .unwrap();
-    fixture
-        .registry
-        .register(&key.peer, 1, key.source, &mut Current(descriptor(key, 2)))
-        .await
-        .unwrap();
-    *fixture.query.values.lock().unwrap() = vec![terminal(0), terminal(1)];
-    let cancel = CancellationToken::new();
-    let mut new = Box::pin(fixture.reconciler.refresh(key, &cancel));
-    assert!(poll!(new.as_mut()).is_pending());
-    fixture.query.release.add_permits(1);
-    let old = timeout(Duration::from_secs(2), old).await.unwrap().unwrap();
-    assert!(matches!(old.as_ref(), Err(ProgressReceiveError::Stale)));
-    timeout(Duration::from_secs(2), fixture.query.entered.notified())
-        .await
-        .expect("new intent must start a new actual query");
-    fixture.query.release.add_permits(1);
-    assert!(timeout(Duration::from_secs(2), new).await.unwrap().is_ok());
-    assert_eq!(
+    for registered in [true, false] {
+        let fixture = Fixture::new(vec![active(0, 1, 1), active(1, 1, 1)], registered).await;
+        let owner = fixture.reconciler.clone();
+        let key = fixture.key;
+        let old = tokio::spawn(async move { owner.refresh(key, &CancellationToken::new()).await });
+        timeout(Duration::from_secs(2), fixture.query.entered.notified())
+            .await
+            .unwrap();
+        fixture.registry.remove(key);
         fixture
             .registry
-            .snapshot(key)
-            .unwrap()
-            .summary
-            .counts
-            .completed,
-        2
-    );
+            .accept_intent(key, vec![item(0), item(1)])
+            .unwrap();
+        if registered {
+            fixture
+                .registry
+                .register(&key.peer, 1, key.source, &mut Current(descriptor(key, 2)))
+                .await
+                .unwrap();
+        }
+        *fixture.query.values.lock().unwrap() = vec![terminal(0), terminal(1)];
+        let cancel = CancellationToken::new();
+        let mut new = Box::pin(fixture.reconciler.refresh(key, &cancel));
+        assert!(poll!(new.as_mut()).is_pending());
+        fixture.query.release.add_permits(1);
+        let old = timeout(Duration::from_secs(2), old).await.unwrap().unwrap();
+        assert!(matches!(old.as_ref(), Err(ProgressReceiveError::Stale)));
+        timeout(Duration::from_secs(2), fixture.query.entered.notified())
+            .await
+            .expect("new intent must start a new actual query");
+        fixture.query.release.add_permits(1);
+        assert!(timeout(Duration::from_secs(2), new).await.unwrap().is_ok());
+        assert_eq!(
+            fixture
+                .registry
+                .snapshot(key)
+                .unwrap()
+                .summary
+                .counts
+                .completed,
+            2
+        );
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn initial_query_discovers_actual_scope_without_granting_a_notification_binding() {
+    let fixture = Fixture::new(vec![terminal(0), terminal(1)], false).await;
+    let initial = fixture.registry.snapshot(fixture.key).unwrap();
+    assert!(initial.bound.is_none() && initial.task.is_none());
+    assert!(fixture.refresh().await.is_ok());
+    let verified = fixture.registry.snapshot(fixture.key).unwrap();
+    assert!(verified.bound.is_none());
+    assert!(verified.task == Some(descriptor(fixture.key, 2)));
+    assert_eq!(verified.summary.counts.completed, 2);
+    let ProgressItemState::Terminal(result) = terminal(0) else {
+        unreachable!();
+    };
+    assert!(matches!(
+        fixture
+            .registry
+            .adopt_terminal(
+                &fixture.key.peer,
+                1,
+                ProgressTerminalNotice {
+                    binding: id(999),
+                    source: fixture.key.source,
+                    attempt: descriptor(fixture.key, 2).attempt,
+                    revision: 1,
+                    result,
+                }
+            )
+            .await,
+        Err(ProgressReceiveError::Stale)
+    ));
+    fixture
+        .registry
+        .register(
+            &fixture.key.peer,
+            1,
+            fixture.key.source,
+            &mut Current(descriptor(fixture.key, 2)),
+        )
+        .await
+        .unwrap();
+    let registered = fixture.registry.snapshot(fixture.key).unwrap();
+    assert!(registered.bound.is_some());
+    assert_eq!(registered.items, verified.items);
+    assert_eq!(registered.summary.counts.completed, 2);
     fixture.shutdown().await;
+}
+#[tokio::test]
+async fn initial_missing_query_keeps_the_original_waiting_intent_without_inventing_a_task() {
+    let fixture = Fixture::new(vec![terminal(0), terminal(1)], false).await;
+    fixture.query.absent.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        fixture.refresh().await.as_ref(),
+        Ok(ProgressSnapshotRead::NotRetained)
+    ));
+    let current = fixture.registry.snapshot(fixture.key).unwrap();
+    assert!(current.task.is_none() && current.bound.is_none());
+    assert!(current.items.iter().all(|(_, item)| item.is_none()));
+    assert_eq!(current.freshness.unwrap(), ProgressFreshnessView::Waiting);
+    fixture.shutdown().await;
+}
+#[tokio::test]
+async fn initial_query_cannot_replace_a_different_scope_registered_while_it_was_waiting() {
+    for same in [true, false] {
+        let fixture = Fixture::new(vec![terminal(0), terminal(1)], false).await;
+        let owner = fixture.reconciler.clone();
+        let key = fixture.key;
+        let querying =
+            tokio::spawn(async move { owner.refresh(key, &CancellationToken::new()).await });
+        timeout(Duration::from_secs(2), fixture.query.entered.notified())
+            .await
+            .unwrap();
+        let current = if same {
+            descriptor(key, 2)
+        } else {
+            ProgressTaskDescriptor {
+                attempt: id(1011),
+                revision: 2,
+                ..descriptor(key, 2)
+            }
+        };
+        fixture
+            .registry
+            .register(&key.peer, 1, key.source, &mut Current(current))
+            .await
+            .unwrap();
+        fixture.query.release.add_permits(1);
+        let reply = timeout(Duration::from_secs(2), querying)
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = fixture.registry.snapshot(key).unwrap();
+        assert!(snapshot.task == Some(current));
+        if same {
+            assert!(reply.is_ok());
+            assert_eq!(snapshot.summary.counts.completed, 2);
+        } else {
+            assert!(matches!(reply.as_ref(), Err(ProgressReceiveError::Stale)));
+            assert!(snapshot.items.iter().all(|(_, value)| value.is_none()));
+        }
+        fixture.shutdown().await;
+    }
 }

@@ -5,9 +5,9 @@ use crate::transfer::progress::clock::Clock as SharedClock;
 use crate::transfer::progress::ProgressLiveRoundPort;
 use crate::transfer::progress::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
-    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSourceCatalog,
-    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
-    ProgressTerminalRoundPort,
+    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotTarget,
+    ProgressSourceCatalog, ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort,
+    ProgressTaskDescriptor, ProgressTerminalRoundPort,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -568,7 +568,7 @@ impl ProgressSnapshotRoundPort for UnusedSnapshot {
     async fn read_snapshot(
         &self,
         _: &DeviceId,
-        _: ProgressSourceTask,
+        _: ProgressSnapshotTarget,
         _: &ProgressExchangeDeadline,
         _: &CancellationToken,
     ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
