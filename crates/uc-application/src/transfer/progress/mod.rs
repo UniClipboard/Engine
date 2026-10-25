@@ -19,7 +19,7 @@ pub use model::{
 };
 pub use ports::{
     CurrentProgressTaskPort, ProgressReceiverPort, ProgressTaskAuthorityPort,
-    ProgressTerminalRoundPort, ProgressWirePort,
+    ProgressTerminalRoundPort, ProgressUnattributedReceiverPort, ProgressWirePort,
 };
 pub use receiver::TransferProgressReceiver;
 pub(crate) use source::ProgressSourceCatalog;

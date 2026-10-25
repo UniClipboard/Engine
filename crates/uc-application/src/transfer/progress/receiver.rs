@@ -412,3 +412,6 @@ fn refresh_view(clock: &Clock, state: &mut State) -> ProgressFreshnessView {
 
 #[path = "receiver_snapshot.rs"]
 mod snapshot_adoption;
+
+#[path = "receiver_unattributed.rs"]
+mod unattributed;

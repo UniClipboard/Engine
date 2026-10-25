@@ -12,6 +12,73 @@ fn descriptor(producer: u8, revision: u64, attempt: u8) -> RegistrationDescripto
 }
 
 #[test]
+fn unattributed_notice_does_not_grant_a_binding_or_consume_the_pending_challenge() {
+    let mut owner = ProgressRegistration::new(1);
+    assert_eq!(
+        owner.apply(Input::UnattributedNotification { source: 9 }),
+        Effect::Refused(Refusal::WrongSource)
+    );
+    owner.apply(Input::ReplaceConnection { generation: 1 });
+    owner.apply(Input::Challenge {
+        generation: 1,
+        nonce: 10,
+    });
+    assert_eq!(
+        owner.apply(Input::UnattributedNotification { source: 1 }),
+        Effect::MarkUnconfirmed
+    );
+    assert_eq!(
+        owner.apply(Input::Notification {
+            generation: 1,
+            binding: 10,
+            source: 1,
+            attempt: 3,
+            revision: 8,
+        }),
+        Effect::Refused(Refusal::WrongBinding)
+    );
+    assert_eq!(
+        owner.apply(Input::Describe {
+            generation: 1,
+            nonce: 10,
+            binding: 10,
+            descriptor: descriptor(2, 8, 3),
+        }),
+        Effect::SendBound
+    );
+}
+
+#[test]
+fn unattributed_notice_cannot_replace_a_registered_or_queried_task_even_after_reconnect() {
+    for queried in [false, true] {
+        let mut owner = ProgressRegistration::new(1);
+        owner.apply(Input::ReplaceConnection { generation: 1 });
+        if queried {
+            assert_eq!(
+                owner.apply(Input::QueryVerified {
+                    descriptor: descriptor(2, 8, 3)
+                }),
+                Effect::QueryVerified
+            );
+        } else {
+            assert_eq!(
+                bind(&mut owner, 1, 10, descriptor(2, 8, 3)),
+                Effect::SendBound
+            );
+        }
+        for generation in [1, 2] {
+            if generation == 2 {
+                owner.apply(Input::ReplaceConnection { generation });
+            }
+            assert_eq!(
+                owner.apply(Input::UnattributedNotification { source: 1 }),
+                Effect::Refused(Refusal::ConfirmedTask)
+            );
+        }
+    }
+}
+
+#[test]
 fn owner_revision_orders_only_one_producer_and_same_revision_freezes_the_full_descriptor() {
     let previous = descriptor(2, 8, 3);
     for (current, expected) in [

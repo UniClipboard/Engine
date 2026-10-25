@@ -52,7 +52,25 @@ Application [模块入口](../../crates/uc-application/src/transfer/progress/mod
 旧终态帧即使传输结束，完整终态动作仍返回Unsupported，表示无法取得新版业务采用确认；原监督器停止该结果补发，
 不记作已确认送达。Contact与普通Update可以完成旧一轮传输，不产生业务ACK。
 当前已证明真实专属profile的批次通知、读取边界，以及实际接收失败清理后的最大原始计划汇总。
-生产Router／接收hook迁移、入站旧进度的保守投影及完整新旧设备矩阵继续按执行计划完成。
+生产Router／接收hook迁移及完整新旧设备矩阵继续按执行计划完成。
+
+## 显式旧协议的保守入站通知
+
+[旧版入站动作](../../crates/uc-infra-p2p/src/network/iroh/transfer_progress_v2/legacy.rs)仅接受实际协商为`/1`的受管单向流。
+旧34字节帧与精确FIN共同使用原交换期限；损坏、截断或尾随字节不开始Application采用，
+FIN等待后重新核对原连接、当前成员与会话资格、取消及期限。`/2`连接不能通过此动作解释为旧协议。
+
+旧帧缺少尝试、producer、修订及逻辑项关联，因此只把认证设备和源条目交给同一投影负责人的
+`ProgressUnattributedReceiverPort`完整动作。网络消息不能创建意图；只有原完整发送动作已经接受且仍保留、
+尚未被登记或完整查询确认的意图，才能显示结果未确认。旧字节、总量和粗粒度终态不进入逐项事实，不刷新有效联系。
+
+[Core登记围栏](../../crates/uc-core/src/file_transfer/progress_registration.rs)拒绝这类通知覆盖已登记或查询确认的任务；
+查询没有通知binding、连接更换后保留描述时也一样。无关联通知不消耗待完成挑战；后续真实登记与有效活动仍可正常采用。
+[原接收负责人](../../crates/uc-application/src/transfer/progress/receiver_unattributed.rs)在同一投影锁内保存未确认程度，
+注册表沿用原删除、退休、封口及变化发布围栏。重复旧通知不重复发布，未知或已删除意图不被重建。
+
+已开始的Application能力继续持有同一单向流工作许可直到实际结束，取消或网络期限不遗弃本机采用；失败保留完整source。
+此动作不发ACK，不据传输FIN确认业务结果。当前实现属于受管profile原型，生产Router、稳定宿主映射和完整新旧矩阵仍须单独验收。
 
 ## 帧边界和观测载体
 

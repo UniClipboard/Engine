@@ -636,8 +636,8 @@ pub use crate::transfer::progress::{
     ProgressExchangeService, ProgressExchangeWorker, ProgressProjectionSnapshot,
     ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask, ProgressSubmission,
     ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, ProgressWirePort, TransferProgressProducer,
-    TransferProgressReceiver,
+    ProgressTerminalRoundPort, ProgressUnattributedReceiverPort, ProgressWirePort,
+    TransferProgressProducer, TransferProgressReceiver,
 };
 
 pub use crate::transfer::progress::{
