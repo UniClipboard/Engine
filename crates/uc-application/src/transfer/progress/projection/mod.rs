@@ -3,6 +3,7 @@ mod handle;
 mod model;
 mod receive;
 mod refresh;
+mod unattributed;
 pub use refresh::TransferProgressReconciler;
 mod worker;
 pub use handle::ProgressProjectionRegistry;

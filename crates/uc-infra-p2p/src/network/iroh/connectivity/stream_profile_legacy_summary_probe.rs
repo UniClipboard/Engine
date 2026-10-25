@@ -328,3 +328,6 @@ async fn legacy_update_uses_current_batch_facts_instead_of_the_single_callback_v
 }
 #[path = "stream_profile_legacy_source_probe.rs"]
 mod source_probe;
+
+#[path = "stream_profile_legacy_inbound_probe.rs"]
+mod inbound_probe;

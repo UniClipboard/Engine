@@ -53,6 +53,17 @@ pub trait ProgressReceiverPort: Send + Sync {
     ) -> Result<ProgressTerminalNotice, ProgressReceiveError>;
 }
 
+/// 缺少尝试关联的完整通知动作；只更新既有未确认意图，不采用字节或结果。
+/// 原意图、已确认任务及退休围栏由同一投影负责人统一核对。
+#[async_trait]
+pub trait ProgressUnattributedReceiverPort: Send + Sync {
+    async fn observe_unattributed(
+        &self,
+        peer: &DeviceId,
+        source: ProgressIdentity,
+    ) -> Result<(), ProgressReceiveError>;
+}
+
 /// 只查询已接受的当前接收尝试；原始计划在接受时已完整核验且同一描述下不可变。
 /// 每次新挑战都重新读取，不捕获旧任务快照。
 /// None只表示本运行期未保留可授权关联，不推断任务失败或文件缺失。

@@ -41,6 +41,10 @@ pub struct ProgressRegistration<I> {
 }
 
 pub enum RegistrationInput<I> {
+    /// 缺少尝试关联的通知只能影响尚未确认的原意图，不能授予任务身份。
+    UnattributedNotification {
+        source: I,
+    },
     /// 当前认证查询已完整核对原始计划；不能据此授予通知绑定。
     QueryVerified {
         descriptor: RegistrationDescriptor<I>,
@@ -69,6 +73,7 @@ pub enum RegistrationInput<I> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationRefusal {
+    ConfirmedTask,
     RetiredConnection,
     StaleChallenge,
     WrongSource,
@@ -81,6 +86,8 @@ pub enum RegistrationRefusal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationEffect {
+    /// 调用方先保存未确认视图，再发布变化；不得采用逐项事实、绑定或刷新联系。
+    MarkUnconfirmed,
     /// 保存初始查询描述后才可发布完整事实；待完成挑战仍受该描述围栏约束，不发送Bound。
     QueryVerified,
     /// 保存新世代后，停止旧连接交换；保留既知描述用于修订判定。
@@ -109,6 +116,15 @@ impl<I: Copy + Eq> ProgressRegistration<I> {
 
     pub fn apply(&mut self, input: RegistrationInput<I>) -> RegistrationEffect {
         match input {
+            Input::UnattributedNotification { source } => {
+                if source != self.source {
+                    return Effect::Refused(Refusal::WrongSource);
+                }
+                if self.descriptor.is_some() {
+                    return Effect::Refused(Refusal::ConfirmedTask);
+                }
+                Effect::MarkUnconfirmed
+            }
             Input::QueryVerified { descriptor } => {
                 if descriptor.source != self.source {
                     return Effect::Refused(Refusal::WrongSource);
