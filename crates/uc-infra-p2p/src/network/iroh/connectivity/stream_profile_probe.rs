@@ -234,6 +234,7 @@ async fn real_backend_progress_profile_adopts_terminal_and_reuses_current_retain
             outbound.clone(),
             Arc::new(TransferProgressWire),
             Arc::new(Authority),
+            Arc::new(UnusedSnapshotProvider),
             Arc::new(SystemElapsedClock),
         );
         let result = ProgressTerminal {
@@ -365,3 +366,8 @@ impl ProfilePair {
         Ok(())
     }
 }
+
+#[path = "stream_profile_legacy_summary_probe.rs"]
+mod legacy_summary_probe;
+
+pub(super) use legacy_summary_probe::LegacyPair;

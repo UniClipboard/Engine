@@ -1,4 +1,5 @@
 //! 完整帧已到达而FIN仍在途时，旧准入不能授权请求结束后的业务采用或读取。
+use super::UnusedSnapshotProvider;
 use super::{denied, descriptor, item, progress_budget, Authority, MemoryPair, Snapshot};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -51,6 +52,7 @@ async fn ended_request_keeps_current_authority(operation: Operation) -> anyhow::
             Arc::new(Authority {
                 peer: pair.sender_id,
             }),
+            Arc::new(UnusedSnapshotProvider),
             Arc::new(SystemElapsedClock),
         );
         let receive = async {

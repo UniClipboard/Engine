@@ -1,3 +1,5 @@
+use crate::file_transfer::OutboundProgressStatus;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProgressBatchCounts {
     pub total: usize,
@@ -29,4 +31,12 @@ pub enum ProgressBatchState {
 pub struct ProgressBatchSummary {
     pub state: ProgressBatchState,
     pub counts: ProgressBatchCounts,
+}
+
+/// 完整批次的粗粒度通知；实际终态与字节汇总来自同一组已校验事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboundProgressSummary {
+    pub bytes: u64,
+    pub total: Option<u64>,
+    pub status: OutboundProgressStatus,
 }

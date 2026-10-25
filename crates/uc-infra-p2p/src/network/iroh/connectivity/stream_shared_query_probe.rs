@@ -208,6 +208,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
                 second.outbound.clone(),
                 Arc::new(TransferProgressWire),
                 authority,
+                Arc::new(UnusedSnapshotProvider),
                 clock.clone(),
             ),
             counts: counts.clone(),

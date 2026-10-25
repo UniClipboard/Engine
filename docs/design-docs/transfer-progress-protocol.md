@@ -32,6 +32,28 @@ Application [模块入口](../../crates/uc-application/src/transfer/progress/mod
 测试放在所属规则、采用、投影、调度和真实流fixture内，预算交叉验收仍只使用测试依赖。
 上述模块边界已实现；生产Router／通知hook、稳定宿主映射和Engine装配迁移继续按执行计划完成，不能由模块组织验收代替。
 
+## 显式旧协议的完整出站通知
+
+[完整通知负责人](../../crates/uc-application/src/transfer/progress/producer.rs)只在受管连接实际协商为`/1`时使用
+[兼容流程](../../crates/uc-application/src/transfer/progress/producer/legacy.rs)。调用方继续提交原Contact、Update或终态动作，
+不汇总单项、不拼装单向流；`/2`上的拒绝、畸形帧、超时或授权失败不会触发旧协议发送。
+登记与任务核对仍对旧协议明确返回Unsupported，不伪造binding、挑战响应或结果ACK。
+
+兼容流程读取同一原接收负责人的`ProgressSnapshotProviderPort`，用原计划、描述、内容修订和分页覆盖规则取得完整事实，
+再由[Core批次通知规则](../../crates/uc-core/src/file_transfer/progress_summary/rules.rs)生成粗粒度状态和字节汇总。
+仍有等待、传输、重试或本地处理项时保持InProgress；全部真实完成才Completed；全部结算后，失败优先于取消，
+末项成功不能覆盖前项失败。取消原因一致时保留原原因，混合原因归Unknown；任一总量未知或不可表示时保持未知，
+字节总和不可表示时拒绝本轮，不截断成较小的已完成批次。
+
+读取、等待实际本机能力与单向发送共用原截止、取消及当前成员／会话围栏。旧单向流使用原`ConnectionLease`与工作许可，
+成功路径完成原帧及传输结算后才释放，不建立原生连接缓存或独立业务重试循环。已经开始的本机读取监督到实际结束；
+取消、到期或原尝试退休后不补发旧帧，读取失败保留source。
+
+旧终态帧即使传输结束，完整终态动作仍返回Unsupported，表示无法取得新版业务采用确认；原监督器停止该结果补发，
+不记作已确认送达。Contact与普通Update可以完成旧一轮传输，不产生业务ACK。
+当前已证明真实专属profile的批次通知、读取边界，以及实际接收失败清理后的最大原始计划汇总。
+生产Router／接收hook迁移、入站旧进度的保守投影及完整新旧设备矩阵继续按执行计划完成。
+
 ## 帧边界和观测载体
 
 一帧为：

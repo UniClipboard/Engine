@@ -1,4 +1,5 @@
 //! 完整通知动作不能在本地权威读取之后重新取得另一会话的准入基线。
+use super::UnusedSnapshotProvider;
 use super::{descriptor, item, progress_budget, terminal, Authority, MemoryPair};
 use crate::network::iroh::transfer_progress_v2::TransferProgressWire;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +91,7 @@ async fn old_action_keeps_its_original_session(operation: Operation) -> anyhow::
         pair.receiver.clone(),
         Arc::new(TransferProgressWire),
         authority.clone(),
+        Arc::new(UnusedSnapshotProvider),
         Arc::new(SystemElapsedClock),
     );
     let target = pair.sender_id;

@@ -129,7 +129,7 @@ async fn queued_query_keeps_original_session_and_a_later_explicit_query_can_use_
         registry.accept_intent(key, (0..65).map(item).collect())?;
         let cancel = CancellationToken::new();
         let projections = tokio::spawn(projection_worker.run(cancel.clone()));
-        let producer = TransferProgressProducer::new(pair.receiver.clone(), Arc::new(TransferProgressWire), Arc::new(Authority { peer: pair.sender_id }), clock.clone());
+        let producer = TransferProgressProducer::new(pair.receiver.clone(), Arc::new(TransferProgressWire), Arc::new(Authority { peer: pair.sender_id }), Arc::new(UnusedSnapshotProvider), clock.clone());
         let register = async { producer.register_current(&pair.sender_id, SOURCE, &cancel).await?; anyhow::Ok(()) };
         let serve = async { TransferProgressInbound::serve(pair.at_sender.accept_bi().await?, &pair.at_sender, 1, progress_budget(), &cancel, &registry, &UnusedSnapshotProvider).await?; anyhow::Ok(()) };
         tokio::try_join!(register, serve)?;

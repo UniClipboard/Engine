@@ -1,5 +1,5 @@
 //! 新挑战到达后才从当前接收负责人取得描述；只做有界交换和精确回显检查。
-use super::io::{invalid, Exchange};
+use super::io::{failed, invalid, Exchange};
 use super::mapping::{
     descriptor, identity, outgoing_contact, outgoing_terminal, outgoing_update, terminal,
     wire_descriptor,
@@ -8,16 +8,52 @@ use super::rejection;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    ConnectionLease, ProgressBound, ProgressContactNotice, ProgressExchangeDeadline,
-    ProgressReceiveError, ProgressTaskAuthorityPort, ProgressTerminalNotice, ProgressUpdateNotice,
-    ProgressWirePort, StreamLease,
+    ConnectionLease, PeerSendStream, ProgressBound, ProgressContactNotice,
+    ProgressExchangeDeadline, ProgressReceiveError, ProgressTaskAuthorityPort,
+    ProgressTerminalNotice, ProgressUpdateNotice, ProgressWirePort, StreamLease, UniStreamLease,
 };
-use uc_core::file_transfer::ProgressIdentity;
+use uc_core::file_transfer::{OutboundProgressSummary, ProgressIdentity};
 use uc_sync_protocol::transfer_progress::v2::{Message, WireId};
+use uc_sync_protocol::transfer_progress::{write_frame, ProgressFrame};
 
 pub struct TransferProgressWire;
 #[async_trait]
 impl ProgressWirePort for TransferProgressWire {
+    async fn summary(
+        &self,
+        stream: &mut UniStreamLease<Box<dyn PeerSendStream>>,
+        connection: &ConnectionLease,
+        source: ProgressIdentity,
+        summary: OutboundProgressSummary,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        connection.check_current().await?;
+        deadline.check(cancel)?;
+        let frame = ProgressFrame {
+            transfer_id_bytes: source.bytes(),
+            bytes_transferred: summary.bytes,
+            total_bytes: summary.total,
+            status: summary.status,
+        };
+        deadline
+            .network(
+                async {
+                    write_frame(&mut stream.stream, &frame)
+                        .await
+                        .map_err(failed)?;
+                    stream.stream.finish()?;
+                    // 原生流的数据确认只完成传输；业务采用仍没有ACK。
+                    stream.stream.settled().await?;
+                    Ok(())
+                },
+                cancel,
+            )
+            .await?;
+        connection.check_current().await?;
+        deadline.check(cancel)
+    }
+
     async fn contact(
         &self,
         stream: &mut StreamLease,
