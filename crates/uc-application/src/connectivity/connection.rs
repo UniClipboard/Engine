@@ -102,8 +102,16 @@ impl ConnectionLease {
         }
         if let Some(request) = &self.request {
             request.check_current().await?;
+            if self.record.stop.is_cancelled() {
+                return Err(ConnectivityError::Stopped);
+            }
         }
-        self.record.grant.check_current().await
+        self.record.grant.check_current().await?;
+        // 等实际读取结束后再封住旧会话的成功；读取失败仍保留原始source。
+        if self.record.stop.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
+        Ok(())
     }
     pub(super) fn claim_exchange(&self) -> Result<(), ConnectivityError> {
         if matches!(

@@ -1707,3 +1707,6 @@ async fn identity_lookup_scope_cannot_gain_a_fresh_grant_after_revocation_or_ses
 
 #[path = "retention_tests.rs"]
 mod retention_tests;
+
+#[path = "authority_session_tests.rs"]
+mod authority_session;

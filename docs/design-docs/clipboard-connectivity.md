@@ -29,6 +29,7 @@ Application 的 [`connectivity`](../../crates/uc-application/src/connectivity/) 
 断开会话后，即使 manager 再次接受工作，旧请求也不能启动。共用建连者的连接不替换调用者的快照：
 开流前先检查请求快照，再检查连接 grant 的当前成员权威。旧请求不能借用移除再添加之后的新连接，
 拒绝旧请求也不会关闭仍有效的新世代连接。当前成员拒绝、读取异常或连接授权失效由 grant 关闭整个连接。
+租约核对在每次异步请求资格／连接grant读取成功后复核原会话停止标记。会话在请求读取期间退休时，不再补启动grant读取；在grant读取期间退休时，等实际读取结束后返回Stopped。实际读取失败保留原source，不能被会话关闭覆盖成成功或无来源停止。
 
 Iroh admission 复用原身份目录、成员权威和同一 `AdmittedConnections`，不创建第二份授权表。
 登记与撤销 epoch 保持原子围栏，迟到拨号和待排队请求都不能跨越撤销。
