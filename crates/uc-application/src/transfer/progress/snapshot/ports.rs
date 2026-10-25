@@ -1,5 +1,5 @@
 use super::super::{ProgressExchangeDeadline, ProgressReceiveError, ProgressSourceTask};
-use super::{ProgressPageReply, ProgressPageRequest, ProgressSnapshotRead};
+use super::{ProgressPageReply, ProgressPageRequest, ProgressSnapshotQuery, ProgressSnapshotRead};
 use crate::connectivity::{ConnectionLease, StreamLease};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -26,5 +26,15 @@ pub trait ProgressSnapshotWirePort: Send + Sync {
         request: ProgressPageRequest,
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
+    ) -> Result<ProgressPageReply, ProgressReceiveError>;
+}
+
+/// 原接收负责人生成当前实际状态的一页；完整计划、内容修订与退休由同一负责人管理。
+#[async_trait]
+pub trait ProgressSnapshotProviderPort: Send + Sync {
+    async fn snapshot_page(
+        &self,
+        peer: &DeviceId,
+        query: ProgressSnapshotQuery,
     ) -> Result<ProgressPageReply, ProgressReceiveError>;
 }

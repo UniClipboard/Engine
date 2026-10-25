@@ -1,4 +1,5 @@
 //! 同一接收设备、两个真实已认证来源；一个终态采用卡住时另端仍获得精确ACK。
+use super::progress_probe::UnusedSnapshotProvider;
 use super::progress_probe::{progress_budget, Fixture, UnusedLive};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
@@ -175,6 +176,7 @@ async fn serve_pair(
             progress_budget(),
             &stop,
             owner.as_ref(),
+            &UnusedSnapshotProvider,
         )
         .await?;
     }

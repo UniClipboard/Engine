@@ -16,6 +16,7 @@ use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::{EntryReceiveProgress, ReceiveItemKind, TrackedFileTransferStatus};
 use uc_core::MimeType;
 
+mod progress_snapshot;
 mod projection;
 
 /// 原包只在尚未保存条目时需要；保存后从既有密文快照重建正文。
@@ -47,7 +48,7 @@ pub(crate) struct PlannedReceiveItem {
     pub(crate) kind: ReceiveItemKind,
     pub(crate) blob_index: usize,
     pub(super) members: usize,
-    pub(super) bytes: u64,
+    pub(in crate::transfer::receive) bytes: u64,
 }
 
 pub(super) struct ReceiveReceipt {
@@ -289,6 +290,9 @@ impl ReceiveAction {
         else {
             return;
         };
+        if complete {
+            progress.fully_persisted.store(true, Ordering::Release);
+        }
         if complete && receipt.landed.is_empty() {
             state.receipts.remove(&progress.entry);
             return;

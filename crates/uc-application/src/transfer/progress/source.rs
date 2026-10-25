@@ -1,10 +1,14 @@
 //! 已接受接收尝试的运行期权威；不持久化来源材料，不按 UUID 大小排序。
-use super::{ProgressClaimRefusal, ProgressSourceTask, ProgressTaskDescriptor};
+use super::{ProgressClaimRefusal, ProgressSnapshot, ProgressSourceTask, ProgressTaskDescriptor};
 use std::collections::HashMap;
 use std::sync::Arc;
-use uc_core::file_transfer::{valid_progress_plan, ProgressIdentity, ProgressItem};
+use uc_core::file_transfer::{
+    valid_progress_plan, ProgressIdentity, ProgressItem, ProgressItemState,
+};
 use uc_core::ids::{DeviceId, EntryId};
 use uuid::Uuid;
+
+mod snapshot;
 
 const GLOBAL_CAPACITY: usize = 256;
 const PEER_CAPACITY: usize = 64;
@@ -12,11 +16,14 @@ type SourceKey = (DeviceId, ProgressIdentity);
 struct AcceptedTask {
     local_entry: EntryId,
     task: ProgressSourceTask,
+    snapshot: Option<Arc<ProgressSnapshot>>,
+    retained_states: Option<Vec<ProgressItemState>>,
 }
 
 pub(crate) struct ProgressSourceCatalog {
     producer: ProgressIdentity,
     revision: u64,
+    snapshot_revision: u64,
     exhausted: bool,
     tasks: HashMap<SourceKey, AcceptedTask>,
 }
@@ -25,6 +32,7 @@ impl Default for ProgressSourceCatalog {
         Self {
             producer: ProgressIdentity::new(*Uuid::new_v4().as_bytes()),
             revision: 0,
+            snapshot_revision: 0,
             exhausted: false,
             tasks: HashMap::new(),
         }
@@ -79,6 +87,8 @@ impl ProgressSourceCatalog {
             key,
             AcceptedTask {
                 local_entry: local_entry.clone(),
+                snapshot: None,
+                retained_states: None,
                 task: ProgressSourceTask {
                     notification_closed: Default::default(),
                     descriptor: ProgressTaskDescriptor {

@@ -2,6 +2,7 @@
 mod io;
 mod mapping;
 mod outbound;
+mod query;
 mod receive;
 mod rejection;
 mod snapshot;

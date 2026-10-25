@@ -99,6 +99,7 @@ struct Progress {
     completion: watch::Sender<Completion>,
     prepared_plan: Mutex<Option<Arc<[PlannedReceiveItem]>>>,
     source_accepted: AtomicBool,
+    fully_persisted: AtomicBool,
     batch: Weak<ReceiveBatch>,
 }
 
@@ -343,6 +344,7 @@ impl ReceiveAction {
             completion: watch::channel(None).0,
             prepared_plan: Mutex::new(None),
             source_accepted: AtomicBool::new(false),
+            fully_persisted: AtomicBool::new(false),
             batch: Arc::downgrade(&self.batch),
         });
         state.active.retain(|_, value| value.strong_count() != 0);
@@ -370,6 +372,7 @@ impl ReceiveAction {
         }
         self.batch.finish(result.is_ok());
         self.finish_receipt();
+        self.retain_final_progress();
         self.birth.completion.send_replace(Some(result.clone()));
         if let Some(progress) = self
             .progress
