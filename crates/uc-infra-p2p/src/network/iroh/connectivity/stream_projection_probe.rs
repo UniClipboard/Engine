@@ -1,13 +1,14 @@
 //! 全局发送投影从原意图建立，再由真实已认证流登记和采用。
 use super::super::progress_probe::UnusedSnapshotProvider;
 use super::*;
+use anyhow::bail;
 use uc_application::deps::{
     ProgressLiveRoundPort, ProgressProjectionAdmission, ProgressProjectionKey,
     ProgressProjectionRegistry,
 };
 use uc_core::file_transfer::{ProgressActive, ProgressFreshnessView, ProgressPhase};
 use uc_sync_protocol::transfer_progress::v2::{
-    ProducerDescriptor, RejectionReason, TaskScope, WireId,
+    write_frame, Envelope, Message, ProducerDescriptor, RejectionReason, TaskScope, WireId,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

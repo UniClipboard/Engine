@@ -112,6 +112,18 @@ Application 消息、Core 规则及 Engine facade 不获得观测字段。载体
 - Query 携带挑战、源条目、可选预期 attempt、分页 offset 与可选快照修订；QueryResult 区分 Current、Superseded、NotRetained、Unsupported、AccessDenied。
 - Rejected 仅含固定原因；实际 IO、存储或解析错误不由 codec 伪造为 NotRetained／Unsupported。
 
+### 完整身份与精确回执
+
+设备身份取自已准入连接，源条目和原始逻辑项取自原意图及原接收权威；登记、活动和终态共用同一权威与围栏。
+producer 通过当前连接的新挑战和精确 descriptor 关联 binding，不在每个 ACK 重复增加 producer 字段。
+ACK 必须保留 binding、源条目、attempt、owner 修订、逻辑项种类与位置、round、sequence、结果修订、
+字节数、total 的存在性及数值、最终结果与原因。None 与 Some(0) 分别比较，不能归一化后冒充精确确认。
+
+专属 progress profile 的真实 Iroh 组合在 Application 采用后覆盖21个回执字段／边界场景，
+并对当前14种完整结果原因逐一核对线上值。错误回执不回滚接收事实，原完整动作的正确重试仍可获得精确ACK；
+[字段证据与验收范围](../exec-plans/active/2026-10-24-transfer-progress-connectivity-feasibility.md#阶段1身份与精确ack校验)
+分别列出纯规则、Application和真实连接证据，不把本项等同生产迁移。
+
 ### 明确拒绝与错误来源
 
 `Rejected.challenge` 是本轮关联值：登记尚未发出Challenge时回显请求source_entry，已发出Challenge后回显本轮nonce；终态回显请求binding；查询继续回显Query challenge。发送端先核对关联，再确认响应FIN，才采用固定拒绝原因。错误关联为Stale，尾随字节或畸形帧为保留原来源的协议错误，不转成Busy、UnknownTask或旧版不支持。
