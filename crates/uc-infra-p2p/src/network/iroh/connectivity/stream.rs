@@ -138,3 +138,7 @@ mod shared_query_probe;
 #[cfg(test)]
 #[path = "stream_profile_probe.rs"]
 mod profile_probe;
+
+#[cfg(test)]
+#[path = "stream_rejection_probe.rs"]
+mod rejection_probe;

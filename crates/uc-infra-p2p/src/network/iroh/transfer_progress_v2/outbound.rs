@@ -4,6 +4,7 @@ use super::mapping::{
     descriptor, identity, outgoing_contact, outgoing_terminal, outgoing_update, terminal,
     wire_descriptor,
 };
+use super::rejection;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
@@ -61,8 +62,17 @@ impl ProgressWirePort for TransferProgressWire {
                 source_entry: WireId(source.bytes()),
             })
             .await?;
-        let Message::Challenge { nonce } = exchange.read().await? else {
-            return Err(invalid());
+        let nonce = match exchange.read().await? {
+            Message::Challenge { nonce } => nonce,
+            Message::Rejected { challenge, reason } => {
+                if challenge.0 != source.bytes() {
+                    return Err(ProgressReceiveError::Stale);
+                }
+                exchange.finish_send().await?;
+                exchange.end_request().await?;
+                return Err(rejection::received(reason));
+            }
+            _ => return Err(invalid()),
         };
         // 不使用拨号前的预检或排队任务所捕获的descriptor。
         let current = authority
@@ -78,13 +88,20 @@ impl ProgressWirePort for TransferProgressWire {
             })
             .await?;
         exchange.finish_send().await?;
-        let Message::Bound {
-            challenge,
-            binding,
-            descriptor: accepted,
-        } = exchange.read().await?
-        else {
-            return Err(invalid());
+        let (challenge, binding, accepted) = match exchange.read().await? {
+            Message::Bound {
+                challenge,
+                binding,
+                descriptor,
+            } => (challenge, binding, descriptor),
+            Message::Rejected { challenge, reason } => {
+                if challenge != nonce {
+                    return Err(ProgressReceiveError::Stale);
+                }
+                exchange.end_request().await?;
+                return Err(rejection::received(reason));
+            }
+            _ => return Err(invalid()),
         };
         if challenge != nonce || descriptor(accepted) != current.descriptor {
             return Err(ProgressReceiveError::Stale);
@@ -108,14 +125,21 @@ impl ProgressWirePort for TransferProgressWire {
         let mut exchange = Exchange::new(stream, connection, deadline, cancel);
         exchange.write(outgoing_terminal(notice)).await?;
         exchange.finish_send().await?;
-        let Message::TerminalAck {
-            binding,
-            scope,
-            owner_revision,
-            result,
-        } = exchange.read().await?
-        else {
-            return Err(invalid());
+        let (binding, scope, owner_revision, result) = match exchange.read().await? {
+            Message::TerminalAck {
+                binding,
+                scope,
+                owner_revision,
+                result,
+            } => (binding, scope, owner_revision, result),
+            Message::Rejected { challenge, reason } => {
+                if challenge.0 != notice.binding.bytes() {
+                    return Err(ProgressReceiveError::Stale);
+                }
+                exchange.end_request().await?;
+                return Err(rejection::received(reason));
+            }
+            _ => return Err(invalid()),
         };
         let adopted = terminal(binding, scope, owner_revision, result);
         if adopted != notice {

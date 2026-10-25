@@ -24,7 +24,7 @@ use uc_core::ports::blob::BlobDigest;
 use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::{
     read_frame, write_frame, Envelope, ItemKind, LogicalItem, Message, ProducerDescriptor,
-    TaskScope, TerminalOutcome, TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
+    RejectionReason, TaskScope, TerminalOutcome, TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
 };
 
 const BUDGET: Duration = Duration::from_secs(5);
@@ -368,7 +368,7 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
         ),
         read_frame(&mut trailing.receive)
     );
-    assert!(matches!(served, Err(ProgressReceiveError::Exchange(_))));
+    assert!(matches!(served, Err(ProgressReceiveError::Malformed(_))));
     assert!(reply.is_err());
     assert_eq!(owner.snapshot().version, version);
     drop(trailing);
@@ -394,7 +394,9 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
         read_frame(&mut rejected.receive)
     );
     assert!(matches!(served, Err(ProgressReceiveError::Conflict)));
-    assert!(reply.is_err());
+    assert!(
+        matches!(reply?.message, Message::Rejected { challenge, reason: RejectionReason::InvalidScope } if challenge.0 == bound.binding.bytes())
+    );
     assert_eq!(owner.snapshot().version, version);
     assert_eq!(tokio::fs::read(&output).await?, bytes);
     drop(rejected);

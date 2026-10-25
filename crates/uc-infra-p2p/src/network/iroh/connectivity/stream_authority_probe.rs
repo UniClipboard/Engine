@@ -31,8 +31,8 @@ use uc_core::file_transfer::{
 use uc_core::ids::DeviceId;
 use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::{
-    read_frame, write_frame, Envelope, ItemKind, LogicalItem, Message, TaskScope, TerminalOutcome,
-    TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
+    read_frame, write_frame, Envelope, ItemKind, LogicalItem, Message, RejectionReason, TaskScope,
+    TerminalOutcome, TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
 };
 use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
@@ -366,7 +366,16 @@ async fn stale_terminal(
         matches!(served, Err(ProgressReceiveError::Stale)),
         "old identity must be refused"
     );
-    ensure!(reply.is_err(), "stale terminal cannot ACK");
+    ensure!(
+        matches!(
+            reply?.message,
+            Message::Rejected {
+                challenge,
+                reason: RejectionReason::Stale,
+            } if challenge.0 == bound.binding.bytes()
+        ),
+        "stale terminal must return its correlated refusal without ACK"
+    );
     Ok(())
 }
 
@@ -583,7 +592,7 @@ async fn explicit_legacy_is_unsupported_but_corrupt_current_frame_keeps_exchange
         .err()
         .ok_or_else(|| anyhow::anyhow!("corrupt current frame must fail"))?;
     ensure!(
-        matches!(failure, ProgressReceiveError::Exchange(_)) && failure.source().is_some(),
+        matches!(failure, ProgressReceiveError::Malformed(_)) && failure.source().is_some(),
         "malformed current protocol is not unsupported or offline"
     );
     drop(incoming);

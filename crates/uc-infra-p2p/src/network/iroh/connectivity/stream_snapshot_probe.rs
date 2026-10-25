@@ -498,6 +498,7 @@ async fn real_pagination_faults_never_return_partial_or_falsely_complete_snapsho
                     error.source().unwrap().downcast_ref::<WireError>(),
                     Some(WireError::Frame(FrameRefusal::Length))
                 )),
+                Mode::Trailing => assert!(matches!(error, ProgressReceiveError::Malformed(_))),
                 _ => assert!(matches!(error, ProgressReceiveError::Exchange(_))),
             }
             assert_eq!(evidence.requests, 2);

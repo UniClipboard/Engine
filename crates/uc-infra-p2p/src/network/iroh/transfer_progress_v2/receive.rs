@@ -1,5 +1,6 @@
 use super::io::{invalid, Exchange};
 use super::mapping::{ack, bound, contact, descriptor, identity, terminal, update};
+use super::rejection;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
@@ -23,14 +24,22 @@ impl TransferProgressInbound {
         let mut exchange = Exchange::new(&mut stream, connection, &deadline, cancel);
         let response = match exchange.read().await? {
             Message::Register { source_entry } => {
-                let registered = owner
+                let registered = match owner
                     .register(
                         &connection.peer(),
                         generation,
                         identity(source_entry),
                         &mut exchange,
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let correlation = exchange.registration_challenge.unwrap_or(source_entry);
+                        rejection::send(&mut exchange, correlation, &error).await?;
+                        return Err(error);
+                    }
+                };
                 Some(bound(registered))
             }
             Message::Terminal {
@@ -41,9 +50,16 @@ impl TransferProgressInbound {
             } => {
                 exchange.end_request().await?;
                 let notice = terminal(binding, scope, owner_revision, result);
-                let adopted = owner
+                let adopted = match owner
                     .adopt_terminal(&connection.peer(), generation, notice)
-                    .await?;
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        rejection::send(&mut exchange, binding, &error).await?;
+                        return Err(error);
+                    }
+                };
                 if adopted != notice {
                     return Err(invalid());
                 }
@@ -97,6 +113,7 @@ impl CurrentProgressTaskPort for Exchange<'_> {
         &mut self,
         nonce: ProgressIdentity,
     ) -> Result<ProgressTaskDescriptor, ProgressReceiveError> {
+        self.registration_challenge = Some(WireId(nonce.bytes()));
         self.write(Message::Challenge {
             nonce: WireId(nonce.bytes()),
         })
