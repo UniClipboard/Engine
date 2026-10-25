@@ -43,9 +43,9 @@ pub use progress_terminal::{
 
 mod progress_snapshot;
 pub use progress_snapshot::{
-    ProgressActive, ProgressItemState, ProgressPhase, ProgressSnapshotCoverage,
-    ProgressSnapshotEffect, ProgressSnapshotInput, ProgressSnapshotRefusal,
-    MAX_SNAPSHOT_PAGE_ITEMS,
+    merge_progress_snapshot, ProgressActive, ProgressItemState, ProgressPhase,
+    ProgressSnapshotCoverage, ProgressSnapshotEffect, ProgressSnapshotInput, ProgressSnapshotMerge,
+    ProgressSnapshotRefusal, MAX_SNAPSHOT_PAGE_ITEMS,
 };
 
 mod progress_projection;

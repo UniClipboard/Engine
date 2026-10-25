@@ -654,7 +654,7 @@ pub use crate::transfer::progress::ProgressContactNotice;
 
 pub use crate::transfer::progress::{
     ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
-    ProgressProjectionRegistry, ProgressProjectionWorker,
+    ProgressProjectionRegistry, ProgressProjectionWorker, TransferProgressReconciler,
 };
 
 pub use crate::transfer::progress::transfer_progress_connectivity_policy;

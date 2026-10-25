@@ -67,6 +67,10 @@ pub enum ProgressSnapshotRefusal {
     WrongItem,
     #[error("snapshot page coverage incomplete")]
     Incomplete,
+    #[error("snapshot contains an invalid item state")]
+    InvalidState,
+    #[error("snapshot conflicts with an adopted item result")]
+    StateConflict,
     #[error("snapshot coverage already sealed")]
     Sealed,
 }
