@@ -71,7 +71,7 @@ run_group() {
 # 统一构建范围下直接执行已构建的示例，避免按单包重新解析特性后重复编译。
 run_testkit_demo() {
   if [[ "${BUILD_SCOPE}" == workspace ]]; then
-    cargo build --quiet --locked --workspace --examples
+    cargo build --quiet --locked --workspace --all-targets
     target/debug/examples/scenario_demo "$1"
   else
     cargo run --quiet --locked -p uc-testkit --example scenario_demo -- "$1"
