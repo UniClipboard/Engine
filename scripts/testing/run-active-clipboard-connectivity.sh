@@ -6,12 +6,20 @@ cd "$repo"
 source scripts/build-cache/env.sh
 mode=${1:-direct}
 [[ "$mode" == direct || "$mode" == relay ]] || { echo 'mode must be direct or relay' >&2; exit 2; }
+build_scope="${UC_TEST_BUILD_SCOPE:-group}"
+[[ "$build_scope" == group || "$build_scope" == workspace ]] || { echo 'UC_TEST_BUILD_SCOPE must be group or workspace' >&2; exit 2; }
 out="$repo/target/active-clipboard-connectivity-evidence/${UC_ACTIVE_CLIPBOARD_RUN_LABEL:-$mode}"
 mkdir -p "$out"
 if [[ "${2:-}" != --inside ]]; then
   # 命名空间内只运行已构建二进制；共享 target 与编译缓存始终由原构建用户使用。
-  if [[ "$mode" == relay ]]; then cargo build --locked -p uc-connectivity-relay; fi
-  cargo test --locked -p uc-connectivity-host --test active_clipboard_connectivity --no-run --message-format=json > "$out/build-artifacts.jsonl"
+  test_targets=(-p uc-connectivity-host --test active_clipboard_connectivity)
+  if [[ "$build_scope" == workspace ]]; then
+    cargo build --locked --workspace --all-targets
+    test_targets=(--workspace --all-targets)
+  elif [[ "$mode" == relay ]]; then
+    cargo build --locked -p uc-connectivity-relay
+  fi
+  cargo test --locked "${test_targets[@]}" --no-run --message-format=json > "$out/build-artifacts.jsonl"
   test_binary=$(node --input-type=module - "$out/build-artifacts.jsonl" <<'NODE'
 import { readFileSync } from 'node:fs'
 const rows = readFileSync(process.argv[2], 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
