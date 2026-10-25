@@ -51,11 +51,17 @@
 Engine workspace失败后仍实际完成必需Blob生命周期资源8项、testkit证据18项、成员smoke16项及隔离网络配对smoke。
 失败导致实际接收权威登记组合、relay历史复用、Direct／Relay完整活跃内容验证等后续步骤跳过；跳过不记通过。
 
-依赖审计仍是未解决的交付阻塞：[RustSec公告](https://github.com/RustSec/advisory-db/blob/main/crates/crypto-bigint/RUSTSEC-2026-0387.md)
+上述旧CI的依赖审计失败来自：[RustSec公告](https://github.com/RustSec/advisory-db/blob/main/crates/crypto-bigint/RUSTSEC-2026-0387.md)
 要求 `crypto-bigint >=0.7.6`，旧0.5.5由OPAQUE／VOPRF的elliptic-curve0.13依赖链引入。
 当前可用上游版本和兼容更新dry-run尚未提供直接修复路径；处理需保持现有密码协议与持久资料兼容。
 [仓库规则](../../design-docs/engine-repository-checks.md)禁止忽略漏洞／unsound公告，当前没有新增例外或放宽门禁。
-本结论不擅自批准维护额外密码依赖实现分支；处理范围尚待用户选择，旧CI失败保留为失败。
+用户随后明确批准纳入兼容修复；候选按[OPAQUE依赖记录](../../design-docs/opaque-dependency-compatibility.md)维护受限来源，真正移除旧EC／大整数链，原套件、协议、资料格式和清零能力保持。
+公开crate归档校验和及原源码已逐文件核对，保留消息展开算法经逆向模块适配后与原版逐字节相同。
+本地完整crypto／profile433项通过（9项跳过），包含消息展开6项、RFC9807精确向量1项及认证边界9项；真实Iroh准入32项通过（其余357项因本次过滤未执行）。
+固定旧提交重新构建的旧旧／混合两轮兼容验证通过，每轮12次实际握手覆盖双向角色、新旧资料来源、错误密码及损坏消息；资料重编码逐字节相同、继续凭据一致。
+Linux初跑诊断符号未满足默认captured要求，按既有CI的 `UC_EXPECT_DIAGNOSTIC_STACK=available` 重跑后完整433项通过；macOS强制captured验收保持不变。
+`cargo audit --deny unsound` 实际刷新1352条公告并扫描803个依赖后通过，无新增ignore；9项既有允许警告不记作漏洞修复或额外豁免。
+六项根门禁、源码清单及独立Git消费者为本候选交付要求；跨平台远端CI结果须另行核对。上述旧CI失败保留为失败，不能冒充候选修复已通过远端CI。
 
 仍未执行或尚未接线的范围包括：生产Router／旧reporter切换、实际下载状态／SQLite结算交接、
 逐项手动重试与批次汇总、稳定Rust／移动宿主视图、完整状态核对与生命周期、

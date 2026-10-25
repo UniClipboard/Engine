@@ -22,7 +22,7 @@ try {
   copyFileSync(join(root, 'Cargo.lock'), join(consumer, 'Cargo.lock'))
   const metadata = JSON.parse(cargo(['metadata', '--format-version', '1'], true))
   const engine = metadata.packages.find(pkg => pkg.name === 'uc-engine')
-  for (const name of ['iroh', 'iroh-base', 'iroh-dns', 'iroh-relay', 'iroh-blobs', 'iroh-tickets', 'iroh-util']) {
+  for (const name of ['iroh', 'iroh-base', 'iroh-dns', 'iroh-relay', 'iroh-blobs', 'iroh-tickets', 'iroh-util', 'opaque-ke', 'voprf']) {
     const packages = metadata.packages.filter(pkg => pkg.name === name)
     if (packages.length !== 1 || packages[0].source !== engine.source) {
       throw new Error(`${name}: expected exactly one package from the Engine Git dependency`)

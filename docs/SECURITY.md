@@ -35,6 +35,10 @@
 升级必须同时验证既有 OpenMLS 场景、混合版本协议、旧加密状态读取和安全扫描。
 本次验收边界见[配对修复计划](exec-plans/completed/2026-10-10-pairing-current-address.md)。
 
+## OPAQUE 密码依赖来源
+
+Ristretto套件使用随Engine传递的受限兼容来源，移除未使用通用EC后端引入的旧大整数实现；不改变密码协议或资料格式，不增加审计例外。来源、兼容矩阵及退出责任见[OPAQUE依赖记录](design-docs/opaque-dependency-compatibility.md)。
+
 ## 深入阅读
 
 - [密文持久化规则](security/encrypted-persistence.md)
