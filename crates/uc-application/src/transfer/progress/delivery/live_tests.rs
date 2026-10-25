@@ -356,3 +356,6 @@ impl ProgressSnapshotRoundPort for UnusedSnapshot {
 
 #[path = "contact_tests.rs"]
 mod contact_tests;
+
+#[path = "capacity_tests.rs"]
+mod capacity_tests;
