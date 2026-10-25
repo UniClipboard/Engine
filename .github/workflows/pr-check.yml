@@ -104,6 +104,7 @@ jobs:
           scripts/architecture/check-direct-log-macros.test.mjs
           scripts/testing/relay-recovery-support.test.mjs
           scripts/testing/connection-recovery-session.test.mjs
+          scripts/testing/clipboard-delivery-evidence.test.mjs
 
       - name: Check snapshot-only cache boundaries
         run: |
