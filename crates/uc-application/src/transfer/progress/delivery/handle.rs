@@ -182,27 +182,36 @@ impl ProgressExchangeService {
                 return clock_failure(Some(source));
             }
         };
+        // 每个观察者守住自己的原五秒；胜者把同一截止和取消交给尚未poll的完整读取。
+        let expires_at = match sample.now.checked_add(QUERY_LIMIT) {
+            Some(deadline) => deadline,
+            None => return Arc::new(Err(ConnectivityError::DeadlineExpired.into())),
+        };
+        let deadline = Arc::new(
+            match ProgressExchangeDeadline::new(self.inner.clock.lease(sample.epoch), expires_at) {
+                Ok(deadline) => deadline,
+                Err(source) => return Arc::new(Err(source)),
+            },
+        );
+        let round_cancel = CancellationToken::new();
+        // 能力构造在状态锁外冻结会话；去重或过载时直接丢弃未启动的future，不提前执行IO。
+        let round = self.inner.snapshot.clone().read_snapshot(
+            peer,
+            target.clone(),
+            deadline.clone(),
+            round_cancel.clone(),
+        );
         let mut receive = match self
             .inner
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .query(peer, target, sample, intent)
+            .query(peer, target, sample, intent, round_cancel, round)
         {
             Ok(receive) => receive,
             Err(reply) => return reply,
         };
         self.inner.wake.notify_one();
-        // 迟到的并发调用可能早于已入队请求采样；观察者也守住各自原五秒，不能借合并延长。
-        let expires_at = match sample.now.checked_add(QUERY_LIMIT) {
-            Some(deadline) => deadline,
-            None => return Arc::new(Err(ConnectivityError::DeadlineExpired.into())),
-        };
-        let deadline =
-            match ProgressExchangeDeadline::new(self.inner.clock.lease(sample.epoch), expires_at) {
-                Ok(deadline) => deadline,
-                Err(source) => return Arc::new(Err(source)),
-            };
         loop {
             if let Err(source) = deadline.check(cancel) {
                 return Arc::new(Err(source));

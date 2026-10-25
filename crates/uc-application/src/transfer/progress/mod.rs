@@ -37,8 +37,8 @@ mod snapshot;
 pub use snapshot::{
     ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotPage,
     ProgressSnapshotProviderPort, ProgressSnapshotQuery, ProgressSnapshotRead,
-    ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSnapshotWirePort,
-    TransferProgressSnapshotReader,
+    ProgressSnapshotRound, ProgressSnapshotRoundPort, ProgressSnapshotTarget,
+    ProgressSnapshotWirePort, TransferProgressSnapshotReader,
 };
 
 pub use model::ProgressUpdateNotice;

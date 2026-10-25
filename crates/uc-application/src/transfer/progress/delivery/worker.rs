@@ -114,7 +114,7 @@ impl ProgressExchangeWorker {
                                 Err(source) => Err(source),
                             },
                         ),
-                        Action::Snapshot(expected) => {
+                        Action::Snapshot(round) => {
                             let interested = match job.work {
                                 Work::Snapshot(key) => inner
                                     .state
@@ -126,20 +126,7 @@ impl ProgressExchangeWorker {
                             Completion::Snapshot(if !interested {
                                 Err(ConnectivityError::Stopped.into())
                             } else {
-                                match ProgressExchangeDeadline::new(clock, job.deadline) {
-                                    Ok(deadline) => {
-                                        inner
-                                            .snapshot
-                                            .read_snapshot(
-                                                &job.work.peer(),
-                                                expected,
-                                                &deadline,
-                                                &job.cancel,
-                                            )
-                                            .await
-                                    }
-                                    Err(source) => Err(source),
-                                }
+                                round.await
                             })
                         }
                     };

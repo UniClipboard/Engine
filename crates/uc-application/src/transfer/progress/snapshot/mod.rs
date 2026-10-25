@@ -7,6 +7,7 @@ pub use model::{
     ProgressSnapshotQuery, ProgressSnapshotRead, ProgressSnapshotTarget,
 };
 pub use ports::{
-    ProgressSnapshotProviderPort, ProgressSnapshotRoundPort, ProgressSnapshotWirePort,
+    ProgressSnapshotProviderPort, ProgressSnapshotRound, ProgressSnapshotRoundPort,
+    ProgressSnapshotWirePort,
 };
 pub use reader::TransferProgressSnapshotReader;

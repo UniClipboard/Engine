@@ -5,9 +5,9 @@ use crate::transfer::progress::clock::Clock as SharedClock;
 use crate::transfer::progress::ProgressLiveRoundPort;
 use crate::transfer::progress::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
-    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotTarget,
-    ProgressSourceCatalog, ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort,
-    ProgressTaskDescriptor, ProgressTerminalRoundPort,
+    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRound, ProgressSnapshotRoundPort,
+    ProgressSnapshotTarget, ProgressSourceCatalog, ProgressSourceTask, ProgressSubmission,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalRoundPort,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -563,16 +563,15 @@ async fn many_actual_eligible_peers_keep_exchange_queue_and_live_futures_bounded
 }
 
 struct UnusedSnapshot;
-#[async_trait]
 impl ProgressSnapshotRoundPort for UnusedSnapshot {
-    async fn read_snapshot(
-        &self,
-        _: &DeviceId,
+    fn read_snapshot(
+        self: Arc<Self>,
+        _: DeviceId,
         _: ProgressSnapshotTarget,
-        _: &ProgressExchangeDeadline,
-        _: &CancellationToken,
-    ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
-        panic!("terminal-only fixture cannot query")
+        _: Arc<ProgressExchangeDeadline>,
+        _: CancellationToken,
+    ) -> ProgressSnapshotRound {
+        Box::pin(async move { panic!("terminal-only fixture cannot query") })
     }
 }
 

@@ -283,8 +283,10 @@ async fn exchange(
     } else {
         Network::Baseline(Fixture::new(1, 1, TRANSFER_PROGRESS_ALPN).await?)
     };
-    let reader =
-        TransferProgressSnapshotReader::new(fixture.outbound(), Arc::new(TransferProgressWire));
+    let reader = Arc::new(TransferProgressSnapshotReader::new(
+        fixture.outbound(),
+        Arc::new(TransferProgressWire),
+    ));
     let clock = Arc::new(Clock(AtomicU64::new(0)));
     let budget = if mode == Mode::Deadline {
         ProgressExchangeDeadline::new(clock.clone(), Duration::from_secs(5))?
@@ -442,14 +444,14 @@ async fn exchange(
     let peer = fixture.peer();
     let (outcome, served) = tokio::join!(
         reader.read_snapshot(
-            &peer,
+            peer,
             ProgressSnapshotTarget {
                 source: expected.descriptor.source,
                 expected: (!discover).then_some(expected.descriptor),
                 items: expected.items.clone()
             },
-            &budget,
-            &stop
+            Arc::new(budget),
+            stop.clone()
         ),
         serve
     );

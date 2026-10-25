@@ -3,8 +3,9 @@ use super::UnusedLive;
 use super::{authority, id, peer, submit, Clock};
 use super::{
     CancellationToken, DeviceId, Ordering, ProgressExchangeDeadline, ProgressExchangeService,
-    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotTarget,
-    ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminal, ProgressTerminalRoundPort,
+    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRound, ProgressSnapshotRoundPort,
+    ProgressSnapshotTarget, ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminal,
+    ProgressTerminalRoundPort,
 };
 use super::{ElapsedClockError, ElapsedClockPort, Sample};
 use crate::connectivity::ConnectivityError;
@@ -62,17 +63,18 @@ impl ProgressTerminalRoundPort for Held {
         Ok(())
     }
 }
-#[async_trait]
 impl ProgressSnapshotRoundPort for Held {
-    async fn read_snapshot(
-        &self,
-        peer: &DeviceId,
+    fn read_snapshot(
+        self: Arc<Self>,
+        peer: DeviceId,
         _: ProgressSnapshotTarget,
-        _: &ProgressExchangeDeadline,
-        cancel: &CancellationToken,
-    ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
-        self.enter(*peer, Kind::Snapshot, cancel.clone()).await;
-        Ok(ProgressSnapshotRead::NotRetained)
+        _: Arc<ProgressExchangeDeadline>,
+        cancel: CancellationToken,
+    ) -> ProgressSnapshotRound {
+        Box::pin(async move {
+            self.enter(peer, Kind::Snapshot, cancel.clone()).await;
+            Ok(ProgressSnapshotRead::NotRetained)
+        })
     }
 }
 fn held() -> (Arc<Held>, mpsc::Receiver<(DeviceId, Kind)>) {
@@ -517,6 +519,19 @@ async fn a_delayed_earlier_observer_cannot_borrow_the_later_admissions_remaining
     };
     clock.entered.notified().await;
     // 受控交错：较早调用已采样0但尚未取得状态锁，较后请求按2先完成准入。
+    let round_cancel = CancellationToken::new();
+    let queued_round = round.clone().read_snapshot(
+        peer(1),
+        task(1, 0).into(),
+        Arc::new(
+            ProgressExchangeDeadline::new(
+                Arc::new(Clock(AtomicU64::new(2))),
+                Duration::from_secs(7),
+            )
+            .unwrap(),
+        ),
+        round_cancel.clone(),
+    );
     let mut newer = match service.inner.state.lock().unwrap().query(
         peer(1),
         task(1, 0).into(),
@@ -525,6 +540,8 @@ async fn a_delayed_earlier_observer_cannot_borrow_the_later_admissions_remaining
             epoch: 0,
         },
         id(1),
+        round_cancel,
+        queued_round,
     ) {
         Ok(receive) => receive,
         Err(_) => panic!("valid later admission"),

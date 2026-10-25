@@ -1,6 +1,6 @@
 use super::super::{
     ElapsedClockError, ElapsedClockRefusal, ProgressReceiveError, ProgressSnapshotRead,
-    ProgressSnapshotTarget, ProgressTaskDescriptor,
+    ProgressSnapshotRound, ProgressSnapshotTarget, ProgressTaskDescriptor,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,7 +118,7 @@ pub(super) enum Action {
         descriptor: ProgressTaskDescriptor,
         result: ProgressTerminal,
     },
-    Snapshot(ProgressSnapshotTarget),
+    Snapshot(ProgressSnapshotRound),
 }
 pub(super) struct Job {
     pub work: Work,

@@ -17,9 +17,10 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal,
     ProgressExchangeDeadline, ProgressExchangeService, ProgressReceiveError, ProgressSnapshotRead,
-    ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceTask, ProgressSubmission,
-    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalRoundPort,
-    TransferProgressProducer, TransferProgressReceiver, TransferProgressSnapshotReader,
+    ProgressSnapshotRound, ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceTask,
+    ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalRoundPort, TransferProgressProducer, TransferProgressReceiver,
+    TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
@@ -114,26 +115,28 @@ impl Counts {
     }
 }
 struct Snapshot {
-    reader: TransferProgressSnapshotReader,
+    reader: Arc<TransferProgressSnapshotReader>,
     counts: Arc<Counts>,
 }
-#[async_trait]
 impl ProgressSnapshotRoundPort for Snapshot {
-    async fn read_snapshot(
-        &self,
-        peer: &DeviceId,
+    fn read_snapshot(
+        self: Arc<Self>,
+        peer: DeviceId,
         expected: ProgressSnapshotTarget,
-        deadline: &ProgressExchangeDeadline,
-        cancel: &CancellationToken,
-    ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
-        self.counts.enter(*peer);
-        self.counts.reads.fetch_add(1, Ordering::SeqCst);
-        let result = self
+        deadline: Arc<ProgressExchangeDeadline>,
+        cancel: CancellationToken,
+    ) -> ProgressSnapshotRound {
+        let round = self
             .reader
-            .read_snapshot(peer, expected, deadline, cancel)
-            .await;
-        self.counts.end(*peer);
-        result
+            .clone()
+            .read_snapshot(peer, expected, deadline, cancel);
+        Box::pin(async move {
+            self.counts.enter(peer);
+            self.counts.reads.fetch_add(1, Ordering::SeqCst);
+            let result = round.await;
+            self.counts.end(peer);
+            result
+        })
     }
 }
 struct Terminal {
@@ -210,10 +213,10 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
             counts: counts.clone(),
         }),
         Arc::new(Snapshot {
-            reader: TransferProgressSnapshotReader::new(
+            reader: Arc::new(TransferProgressSnapshotReader::new(
                 first.outbound.clone(),
                 Arc::new(TransferProgressWire),
-            ),
+            )),
             counts: counts.clone(),
         }),
         Arc::new(UnusedLive),

@@ -1,6 +1,8 @@
 //! 同一真实codec和Application动作使用第二backend；不把内存字节流当作真实网络或密码握手证据。
 #[path = "stream_memory_backend_fixture.rs"]
 mod fixture;
+#[path = "stream_memory_backend_queued_query_probe.rs"]
+mod queued_query_probe;
 #[path = "stream_memory_backend_session_probe.rs"]
 mod session_probe;
 use super::progress_probe::{progress_budget, UnusedSnapshotProvider};

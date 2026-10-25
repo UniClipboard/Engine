@@ -1,7 +1,7 @@
 use super::*;
 use crate::transfer::progress::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
-    ProgressExchangeService, ProgressLiveRoundPort, ProgressReceiveError, ProgressSnapshotRead,
+    ProgressExchangeService, ProgressLiveRoundPort, ProgressReceiveError, ProgressSnapshotRound,
     ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceCatalog, ProgressSourceTask,
     ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalRoundPort,
 };
@@ -341,16 +341,15 @@ fn authority(plans: &[(u8, u16)]) -> Arc<Many> {
     Arc::new(Many(Mutex::new(catalog)))
 }
 struct UnusedSnapshot;
-#[async_trait]
 impl ProgressSnapshotRoundPort for UnusedSnapshot {
-    async fn read_snapshot(
-        &self,
-        _: &DeviceId,
+    fn read_snapshot(
+        self: Arc<Self>,
+        _: DeviceId,
         _: ProgressSnapshotTarget,
-        _: &ProgressExchangeDeadline,
-        _: &CancellationToken,
-    ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
-        panic!("activity fixture does not query")
+        _: Arc<ProgressExchangeDeadline>,
+        _: CancellationToken,
+    ) -> ProgressSnapshotRound {
+        Box::pin(async move { panic!("activity fixture does not query") })
     }
 }
 
