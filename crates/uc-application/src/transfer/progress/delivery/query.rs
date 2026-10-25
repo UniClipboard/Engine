@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use uc_core::file_transfer::{ExchangePriority, ExchangeRefusal};
+use uc_core::file_transfer::{ExchangePriority, ExchangeRefusal, ProgressIdentity};
 use uc_core::ids::DeviceId;
 
 const MAX_QUERY_OBSERVERS: usize = 16;
@@ -44,6 +44,7 @@ impl State {
         peer: DeviceId,
         expected: ProgressSourceTask,
         sample: Sample,
+        intent: ProgressIdentity,
     ) -> Result<watch::Receiver<Option<ProgressQueryResult>>, ProgressQueryResult> {
         if self.closed {
             return Err(stopped());
@@ -58,7 +59,7 @@ impl State {
             .checked_add(QUERY_LIMIT)
             .filter(|deadline| *deadline > current.now)
             .ok_or_else(expired)?;
-        let key = QueryKey::new(peer, expected.descriptor);
+        let key = QueryKey::query(peer, expected.descriptor, intent);
         if let Some(existing) = self.queries.get(&key) {
             if existing.expected.items != expected.items {
                 return Err(Arc::new(Err(ProgressReceiveError::InvalidPlan)));

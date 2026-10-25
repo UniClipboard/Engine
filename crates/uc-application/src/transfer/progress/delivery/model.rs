@@ -55,6 +55,7 @@ pub(super) struct Entry {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct QueryKey {
     pub peer: DeviceId,
+    intent: Option<ProgressIdentity>,
     source: ProgressIdentity,
     attempt: ProgressIdentity,
     producer: ProgressIdentity,
@@ -62,9 +63,16 @@ pub(super) struct QueryKey {
     count: u16,
 }
 impl QueryKey {
+    pub fn query(peer: DeviceId, task: ProgressTaskDescriptor, intent: ProgressIdentity) -> Self {
+        Self {
+            intent: Some(intent),
+            ..Self::new(peer, task)
+        }
+    }
     pub fn new(peer: DeviceId, task: ProgressTaskDescriptor) -> Self {
         Self {
             peer,
+            intent: None,
             source: task.source,
             attempt: task.attempt,
             producer: task.producer,

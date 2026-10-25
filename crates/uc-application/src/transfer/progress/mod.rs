@@ -48,7 +48,7 @@ pub use model::ProgressContactNotice;
 mod projection;
 pub use projection::{
     ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
-    ProgressProjectionRegistry, ProgressProjectionWorker,
+    ProgressProjectionRegistry, ProgressProjectionWorker, TransferProgressReconciler,
 };
 
 mod connectivity;

@@ -144,6 +144,7 @@ impl ProgressExchangeService {
         &self,
         peer: DeviceId,
         expected: ProgressSourceTask,
+        intent: ProgressIdentity,
         cancel: &CancellationToken,
     ) -> ProgressQueryResult {
         if self
@@ -182,7 +183,7 @@ impl ProgressExchangeService {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .query(peer, expected, sample)
+            .query(peer, expected, sample, intent)
         {
             Ok(receive) => receive,
             Err(reply) => return reply,

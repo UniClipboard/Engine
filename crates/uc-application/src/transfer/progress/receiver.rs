@@ -22,6 +22,7 @@ use uuid::Uuid;
 pub struct TransferProgressReceiver {
     peer: DeviceId,
     source: ProgressIdentity,
+    query_intent: ProgressIdentity,
     state: Mutex<State>,
     clock: Arc<Clock>,
 }
@@ -31,6 +32,8 @@ struct State {
     generation: u64,
     registration: ProgressRegistration<ProgressIdentity>,
     bound: Option<ProgressBound>,
+    snapshot_revision: Option<u64>,
+    snapshot_content: Option<Vec<ProgressItemState>>,
     items: HashMap<ProgressItem, ProgressItemProjection>,
     version: u64,
     freshness: ProgressFreshness,
@@ -61,12 +64,15 @@ impl TransferProgressReceiver {
             clock,
             peer,
             source,
+            query_intent: ProgressIdentity::new(*Uuid::new_v4().as_bytes()),
             state: Mutex::new(State {
                 plan,
                 closed: false,
                 generation: 0,
                 registration: ProgressRegistration::new(source),
                 bound: None,
+                snapshot_revision: None,
+                snapshot_content: None,
                 items: HashMap::new(),
                 version: 0,
                 freshness,
@@ -88,6 +94,8 @@ impl TransferProgressReceiver {
         state.items.clear();
         state.items.shrink_to_fit();
         state.bound = None;
+        state.snapshot_revision = None;
+        state.snapshot_content = None;
         state
             .freshness
             .apply(ProgressFreshnessInput::ContinuityLost);
@@ -290,6 +298,13 @@ impl ProgressReceiverPort for TransferProgressReceiver {
         }
         if state
             .bound
+            .is_none_or(|previous| previous.descriptor != descriptor)
+        {
+            state.snapshot_revision = None;
+            state.snapshot_content = None;
+        }
+        if state
+            .bound
             .is_none_or(|previous| previous.descriptor.attempt != descriptor.attempt)
         {
             state.items.clear();
@@ -397,3 +412,6 @@ fn refresh_view(clock: &Clock, state: &mut State) -> ProgressFreshnessView {
     }
     view
 }
+
+#[path = "receiver_snapshot.rs"]
+mod snapshot_adoption;

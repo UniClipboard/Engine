@@ -2,6 +2,8 @@
 mod handle;
 mod model;
 mod receive;
+mod refresh;
+pub use refresh::TransferProgressReconciler;
 mod worker;
 pub use handle::ProgressProjectionRegistry;
 pub use model::{ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey};

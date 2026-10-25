@@ -230,7 +230,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
     let query = {
         let service = service.clone();
         let cancel = query_cancel.clone();
-        tokio::spawn(async move { service.read_snapshot(a, task(), &cancel).await })
+        tokio::spawn(async move { service.read_snapshot(a, task(), SOURCE, &cancel).await })
     };
     let mut incoming = first.receiving.accept_bi().await?;
     let Message::Query {
@@ -328,7 +328,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
         assert!(counts.active.lock().unwrap().contains(&a));
         let repeated = timeout(
             Duration::from_secs(2),
-            service.read_snapshot(a, task(), &CancellationToken::new()),
+            service.read_snapshot(a, task(), SOURCE, &CancellationToken::new()),
         )
         .await?;
         assert!(matches!(&*repeated, Err(_)));

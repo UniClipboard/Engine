@@ -7,15 +7,17 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    ProgressPageReply, ProgressReceiveError, ProgressSnapshotPage, ProgressSnapshotProviderPort,
-    ProgressSnapshotQuery, ProgressSnapshotRead, ProgressSnapshotRoundPort,
-    TransferProgressReceiver, TransferProgressSnapshotReader,
+    ProgressExchangeService, ProgressPageReply, ProgressProjectionKey, ProgressProjectionRegistry,
+    ProgressReceiveError, ProgressSnapshotPage, ProgressSnapshotProviderPort,
+    ProgressSnapshotQuery, ProgressSnapshotRead, ProgressWirePort, TransferProgressProducer,
+    TransferProgressReconciler, TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::{
-    ProgressFailureReason, ProgressItemState, ProgressTerminal, ProgressTerminalOutcome,
+    ProgressFailureReason, ProgressFreshnessView, ProgressItemState, ProgressTerminal,
+    ProgressTerminalOutcome,
 };
 use uc_core::ids::DeviceId;
 use uc_infra_local::SystemElapsedClock;
@@ -90,27 +92,56 @@ async fn actual_failed_receive_results_cross_sixteen_real_inbound_query_pages() 
         let authority = AuthorityProcess::start()?;
         let task = authority.accept(false, 1024)?;
         let fixture = ProfilePair::new().await?;
-        let receiver = TransferProgressReceiver::new(fixture.receiving.peer(), SOURCE, task.items.to_vec(), Arc::new(SystemElapsedClock))?;
+        let clock = Arc::new(SystemElapsedClock);
+        let (registry, projection_worker) = ProgressProjectionRegistry::new(clock.clone());
+        let key = ProgressProjectionKey { peer:fixture.peer, source:SOURCE };
+        registry.accept_intent(key, task.items.to_vec())?;
         let provider = SettledSnapshot(authority.authority.as_ref());
         let stop = CancellationToken::new();
+        // 接收侧真实权威从反向流发起登记，发送侧原意图负责人采用后才返回Bound。
+        let sending = fixture.outbound.request(fixture.peer).connect(Instant::now()+Duration::from_secs(5), &stop).await?;
+        let register = async {
+            let mut stream = fixture.receiving.open_bi(Instant::now()+Duration::from_secs(5)).await?;
+            TransferProgressWire.register(&mut stream, &fixture.receiving, SOURCE, authority.authority.as_ref(), &progress_budget(), &stop).await.map_err(anyhow::Error::from)
+        };
+        let accept = async {
+            TransferProgressInbound::serve(sending.accept_bi().await?, &sending, 1,
+                progress_budget(), &stop, &registry, &provider).await.map_err(anyhow::Error::from)
+        };
+        let (bound, ()) = tokio::try_join!(register, accept)?;
+        ensure!(bound.descriptor == task.descriptor, "real registration must use actual current receive authority");
+        fixture.outbound.retain(&sending).await?;
+        drop(sending);
+        ensure!(registry.snapshot(key).unwrap().items.iter().all(|(_,value)|value.is_none()), "registration cannot invent result events");
+        let producer = Arc::new(TransferProgressProducer::new(fixture.outbound.clone(), Arc::new(TransferProgressWire), authority.authority.clone(), clock.clone()));
+        let reader = Arc::new(TransferProgressSnapshotReader::new(fixture.outbound.clone(), Arc::new(TransferProgressWire)));
+        let (service, exchange_worker) = ProgressExchangeService::new(clock, authority.authority.clone(), producer.clone(), reader, producer);
+        let reconciler = TransferProgressReconciler::new(registry.clone(), service);
+        let exchange = tokio::spawn(exchange_worker.run(stop.clone()));
+        let projection = tokio::spawn(projection_worker.run(stop.clone()));
         let serving = async {
             for _ in 0..16 {
                 TransferProgressInbound::serve(fixture.receiving.accept_bi().await?, &fixture.receiving, 1,
-                    progress_budget(), &stop, &receiver, &provider).await?;
+                    progress_budget(), &stop, &registry, &provider).await?;
             }
             anyhow::Ok(())
         };
         let reading = async {
-            let reader = TransferProgressSnapshotReader::new(fixture.outbound.clone(), Arc::new(TransferProgressWire));
-            reader.read_snapshot(&fixture.peer, task, &progress_budget(), &stop).await
+            let result = reconciler.refresh(key, &stop).await;
+            ensure!(result.is_ok(), "actual reconciliation failed: {:?}", result.as_ref().as_ref().err());
+            Ok::<_, anyhow::Error>(result)
         };
-        let (read, _) = tokio::try_join!(
-            async { reading.await.map_err(anyhow::Error::from) },
-            serving,
-        )?;
-        let ProgressSnapshotRead::Complete(snapshot) = read else { anyhow::bail!("actual complete query required"); };
+        let (read, ()) = tokio::try_join!(reading, serving)?;
+        let Ok(ProgressSnapshotRead::Complete(snapshot)) = read.as_ref() else { anyhow::bail!("actual complete query required"); };
         ensure!(snapshot.items.len() == 1024, "every actual original-plan item must be returned");
         ensure!(snapshot.items.iter().all(|item| matches!(item, ProgressItemState::Terminal(value) if matches!(value.outcome, ProgressTerminalOutcome::Failed(_)))), "actual failed materialization cannot become completed");
+        let adopted = registry.snapshot(key).unwrap();
+        ensure!(adopted.summary.counts.failed == 1024, "complete reconciliation must restore all lost result events");
+        ensure!(adopted.freshness.unwrap() == ProgressFreshnessView::Settled, "adopted actual terminal facts must end unknown waiting");
+        registry.close();
+        stop.cancel();
+        exchange.await?;
+        projection.await?;
         fixture.close().await?;
         anyhow::Ok(())
     }).await??;
