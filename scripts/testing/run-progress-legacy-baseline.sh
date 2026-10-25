@@ -8,9 +8,18 @@ matrix_root="$repo/target/progress-legacy-evidence"
 root="${UC_PROGRESS_LEGACY_EVIDENCE_ROOT:-$matrix_root/runs/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 main_rev=5cbca8fc24a278fa7b01ae611bf4b925914bef13
 history_rev=f6f305d9689e4e79e7ab6d0e4921061f9416e4a6
+selected=
+if (($#)); then
+  [[ "$#" == 2 && "$1" == --case ]] || { printf 'usage: %s [--case main-direct|main-relay|history-direct|history-relay]\n' "$0" >&2; exit 2; }
+  selected=$2
+  case "$selected" in
+    main-direct|main-relay|history-direct|history-relay) ;;
+    *) printf 'unknown fixed legacy cell\n' >&2; exit 2 ;;
+  esac
+fi
 [[ ! -e "$root" ]] || { printf 'legacy evidence directory already exists\n' >&2; exit 2; }
 mkdir -p "$root"
-python3 - "$root" "$main_rev" "$history_rev" <<'PY'
+python3 - "$root" "$main_rev" "$history_rev" "$selected" <<'PY'
 import hashlib,json,subprocess,sys
 from pathlib import Path
 root=Path(sys.argv[1]); sources=[]
@@ -29,20 +38,26 @@ inputs=['Cargo.lock','scripts/testing/run-progress-legacy-baseline.sh',
     'driver_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
     'driver_tree':subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip(),
     'driver_state':'modified' if subprocess.check_output(['git','status','--porcelain']) else 'clean',
+    'selected_case':sys.argv[4] or None,
     'driver_inputs_sha256':{p:hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in inputs},
     'anchors':sources},indent=2)+'\n')
 PY
-UC_CONNECTIVITY_BASELINE_REV="$main_rev" UC_CONNECTIVITY_BASELINE_ROOT="$root/frozen-main" \
-UC_CONNECTIVITY_BASELINE_LABEL=progress-legacy-main \
-  bash scripts/testing/build-peer-reachability-main.sh > "$root/build-main.log" 2>&1
-CARGO_TARGET_DIR="$repo/target" bash scripts/testing/build-upgrade-anchors.sh a07 > "$root/build-history.log" 2>&1
+if [[ -z "$selected" || "$selected" == main-* ]]; then
+  UC_CONNECTIVITY_BASELINE_REV="$main_rev" UC_CONNECTIVITY_BASELINE_ROOT="$root/frozen-main" \
+  UC_CONNECTIVITY_BASELINE_LABEL=progress-legacy-main \
+    bash scripts/testing/build-peer-reachability-main.sh > "$root/build-main.log" 2>&1
+fi
+if [[ -z "$selected" || "$selected" == history-* ]]; then
+  CARGO_TARGET_DIR="$repo/target" bash scripts/testing/build-upgrade-anchors.sh a07 > "$root/build-history.log" 2>&1
+  cp "target/upgrade-anchors/$history_rev/host.json" "$root/history-host.json"
+fi
 just cargo build --locked -p uc-connectivity-relay > "$root/build-relay.log" 2>&1
-cp "target/upgrade-anchors/$history_rev/host.json" "$root/history-host.json"
 for anchor in main history; do
   if [[ "$anchor" == main ]]; then old="$root/frozen-main/uc-connectivity-host"
   else old="$repo/target/upgrade-anchors/$history_rev/bin/uc-connectivity-host"; fi
   for topology in direct relay; do
     label="$anchor-$topology"
+    if [[ -n "$selected" && "$label" != "$selected" ]]; then continue; fi
     UC_CONNECTION_RECOVERY_EVIDENCE="$root/$label" \
       bash scripts/testing/run-connection-recovery-e2e.sh --suite network --prebuilt --repeat 1 \
         --mode "$topology" --case P00-prepaired-upgrade --host "$old" \
@@ -51,11 +66,13 @@ for anchor in main history; do
     printf '%s\n' "$label" >> "$root/completed-labels.txt"
   done
 done
-python3 - "$root" "$main_rev" "$history_rev" <<'PY'
+python3 - "$root" "$main_rev" "$history_rev" "$selected" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
 root=Path(sys.argv[1]); labels=(root/'completed-labels.txt').read_text().splitlines()
-assert len(labels)==4 and set(labels)=={'main-direct','main-relay','history-direct','history-relay'}
+all_cases={'main-direct','main-relay','history-direct','history-relay'}
+expected={sys.argv[4]} if sys.argv[4] else all_cases
+assert len(labels)==len(expected) and set(labels)==expected
 cases=[]
 for label in labels:
     files=list((root/label).glob('*.json')); assert len(files)==1
@@ -75,7 +92,12 @@ for label in labels:
         assert all(f['ipv4_drop_packets']>0 and f['ipv6_drop_packets']>0 for f in faults)
     cases.append({'case':label,'engine_revision':rev,'passed':True,'paths':proof['paths'],
         'binaries':result['binaries'],'evidence_sha256':hashlib.sha256(files[0].read_bytes()).hexdigest()})
-(root/'summary.json').write_text(json.dumps({'scope':'fixed-old-pairs-before-progress-migration',
+(root/'summary.json').write_text(json.dumps({'scope':'selected-fixed-old-pair-reproduction' if sys.argv[4] else 'fixed-old-pairs-before-progress-migration',
+    'full_matrix':not bool(sys.argv[4]),
+    'skipped_cases':sorted(all_cases-expected),
     'sources':json.loads((root/'sources.json').read_text()),'cases':cases},indent=2)+'\n')
-print('legacy progress baseline: four exact-content cells passed')
+if sys.argv[4]:
+    print(f'legacy progress reproduction: {sys.argv[4]} exact-content cell passed; full matrix not run')
+else:
+    print('legacy progress baseline: four exact-content cells passed')
 PY
