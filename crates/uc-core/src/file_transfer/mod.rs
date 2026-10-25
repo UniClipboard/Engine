@@ -65,3 +65,8 @@ pub use progress_capacity::{
 
 mod progress_connections;
 pub use progress_connections::{PROGRESS_IDLE_RETENTION, PROGRESS_RETAINED_CONNECTIONS};
+
+mod progress_summary;
+pub use progress_summary::{
+    summarize_progress, ProgressBatchCounts, ProgressBatchState, ProgressBatchSummary,
+};

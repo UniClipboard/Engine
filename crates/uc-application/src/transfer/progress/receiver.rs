@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::Notify;
 use uc_core::file_transfer::{
-    valid_progress_plan, ProgressFreshness, ProgressFreshnessEffect, ProgressFreshnessInput,
-    ProgressFreshnessView, ProgressIdentity, ProgressItem, ProgressItemEffect, ProgressItemInput,
-    ProgressItemProjection, ProgressItemState, ProgressRegistration, RegistrationEffect,
-    RegistrationInput,
+    summarize_progress, valid_progress_plan, ProgressFreshness, ProgressFreshnessEffect,
+    ProgressFreshnessInput, ProgressFreshnessView, ProgressIdentity, ProgressItem,
+    ProgressItemEffect, ProgressItemInput, ProgressItemProjection, ProgressItemState,
+    ProgressRegistration, RegistrationEffect, RegistrationInput,
 };
 use uc_core::ids::DeviceId;
 use uuid::Uuid;
@@ -116,23 +116,26 @@ impl TransferProgressReceiver {
                 None => Ok(view),
             }
         };
+        let items: Vec<_> = state
+            .plan
+            .iter()
+            .map(|item| {
+                (
+                    *item,
+                    state
+                        .items
+                        .get(item)
+                        .and_then(ProgressItemProjection::state),
+                )
+            })
+            .collect();
+        let summary = summarize_progress(items.iter().map(|(_, value)| *value), view);
         ProgressProjectionSnapshot {
             freshness,
+            summary,
             version: state.version,
             bound: state.bound,
-            items: state
-                .plan
-                .iter()
-                .map(|item| {
-                    (
-                        *item,
-                        state
-                            .items
-                            .get(item)
-                            .and_then(ProgressItemProjection::state),
-                    )
-                })
-                .collect(),
+            items,
         }
     }
 }

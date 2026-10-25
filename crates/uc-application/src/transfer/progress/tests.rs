@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use uc_core::error_class::ErrorClass;
 use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
-    ProgressActive, ProgressFreshnessView, ProgressIdentity, ProgressItem, ProgressItemKind,
-    ProgressPhase, ProgressTerminal, ProgressTerminalOutcome,
+    ProgressActive, ProgressBatchState, ProgressFailureReason, ProgressFreshnessView,
+    ProgressIdentity, ProgressItem, ProgressItemKind, ProgressPhase, ProgressTerminal,
+    ProgressTerminalOutcome,
 };
 use uc_core::ids::DeviceId;
 
@@ -458,6 +459,10 @@ async fn clock_fault_keeps_source_and_duplicate_contact_cannot_restore_confirmed
         .await
         .unwrap();
     clock.0.store(109, Ordering::SeqCst);
+    assert_eq!(
+        owner.snapshot().summary.state,
+        ProgressBatchState::Unconfirmed
+    );
     let fault = owner.snapshot().freshness.unwrap_err();
     assert!(fault.source().is_some());
     assert!(owner.snapshot().freshness.is_err());
@@ -474,4 +479,59 @@ async fn clock_fault_keeps_source_and_duplicate_contact_cannot_restore_confirmed
         owner.snapshot().freshness.unwrap(),
         ProgressFreshnessView::Live
     );
+}
+
+#[tokio::test]
+async fn complete_snapshot_summarizes_partial_unknown_then_real_settlement() {
+    let peer = DeviceId::new("receiver");
+    let clock = Arc::new(ManualClock(AtomicU64::new(0)));
+    let second = ProgressItem { index: 1, ..item() };
+    let owner =
+        TransferProgressReceiver::new(peer, id(1), vec![item(), second], clock.clone()).unwrap();
+    let initial = owner.snapshot();
+    assert_eq!(initial.summary.state, ProgressBatchState::Waiting);
+    assert_eq!(initial.summary.counts.waiting, 2);
+    let bound = owner
+        .register(
+            &peer,
+            1,
+            id(1),
+            &mut Current(ProgressTaskDescriptor {
+                item_count: 2,
+                ..descriptor()
+            }),
+        )
+        .await
+        .unwrap();
+    owner
+        .adopt_terminal(&peer, 1, terminal(bound.binding))
+        .await
+        .unwrap();
+    let partial = owner.snapshot();
+    assert_eq!(partial.summary.counts.completed, 1);
+    assert_eq!(partial.summary.counts.waiting, 1);
+    assert_eq!(partial.summary.state, ProgressBatchState::Waiting);
+    clock.0.store(60, Ordering::SeqCst);
+    let unknown = owner.snapshot();
+    assert_eq!(
+        unknown.summary.state,
+        ProgressBatchState::PartiallyUnconfirmed
+    );
+    assert_eq!(unknown.summary.counts.completed, 1);
+    assert_eq!(unknown.summary.counts.unconfirmed, 1);
+    assert_eq!(unknown.summary.counts.failed, 0);
+    let mut failure = terminal(bound.binding);
+    failure.result.item = second;
+    failure.result.outcome =
+        ProgressTerminalOutcome::Failed(ProgressFailureReason::StorageUnavailable);
+    owner.adopt_terminal(&peer, 1, failure).await.unwrap();
+    let settled = owner.snapshot();
+    assert_eq!(settled.freshness.unwrap(), ProgressFreshnessView::Settled);
+    assert_eq!(settled.summary.state, ProgressBatchState::PartiallyFailed);
+    assert_eq!(settled.summary.counts.completed, 1);
+    assert_eq!(settled.summary.counts.failed, 1);
+    clock.0.store(0, Ordering::SeqCst);
+    assert_eq!(owner.snapshot().summary, settled.summary);
+    owner.retire();
+    assert_eq!(owner.snapshot().summary.state, ProgressBatchState::NoItems);
 }
