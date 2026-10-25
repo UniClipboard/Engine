@@ -2,8 +2,13 @@
 mod model;
 mod rules;
 
-pub use model::{ProgressBatchCounts, ProgressBatchState, ProgressBatchSummary};
-pub use rules::summarize_progress;
+pub use model::{
+    OutboundProgressSummary, ProgressBatchCounts, ProgressBatchState, ProgressBatchSummary,
+};
+pub use rules::{summarize_outbound_progress, summarize_progress};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod notice_tests;

@@ -3,10 +3,12 @@ use super::{
     ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminalNotice,
     ProgressUpdateNotice,
 };
-use crate::connectivity::{ConnectionLease, StreamLease};
+use crate::connectivity::{ConnectionLease, PeerSendStream, StreamLease, UniStreamLease};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-use uc_core::file_transfer::{ProgressActive, ProgressIdentity, ProgressItem, ProgressTerminal};
+use uc_core::file_transfer::{
+    OutboundProgressSummary, ProgressActive, ProgressIdentity, ProgressItem, ProgressTerminal,
+};
 use uc_core::ids::DeviceId;
 
 /// 一次完整的当前任务确认；实现负责有界编解码、截止时间及请求结束检查。
@@ -71,6 +73,16 @@ pub trait ProgressTaskAuthorityPort: Send + Sync {
 /// 借用流，原负责人持许可至后置权威检查及实际连接保留读取结束。
 #[async_trait]
 pub trait ProgressWirePort: Send + Sync {
+    /// 粗粒度通知经已准入单向流完整发送；传输结束不代表业务结果采用。
+    async fn summary(
+        &self,
+        stream: &mut UniStreamLease<Box<dyn PeerSendStream>>,
+        connection: &ConnectionLease,
+        source: ProgressIdentity,
+        summary: OutboundProgressSummary,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError>;
     async fn contact(
         &self,
         stream: &mut StreamLease,

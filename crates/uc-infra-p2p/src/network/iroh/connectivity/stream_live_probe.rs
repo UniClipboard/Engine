@@ -42,6 +42,7 @@ async fn managed_live_updates_coalesce_on_real_streams_and_terminal_seals_projec
             fixture.outbound.clone(),
             wire.clone(),
             authority.clone(),
+            Arc::new(UnusedSnapshotProvider),
             clock.clone(),
         ));
         let snapshot = Arc::new(TransferProgressSnapshotReader::new(
@@ -165,6 +166,7 @@ async fn waiting_task_contact_uses_real_streams_and_old_sequence_cannot_renew_di
             fixture.outbound.clone(),
             wire.clone(),
             authority.clone(),
+            Arc::new(UnusedSnapshotProvider),
             clock.clone(),
         ));
         let (service, worker) = ProgressExchangeService::new(

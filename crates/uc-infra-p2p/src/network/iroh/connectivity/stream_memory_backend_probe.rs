@@ -182,7 +182,7 @@ async fn memory_backend_runs_actual_registration_notifications_ack_and_complete_
         registry.accept_intent(key, (0..65).map(item).collect())?;
         let stop = CancellationToken::new();
         let projections = tokio::spawn(projection_worker.run(stop.clone()));
-        let producer = TransferProgressProducer::new(pair.receiver.clone(), Arc::new(TransferProgressWire), Arc::new(Authority { peer: pair.sender_id }), clock.clone());
+        let producer = TransferProgressProducer::new(pair.receiver.clone(), Arc::new(TransferProgressWire), Arc::new(Authority { peer: pair.sender_id }), Arc::new(UnusedSnapshotProvider), clock.clone());
         let serve = async {
             for _ in 0..6 {
                 TransferProgressInbound::serve(pair.at_sender.accept_bi().await?, &pair.at_sender, 1, progress_budget(), &stop, &registry, &UnusedSnapshotProvider).await?;

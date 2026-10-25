@@ -287,6 +287,7 @@ fn producer(fixture: &Fixture, authority: Arc<Authority>) -> Arc<TransferProgres
         fixture.outbound.clone(),
         Arc::new(TransferProgressWire),
         authority,
+        Arc::new(UnusedSnapshotProvider),
         Arc::new(SystemElapsedClock),
     ))
 }
@@ -786,3 +787,6 @@ mod snapshot_probe;
 
 #[path = "stream_query_provider_probe.rs"]
 mod query_provider_probe;
+
+#[path = "stream_legacy_authority_probe.rs"]
+mod legacy_probe;

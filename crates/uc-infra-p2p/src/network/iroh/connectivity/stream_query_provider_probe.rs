@@ -22,9 +22,9 @@ use uc_core::file_transfer::{
 use uc_core::ids::DeviceId;
 use uc_infra_local::SystemElapsedClock;
 
-struct SettledSnapshot<'a>(&'a Authority);
+pub(super) struct SettledSnapshot(pub(super) Arc<Authority>);
 #[async_trait]
-impl ProgressSnapshotProviderPort for SettledSnapshot<'_> {
+impl ProgressSnapshotProviderPort for SettledSnapshot {
     async fn snapshot_page(
         &self,
         peer: &DeviceId,
@@ -143,7 +143,7 @@ async fn actual_failed_receive_results_cross_sixteen_real_inbound_query_pages() 
             let (registry,projection_worker)=ProgressProjectionRegistry::new(clock.clone());
             let key=ProgressProjectionKey { peer:fixture.peer,source:SOURCE };
             registry.accept_intent(key,task.items.to_vec())?;
-            let provider=SettledSnapshot(authority.authority.as_ref());
+            let provider=SettledSnapshot(authority.authority.clone());
             let stop=CancellationToken::new();
             if registered {
                 let bound=register_current(&fixture,&registry,authority.authority.as_ref(),&provider,&stop).await?;
@@ -152,7 +152,7 @@ async fn actual_failed_receive_results_cross_sixteen_real_inbound_query_pages() 
             let initial=registry.snapshot(key).unwrap();
             ensure!(initial.items.iter().all(|(_,value)|value.is_none()),"intent and registration cannot invent results");
             ensure!(initial.bound.is_some()==registered,"unregistered fixture must not manufacture a binding");
-            let producer=Arc::new(TransferProgressProducer::new(fixture.outbound.clone(),Arc::new(TransferProgressWire),authority.authority.clone(),clock.clone()));
+            let producer=Arc::new(TransferProgressProducer::new(fixture.outbound.clone(), Arc::new(TransferProgressWire), authority.authority.clone(), Arc::new(SettledSnapshot(authority.authority.clone())), clock.clone()));
             let reader=Arc::new(TransferProgressSnapshotReader::new(fixture.outbound.clone(),Arc::new(TransferProgressWire)));
             let (service,exchange_worker)=ProgressExchangeService::new(clock,authority.authority.clone(),producer.clone(),reader,producer);
             let reconciler=TransferProgressReconciler::new(registry.clone(),service);

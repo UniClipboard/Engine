@@ -68,5 +68,6 @@ pub use progress_connections::{PROGRESS_IDLE_RETENTION, PROGRESS_RETAINED_CONNEC
 
 mod progress_summary;
 pub use progress_summary::{
-    summarize_progress, ProgressBatchCounts, ProgressBatchState, ProgressBatchSummary,
+    summarize_outbound_progress, summarize_progress, OutboundProgressSummary, ProgressBatchCounts,
+    ProgressBatchState, ProgressBatchSummary,
 };

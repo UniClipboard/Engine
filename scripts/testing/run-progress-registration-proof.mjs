@@ -19,6 +19,7 @@ const required = [
   'live_receive_attempt_reports_its_failed_materialization_through_the_complete_action',
   'snapshot_probe::actual_maximum_v3_plan_survives_sixteen_real_snapshot_pages',
   'query_provider_probe::actual_failed_receive_results_cross_sixteen_real_inbound_query_pages',
+  'legacy_probe::actual_failed_receive_results_form_one_complete_legacy_summary_without_ack',
 ].map(name => prefix + name)
 function binary(packageName, targetName) {
   const built = spawnSync('just', ['cargo', 'test', '-p', packageName, '--lib', '--no-run', '--locked', '--message-format=json'], {

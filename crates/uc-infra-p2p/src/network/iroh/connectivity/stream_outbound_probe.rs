@@ -16,15 +16,16 @@ use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangePort, BlobReadStorePort, BlobValidatedProgress, ConnectionLease,
-    ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressBound, ProgressClaimRefusal,
-    ProgressContactNotice, ProgressExchangeDeadline, ProgressReceiveError, ProgressReceiverPort,
-    ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, ProgressUpdateNotice, ProgressWirePort, StreamLease,
-    TransferProgressProducer, TransferProgressReceiver,
+    ConnectivityError, ElapsedClockError, ElapsedClockPort, PeerSendStream, ProgressBound,
+    ProgressClaimRefusal, ProgressContactNotice, ProgressExchangeDeadline, ProgressReceiveError,
+    ProgressReceiverPort, ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressUpdateNotice, ProgressWirePort,
+    StreamLease, TransferProgressProducer, TransferProgressReceiver, UniStreamLease,
 };
 use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
-    ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
+    OutboundProgressSummary, ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal,
+    ProgressTerminalOutcome,
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::blob::BlobDigest;
@@ -117,6 +118,7 @@ fn producer(fixture: &Fixture) -> TransferProgressProducer {
         fixture.outbound.clone(),
         Arc::new(TransferProgressWire),
         Arc::new(Authority::default()),
+        Arc::new(UnusedSnapshotProvider),
         Arc::new(SystemElapsedClock),
     )
 }
@@ -383,6 +385,17 @@ struct ConsumedBudget {
 }
 #[async_trait]
 impl ProgressWirePort for ConsumedBudget {
+    async fn summary(
+        &self,
+        _: &mut UniStreamLease<Box<dyn PeerSendStream>>,
+        _: &ConnectionLease,
+        _: ProgressIdentity,
+        _: OutboundProgressSummary,
+        _: &ProgressExchangeDeadline,
+        _: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        panic!("the current-protocol budget test cannot send a legacy summary");
+    }
     async fn contact(
         &self,
         stream: &mut StreamLease,
@@ -448,6 +461,7 @@ async fn registration_and_terminal_share_original_elapsed_budget() -> anyhow::Re
             clock: clock.clone(),
         }),
         Arc::new(Authority::default()),
+        Arc::new(UnusedSnapshotProvider),
         clock.clone(),
     );
     let deadline = ProgressExchangeDeadline::new(clock.clone(), BUDGET)?;
@@ -501,6 +515,7 @@ async fn new_attempt_during_challenge_cannot_relabel_an_old_settled_result() -> 
         fixture.outbound.clone(),
         Arc::new(TransferProgressWire),
         authority.clone(),
+        Arc::new(UnusedSnapshotProvider),
         Arc::new(SystemElapsedClock),
     );
     let stop = CancellationToken::new();
