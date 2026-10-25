@@ -608,3 +608,30 @@ GitHub Actions的`Engine real environment`提供`legacy-blob`手工模式，`cas
 
 本组只证明原投影关联的退休、重建和实际字节流采用，固定身份与事实不代替真实密码认证、
 接收 SQLite 权威、成员撤销或生产会话装配；阶段0物理挂起及生产迁移门槛保持原状态。
+
+
+## 阶段1身份与精确ACK校验
+
+本项完成Core／Application身份规则与既有主机原型验收；生产发送／接收hook、SQLite及稳定宿主迁移仍按后续阶段执行。
+设备身份来自连接，通知中的字段不能反向赋予设备或任务权限。各维度使用同一注册和当前权威：
+
+| 维度 | 规则及实际证据 |
+| --- | --- |
+| 设备、源条目 | Application登记／活动／终态拒绝错误peer和source；源目录以设备／源条目保存当前任务，拒绝输入不改变绑定、项或修订 |
+| 逻辑项 | 原计划按kind和原始index关联；File同位置的Representation／DirectoryUnit与未知index均被拒绝 |
+| attempt | Core注册描述围栏、Application旧尝试拒绝及实际接收CAS后的当前挑战／迟到Bound组合 |
+| round、sequence | Core逐项投影区分真实新round、旧序号和旧round；Application实证较大sequence仍不能覆盖旧round，旧round终态不封口当前项 |
+| producer及修订 | Core同producer修订单调且相同修订冻结完整描述；进程重启的新producer不按UUID大小或跨进程修订排序，实际接收重启／新连接组合验证退休 |
+| 完整结果ACK | binding、source、attempt、owner_revision、kind、index、round、sequence、result_revision、bytes、total、outcome及原因均经实际字节流核对；None／Some(0)双向、错误帧型和尾随字节分别拒绝 |
+| 同一权威 | 原Producer的登记／Contact／Update／终态共用同一authority；原ReceiveWorkRegistry同锁保存接收目录，真实挑战重读当前任务，晚到Bound再次核对 |
+
+[真实ACK矩阵](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/stream_outbound_ack_probe.rs)
+通过专属profile的真实Iroh backend，在原Application采用之后只改变回执字段；21个字段／边界场景和14个完整结果词表均执行。
+每个场景再次由原完整入站负责人处理正确重试，核对原结果保持且精确ACK成功，避免把传输FIN或错误确认当作业务成功。
+[Application围栏组合](../../../crates/uc-application/src/transfer/progress/tests.rs)
+核对错误源、设备、逻辑项、尝试、连接世代、旧round和旧sequence的拒绝分类及无副作用。
+Core登记、逐项投影和不可变终态规则与[实际接收权威组合](#实际当前权威与真实登记的组合)共同提供其余维度的证据。
+
+本地主机五项定向用例、Core／Application／P2P完整2164项及强制实际接收权威8项通过；
+13个默认跳过项中8项已由专用入口另行执行，其余外部凭据／工具项目不记作通过。
+本项不改变blob／V3、线上字段或持久化，不替代阶段0物理挂起和后续生产／设备矩阵。
