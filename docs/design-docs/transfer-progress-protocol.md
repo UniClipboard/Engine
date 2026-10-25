@@ -160,8 +160,8 @@ Core `ProgressSnapshotCoverage` 核验完整 descriptor、总项数、连续位�
 读取方不自行创建查询队列／补发循环或重新启动五秒期限；该 round 由同一个 progress 监督器的等待队列与实际活动额度调度。
 已开始的本机准入／连接保留读取仍等待到真实结束，并持本页流许可；原期限到达后不再开下一页或返回快照。
 
-明确 Current 才参与此已登记任务的覆盖核验；Superseded 只返回同源的新尝试描述，
-不从旧原始计划拼装新尝试的完整快照。明确 NotRetained、Unsupported、AccessDenied 与 Busy 分别返回；
+明确 Current 才参与此已登记任务的覆盖核验；Superseded 只返回同源的新尝试描述。
+该描述与登记共用Core修订规则：同producer不能回退，同一修订不能改变描述；跨producer不比较修订大小。新尝试可以有不同计划数量，不从旧原始计划拼装新尝试的完整快照。明确 NotRetained、Unsupported、AccessDenied 与 Busy 分别返回；
 读取失败、损坏、错误挑战、请求／响应尾随字节和经过时间到期保留错误，不伪装为资料缺失。
 
 当前阶段 0 证明使用实际 Application 接收 fixture 进程从最大 V3 清单 CAS 交接的 1024 项身份，
