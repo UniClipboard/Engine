@@ -5,6 +5,8 @@ import { createHash } from 'node:crypto'
 import { createReadStream, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 const root = resolve(import.meta.dirname, '../..')
+const buildScope = process.env.UC_TEST_BUILD_SCOPE || 'group'
+if (!['group', 'workspace'].includes(buildScope)) throw new Error('UC_TEST_BUILD_SCOPE must be group or workspace')
 const report = resolve(root, process.env.UC_TEST_ARTIFACTS_DIR ?? 'target/test-artifacts/ci', 'progress-registration')
 mkdirSync(report, { recursive: true })
 rmSync(resolve(report, 'report.json'), { force: true })
@@ -22,7 +24,9 @@ const required = [
   'legacy_probe::actual_failed_receive_results_form_one_complete_legacy_summary_without_ack',
 ].map(name => prefix + name)
 function binary(packageName, targetName) {
-  const built = spawnSync('just', ['cargo', 'test', '-p', packageName, '--lib', '--no-run', '--locked', '--message-format=json'], {
+  // CI 沿用前后验收的工作区构建范围，避免单包特性解析使整条链路再次编译。
+  const targets = buildScope === 'workspace' ? ['--workspace', '--all-targets'] : ['-p', packageName, '--lib']
+  const built = spawnSync('just', ['cargo', 'test', ...targets, '--no-run', '--locked', '--message-format=json'], {
     cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'],
   })
   if (built.error) throw built.error

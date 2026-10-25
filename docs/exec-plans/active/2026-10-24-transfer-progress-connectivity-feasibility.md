@@ -238,7 +238,9 @@ Infra 在新 Challenge 到达后实时读取 `ProgressTaskAuthorityPort`；收�
 Application 等实际连接保留读取结束后再次检查当前 attempt／producer／revision，迟到 Bound 不直接激活旧任务。
 借用的 StreamLease 由 Application 持有至这些实际工作结束，取消或期限到达后不提前归还原额度。
 
-组合入口为 `scripts/testing/run-progress-registration-proof.mjs`。它串行构建当前 Application 与 Infra 测试二进制，
+组合入口为 `scripts/testing/run-progress-registration-proof.mjs`。它遵守既有 `UC_TEST_BUILD_SCOPE`：
+CI 的 `workspace` 统一使用整个工作区所有目标，复用前后验收的特性解析与构建产物；
+默认 `group` 仍串行构建当前 Application 与 Infra 测试二进制。
 从 Cargo JSON 精确取得产物路径，先核对必需用例均存在，再显式执行，避免零用例退出成功。
 报告记录源码提交／工作区状态、两个二进制 SHA-256 和必需用例清单，位于
 `target/test-artifacts/ci/progress-registration/report.json`；CI 的 Engine tests job 必需执行此入口。
