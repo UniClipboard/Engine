@@ -1,6 +1,8 @@
 //! 同一真实codec和Application动作使用第二backend；不把内存字节流当作真实网络或密码握手证据。
 #[path = "stream_memory_backend_fixture.rs"]
 mod fixture;
+#[path = "stream_memory_backend_session_probe.rs"]
+mod session_probe;
 use super::progress_probe::{progress_budget, UnusedSnapshotProvider};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
