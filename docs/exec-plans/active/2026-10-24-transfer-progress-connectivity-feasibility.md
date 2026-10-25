@@ -592,6 +592,24 @@ GitHub Actions的`Engine real environment`提供`legacy-blob`手工模式，`cas
 尚未捕捉到同一失败。工具可用不代表旧端间歇问题已修复，远端反馈、物理挂起及生产迁移继续分别记录。
 
 
+### 发送与读回失败的诊断边界
+
+run40204732042 的 Engine、覆盖率及移动绑定检查通过；完整 Blob 矩阵仍在第十格固定
+rc.15 旧旧 Relay 的反向文件发送失败，升级动作尚未执行。原工件只有 `file not accepted`
+和接收侧 `apply_failed`，不足以判断发送侧收到拒绝、传输错误还是离线结果；该故障保持未修复。
+
+原网络 runner 现在将每次既有文本／文件发送及精确读回写入同一测试 JSON 的 `deliveries`：
+只保留合成节点标签、原场景、固定失败分类、既有计数和发送／读回耗时。发送拒绝或异常停在
+`dispatch`，发送已接受但读回失败停在 `readback`，只有精确读回后才为 `verified`；失败仍使原场景失败。
+未知错误正文、未知 kind、设备／条目标识、内容、文件名和路径均不复制；原错误继续抛出。
+既有业务调用、文本／文件读回期限及旧端二进制不变，也不增加宿主查询或重试。
+
+验证入口为 `node --test scripts/testing/clipboard-delivery-evidence.test.mjs`，并接入原 PR Check。
+6 项分类、隐私和失败边界测试及相关 15 项测试通过；复用固定来源的预构建宿主执行完整四格，
+16 次原文本／文件精确读回及新增证据核验通过。原 rc.15 同角色两 CPU 重放三轮及带诊断一轮均通过，
+仍不能用本地主机成功覆盖远端首次失败或据此完成生产迁移。
+
+
 ## 原投影退休与重建的字节流组合
 
 专属 progress profile 的第二 backend 复用实际 codec、`TransferProgressProducer` 和

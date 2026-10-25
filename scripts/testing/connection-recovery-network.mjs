@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, relayTransportReadyAt, terminateRelay } from './relay-recovery-support.mjs'
+import { verifyDelivery } from './clipboard-delivery-evidence.mjs'
 import { ensureSessionReady } from './connection-recovery-session.mjs'
 
 const options = new Map()
@@ -72,6 +73,8 @@ const namespaces = []
 const bridge = `${runId}br`.slice(0, 15)
 const root = mkdtempSync(join(tmpdir(), 'uc-connectivity-'))
 const records = []
+const deliveries = []
+let activeScenario
 const faults = []
 const timingStartedAt = performance.now()
 let firstScenarioStartedAt
@@ -271,19 +274,16 @@ async function online(group, budget) {
 async function transfer(left, right, marker) {
   for (const [sender, receiver] of [[left, right], [right, left]]) {
     const text = `synthetic-${marker}-${sender.label}`
-    const result = await sender.call('send', { peer: receiver.id, text })
-    const causes = (result.per_target ?? []).map(target => {
-      const message = target.outcome?.message ?? ''
-      return ['peer rejected', 'stream io', 'internal', 'local policy rejected payload before dispatch', 'peer version is incompatible with confirmed clipboard delivery', 'target device offline or unreachable']
-        .find(prefix => message.startsWith(prefix)) ?? target.outcome?.kind ?? 'unknown'
+    await verifyDelivery(deliveries, {
+      kind: 'text', from: sender.label, to: receiver.label, scenario: activeScenario ?? null,
+    }, () => sender.call('send', { peer: receiver.id, text }), async () => {
+      await until(async () => {
+        for (const entry of await receiver.call('history')) {
+          if ((await receiver.call('entry', { entry: entry.entry_id })).content === text) return true
+        }
+        return false
+      }, 20_000, 'exact content did not arrive')
     })
-    assert.equal(result.total_accepted, 1, `${sender.label} to ${receiver.label}: content not accepted (offline=${result.total_offline}, failed=${result.total_errored}, pending=${result.total_pending}, duplicate=${result.total_duplicate}, causes=${causes.join(',')})`)
-    await until(async () => {
-      for (const entry of await receiver.call('history')) {
-        if ((await receiver.call('entry', { entry: entry.entry_id })).content === text) return true
-      }
-      return false
-    }, 20_000, 'exact content did not arrive')
   }
 }
 
@@ -309,27 +309,29 @@ async function transferFile(left, right, marker) {
     const handle = `managed-${marker}-${sender.label}`
     const displayName = `evidence-${sender.label}.bin`
     const content = `managed-file-payload-${marker}-${sender.label}`
-    const result = await sender.call('send_file', {
+    await verifyDelivery(deliveries, {
+      kind: 'file', from: sender.label, to: receiver.label, scenario: activeScenario ?? null,
+    }, () => sender.call('send_file', {
       peer: receiver.id,
       handle,
       display_name: displayName,
       mime_type: 'application/octet-stream',
       content,
-    })
-    assert.equal(result.total_accepted, 1, `${sender.label} to ${receiver.label}: file not accepted`)
-    await until(async () => {
-      for (const entry of await receiver.call('history')) {
-        if (entry.content_type !== 'file') continue
-        const response = await receiver.raw({ command: 'read_file', entry: entry.entry_id })
-        if (!response.ok || response.ok.file_name !== displayName) continue
-        if (Buffer.from(response.ok.bytes).equals(Buffer.from(content))) {
-          receiver.expectedFiles ??= []
-          receiver.expectedFiles.push({ entry: entry.entry_id, content, displayName })
-          return true
+    }), async () => {
+      await until(async () => {
+        for (const entry of await receiver.call('history')) {
+          if (entry.content_type !== 'file') continue
+          const response = await receiver.raw({ command: 'read_file', entry: entry.entry_id })
+          if (!response.ok || response.ok.file_name !== displayName) continue
+          if (Buffer.from(response.ok.bytes).equals(Buffer.from(content))) {
+            receiver.expectedFiles ??= []
+            receiver.expectedFiles.push({ entry: entry.entry_id, content, displayName })
+            return true
+          }
         }
-      }
-      return false
-    }, 60_000, 'exact file bytes did not arrive')
+        return false
+      }, 60_000, 'exact file bytes did not arrive')
+    })
   }
 }
 
@@ -440,12 +442,14 @@ async function scenario(id, action) {
   const clock = performance.now()
   const record = { id, started, outcome: 'failed' }
   records.push(record)
+  const previousScenario = activeScenario
+  activeScenario = id
   try {
     const proof = await action()
     if (proof !== undefined) record.proof = proof
     record.outcome = 'passed'
   }
-  finally { record.elapsed_ms = Math.round(performance.now() - clock); record.completed = new Date().toISOString() }
+  finally { activeScenario = previousScenario; record.elapsed_ms = Math.round(performance.now() - clock); record.completed = new Date().toISOString() }
   process.stdout.write(`${id}: passed (${record.elapsed_ms} ms)\n`)
   return record
 }
@@ -1235,6 +1239,6 @@ finally {
     cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
     total_ms: Math.round(timingCompletedAt - timingStartedAt),
   }
-  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, reproduction, binaries, faults, records, deliveries, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0
