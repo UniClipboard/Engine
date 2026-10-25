@@ -119,6 +119,9 @@ Core 的 `ProgressRegistration` 现在提供单个已授权设备／源条目的
 完整负责人必须按 Space 世代／认证设备隔离实例、生成不复用的挑战及 binding，并将迟到交换保留在原连接世代；
 不能因帧晚到而重新激活旧连接，也不能在普通重连时重建规则丢失修订。
 
+Producer在完整登记或通知动作入口、读取本地权威之前冻结原连接请求，连接阶段只消费该请求。
+本地读取跨过会话退休时，旧动作不能在返回后重新取得新会话的拨号资格；原单轮截止和取消责任保持。
+
 真实双端登记原型和未覆盖边界见[阶段 0 证明](../exec-plans/active/2026-10-24-transfer-progress-connectivity-feasibility.md)。
 Application `transfer/progress` 现在提供从原始发送意图授权的单任务登记及终态采用能力。
 Infra `transfer_progress_v2` 有界入站适配取得真实连接对端身份，等待完整描述／终态采用成功后才写 Bound／TerminalAck；

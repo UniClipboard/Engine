@@ -1,10 +1,13 @@
 //! 一次完整通知；当前登记、活动发送或终态精确ACK共用原预算。
+//! 本地权威读取之前冻结连接请求；会话退休后不能为旧动作重取新会话资格。
 use super::{
     ElapsedClockPort, ProgressBound, ProgressContactNotice, ProgressExchangeDeadline,
     ProgressLiveRoundPort, ProgressReceiveError, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
     ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressUpdateNotice, ProgressWirePort,
 };
-use crate::connectivity::{ConnectionLease, ConnectionProtocol, ConnectivityManager};
+use crate::connectivity::{
+    ConnectionLease, ConnectionProtocol, ConnectionRequest, ConnectivityManager,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -39,6 +42,7 @@ impl TransferProgressProducer {
         source: ProgressIdentity,
         cancel: &CancellationToken,
     ) -> Result<ProgressBound, ProgressReceiveError> {
+        let request = self.manager.request(*peer);
         let deadline = ProgressExchangeDeadline::new(
             self.clock.clone(),
             self.clock.elapsed()?.saturating_add(TERMINAL_ROUND_LIMIT),
@@ -46,22 +50,18 @@ impl TransferProgressProducer {
         if self.authority.current_task(peer, source).is_none() {
             return Err(ProgressReceiveError::UnknownTask);
         }
-        let connection = self.connect(peer, &deadline, cancel).await?;
+        let connection = self.connect(request, &deadline, cancel).await?;
         self.register_on(&connection, source, &deadline, cancel)
             .await
     }
     async fn connect(
         &self,
-        peer: &DeviceId,
+        request: ConnectionRequest,
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ConnectionLease, ProgressReceiveError> {
         deadline.check(cancel)?;
-        let connection = self
-            .manager
-            .request(*peer)
-            .connect(deadline.instant(), cancel)
-            .await?;
+        let connection = request.connect(deadline.instant(), cancel).await?;
         deadline.check(cancel)?;
         match connection.protocol() {
             ConnectionProtocol::TransferProgressV2 => Ok(connection),
@@ -124,6 +124,7 @@ impl ProgressTerminalRoundPort for TransferProgressProducer {
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<(), ProgressReceiveError> {
+        let request = self.manager.request(*peer);
         let source = expected.source;
         let attempt = expected.attempt;
         let current = self
@@ -136,7 +137,7 @@ impl ProgressTerminalRoundPort for TransferProgressProducer {
         if !current.items.contains(&result.item) {
             return Err(ProgressReceiveError::InvalidPlan);
         }
-        let connection = self.connect(peer, deadline, cancel).await?;
+        let connection = self.connect(request, deadline, cancel).await?;
         let bound = self
             .register_on(&connection, source, deadline, cancel)
             .await?;
@@ -178,6 +179,7 @@ impl ProgressLiveRoundPort for TransferProgressProducer {
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<(), ProgressReceiveError> {
+        let request = self.manager.request(*peer);
         let check = || -> Result<(), ProgressReceiveError> {
             let current = self
                 .authority
@@ -194,7 +196,7 @@ impl ProgressLiveRoundPort for TransferProgressProducer {
             deadline.check(cancel)
         };
         check()?;
-        let connection = self.connect(peer, deadline, cancel).await?;
+        let connection = self.connect(request, deadline, cancel).await?;
         let bound = self
             .register_on(&connection, expected.source, deadline, cancel)
             .await?;
@@ -233,6 +235,7 @@ impl ProgressLiveRoundPort for TransferProgressProducer {
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<(), ProgressReceiveError> {
+        let request = self.manager.request(*peer);
         let check = || -> Result<(), ProgressReceiveError> {
             let current = self
                 .authority
@@ -250,7 +253,7 @@ impl ProgressLiveRoundPort for TransferProgressProducer {
             deadline.check(cancel)
         };
         check()?;
-        let connection = self.connect(peer, deadline, cancel).await?;
+        let connection = self.connect(request, deadline, cancel).await?;
         let bound = self
             .register_on(&connection, expected.source, deadline, cancel)
             .await?;
