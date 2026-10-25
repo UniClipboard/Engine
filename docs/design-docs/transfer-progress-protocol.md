@@ -15,6 +15,23 @@
 
 本片没有新增持久格式、通知 outbox 或 blob／V3 envelope 版本。
 
+## 模块所有权与调用边界
+
+Application [模块入口](../../crates/uc-application/src/transfer/progress/mod.rs)只声明模块、集中引入名称和导出必要能力；
+业务实现、专属port、模型、错误和测试按各自职责组织，不由入口编排内部步骤。
+
+| 职责 | 当前实现与边界 |
+| --- | --- |
+| 纯规则与策略 | Core `file_transfer`保存登记修订、逐项投影、汇总、联系、补发、保留和公平规则；Application [连接策略](../../crates/uc-application/src/transfer/progress/connectivity.rs)仅装配既有受管连接能力，不另建拨号／缓存循环。 |
+| 定义与依赖 | `progress/model.rs`、`ports.rs`及`snapshot`内对应文件保存领域模型和专属能力；完整动作、单轮交换、单页IO各有契约，不建立跨业务的公共技术port目录。 |
+| 通知采用与投影 | [接收负责人](../../crates/uc-application/src/transfer/progress/receiver.rs)统一登记、联系、活动与终态采用；[投影注册表](../../crates/uc-application/src/transfer/progress/projection/handle.rs)保存原意图、退休围栏和变化通知。Infra只有在完整采用成功后才能回Bound／精确ACK。 |
+| 完整状态核对 | [核对动作](../../crates/uc-application/src/transfer/progress/projection/refresh.rs)在组装时持有投影与交换服务，调用方只发起一次`refresh`；读取、范围复核和原子采用由该动作完成。 |
+| 统一交换监督 | [delivery](../../crates/uc-application/src/transfer/progress/delivery/mod.rs)统一通知与查询的额度、补发、取消和实际关闭；[producer](../../crates/uc-application/src/transfer/progress/producer.rs)执行一轮完整登记／发送／精确结果核对，不向调用方转交网络阶段编排。 |
+| 实际接收事实 | 原`transfer/receive`继续独占下载、重试、输出、结算及清理；[查询提供端](../../crates/uc-application/src/transfer/receive/work/catalog/progress_snapshot.rs)在原目录锁内关联原计划与保存事实，`progress/source`不形成第二套业务结算权威。 |
+
+测试放在所属规则、采用、投影、调度和真实流fixture内，预算交叉验收仍只使用测试依赖。
+上述模块边界已实现；生产Router／通知hook、稳定宿主映射和Engine装配迁移继续按执行计划完成，不能由模块组织验收代替。
+
 ## 帧边界和观测载体
 
 一帧为：
