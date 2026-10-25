@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use futures::poll;
 use std::error::Error;
 use std::io;
+use std::mem::discriminant;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,6 +33,7 @@ struct Query {
     fail: AtomicBool,
     remote: Mutex<ProgressTaskDescriptor>,
     absent: AtomicBool,
+    reply: Mutex<Option<ProgressSnapshotRead>>,
 }
 #[async_trait]
 impl ProgressSnapshotRoundPort for Query {
@@ -46,6 +48,7 @@ impl ProgressSnapshotRoundPort for Query {
         let remote = *self.remote.lock().unwrap();
         let revision = self.revision.load(Ordering::SeqCst);
         let absent = self.absent.load(Ordering::SeqCst);
+        let reply = self.reply.lock().unwrap().take();
         assert_eq!(expected.source, remote.source);
         assert!(expected.expected.is_none_or(|expected| expected == remote));
         assert!(expected.items.iter().copied().eq([item(0), item(1)]));
@@ -58,6 +61,9 @@ impl ProgressSnapshotRoundPort for Query {
         }
         if absent {
             return Ok(ProgressSnapshotRead::NotRetained);
+        }
+        if let Some(reply) = reply {
+            return Ok(reply);
         }
         Ok(ProgressSnapshotRead::Complete(ProgressSnapshot {
             descriptor: remote,
@@ -151,6 +157,7 @@ impl Fixture {
             fail: AtomicBool::new(false),
             remote: Mutex::new(descriptor(key, 2)),
             absent: AtomicBool::new(false),
+            reply: Mutex::new(None),
         });
         let (service, worker) = ProgressExchangeService::new(
             clock.clone(),
@@ -527,6 +534,125 @@ async fn initial_query_cannot_replace_a_different_scope_registered_while_it_was_
             assert!(matches!(reply.as_ref(), Err(ProgressReceiveError::Stale)));
             assert!(snapshot.items.iter().all(|(_, value)| value.is_none()));
         }
+        fixture.shutdown().await;
+    }
+}
+
+fn non_snapshot_reply(index: usize, key: ProgressProjectionKey) -> ProgressSnapshotRead {
+    match index {
+        0 => ProgressSnapshotRead::NotRetained,
+        1 => ProgressSnapshotRead::Unsupported,
+        2 => ProgressSnapshotRead::AccessDenied,
+        3 => ProgressSnapshotRead::Busy,
+        4 => ProgressSnapshotRead::Superseded(ProgressTaskDescriptor {
+            attempt: id(1011),
+            revision: 2,
+            ..descriptor(key, 2)
+        }),
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn late_non_snapshot_reply_cannot_cross_a_registration_scope_change() {
+    for registered in [true, false] {
+        for reply in 0..5 {
+            let fixture = Fixture::new(vec![terminal(0), terminal(1)], registered).await;
+            *fixture.query.reply.lock().unwrap() = Some(non_snapshot_reply(reply, fixture.key));
+            let owner = fixture.reconciler.clone();
+            let key = fixture.key;
+            let querying =
+                tokio::spawn(async move { owner.refresh(key, &CancellationToken::new()).await });
+            timeout(Duration::from_secs(2), fixture.query.entered.notified())
+                .await
+                .unwrap();
+            let current = ProgressTaskDescriptor {
+                attempt: id(1011),
+                revision: 2,
+                ..descriptor(key, 2)
+            };
+            fixture
+                .registry
+                .register(&key.peer, 1, key.source, &mut Current(current))
+                .await
+                .unwrap();
+            let before = fixture.registry.snapshot(key).unwrap();
+            fixture.query.release.add_permits(1);
+            let reply = timeout(Duration::from_secs(2), querying)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(reply.as_ref(), Err(ProgressReceiveError::Stale)));
+            let after = fixture.registry.snapshot(key).unwrap();
+            assert_eq!(after.version, before.version);
+            assert_eq!(after.items, before.items);
+            assert!(after.task == Some(current));
+            fixture.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn unchanged_non_snapshot_replies_preserve_the_result_and_do_not_publish_facts() {
+    for registered in [true, false] {
+        for reply in 0..5 {
+            let fixture = Fixture::new(vec![terminal(0), terminal(1)], registered).await;
+            *fixture.query.reply.lock().unwrap() = Some(non_snapshot_reply(reply, fixture.key));
+            let before = fixture.registry.snapshot(fixture.key).unwrap();
+            let mut events = fixture.registry.subscribe();
+            let response = fixture.refresh().await;
+            let actual = response.as_ref().as_ref().unwrap();
+            assert_eq!(
+                discriminant(actual),
+                discriminant(&non_snapshot_reply(reply, fixture.key))
+            );
+            if let ProgressSnapshotRead::Superseded(current) = actual {
+                assert_eq!(current.attempt, id(1011));
+                assert_eq!(current.revision, 2);
+            }
+            let after = fixture.registry.snapshot(fixture.key).unwrap();
+            assert_eq!(after.version, before.version);
+            assert_eq!(after.items, before.items);
+            assert!(after.task == before.task && after.bound == before.bound);
+            assert_eq!(after.freshness.unwrap(), before.freshness.unwrap());
+            assert!(matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ));
+            fixture.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn late_non_snapshot_replies_cannot_answer_a_new_same_key_intent() {
+    for reply in 0..5 {
+        let fixture = Fixture::new(vec![terminal(0), terminal(1)], false).await;
+        *fixture.query.reply.lock().unwrap() = Some(non_snapshot_reply(reply, fixture.key));
+        let owner = fixture.reconciler.clone();
+        let key = fixture.key;
+        let querying =
+            tokio::spawn(async move { owner.refresh(key, &CancellationToken::new()).await });
+        timeout(Duration::from_secs(2), fixture.query.entered.notified())
+            .await
+            .unwrap();
+        fixture.registry.remove(key);
+        fixture
+            .registry
+            .accept_intent(key, vec![item(0), item(1)])
+            .unwrap();
+        fixture.query.release.add_permits(1);
+        let response = timeout(Duration::from_secs(2), querying)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response.as_ref(),
+            Err(ProgressReceiveError::Stale)
+        ));
+        let current = fixture.registry.snapshot(key).unwrap();
+        assert!(current.task.is_none() && current.bound.is_none());
+        assert!(current.items.iter().all(|(_, state)| state.is_none()));
         fixture.shutdown().await;
     }
 }

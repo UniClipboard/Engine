@@ -4,7 +4,7 @@ use super::{
     TransferProgressReceiver,
 };
 use crate::transfer::progress::{
-    ProgressReceiveError, ProgressSnapshot, ProgressSnapshotTarget, ProgressTaskDescriptor,
+    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotTarget, ProgressTaskDescriptor,
 };
 use std::sync::{Arc, PoisonError};
 use uc_core::file_transfer::{
@@ -36,17 +36,26 @@ impl TransferProgressReceiver {
             },
         ))
     }
-    pub(in super::super) fn adopt_snapshot(
+    pub(in super::super) fn finish_query(
         &self,
         expected: Option<ProgressTaskDescriptor>,
-        snapshot: &ProgressSnapshot,
+        reply: &ProgressSnapshotRead,
     ) -> Result<(), ProgressReceiveError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let current = state.task_descriptor();
-        if state.closed
-            || expected.is_some_and(|expected| {
-                current != Some(expected) || snapshot.descriptor != expected
-            })
+        if state.closed {
+            return Err(ProgressReceiveError::Stale);
+        }
+        let ProgressSnapshotRead::Complete(snapshot) = reply else {
+            // 未保留等回复没有完整事实可与并发登记合流，不能据此判断另一任务。
+            return if current == expected {
+                Ok(())
+            } else {
+                Err(ProgressReceiveError::Stale)
+            };
+        };
+        if expected
+            .is_some_and(|expected| current != Some(expected) || snapshot.descriptor != expected)
             || (expected.is_none() && current.is_some_and(|current| current != snapshot.descriptor))
         {
             return Err(ProgressReceiveError::Stale);
