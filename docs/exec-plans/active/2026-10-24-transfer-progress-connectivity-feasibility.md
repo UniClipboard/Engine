@@ -590,3 +590,21 @@ GitHub Actions的`Engine real environment`提供`legacy-blob`手工模式，`cas
 
 该入口用于定位run40187851498中固定rc.15旧旧Relay的`apply_failed`；本机ARM普通12轮及受控两CPU12轮均通过，
 尚未捕捉到同一失败。工具可用不代表旧端间歇问题已修复，远端反馈、物理挂起及生产迁移继续分别记录。
+
+
+## 原投影退休与重建的字节流组合
+
+专属 progress profile 的第二 backend 复用实际 codec、`TransferProgressProducer` 和
+`ProgressProjectionRegistry`，在原登记 Challenge 已发出、当前事实读取尚未返回时，分别退休源条目关联、
+对端投影关联、全部投影或整个投影负责人，再由完整发送意图重新接受相同设备、源条目和原计划。
+旧登记必须经真实拒绝帧返回 `UnknownTask`，不能把迟到 Bound 交给同键新意图；投影负责人关闭后，
+原 worker 继续等待实际登记返回，旧 handle 的新意图仍被拒绝。
+
+四项组合保持 producer、attempt、修订和原计划完全相同，重新登记仍取得不同 binding。
+旧 binding 的终态经原帧到达后，两端均返回 `Stale`，没有终态 ACK、新变化提示或新投影修订；
+新 binding 的同一终态则实际采用并取得精确 ACK。同方向始终只有一次拨号，
+避免把换连接误当作意图退休隔离。入口为
+[内存 backend 退休组合](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/stream_memory_backend_retirement_probe.rs)。
+
+本组只证明原投影关联的退休、重建和实际字节流采用，固定身份与事实不代替真实密码认证、
+接收 SQLite 权威、成员撤销或生产会话装配；阶段0物理挂起及生产迁移门槛保持原状态。

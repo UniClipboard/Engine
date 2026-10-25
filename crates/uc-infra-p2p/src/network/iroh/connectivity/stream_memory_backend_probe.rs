@@ -5,6 +5,8 @@ mod fixture;
 mod queued_query_probe;
 #[path = "stream_memory_backend_request_end_probe.rs"]
 mod request_end_probe;
+#[path = "stream_memory_backend_retirement_probe.rs"]
+mod retirement_probe;
 #[path = "stream_memory_backend_session_probe.rs"]
 mod session_probe;
 use super::progress_probe::{progress_budget, UnusedSnapshotProvider};
