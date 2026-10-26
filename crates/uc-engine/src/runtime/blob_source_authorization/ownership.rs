@@ -21,7 +21,7 @@ use uc_application::facade::PublishBlobPathCommand;
 use url::Url;
 use wiremock::MockServer;
 
-async fn outbound(
+pub(super) async fn outbound(
     runtime: &ProductionRuntime,
     source: &str,
     peer: &str,
@@ -54,7 +54,12 @@ async fn outbound(
     .expect("original authenticated sender must observe its own receiver")
 }
 
-async fn assert_saved(runtime: &ProductionRuntime, entry: &str, root: &Path, content: &[u8]) {
+pub(super) async fn assert_saved(
+    runtime: &ProductionRuntime,
+    entry: &str,
+    root: &Path,
+    content: &[u8],
+) {
     let OperationResult::HistoryEntryResource(resource) = runtime
         .execute(
             Operation::GetHistoryEntryResource(HistoryEntryInput {

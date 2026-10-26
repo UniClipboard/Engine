@@ -572,6 +572,9 @@ pub async fn prepare_sync_session(
             snapshot_wire: Arc::new(TransferProgressWire),
             inbound: Box::new(move |receiver, legacy, queries| {
                 #[cfg(all(test, feature = "dev-tools"))]
+                let receiver =
+                    receive_exports::decorate_progress_receiver(&progress_probe_path, receiver);
+                #[cfg(all(test, feature = "dev-tools"))]
                 let queries =
                     receive_exports::decorate_progress_queries(&progress_probe_path, queries);
                 Arc::new(TransferProgressInboundAdapter::new(
