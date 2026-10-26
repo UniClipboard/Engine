@@ -944,3 +944,27 @@ just cargo test -p uc-application --lib transfer::receive::work::catalog::tests:
 just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib -E 'test(real_engine_manual_retry_replaces_source_attempt_and_preserves_unselected_successes)' --locked
 just cargo test -p uc-engine --features dev-tools --lib receive_retry:: --locked
 ```
+
+
+## zstd依赖审计与冻结旧压缩载荷
+
+#308 的仓库CI审计暴露原锁图的4条漏洞与10条unsound阻断；本地同一公告库提交
+`a78282a1414d6c28cc228c4eae3570451affb0dc`重放确认。
+按官方[RUSTSEC-2026-0391](https://github.com/RustSec/advisory-db/blob/main/crates/zstd/RUSTSEC-2026-0391.md)、
+[RUSTSEC-2026-0403](https://github.com/RustSec/advisory-db/blob/main/crates/zstd-safe/RUSTSEC-2026-0403.md)、
+[RUSTSEC-2026-0398](https://github.com/RustSec/advisory-db/blob/main/crates/zstd-safe/RUSTSEC-2026-0398.md)和
+[RUSTSEC-2026-0410](https://github.com/RustSec/advisory-db/blob/main/crates/zstd-sys/RUSTSEC-2026-0410.md)修复范围，
+两个直接依赖最低改为zstd0.14.3，唯一生产锁图仅更新zstd／zstd-safe／zstd-sys到0.14.3／8.2.0／2.1.2+zstd.1.5.7。
+同一公告库下`just cargo audit --deny unsound --json`转为0漏洞、0unsound并退出0；原非阻断的5条unmaintained和5条yanked保留，没有增加忽略或减少审计范围。
+本仓使用bulk压缩／解压，不将公告中stream／seekable／wasm32特定路径描述为本仓已证实触发的线上故障。
+
+既有内容保护负责人、MasterKey AEAD、压缩等级、解压上限及线上／持久化封装保持，底层Zstd C仍为1.5.7。
+复用仓库共享target的一次性主机探针对冻结旧链0.13.3／7.2.4／2.0.16+zstd.1.5.7与新链进行实际双向互读，
+空、文本、可压缩、字节循环、二进制5类数据共10次精确读回，非空数据容量少1字节的8次解压均拒绝且没有输出文件；
+五类实际压缩字节也逐一相同。探针显式冻结三个版本，避免把重新解析旧宽范围后得到的新底层库当成原锁图；没有把旧依赖加入生产图或创建独立构建目录。
+
+[旧压缩向量及来源](../../../crates/uc-infra-content/src/clipboard/chunked_transfer/fixtures/README.md)
+保存由冻结旧链实际生成的178字节合成载荷。
+原`compressed_legacy_v3_content_remains_readable`改为读取该固定向量，经过既有UC3加密封装及实际TransferCipherAdapter解密／解压，
+避免用当前编码器生成的“旧”载荷自证兼容。
+此候选内容模块80项全部通过；Profile库测试249项通过／3项按原条件跳过（33.72秒），跳过项为需要显式现场资料的两项读取与一项大状态性能探针。完整Engine接收51项通过／1项按原Collector条件跳过（385.86秒）。另跑真实SQLite密文接收／文件与目录提交、资料升级及独立进程升级恢复共5组集成，60项通过；2项历史资料fixture未提供，子进程入口按原安排默认忽略但由父例实际启动，不据此替代原设备／完整网络矩阵。
