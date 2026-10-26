@@ -18,7 +18,8 @@ pub(super) fn retry_class(source: &ProgressReceiveError) -> RetryClass {
         | ProgressReceiveError::UnknownTask
         | ProgressReceiveError::InvalidPlan
         | ProgressReceiveError::Stale
-        | ProgressReceiveError::Conflict => RetryClass::Stop,
+        | ProgressReceiveError::Conflict
+        | ProgressReceiveError::Settlement { .. } => RetryClass::Stop,
     }
 }
 fn connection_retry(source: &ConnectivityError) -> RetryClass {

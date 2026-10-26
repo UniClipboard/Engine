@@ -232,6 +232,7 @@ impl ConnectionLease {
                 .unwrap_or_else(Instant::now);
             let mut stream = StreamLease::new(pair, self.record.clone(), Vec::new())?;
             stream.received_at = Some(started);
+            stream.received_elapsed_at = self.record.activity.sample_elapsed()?;
             drop(held_activity);
             let capacity = (|| {
                 let local = self

@@ -9,3 +9,6 @@ mod rejection;
 mod snapshot;
 pub use outbound::TransferProgressWire;
 pub use receive::TransferProgressInbound;
+
+mod inbound;
+pub use inbound::TransferProgressInboundAdapter;
