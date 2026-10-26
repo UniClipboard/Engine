@@ -39,7 +39,7 @@ use crate::clipboard::sync::payload_codec::{
 };
 use crate::clipboard::sync::{
     encode_snapshot_to_v3_bytes, DispatchClipboardEntryInput, DispatchClipboardEntryUseCase,
-    DispatchOutcome, DispatchPerTarget, DispatchSyncError,
+    DispatchOutcome, DispatchPerTarget, DispatchSyncError, RecoverableDeliveryFeed,
 };
 use crate::deps::CurrentSpaceMemberScopePort;
 use crate::facade::blob_transfer::SharedHostEventEmitter;
@@ -451,6 +451,11 @@ impl ClipboardSyncFacade {
     /// across the crate boundary.
     pub(crate) fn dispatch_runner(&self) -> Arc<dyn DispatchEntryRunner> {
         Arc::clone(&self.dispatch_uc) as Arc<dyn DispatchEntryRunner>
+    }
+
+    /// 出站投递记录负责人发布的可恢复结果，供同一会话的离线投递恢复订阅。
+    pub(crate) fn recoverable_deliveries(&self) -> RecoverableDeliveryFeed {
+        self.dispatch_uc.recoverable_deliveries()
     }
 }
 

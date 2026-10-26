@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio::task::{JoinError, JoinSet};
 use tracing::Instrument;
 
@@ -123,6 +123,29 @@ pub(crate) fn classify_dispatch_result(
                 bucket: DispatchResultBucket::Offline,
             }
         }
+        Ok((device_id, Err(err @ ClipboardDispatchError::Transient(_)))) => {
+            uc_debug!(
+                error_kind = "dispatch_transient",
+                io_error_kind = io_error_kind(&err),
+                "dispatch deferred because the transport was interrupted"
+            );
+            // 确认前的暂时中断与不可达同属可恢复结果；对端若已保存，重试会得到重复确认。
+            let delivery_record = entry_id.map(|eid| EntryDeliveryRecord {
+                entry_id: eid.clone(),
+                target_device_id: device_id,
+                status: EntryDeliveryStatus::Unreachable,
+                reason_detail: None,
+                updated_at_ms: now_ms,
+            });
+            ProcessedDispatchResult {
+                per_target: Some(DispatchPerTarget {
+                    device_id,
+                    outcome: Err(err.to_string()),
+                }),
+                delivery_record,
+                bucket: DispatchResultBucket::Offline,
+            }
+        }
         Ok((device_id, Err(err))) => {
             uc_warn!(
                 error_kind = "dispatch_failed",
@@ -132,8 +155,8 @@ pub(crate) fn classify_dispatch_result(
             let (failure_reason, reason_detail) = match &err {
                 // Offline is handled in the previous arm (Unreachable); this
                 // arm only fires for the non-Offline error variants.
-                ClipboardDispatchError::Offline => {
-                    unreachable!("Offline is matched in the dedicated arm above")
+                ClipboardDispatchError::Offline | ClipboardDispatchError::Transient(_) => {
+                    unreachable!("recoverable failures are matched in the dedicated arms above")
                 }
                 ClipboardDispatchError::LocalPolicyExceeded(s) => {
                     (DeliveryFailureReason::LocalPolicy, Some(s.clone()))
@@ -185,12 +208,46 @@ pub(crate) fn classify_dispatch_result(
     }
 }
 
+/// 可恢复结果通知的缓冲上限；恢复负责人落后时按丢失处理并重新扫描在线目标。
+const RECOVERABLE_DELIVERY_CAPACITY: usize = 64;
+
+/// 已经落库的一条可恢复投递结果（`Unreachable`）。只说明哪个目标需要再试，不携带内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoverableDelivery {
+    pub entry_id: EntryId,
+    pub target_device_id: DeviceId,
+}
+
+/// 可恢复投递结果的订阅入口。只由投递记录负责人在结果持久化之后发布，
+/// 自动投递、后台收尾、恢复补发与手动重发共用同一来源。
+#[derive(Clone)]
+pub(crate) struct RecoverableDeliveryFeed(broadcast::Sender<RecoverableDelivery>);
+
+impl RecoverableDeliveryFeed {
+    pub(crate) fn new() -> Self {
+        Self(broadcast::channel(RECOVERABLE_DELIVERY_CAPACITY).0)
+    }
+
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<RecoverableDelivery> {
+        self.0.subscribe()
+    }
+
+    fn publish(&self, record: &EntryDeliveryRecord) {
+        // 没有订阅者只说明恢复负责人尚未启动或已停止；结果已落库，启动扫描会再处理。
+        let _ = self.0.send(RecoverableDelivery {
+            entry_id: record.entry_id.clone(),
+            target_device_id: record.target_device_id,
+        });
+    }
+}
+
 /// Persists per-peer delivery outcomes and pings the frontend to refetch.
 pub(crate) struct DeliveryRecorder {
     entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     host_event_bus: SharedHostEventEmitter,
     current: Arc<Mutex<HashMap<(EntryId, DeviceId), Weak<()>>>>,
     attempt: Option<Arc<()>>,
+    recoverable: RecoverableDeliveryFeed,
 }
 
 impl DeliveryRecorder {
@@ -204,7 +261,12 @@ impl DeliveryRecorder {
             host_event_bus: self.host_event_bus.clone(),
             current: self.current.clone(),
             attempt: Some(attempt),
+            recoverable: self.recoverable.clone(),
         })
+    }
+
+    pub(crate) fn recoverable_deliveries(&self) -> RecoverableDeliveryFeed {
+        self.recoverable.clone()
     }
     fn is_current(
         &self,
@@ -279,6 +341,7 @@ impl DeliveryRecorder {
             host_event_bus,
             current: Arc::new(Mutex::new(HashMap::new())),
             attempt: None,
+            recoverable: RecoverableDeliveryFeed::new(),
         }
     }
 
@@ -309,6 +372,9 @@ impl DeliveryRecorder {
                     target_device_id: record.target_device_id.as_str().to_string(),
                 },
             ));
+            if record.status == EntryDeliveryStatus::Unreachable {
+                self.recoverable.publish(record);
+            }
         }
     }
 }
@@ -571,6 +637,114 @@ mod tests {
             p.delivery_record.unwrap().status,
             EntryDeliveryStatus::Unreachable,
         ));
+    }
+
+    #[test]
+    fn transient_failure_maps_to_recoverable_unreachable_record() {
+        let joined = Ok((
+            dev("peer-a"),
+            Err(ClipboardDispatchError::Transient(Box::new(
+                std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+            ))),
+        ));
+        let p = classify_dispatch_result(joined, Some(&eid()), 1);
+        assert!(matches!(p.bucket, DispatchResultBucket::Offline));
+        assert!(p.per_target.unwrap().outcome.is_err());
+        let rec = p.delivery_record.unwrap();
+        assert_eq!(rec.status, EntryDeliveryStatus::Unreachable);
+        assert_eq!(rec.reason_detail, None);
+    }
+
+    /// 策略拒绝、协议不兼容、不可重试的连接失败与本机内部错误都保持终态。
+    #[test]
+    fn non_retryable_failures_stay_terminal() {
+        for (error, reason) in [
+            (
+                ClipboardDispatchError::LocalPolicyExceeded("too big".into()),
+                DeliveryFailureReason::LocalPolicy,
+            ),
+            (
+                ClipboardDispatchError::PeerRejected("bad header".into()),
+                DeliveryFailureReason::PeerRejected,
+            ),
+            (
+                ClipboardDispatchError::PeerIncompatible,
+                DeliveryFailureReason::PeerIncompatible,
+            ),
+            (
+                ClipboardDispatchError::Io("owner stopped".into()),
+                DeliveryFailureReason::Io,
+            ),
+            (
+                ClipboardDispatchError::Internal("corrupt".into()),
+                DeliveryFailureReason::Internal,
+            ),
+        ] {
+            let p = classify_dispatch_result(Ok((dev("peer-a"), Err(error))), Some(&eid()), 1);
+            assert!(matches!(p.bucket, DispatchResultBucket::Errored));
+            assert_eq!(
+                p.delivery_record.unwrap().status,
+                EntryDeliveryStatus::Failed { reason }
+            );
+        }
+    }
+
+    /// 只有已持久化的可恢复结果才通知恢复负责人；终态、成功与写入失败都不通知。
+    #[tokio::test]
+    async fn only_persisted_recoverable_results_are_announced() {
+        struct Repo;
+        #[async_trait::async_trait]
+        impl EntryDeliveryRepositoryPort for Repo {
+            async fn record_attempt(
+                &self,
+                record: &EntryDeliveryRecord,
+            ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+                if record.updated_at_ms == 99 {
+                    return Err(uc_core::clipboard::EntryDeliveryError::InvalidStatus);
+                }
+                Ok(())
+            }
+            async fn list_by_entry(
+                &self,
+                _: &EntryId,
+            ) -> Result<Vec<EntryDeliveryRecord>, uc_core::clipboard::EntryDeliveryError>
+            {
+                Ok(vec![])
+            }
+        }
+        let recorder =
+            DeliveryRecorder::new(Arc::new(Repo), Arc::new(crate::facade::HostEventBus::new()));
+        let mut results = recorder.recoverable_deliveries().subscribe();
+        let record = |target: &str, status, updated_at_ms| EntryDeliveryRecord {
+            entry_id: eid(),
+            target_device_id: dev(target),
+            status,
+            reason_detail: None,
+            updated_at_ms,
+        };
+        recorder
+            .flush(&[
+                record("delivered", EntryDeliveryStatus::Delivered, 1),
+                record(
+                    "failed",
+                    EntryDeliveryStatus::Failed {
+                        reason: DeliveryFailureReason::PeerRejected,
+                    },
+                    1,
+                ),
+                record("not-persisted", EntryDeliveryStatus::Unreachable, 99),
+                record("unreachable", EntryDeliveryStatus::Unreachable, 1),
+            ])
+            .await;
+
+        assert_eq!(
+            results.try_recv().unwrap(),
+            RecoverableDelivery {
+                entry_id: eid(),
+                target_device_id: dev("unreachable"),
+            }
+        );
+        assert!(results.try_recv().is_err());
     }
 
     #[test]

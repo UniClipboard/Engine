@@ -96,7 +96,12 @@ pub enum ClipboardDispatchError {
     /// cannot confirm application-level ingest.
     #[error("peer version is incompatible with confirmed clipboard delivery")]
     PeerIncompatible,
-    /// Stream I/O failure — broken connection, short read, etc.
+    /// 连接或流在投递确认前暂时失败：流被重置、连接中断、读写超时，或本机
+    /// 连接容量暂满。对端可能已经保存内容（只是确认丢失），因此重试依赖接收端
+    /// 去重；发送负责人必须把它记为可恢复结果，而不是终态失败。
+    #[error("transport interrupted before delivery was confirmed")]
+    Transient(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// 不可重试的连接失败：本机连接负责人已停止、地址资料无法读取等。
     #[error("stream io")]
     Io(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("internal")]

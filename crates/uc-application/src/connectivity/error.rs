@@ -97,6 +97,20 @@ impl ConnectivityError {
             _ => false,
         }
     }
+    /// 暂时性的传输或容量失败：稍后重试同一请求可能成功。准入拒绝、本机负责人
+    /// 停止、本机时钟失效、流能力不可用、地址资料读取失败与本机结算失败都不属于此类。
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Busy(_)
+            | Self::DeadlineExpired
+            | Self::TimedOut(_)
+            | Self::AdmissionDeadlineExpired
+            | Self::AdmissionTimedOut(_)
+            | Self::Stream(_) => true,
+            Self::Shared(error) => error.is_transient(),
+            _ => false,
+        }
+    }
 }
 
 impl ErrorClass for ConnectivityError {
@@ -164,5 +178,45 @@ mod inbound_handoff_tests {
                 .kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 只有暂时性的传输与容量失败可重试；准入拒绝、本机停止与地址资料失败不可重试。
+    #[tokio::test]
+    async fn only_transport_and_capacity_failures_are_transient() {
+        let busy = std::sync::Arc::new(tokio::sync::Semaphore::new(0))
+            .try_acquire_owned()
+            .map(drop)
+            .unwrap_err();
+        let elapsed = tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        let stream = || Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        for error in [
+            ConnectivityError::Busy(busy),
+            ConnectivityError::DeadlineExpired,
+            ConnectivityError::TimedOut(elapsed),
+            ConnectivityError::AdmissionDeadlineExpired,
+            ConnectivityError::Stream(stream()),
+            ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Stream(stream()))),
+        ] {
+            assert!(error.is_transient(), "{}", error.class());
+        }
+        for error in [
+            ConnectivityError::Denied,
+            ConnectivityError::Stopped,
+            ConnectivityError::Offline,
+            ConnectivityError::AddressMissing,
+            ConnectivityError::ExchangeAlreadyUsed,
+            ConnectivityError::Capability(StreamCapabilityRefusal::UnidirectionalUnavailable),
+            ConnectivityError::AddressLookup(stream()),
+            ConnectivityError::Admission(stream()),
+        ] {
+            assert!(!error.is_transient(), "{}", error.class());
+        }
     }
 }

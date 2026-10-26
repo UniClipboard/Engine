@@ -83,9 +83,13 @@ use super::work::WorkOwner;
 use crate::connectivity::{ElapsedClockError, ElapsedClockPort};
 use crate::runtime_lifecycle::LifecycleError;
 use crate::transfer::progress::ProgressProjectionRegistry;
+pub(crate) use delivery::RecoverableDeliveryFeed;
 use delivery::{
     classify_dispatch_result, spawn_deferred_drain, DeliveryRecorder, DispatchResultBucket,
 };
+// 恢复负责人的测试经真实记录负责人落库并发布结果，不另造发布入口。
+#[cfg(test)]
+pub(crate) use delivery::DeliveryRecorder as RecordingOwner;
 use fanout::DeadlineBoundedFanout;
 use header::OutboundHeaderFactory;
 use per_peer::PerPeerDispatcher;
@@ -144,7 +148,9 @@ fn map_dispatch_error_to_failure_reason(err: &ClipboardDispatchError) -> Failure
         ClipboardDispatchError::LocalPolicyExceeded(_) => FailureReason::FileTooLarge,
         ClipboardDispatchError::PeerRejected(_) => FailureReason::NetworkError,
         ClipboardDispatchError::PeerIncompatible => FailureReason::NetworkError,
-        ClipboardDispatchError::Io(_) => FailureReason::NetworkError,
+        ClipboardDispatchError::Transient(_) | ClipboardDispatchError::Io(_) => {
+            FailureReason::NetworkError
+        }
         ClipboardDispatchError::Internal(_) => FailureReason::Unknown,
     }
 }
@@ -161,6 +167,7 @@ fn dispatch_failure_stage(err: &ClipboardDispatchError) -> SyncFailureStage {
         ClipboardDispatchError::Offline
         | ClipboardDispatchError::PeerRejected(_)
         | ClipboardDispatchError::PeerIncompatible
+        | ClipboardDispatchError::Transient(_)
         | ClipboardDispatchError::Io(_) => SyncFailureStage::ImmediateSend,
     }
 }
@@ -608,6 +615,11 @@ impl DispatchClipboardEntryUseCase {
 
     pub(crate) async fn shutdown(&self) -> Result<(), LifecycleError> {
         self.work.shutdown().await
+    }
+
+    /// 本用例落库的可恢复结果；离线投递恢复负责人据此安排重试。
+    pub(crate) fn recoverable_deliveries(&self) -> RecoverableDeliveryFeed {
+        self.recorder.recoverable_deliveries()
     }
 }
 
@@ -2280,6 +2292,68 @@ mod tests {
         assert_eq!(
             outcome.per_target[0].outcome.as_ref().unwrap_err(),
             "delivery_intent_not_persisted"
+        );
+    }
+
+    /// 流在确认前被重置：用例把结果持久化为可恢复的 `Unreachable`，并在落库后
+    /// 通知恢复负责人；不会记成恢复永不处理的终态失败。
+    #[tokio::test]
+    async fn stream_reset_before_ack_is_recorded_and_announced_as_recoverable() {
+        let mut repo = MockPeerAddrRepo::new();
+        repo.expect_list()
+            .times(1)
+            .returning(|| Ok(vec![record("peer-io")]));
+
+        let mut cipher = MockCipher::new();
+        cipher
+            .expect_encrypt()
+            .times(1)
+            .returning(|plaintext| Ok(plaintext.to_vec()));
+
+        let mut dispatch = MockDispatch::new();
+        dispatch.expect_dispatch().times(1).returning(|_, _, _| {
+            dispatch_report(Err(ClipboardDispatchError::Transient(Box::new(
+                std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+            ))))
+        });
+
+        let spy = Arc::new(SpyEntryDeliveryRepo::default());
+        let (progress, _progress_worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
+        let uc = DispatchClipboardEntryUseCase::new(
+            Arc::new(repo),
+            Arc::new(make_member_repo_all_enabled()),
+            Arc::new(StaticPeerReachability(ReachabilityState::Online)),
+            Arc::new(cipher),
+            Arc::new(dispatch),
+            Arc::new(make_device_identity("self-device")),
+            Arc::new(make_local_identity_stub()),
+            Arc::new(make_settings_stub()),
+            Arc::new(FixedClock(1_700_000_000_000)),
+            Arc::new(uc_observability_contract::analytics::NoopAnalyticsSink),
+            Arc::new(AllMarkedFirstSyncState),
+            Arc::clone(&spy) as Arc<dyn EntryDeliveryRepositoryPort>,
+            Arc::new(crate::facade::host_event::HostEventBus::new()),
+            Arc::new(AllTestPeerScope),
+            progress,
+        );
+        let mut results = uc.recoverable_deliveries().subscribe();
+
+        let mut input = input();
+        input.entry_id = Some(EntryId::from("entry-reset"));
+        let outcome = uc.execute(input).await.expect("dispatch should settle");
+
+        assert_eq!(outcome.total_offline, 1);
+        assert_eq!(outcome.total_errored, 0);
+        let attempts = spy.snapshot().await;
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].status, EntryDeliveryStatus::Pending);
+        assert_eq!(attempts[1].status, EntryDeliveryStatus::Unreachable);
+        assert_eq!(
+            results.try_recv().expect("recoverable result announced"),
+            delivery::RecoverableDelivery {
+                entry_id: EntryId::from("entry-reset"),
+                target_device_id: DeviceId::new("peer-io"),
+            }
         );
     }
 

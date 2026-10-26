@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::task::{JoinError, JoinHandle};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
@@ -16,9 +18,12 @@ use super::automatic_sync_enabled;
 use crate::clipboard::outbound::{
     ClipboardOutboundFacade, NotResendableReason, ResendEntryError, ResendReport,
 };
+use crate::clipboard::sync::RecoverableDeliveryFeed;
 use crate::deps::CurrentSpaceMemberScopePort;
+use schedule::RetrySchedule;
 use uc_observability_contract::{log_fields::log_id, uc_debug, uc_info, uc_warn, wire_enum};
 
+mod schedule;
 #[cfg(test)]
 mod tests;
 
@@ -32,6 +37,10 @@ wire_enum! {
         Startup => "startup",
         /// 设备刚刚上线。
         PeerOnline => "peer_online",
+        /// 设备仍在线，但此前留下了可恢复结果，按退避到期再试。
+        Retry => "retry",
+        /// 可恢复结果通知积压丢失，重新扫描当前在线设备。
+        ResultsLagged => "results_lagged",
     }
 }
 
@@ -39,7 +48,9 @@ wire_enum! {
     /// 一轮恢复的结局：每个提前返回都对应一个固定类别，不记录条目、设备或错误正文。
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum RecoveryOutcome: &'static str {
-        /// 向目标补发了一条待恢复内容，并拿到派送汇总。
+        /// 向目标补发了一条待恢复内容，对端已确认收下（含重复确认）。
+        Delivered => "delivered",
+        /// 向目标补发了一条待恢复内容，但尚未得到确认；可恢复结果会再次排期。
         Dispatched => "dispatched",
         /// 没有需要恢复的条目。
         NothingToRecover => "nothing_to_recover",
@@ -69,6 +80,39 @@ wire_enum! {
         DeliveryFailed => "delivery_failed",
         /// 补发被拒绝的其他固定原因。
         DeliverySkipped => "delivery_skipped",
+    }
+}
+
+/// 一轮恢复结束后，按目标退避应如何继续。
+enum RetryAfterRound {
+    /// 已送达、进入终态或不再适合自动恢复：清除该目标的退避。
+    Clear,
+    /// 恢复轮次自身失败且没有落下新的投递结果：按退避再试。
+    Again,
+    /// 补发已经发出：若结果可恢复，记录负责人落库后会通知再次排期。
+    AwaitResult,
+}
+
+impl RecoveryOutcome {
+    fn retry_after_round(self) -> RetryAfterRound {
+        match self {
+            Self::Dispatched => RetryAfterRound::AwaitResult,
+            Self::ListingFailed
+            | Self::SupersedeFailed
+            | Self::ScopeUnavailable
+            | Self::DeliveryFailed => RetryAfterRound::Again,
+            Self::Delivered
+            | Self::NothingToRecover
+            | Self::Cancelled
+            | Self::SyncDisabled
+            | Self::MemberInactive
+            | Self::TargetPaused
+            | Self::TargetNotCurrent
+            | Self::StatusChanged
+            | Self::PayloadLost
+            | Self::NotResendable
+            | Self::DeliverySkipped => RetryAfterRound::Clear,
+        }
     }
 }
 
@@ -111,10 +155,12 @@ pub(super) struct OfflineDeliveryRecoveryDeps {
     pub(super) device_identity: Arc<dyn DeviceIdentityPort>,
     pub(super) clock: Arc<dyn ClockPort>,
     pub(super) delivery: Arc<dyn RecoveryDeliveryPort>,
+    pub(super) recoverable_deliveries: RecoverableDeliveryFeed,
     pub(super) delivery_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
-/// 监听可达性变化，只恢复已记录为暂时不可达的发送。
+/// 只恢复已记录为暂时不可达的发送。触发来源有三类：启动扫描、设备上线事件，
+/// 以及设备保持在线期间的可恢复结果（按目标有界退避重试，不依赖新的上线事件）。
 pub(super) struct OfflineDeliveryRecovery {
     cancel: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
@@ -127,28 +173,68 @@ impl OfflineDeliveryRecovery {
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
         let task_deps = Arc::clone(&deps);
+        // 先订阅再扫描，扫描期间落库的结果不会丢失通知。
+        let mut events = deps.peer_reachability.subscribe();
+        let mut results = deps.recoverable_deliveries.subscribe();
         let task = tokio::spawn(async move {
-            let mut events = task_deps.peer_reachability.subscribe();
-            recover_currently_online(&task_deps, &task_cancel).await;
+            let mut schedule = RetrySchedule::default();
+            recover_currently_online(
+                &task_deps,
+                RecoveryTrigger::Startup,
+                &mut schedule,
+                &task_cancel,
+            )
+            .await;
             loop {
+                let next_due = schedule.next_due();
                 tokio::select! {
                     biased;
                     _ = task_cancel.cancelled() => return,
                     event = events.recv() => match event {
                         Ok(event) if event.state == ReachabilityState::Online => {
-                            recover_online_target(
+                            // 上线事件立即恢复，此前的退避不再适用。
+                            schedule.clear(&event.device_id);
+                            recover_and_schedule(
                                 &task_deps,
                                 event.device_id,
                                 RecoveryTrigger::PeerOnline,
+                                &mut schedule,
                                 &task_cancel,
                             )
                             .await;
                         }
+                        Ok(event) if event.state == ReachabilityState::Offline => {
+                            // 离线目标等待下一次上线事件，不空转重试。
+                            schedule.clear(&event.device_id);
+                        }
                         Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        Err(RecvError::Lagged(missed)) => {
                             uc_warn!(missed = missed, "clipboard delivery recovery: presence events lagged");
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                        Err(RecvError::Closed) => return,
+                    },
+                    result = results.recv() => match result {
+                        Ok(result) => schedule.record_recoverable(
+                            result.target_device_id,
+                            Some(result.entry_id),
+                            Instant::now(),
+                        ),
+                        Err(RecvError::Lagged(missed)) => {
+                            uc_warn!(missed = missed, "clipboard delivery recovery: delivery results lagged");
+                            recover_currently_online(
+                                &task_deps,
+                                RecoveryTrigger::ResultsLagged,
+                                &mut schedule,
+                                &task_cancel,
+                            )
+                            .await;
+                        }
+                        Err(RecvError::Closed) => return,
+                    },
+                    _ = tokio::time::sleep_until(next_due.unwrap_or_else(Instant::now)), if next_due.is_some() => {
+                        if let Some(target) = schedule.take_due(Instant::now()) {
+                            retry_due_target(&task_deps, target, &mut schedule, &task_cancel).await;
+                        }
                     }
                 }
             }
@@ -193,7 +279,12 @@ impl Drop for OfflineDeliveryRecovery {
     }
 }
 
-async fn recover_currently_online(deps: &OfflineDeliveryRecoveryDeps, cancel: &CancellationToken) {
+async fn recover_currently_online(
+    deps: &OfflineDeliveryRecoveryDeps,
+    trigger: RecoveryTrigger,
+    schedule: &mut RetrySchedule,
+    cancel: &CancellationToken,
+) {
     if cancel.is_cancelled() {
         return;
     }
@@ -213,8 +304,42 @@ async fn recover_currently_online(deps: &OfflineDeliveryRecoveryDeps, cancel: &C
         }
         if deps.peer_reachability.current_state(&peer.device_id).await == ReachabilityState::Online
         {
-            recover_online_target(deps, peer.device_id, RecoveryTrigger::Startup, cancel).await;
+            schedule.clear(&peer.device_id);
+            recover_and_schedule(deps, peer.device_id, trigger, schedule, cancel).await;
         }
+    }
+}
+
+/// 退避到期的目标只在仍然在线时重试；否则交给下一次上线事件，避免为离线目标空转。
+async fn retry_due_target(
+    deps: &OfflineDeliveryRecoveryDeps,
+    target: DeviceId,
+    schedule: &mut RetrySchedule,
+    cancel: &CancellationToken,
+) {
+    if deps.peer_reachability.current_state(&target).await != ReachabilityState::Online {
+        schedule.clear(&target);
+        return;
+    }
+    recover_and_schedule(deps, target, RecoveryTrigger::Retry, schedule, cancel).await;
+}
+
+/// 执行一轮恢复，并按结局决定该目标的退避：送达或终态清除，自身失败再排期，
+/// 已发出的补发等待记录负责人发布的可恢复结果。
+async fn recover_and_schedule(
+    deps: &OfflineDeliveryRecoveryDeps,
+    target: DeviceId,
+    trigger: RecoveryTrigger,
+    schedule: &mut RetrySchedule,
+    cancel: &CancellationToken,
+) {
+    match recover_online_target(deps, target, trigger, cancel)
+        .await
+        .retry_after_round()
+    {
+        RetryAfterRound::Clear => schedule.clear(&target),
+        RetryAfterRound::Again => schedule.record_recoverable(target, None, Instant::now()),
+        RetryAfterRound::AwaitResult => {}
     }
 }
 
@@ -224,17 +349,18 @@ async fn recover_online_target(
     target: DeviceId,
     trigger: RecoveryTrigger,
     cancel: &CancellationToken,
-) {
+) -> RecoveryOutcome {
     let _gate = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
             record_recovery(trigger, RecoveryOutcome::Cancelled);
-            return;
+            return RecoveryOutcome::Cancelled;
         }
         gate = deps.delivery_gate.lock() => gate,
     };
     let outcome = recover_for_target(deps, target, cancel).await;
     record_recovery(trigger, outcome);
+    outcome
 }
 
 fn record_recovery(trigger: RecoveryTrigger, outcome: RecoveryOutcome) {
@@ -376,7 +502,11 @@ async fn recover_for_target(
                         pending = report.pending,
                         "clipboard delivery recovery dispatched"
                     );
-                    RecoveryOutcome::Dispatched
+                    if report.accepted + report.duplicate > 0 {
+                        RecoveryOutcome::Delivered
+                    } else {
+                        RecoveryOutcome::Dispatched
+                    }
                 }
                 Err(ResendEntryError::EntryNotResendable { reason, .. }) => {
                     if matches!(reason, NotResendableReason::PayloadLost) {

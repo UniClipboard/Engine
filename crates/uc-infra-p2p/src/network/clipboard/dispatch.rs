@@ -41,7 +41,7 @@ impl ClipboardDispatchAdapter {
         let mut stream = connection
             .open_bi(deadline)
             .await
-            .map_err(|error| ClipboardDispatchError::Io(Box::new(error)))?;
+            .map_err(map_connectivity_err)?;
         let mut wire_header = header.clone();
         if connection.protocol() != ConnectionProtocol::AttributedClipboard {
             // 实际协商的旧能力只发送冻结旧头；不追加尾随数据或在错误后重试旧格式。
@@ -55,16 +55,17 @@ impl ClipboardDispatchAdapter {
         )
         .await
         .map_err(map_encode_err)?;
+        // 帧已交给传输层后，流失败只说明确认未到达；对端可能已保存，重试靠接收端去重。
         stream
             .send
             .finish()
-            .map_err(|error| ClipboardDispatchError::Io(Box::new(error)))?;
+            .map_err(|error| ClipboardDispatchError::Transient(Box::new(error)))?;
         let mut ack = [0u8; 1];
         stream
             .receive
             .read_exact(&mut ack)
             .await
-            .map_err(|error| ClipboardDispatchError::Io(Box::new(error)))?;
+            .map_err(|error| ClipboardDispatchError::Transient(Box::new(error)))?;
         match AckCode::try_from(ack[0]) {
             Ok(AckCode::Accepted) => Ok(DispatchAck::Accepted),
             Ok(AckCode::DuplicateIgnored) => Ok(DispatchAck::DuplicateIgnored),
@@ -109,7 +110,7 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
                 let outcome = if error.is_unavailable() {
                     ClipboardDispatchError::Offline
                 } else {
-                    ClipboardDispatchError::Io(Box::new(error))
+                    map_connectivity_err(error)
                 };
                 return DispatchReport {
                     transport: ConnectionChannel::Unknown,
@@ -124,20 +125,11 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
         .await
         {
             Ok(result) => result,
-            Err(error) => Err(ClipboardDispatchError::Io(Box::new(error))),
+            Err(error) => Err(ClipboardDispatchError::Transient(Box::new(error))),
         };
+        // presence 已确认对端离线时，暂时性网络失败归为离线；本机授权与资源失败保持原分类。
         let outcome = match outcome {
-            Err(ClipboardDispatchError::Io(ref source))
-                if connection.is_unreachable()
-                    && source
-                        .downcast_ref::<ConnectivityError>()
-                        .is_none_or(|error| {
-                            matches!(
-                                error,
-                                ConnectivityError::Stream(_) | ConnectivityError::TimedOut(_)
-                            )
-                        }) =>
-            {
+            Err(ClipboardDispatchError::Transient(_)) if connection.is_unreachable() => {
                 Err(ClipboardDispatchError::Offline)
             }
             outcome => outcome,
@@ -149,6 +141,16 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
     }
 }
 
+/// 暂时性连接或容量失败可重试；其余连接失败（本机负责人停止、地址资料读取失败、
+/// 准入结算失败等）保持不可重试。
+fn map_connectivity_err(error: ConnectivityError) -> ClipboardDispatchError {
+    if error.is_transient() {
+        ClipboardDispatchError::Transient(Box::new(error))
+    } else {
+        ClipboardDispatchError::Io(Box::new(error))
+    }
+}
+
 fn map_encode_err(err: WireEncodeError) -> ClipboardDispatchError {
     match err {
         WireEncodeError::SourceIdentity(source) => ClipboardDispatchError::Internal(
@@ -156,9 +158,9 @@ fn map_encode_err(err: WireEncodeError) -> ClipboardDispatchError {
                 .context("source entry encode")
                 .into(),
         ),
-        WireEncodeError::Io(ioerr) => {
-            ClipboardDispatchError::Io(anyhow::Error::new(ioerr).context("frame write").into())
-        }
+        WireEncodeError::Io(ioerr) => ClipboardDispatchError::Transient(
+            anyhow::Error::new(ioerr).context("frame write").into(),
+        ),
         WireEncodeError::PayloadTooLarge { size, max } => {
             // wire codec also enforces MAX_PAYLOAD_SIZE; if we somehow get
             // here (the upstream early-reject in `dispatch` should have

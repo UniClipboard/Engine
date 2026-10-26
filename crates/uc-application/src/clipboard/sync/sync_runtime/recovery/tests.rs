@@ -13,12 +13,17 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use std::collections::VecDeque;
+
 use tokio::sync::Notify;
 
+use super::schedule::RETRY_BACKOFF;
+use crate::clipboard::sync::dispatch_entry::RecordingOwner;
 use crate::deps::{
     CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
     PausedSpaceMember, SpaceMemberPauseReason,
 };
+use crate::facade::HostEventBus;
 use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError};
 use uc_core::ids::{EntryId, EventId};
 use uc_core::ports::peer_reachability::{PeerReachabilityChanged, PeerReachabilityError};
@@ -611,6 +616,7 @@ fn recovery_deps(
         device_identity: Arc::new(LocalDevice(DeviceId::new("local"))),
         clock: Arc::new(FixedClock),
         delivery,
+        recoverable_deliveries: RecoverableDeliveryFeed::new(),
         delivery_gate: Arc::new(tokio::sync::Mutex::new(())),
     }
 }
@@ -1184,7 +1190,7 @@ async fn every_recovery_round_ends_with_one_fixed_outcome_record() {
     }
     let target = DeviceId::new("recovered");
     for (setup, expected) in [
-        (Setup::Normal, "dispatched"),
+        (Setup::Normal, "delivered"),
         (Setup::NoEntries, "nothing_to_recover"),
         (Setup::AutoSyncOff, "sync_disabled"),
         (Setup::Paused, "target_paused"),
@@ -1276,4 +1282,384 @@ async fn every_recovery_round_ends_with_one_fixed_outcome_record() {
         );
         assert!(!logs.output().contains("PRIVATE"));
     }
+}
+
+// ── 设备保持在线时的有界退避重试 ──────────────────────────────────────
+
+/// 可控的在线状态：测试中途改为离线时不发事件，模拟“状态已变但事件未到”。
+struct SwitchablePeerReachability {
+    state: Mutex<ReachabilityState>,
+    tx: tokio::sync::broadcast::Sender<PeerReachabilityChanged>,
+}
+
+impl SwitchablePeerReachability {
+    fn new(state: ReachabilityState) -> Arc<Self> {
+        let (tx, _) = tokio::sync::broadcast::channel(8);
+        Arc::new(Self {
+            state: Mutex::new(state),
+            tx,
+        })
+    }
+
+    fn set(&self, state: ReachabilityState) {
+        *self.state.lock().unwrap() = state;
+    }
+
+    fn announce(&self, device_id: DeviceId, state: ReachabilityState) {
+        self.set(state);
+        let _ = self.tx.send(PeerReachabilityChanged {
+            device_id,
+            state,
+            at: chrono::Utc::now(),
+        });
+    }
+}
+
+#[async_trait]
+impl PeerReachabilityPort for SwitchablePeerReachability {
+    async fn ensure_reachable(
+        &self,
+        _device: &DeviceId,
+    ) -> Result<ReachabilityState, PeerReachabilityError> {
+        Ok(*self.state.lock().unwrap())
+    }
+
+    async fn current_state(&self, _device: &DeviceId) -> ReachabilityState {
+        *self.state.lock().unwrap()
+    }
+
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PeerReachabilityChanged> {
+        self.tx.subscribe()
+    }
+}
+
+/// 一次补发的结果；可恢复与成功结果都经真实记录负责人落库并发布。
+#[derive(Clone, Copy)]
+enum Attempt {
+    /// 内容拨号失败或流在确认前中断，落为 `Unreachable`。
+    Interrupted,
+    /// 对端确认收下。
+    Accepted,
+    /// 上次确认丢失但对端已保存，这次得到重复确认。
+    Duplicate,
+    /// 补发前存储失败，没有落下任何投递结果。
+    StorageFailure,
+}
+
+struct ScriptedDelivery {
+    recorder: Arc<RecordingOwner>,
+    attempts: Mutex<VecDeque<Attempt>>,
+    calls: AtomicUsize,
+}
+
+impl ScriptedDelivery {
+    fn new(recorder: Arc<RecordingOwner>, attempts: &[Attempt]) -> Arc<Self> {
+        Arc::new(Self {
+            recorder,
+            attempts: Mutex::new(attempts.iter().copied().collect()),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RecoveryDeliveryPort for ScriptedDelivery {
+    async fn deliver_existing_local_entry(
+        &self,
+        entry_id: EntryId,
+        targets: Vec<DeviceId>,
+    ) -> Result<ResendReport, ResendEntryError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let attempt = self
+            .attempts
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected extra recovery attempt");
+        let (status, report) = match attempt {
+            Attempt::Interrupted => (
+                EntryDeliveryStatus::Unreachable,
+                ResendReport {
+                    reconciled: Vec::new(),
+                    accepted: 0,
+                    duplicate: 0,
+                    offline: 1,
+                    errored: 0,
+                    pending: 0,
+                },
+            ),
+            Attempt::Accepted => (
+                EntryDeliveryStatus::Delivered,
+                ResendReport {
+                    reconciled: Vec::new(),
+                    accepted: 1,
+                    duplicate: 0,
+                    offline: 0,
+                    errored: 0,
+                    pending: 0,
+                },
+            ),
+            Attempt::Duplicate => (
+                EntryDeliveryStatus::Duplicate,
+                ResendReport {
+                    reconciled: Vec::new(),
+                    accepted: 0,
+                    duplicate: 1,
+                    offline: 0,
+                    errored: 0,
+                    pending: 0,
+                },
+            ),
+            Attempt::StorageFailure => {
+                return Err(ResendEntryError::Storage(anyhow::anyhow!(
+                    "PRIVATE_STORAGE_DETAIL"
+                )))
+            }
+        };
+        let records: Vec<_> = targets
+            .into_iter()
+            .map(|target_device_id| EntryDeliveryRecord {
+                entry_id: entry_id.clone(),
+                target_device_id,
+                status: status.clone(),
+                reason_detail: None,
+                updated_at_ms: 43,
+            })
+            .collect();
+        self.recorder.flush(&records).await;
+        Ok(report)
+    }
+}
+
+struct RetryHarness {
+    recovery: OfflineDeliveryRecovery,
+    recorder: Arc<RecordingOwner>,
+    deliveries: Arc<Deliveries>,
+    delivery: Arc<ScriptedDelivery>,
+    reachability: Arc<SwitchablePeerReachability>,
+    entry: ClipboardEntry,
+    target: DeviceId,
+}
+
+impl RetryHarness {
+    fn start(initial: Option<EntryDeliveryStatus>, attempts: &[Attempt]) -> Self {
+        let entry = entry("copied-entry", "local-event");
+        let target = DeviceId::new("target");
+        let deliveries = Arc::new(Deliveries {
+            records: Mutex::new(HashMap::new()),
+        });
+        if let Some(status) = initial {
+            deliveries.records.lock().unwrap().insert(
+                entry.entry_id.clone(),
+                vec![EntryDeliveryRecord {
+                    entry_id: entry.entry_id.clone(),
+                    target_device_id: target,
+                    status,
+                    reason_detail: None,
+                    updated_at_ms: 1,
+                }],
+            );
+        }
+        let recorder = Arc::new(RecordingOwner::new(
+            Arc::clone(&deliveries) as Arc<dyn EntryDeliveryRepositoryPort>,
+            Arc::new(HostEventBus::new()),
+        ));
+        let delivery = ScriptedDelivery::new(Arc::clone(&recorder), attempts);
+        let reachability = SwitchablePeerReachability::new(ReachabilityState::Online);
+        let mut deps = recovery_deps(
+            true,
+            vec![entry.clone()],
+            HashMap::from([(entry.event_id.clone(), DeviceId::new("local"))]),
+            Arc::clone(&deliveries),
+            Arc::new(RecordingDispatch {
+                commands: Mutex::new(Vec::new()),
+                result: DispatchResult::Delivered,
+            }),
+        );
+        deps.peer_reachability = Arc::clone(&reachability) as Arc<dyn PeerReachabilityPort>;
+        deps.delivery = Arc::clone(&delivery) as Arc<dyn RecoveryDeliveryPort>;
+        deps.recoverable_deliveries = recorder.recoverable_deliveries();
+        Self {
+            recovery: OfflineDeliveryRecovery::start(deps),
+            recorder,
+            deliveries,
+            delivery,
+            reachability,
+            entry,
+            target,
+        }
+    }
+
+    /// 模拟自动投递：经真实记录负责人写入本次结果（并在可恢复时发布通知）。
+    async fn record_dispatch(&self, status: EntryDeliveryStatus) {
+        self.recorder
+            .flush(&[EntryDeliveryRecord {
+                entry_id: self.entry.entry_id.clone(),
+                target_device_id: self.target,
+                status,
+                reason_detail: None,
+                updated_at_ms: 2,
+            }])
+            .await;
+    }
+
+    fn status(&self) -> Option<EntryDeliveryStatus> {
+        self.deliveries
+            .records
+            .lock()
+            .unwrap()
+            .get(&self.entry.entry_id)
+            .and_then(|records| records.first())
+            .map(|record| record.status.clone())
+    }
+}
+
+/// 让后台恢复任务处理已经到达的通知与到期计时器。
+async fn settle() {
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+}
+
+const JUST_BEFORE: Duration = Duration::from_millis(1);
+
+/// presence 一直在线、从未产生新的上线事件：内容拨号失败后按退避自动重试，
+/// 第二次失败后间隔增长，第三次成功即停止，用户无需重新复制。
+#[tokio::test(start_paused = true)]
+async fn online_target_retries_a_failed_content_dial_without_a_new_online_event() {
+    let harness = RetryHarness::start(None, &[Attempt::Interrupted, Attempt::Accepted]);
+    settle().await;
+    harness
+        .record_dispatch(EntryDeliveryStatus::Unreachable)
+        .await;
+    settle().await;
+
+    tokio::time::sleep(RETRY_BACKOFF[0] - JUST_BEFORE).await;
+    settle().await;
+    assert_eq!(
+        harness.delivery.calls(),
+        0,
+        "no retry before the first backoff"
+    );
+    tokio::time::sleep(JUST_BEFORE * 2).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 1);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Unreachable));
+
+    tokio::time::sleep(RETRY_BACKOFF[1] - JUST_BEFORE * 3).await;
+    settle().await;
+    assert_eq!(
+        harness.delivery.calls(),
+        1,
+        "second retry waits for a longer backoff"
+    );
+    tokio::time::sleep(JUST_BEFORE * 3).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 2);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    settle().await;
+    assert_eq!(
+        harness.delivery.calls(),
+        2,
+        "a delivered target is not retried"
+    );
+    harness.recovery.shutdown().await.unwrap();
+}
+
+/// 流在确认前被重置（落为可恢复结果）后，重试得到重复确认即结束；
+/// 接收端的去重保证确认丢失时不会重复写入。
+#[tokio::test(start_paused = true)]
+async fn lost_ack_retry_settles_as_duplicate_without_a_new_copy() {
+    let harness = RetryHarness::start(None, &[Attempt::Duplicate]);
+    settle().await;
+    harness
+        .record_dispatch(EntryDeliveryStatus::Unreachable)
+        .await;
+    settle().await;
+
+    tokio::time::sleep(RETRY_BACKOFF[0] + JUST_BEFORE).await;
+    settle().await;
+
+    assert_eq!(harness.delivery.calls(), 1);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Duplicate));
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 1);
+    harness.recovery.shutdown().await.unwrap();
+}
+
+/// 终态失败（策略拒绝、协议不兼容、不可重试错误）不会触发任何自动重试。
+#[tokio::test(start_paused = true)]
+async fn terminal_results_are_never_retried() {
+    for reason in [
+        DeliveryFailureReason::PeerRejected,
+        DeliveryFailureReason::PeerIncompatible,
+        DeliveryFailureReason::LocalPolicy,
+        DeliveryFailureReason::Io,
+        DeliveryFailureReason::Internal,
+    ] {
+        let harness = RetryHarness::start(None, &[]);
+        settle().await;
+        harness
+            .record_dispatch(EntryDeliveryStatus::Failed { reason })
+            .await;
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        settle().await;
+        assert_eq!(harness.delivery.calls(), 0);
+        harness.recovery.shutdown().await.unwrap();
+    }
+}
+
+/// 到期时目标已离线：不空转重试，改由下一次上线事件恢复。
+#[tokio::test(start_paused = true)]
+async fn due_retry_for_an_offline_target_waits_for_the_next_online_event() {
+    let harness = RetryHarness::start(None, &[Attempt::Accepted]);
+    settle().await;
+    harness
+        .record_dispatch(EntryDeliveryStatus::Unreachable)
+        .await;
+    settle().await;
+    harness.reachability.set(ReachabilityState::Offline);
+
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 0);
+
+    harness
+        .reachability
+        .announce(harness.target, ReachabilityState::Online);
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 1);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    harness.recovery.shutdown().await.unwrap();
+}
+
+/// 恢复轮次自身失败（补发前存储失败，没有新的投递结果）也按退避再试。
+#[tokio::test(start_paused = true)]
+async fn a_failed_recovery_round_is_retried_with_backoff() {
+    let harness = RetryHarness::start(
+        Some(EntryDeliveryStatus::Unreachable),
+        &[Attempt::StorageFailure, Attempt::Accepted],
+    );
+    settle().await;
+    harness
+        .reachability
+        .announce(harness.target, ReachabilityState::Online);
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 1);
+
+    tokio::time::sleep(RETRY_BACKOFF[0] - JUST_BEFORE).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 1);
+    tokio::time::sleep(JUST_BEFORE * 2).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 2);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    harness.recovery.shutdown().await.unwrap();
 }

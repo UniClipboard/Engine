@@ -541,7 +541,7 @@ async fn dropped_dial_leader_does_not_block_later_dispatches() {
     ));
 }
 
-/// 对端收下帧却永不回执时，发送必须在回执上限内以 I/O 失败返回。
+/// 对端收下帧却永不回执时，发送必须在回执上限内以可恢复的暂时失败返回。
 #[tokio::test]
 async fn dispatch_returns_when_the_peer_never_acks() {
     #[derive(Debug, Clone)]
@@ -589,7 +589,66 @@ async fn dispatch_returns_when_the_peer_never_acks() {
     )
     .await
     .expect("dispatch must give up when no ack arrives");
-    assert!(matches!(report.outcome, Err(ClipboardDispatchError::Io(_))));
+    assert!(matches!(
+        report.outcome,
+        Err(ClipboardDispatchError::Transient(_))
+    ));
+    peer_router.shutdown().await.expect("router shutdown");
+}
+
+/// 对端读完帧后在回执前重置流：确认丢失只是暂时失败，必须可恢复而不是终态 I/O。
+#[tokio::test]
+async fn stream_reset_before_ack_is_a_transient_dispatch_failure() {
+    #[derive(Debug, Clone)]
+    struct ResettingHandler;
+    impl ProtocolHandler for ResettingHandler {
+        async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+            let (mut send, mut recv) = connection
+                .accept_bi()
+                .await
+                .map_err(|err| AcceptError::from_err(err))?;
+            let _ = clipboard_wire::read_frame(&mut recv).await;
+            let _ = send.reset(0u32.into());
+            let _ = connection.closed().await;
+            Ok(())
+        }
+    }
+
+    let peer_endpoint = bind_endpoint().await;
+    wait_for_direct_addrs(&peer_endpoint).await;
+    let peer_router = Router::builder((*peer_endpoint).clone())
+        .accept(CLIPBOARD_ALPN, ResettingHandler)
+        .spawn();
+    let sender_endpoint = bind_endpoint().await;
+    wait_for_direct_addrs(&sender_endpoint).await;
+    let repo = Arc::new(MemRepo::default());
+    let target = DeviceId::new("resetting-target");
+    seed_addr(&repo, &target, &peer_endpoint.addr()).await;
+    let adapter = dispatch_fixture(
+        sender_endpoint,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    );
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(8),
+        adapter.dispatch(
+            &target,
+            &sample_header(),
+            SyncPayload {
+                ciphertext: Bytes::from_static(b"reset before ack"),
+            },
+        ),
+    )
+    .await
+    .expect("dispatch must settle when the stream is reset");
+    assert!(
+        matches!(report.outcome, Err(ClipboardDispatchError::Transient(_))),
+        "unexpected outcome: {:?}",
+        report.outcome
+    );
     peer_router.shutdown().await.expect("router shutdown");
 }
 
