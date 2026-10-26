@@ -1159,3 +1159,33 @@ Application 新增历史 get/list 与删除／成员退休交错的四种组合�
 当前冻结Rust源码上的 Application progress82项通过16.08秒，启用test-util的原Native进度86项通过62.735秒，Engine接收／来源授权／三端与读流ACK隔离56项通过519.558秒。共享夹具的原无文件SDK关闭入口另通过32.763秒；最终测试二进制310409160字节，运行前后SHA-256保持一致。原小文件采样边界、双1GiB真实负载和无文件关闭三个入口均验证，没有为补证据重跑已经通过的整组资源。
 
 以上完成本阶段原负载与连续通知／完整核对／重连资源验收。原文件部分失败／目录发布回滚／重试与恢复按下一专项逐条核对，不以本项通过自动代替；主机资源证据不代替物理挂起、设备／产品宿主或Collector验收。
+
+
+## 原接收语义与目录回滚重启恢复专项验证
+
+完整接收、保存、失败结算及重启责任继续归 Application 原 `transfer/receive` 与 `apply_inbound`；进度只采用已实际结算的成果。逐条核对如下，不能仅以测试名称或批次计数代替文件／SQLite 断言：
+
+| 原约束 | 实际断言与证据范围 |
+| --- | --- |
+| 独立文件部分失败不撤销成功项 | `receive_retry/save_failure.rs` 的首／中／末保存故障均精确读回其余两份文件；实际 SQLite 保留网络 completed 与本地 storage_unavailable，不将已成功的传输改写为失败。 |
+| 单项重试只获取所选失败项 | 原 `receive_retry.rs` 及 `batch_outcomes/retry.rs` 核对原成功路径不变、protect／export 共3→4且第四次只对应失败来源；重复请求 AlreadyReceiving、旧尝试 Superseded，源端按新 attempt 采用而不覆盖未选成果。 |
+| 授权与删除沿用原完整动作 | 撤销来源后重试在缓存复用前返回 AccessDenied、获取／导出计数仍3、原成功文件保留；放弃删除等待者后仍等实际导出退出，再删除文件及接收事实。不是让取消隐式删除先前成果。 |
+| 目录只交付完整单元 | 原三个真实目录案例覆盖双成员、最终提交失败和无 blob 空目录；成功精确读回目录及成员内容，失败不能把成功子文件算成交付，原成员终态修复期间父动作不能结束。 |
+| 已发布根的撤回失败仍有恢复责任 | 新真实 Engine 场景通过原 ObserveClipboardChange 发送三个根：前两根走实际 FsAtomicPublisher，第三根在原 publisher 外注入固定 IO 失败；第二根实际撤回一次，首根撤回注入 IO 失败。实际 SQLite 为 publishing／可见根1／landed=0，无保存条目，原查询为 failing，不能假称结算完成。 |
+| 重启只处理原输出 | 上述接收子进程真实 SIGKILL／wait（信号9），此前已改变当前保存目录；用户复用已撤回第二根的目标名称。原 Engine 启动 readiness 在旧保存目录撤回首根、清理全部 staging，保留用户新文件与无关文件；原 attempt 变 failed、可见根归零，无 pending 产物、无保存条目。partial_publication 表示已记录检查点，归零后仍为 true，不能误当未清理。 |
+| 文件成果及未确认进度的进程重启 | 原 `receive_retry/process_restart.rs` 分别启动独立 sender／receiver 子进程；精确读回已保存文件、无额外 protect／export、无旧通知恢复，源端完整核对保留未确认。范围及原始结果见[进程重启验证](#同资料重开与真实进程重启验证)。 |
+
+新场景复用原隔离子进程及完整生产对象图，安全存储材料只经原匿名 stdin 管道移交；没有新增 Engine 阶段接口、协议／持久化版本、通知 outbox 或下载预算。真实移动由原文件系统执行，故障由测试装饰器注入，不宣称模拟了物理磁盘损坏。初两轮候选失败保留原输出：子进程测试捕获隐藏了 panic，打开 nocapture 后确认是预期 receiving 而实际为 failing 的错误断言；按既有契约修正，不改生产状态来适配测试。
+
+当前候选针对新增及共享目录夹具重新执行：Engine 目录／原文件强杀恢复7项通过（64.822秒），Application 目录及原 reconciliation 86项通过（7.233秒），真实 SQLite 目录提交／加密发布日志／产物日志8项通过（0.356秒），原文件系统发布9项通过。Application 的受控 port 测试用于证明流程分支，不冒充完整原生链路；SQLite 合同证明原子提交、缺日志回滚、密文关联与锁定拒绝；完整 Engine 场景另覆盖生产 V3 资料与实际文件。
+
+复现入口：
+
+```bash
+just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked --no-tests fail -E 'test(offline_lifecycle::crash::) | test(batch_outcomes::directory::) | test(save_failure::directory_settlement::)'
+just cargo nextest run --profile ci -p uc-application --lib --locked --no-tests fail -E 'test(directory) | test(transfer::receive::reconciliation::)'
+just cargo nextest run --profile ci -p uc-infra-profile --test directory_receive_commit_contract --test directory_publish_log_contract --test receive_artifact_log_contract --locked --no-tests fail
+just cargo test -p uc-infra-local --lib fs::atomic_publish::tests:: --locked
+```
+
+其余原文件／授权／删除／单项重试及进程进度证据继承上一层 #321 已通过的56项接收回归；生产 Rust、依赖、原固定九项资源入口和门限均未修改，不冒充本轮重跑这些整组。原两轮1GiB、下载4／2、排队64／16及严格7场景／8报告／33个SDK关闭前样本仍见[连续资源验证](#大文件与连续进度核对及重连的资源验证)。本项闭合阶段5原接收专项；workspace／成员／升级全集、物理挂起、设备／产品宿主及 Collector 的其他验收仍按原未完成项执行，AC11整体不因此自动完成。
