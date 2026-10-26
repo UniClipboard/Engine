@@ -151,3 +151,5 @@ pub(crate) use worker::{
 };
 
 pub(crate) use group_update::PrepareMembershipRemovalPort;
+
+pub(crate) use owner::{MemberScopeRetirement, MemberScopeRetirementPort};

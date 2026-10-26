@@ -197,3 +197,5 @@ pub use connectivity::{
     PeerReachabilityEnvironmentPort, PeerReachabilityTransport, PeerReachabilityTransportError,
     PeerReachabilityTransportPorts, PeerReachabilityWireError, PeerReachabilityWirePort,
 };
+
+pub(crate) use membership::{MemberScopeRetirement, MemberScopeRetirementPort};

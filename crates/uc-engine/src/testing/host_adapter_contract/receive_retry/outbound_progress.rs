@@ -203,3 +203,71 @@ async fn real_engine_deleting_source_retires_outbound_view_without_touching_rece
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_membership_removal_and_space_reset_retire_outbound_progress_and_keep_saved_files(
+) {
+    let _lock = ENGINE_TEST_LOCK.lock().await;
+    for reset_space in [false, true] {
+        let case = receive_case(false).await;
+        let _release = ReleaseOnDrop(case.exports.clone());
+        let view = timeout(Duration::from_secs(20), async {
+            loop {
+                let OperationResult::OutboundProgressList(views) = case
+                    .source
+                    .execute(Operation::ListOutboundProgress)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("complete outbound list")
+                };
+                if let Some(view) = views.into_iter().find(|view| {
+                    view.attempt_id.as_deref() == Some(case.first.attempt_id.as_str())
+                        && view.state == OutboundProgressBatchState::PartiallyFailed
+                }) {
+                    return view;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("actual receiver result before membership action");
+        if reset_space {
+            case.source.execute(Operation::ResetSpace).await.unwrap();
+        } else {
+            case.source
+                .execute(Operation::RemoveMember(RemoveMemberInput {
+                    device_id: member_id(&case.receiver).await,
+                }))
+                .await
+                .unwrap();
+        }
+        let listed = case
+            .source
+            .execute(Operation::ListOutboundProgress)
+            .await
+            .unwrap();
+        let queried = case
+            .source
+            .execute(Operation::QueryOutboundProgress(OutboundProgressInput {
+                entry_id: view.entry_id,
+                target_device_id: view.target_device_id,
+            }))
+            .await
+            .unwrap_err();
+        let files = saved_files(
+            &case.receiver,
+            &case.first.entry_id,
+            case.receiver_root.path(),
+        )
+        .await;
+        let original = case.saved.clone();
+        case.shutdown().await;
+        assert_eq!(listed, OperationResult::OutboundProgressList(vec![]));
+        assert_eq!(queried.category(), EngineErrorCategory::Unauthorized);
+        assert_eq!(
+            files, original,
+            "retiring sender association does not revoke receiver-owned output"
+        );
+    }
+}

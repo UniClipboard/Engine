@@ -2,7 +2,7 @@ use super::super::{
     ElapsedClockPort, ProgressInboundWirePort, ProgressProjectionSnapshot, ProgressReceiveError,
     TransferProgressReceiver, TransferProgressTransport,
 };
-use super::intent::{IntentLifetimes, IntentOwner};
+use super::intent::{IntentLifetimes, IntentOwner, IntentPeers};
 use super::model::{ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey};
 use super::worker::ProgressProjectionWorker;
 use crate::connectivity::{ConnectivityError, ConnectivityManager};
@@ -84,6 +84,7 @@ impl ProgressProjectionRegistry {
     pub(super) fn retain_intent(
         &self,
         owner: &IntentOwner,
+        peers: &IntentPeers,
         key: ProgressProjectionKey,
         plan: Vec<ProgressItem>,
     ) -> Result<ProgressProjectionAdmission, ProgressReceiveError> {
@@ -95,7 +96,7 @@ impl ProgressProjectionRegistry {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if state.capacity.is_closed() || owner.retired() {
+        if state.capacity.is_closed() || owner.retired() || peers.blocks(key.peer) {
             return Ok(ProgressProjectionAdmission::Closed);
         }
         if let Some(slot) = state.slots.get(&key) {
@@ -178,7 +179,22 @@ impl ProgressProjectionRegistry {
     }
     /// 成员退出时一次退休该端全部关联，不推断文件实际取消结果。
     pub fn remove_peer(&self, peer: DeviceId) {
-        self.remove_matching(|key| key.peer == peer);
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.intents.retire_peer(peer);
+        let keys = state
+            .slots
+            .keys()
+            .filter(|key| key.peer == peer)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in keys {
+            remove_slot(&self.inner, &mut state, key);
+        }
+        self.inner.wake.notify_one();
     }
     fn remove_matching(&self, select: impl Fn(&ProgressProjectionKey) -> bool) {
         let mut state = self
