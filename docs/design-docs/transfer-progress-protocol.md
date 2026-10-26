@@ -27,6 +27,7 @@ Application [模块入口](../../crates/uc-application/src/transfer/progress/mod
 | 通知采用与投影 | [接收负责人](../../crates/uc-application/src/transfer/progress/receiver.rs)统一登记、联系、活动与终态采用；[投影注册表](../../crates/uc-application/src/transfer/progress/projection/handle.rs)保存原意图、退休围栏和变化通知。Infra只有在完整采用成功后才能回Bound／精确ACK。 |
 | 完整状态核对 | [核对动作](../../crates/uc-application/src/transfer/progress/projection/refresh.rs)在组装时持有投影与交换服务，调用方只发起一次`refresh`；读取、范围复核和原子采用由该动作完成。 |
 | 统一交换监督 | [delivery](../../crates/uc-application/src/transfer/progress/delivery/mod.rs)统一通知与查询的额度、补发、取消和实际关闭；[producer](../../crates/uc-application/src/transfer/progress/producer.rs)执行一轮完整登记／发送／精确结果核对，不向调用方转交网络阶段编排。 |
+| 完整入站连接 | [入站负责人](../../crates/uc-application/src/transfer/progress/inbound/owner.rs)统一连接准入、版本选择、单流采用、保留及取消安全的实际关闭；[专属wire port](../../crates/uc-application/src/transfer/progress/inbound/ports.rs)只交接一条完整交换，原生handler不编排业务阶段。 |
 | 实际接收事实 | 原`transfer/receive`继续独占下载、重试、输出、结算及清理；[查询提供端](../../crates/uc-application/src/transfer/receive/work/catalog/progress_snapshot.rs)在原目录锁内关联原计划与保存事实，`progress/source`不形成第二套业务结算权威。 |
 
 测试放在所属规则、采用、投影、调度和真实流fixture内，预算交叉验收仍只使用测试依赖。
@@ -422,3 +423,20 @@ Core复用单项活动／终态规则进行全量合并。快照中任一项缺�
 未保留、旧端不支持、访问拒绝、忙碌和已替换等业务回复同样须经过原意图实例与查询起止范围核对；等待期间登记已改变当前任务时返回过期，不把旧回复用于判断新任务。这些回复不更新逐项事实或联系期限；下层失败保留原来源。
 
 完整快照分别提供当前确认任务与实际通知绑定；没有binding不等于没有已核对事实。未保留、旧端或明确拒绝不制造任务、终态或下载。稳定宿主查询结果映射和生产接线继续按执行计划完成，不让Engine或宿主拼接内部步骤。
+
+## 入站连接的完整寿命
+
+`TransferProgressTransport`接收一个原生连接能力，先固定原会话准入围栏，再在同一首轮期限内完成当前成员核验、保留资格与首流。
+`/2`后续流从实际收流时刻起算；受管连接在异步准入读取前保存包含挂起的经过时间，仅在Application内部交接，不能等读取结束后重新获得五秒。
+旧`/1`只完成一次受管单向交换并关闭，不授予跨轮保留。协议选择只读取实际协商结果，失败不触发旧版重拨。
+
+同一连接允许原manager在实际交换进行时接收并拒绝超量流；单流错误只结束本交换，既有流和其他对端继续使用各自原许可。
+连接监听不算业务活动，空闲回收仍由原16连接／30秒策略负责；入站负责人只使用原保留容量与在途额度合计的有界工作位置，不建立新业务等待队列。
+投影注册表通过`inbound_transport`创建完整入站能力并持有连接世代命名空间；同一投影重新组装transport仍继续单调分配，不能用实例内从零计数或未承诺数值单调的原生connection id代替。连接重建只退休旧binding，不重置producer修订或真实终态。
+
+调用方取消等待、会话封口、期限消耗及shutdown等待被丢弃，都不能abort已开始的准入或业务采用。
+入站连接任务与唯一关闭任务由负责人持有可重复等待的完成结果；关闭先封口，再关闭连接并等待实际本地工作及原manager收尾。
+期限与迟到能力同时失败时分别保存来源，复合结算失败不自动补发；任务异常退出按既有进度监督类别进入运行诊断，不新增heartbeat／ACK业务入口。
+
+原生`IrohTransferProgressHandler`只做连接桥接与完整关闭；新版仍由Application登记／采用后响应，旧版只交接未关联通知，查询使用原提供能力。
+当前这些完整能力已可由真实Router直接安装；节点安装、Engine组装、实际发送意图／接收hook及稳定宿主映射仍按执行计划迁移，不据此宣称整个生产进度已切换。

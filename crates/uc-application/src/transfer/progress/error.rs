@@ -30,6 +30,12 @@ pub enum ProgressReceiveError {
     Stale,
     #[error("progress terminal conflicts with adopted result")]
     Conflict,
+    #[error("progress exchange settlement failed")]
+    Settlement {
+        #[source]
+        primary: Box<ProgressReceiveError>,
+        additional: Box<ProgressReceiveError>,
+    },
     #[error("progress exchange failed")]
     Exchange(#[source] Box<dyn Error + Send + Sync>),
 }
@@ -48,6 +54,7 @@ impl ErrorClass for ProgressReceiveError {
             Self::Stale => "progress_binding_stale",
             Self::Conflict => "progress_terminal_conflict",
             Self::Exchange(_) => "progress_exchange_failed",
+            Self::Settlement { .. } => "progress_settlement_failed",
         }
     }
 }

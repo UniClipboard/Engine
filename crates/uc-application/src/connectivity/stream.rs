@@ -3,6 +3,7 @@ use super::retention::ActivityGuard;
 use super::ConnectivityError;
 use futures::future::BoxFuture;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::Instant;
@@ -29,6 +30,8 @@ pub struct StreamLease {
     pub receive: Box<dyn PeerReceiveStream>,
     /// 原生入站流首次被接收的时间；排队和重新等待不会刷新它。
     pub received_at: Option<Instant>,
+    /// 仅由受管入站记录；业务预算在本地准入完成后仍从实际收流起算。
+    pub(crate) received_elapsed_at: Option<Duration>,
     _connection: Arc<ConnectionRecord>,
     _permits: Arc<Vec<OwnedSemaphorePermit>>,
     _activity: Arc<ActivityGuard>,
@@ -105,6 +108,7 @@ impl StreamLease {
             send: pair.0,
             receive: pair.1,
             received_at: None,
+            received_elapsed_at: None,
             _connection: connection,
             _permits: Arc::new(permits),
             _activity: activity,

@@ -1,5 +1,5 @@
 //! 同一交换共享原绝对经过时间预算；网络每次poll先检查，实际本机工作由原负责人监督。
-use super::{ElapsedClockPort, ProgressReceiveError};
+use super::{ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal, ProgressReceiveError};
 use crate::connectivity::ConnectivityError;
 use std::future::{poll_fn, Future};
 use std::pin::pin;
@@ -10,9 +10,10 @@ use tokio::time::{interval_at, timeout_at, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{BudgetStatus, ElapsedBudget};
 
+#[derive(Clone)]
 pub struct ProgressExchangeDeadline {
     clock: Arc<dyn ElapsedClockPort>,
-    budget: Mutex<ElapsedBudget>,
+    budget: Arc<Mutex<ElapsedBudget>>,
     instant: Instant,
 }
 impl ProgressExchangeDeadline {
@@ -31,7 +32,34 @@ impl ProgressExchangeDeadline {
             .ok_or(ConnectivityError::DeadlineExpired)?;
         Ok(Self {
             clock,
-            budget: Mutex::new(ElapsedBudget::start(Some(origin), remaining)),
+            budget: Arc::new(Mutex::new(ElapsedBudget::start(Some(origin), remaining))),
+            instant,
+        })
+    }
+    /// 收流与本地准入共用原预算；本地读取期间的系统挂起不能获得新的五秒。
+    pub(crate) fn received(
+        clock: Arc<dyn ElapsedClockPort>,
+        received_at: Duration,
+        limit: Duration,
+    ) -> Result<Self, ProgressReceiveError> {
+        let started = Instant::now();
+        let now = clock.elapsed()?;
+        if now < received_at {
+            return Err(ElapsedClockError {
+                source: Box::new(ElapsedClockRefusal::NonMonotonicReading),
+            }
+            .into());
+        }
+        let remaining = limit
+            .checked_sub(now - received_at)
+            .filter(|left| !left.is_zero())
+            .ok_or(ConnectivityError::DeadlineExpired)?;
+        let instant = started
+            .checked_add(remaining)
+            .ok_or(ConnectivityError::DeadlineExpired)?;
+        Ok(Self {
+            clock,
+            budget: Arc::new(Mutex::new(ElapsedBudget::start(Some(now), remaining))),
             instant,
         })
     }

@@ -1,4 +1,4 @@
-use super::ElapsedClockError;
+use super::{ElapsedClockError, InboundConnectionError};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -125,5 +125,44 @@ impl ErrorClass for ConnectivityError {
             Self::Shared(source) => source.class(),
             Self::Settlement { .. } => "connection_settlement_failed",
         }
+    }
+}
+
+impl From<InboundConnectionError> for ConnectivityError {
+    fn from(source: InboundConnectionError) -> Self {
+        // 识别入口的临时许可在错误交接时释放，保留原始分类和完整来源。
+        source.cause
+    }
+}
+
+#[cfg(test)]
+mod inbound_handoff_tests {
+    use super::{ConnectivityError, InboundConnectionError};
+    use std::error::Error;
+    use std::io;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn consuming_inbound_failure_releases_reservation_and_keeps_original_source() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let error = InboundConnectionError {
+            cause: ConnectivityError::Admission(Box::new(io::Error::from(
+                io::ErrorKind::PermissionDenied,
+            ))),
+            _capacity: Some(capacity.clone().try_acquire_owned().unwrap()),
+        };
+        assert_eq!(capacity.available_permits(), 0);
+        let error = ConnectivityError::from(error);
+        assert_eq!(capacity.available_permits(), 1);
+        assert_eq!(
+            error
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

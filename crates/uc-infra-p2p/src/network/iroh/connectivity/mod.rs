@@ -17,3 +17,6 @@ mod presence_environment;
 pub(crate) use presence_environment::PresenceEnvironment;
 mod presence_handler;
 pub use presence_handler::IrohPeerReachabilityHandler;
+
+mod progress_handler;
+pub use progress_handler::IrohTransferProgressHandler;

@@ -40,6 +40,14 @@ impl ConnectionActivity {
             changed: Notify::new(),
         }
     }
+    pub fn sample_elapsed(&self) -> Result<Option<Duration>, ConnectivityError> {
+        self.policy
+            .as_ref()
+            .and_then(|policy| policy.elapsed_clock.as_ref())
+            .map(|clock| clock.elapsed())
+            .transpose()
+            .map_err(|source| ConnectivityError::Clock(Arc::new(source)))
+    }
     fn start_idle(&self) -> Idle {
         let mut idle = Idle {
             since: Instant::now(),

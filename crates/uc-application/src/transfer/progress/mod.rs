@@ -54,3 +54,6 @@ pub use projection::{
 
 mod connectivity;
 pub use connectivity::transfer_progress_connectivity_policy;
+
+mod inbound;
+pub use inbound::{ProgressInboundWirePort, TransferProgressTransport};

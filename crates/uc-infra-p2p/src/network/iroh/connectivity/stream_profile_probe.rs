@@ -372,3 +372,6 @@ impl ProfilePair {
 mod legacy_summary_probe;
 
 pub(super) use legacy_summary_probe::LegacyPair;
+
+#[path = "stream_inbound_transport_probe.rs"]
+mod inbound_transport_probe;

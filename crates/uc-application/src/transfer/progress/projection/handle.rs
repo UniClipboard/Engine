@@ -1,8 +1,10 @@
 use super::super::{
-    ElapsedClockPort, ProgressProjectionSnapshot, ProgressReceiveError, TransferProgressReceiver,
+    ElapsedClockPort, ProgressInboundWirePort, ProgressProjectionSnapshot, ProgressReceiveError,
+    TransferProgressReceiver, TransferProgressTransport,
 };
 use super::model::{ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey};
 use super::worker::ProgressProjectionWorker;
+use crate::connectivity::{ConnectivityError, ConnectivityManager};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{broadcast, Notify};
@@ -18,6 +20,7 @@ pub(super) struct Slot {
 }
 #[derive(Default)]
 pub(super) struct State {
+    connection_generation: u64,
     pub slots: HashMap<ProgressProjectionKey, Slot>,
     pub capacity: ProgressProjectionCapacity<DeviceId, ProgressProjectionKey>,
     pub registrations: ExchangeQueue<DeviceId, ()>,
@@ -48,6 +51,31 @@ impl ProgressProjectionRegistry {
             },
             ProgressProjectionWorker { inner },
         )
+    }
+    /// 入站连接与同一投影共用世代命名空间；重建transport不能令旧关联重新获得资格。
+    pub fn inbound_transport(
+        &self,
+        manager: ConnectivityManager,
+        wire: Arc<dyn ProgressInboundWirePort>,
+        clock: Arc<dyn ElapsedClockPort>,
+    ) -> Arc<TransferProgressTransport> {
+        TransferProgressTransport::new(manager, wire, clock, self.clone())
+    }
+    pub(crate) fn connection_generation(&self) -> Result<u64, ProgressReceiveError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.capacity.is_closed() {
+            return Err(ConnectivityError::Stopped.into());
+        }
+        let generation = state
+            .connection_generation
+            .checked_add(1)
+            .ok_or(ConnectivityError::Stopped)?;
+        state.connection_generation = generation;
+        Ok(generation)
     }
     /// 仅由原完整发送负责人接受意图时调用；网络帧不得以此创建任务。
     pub fn accept_intent(
