@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::bytes::Bytes;
@@ -25,6 +25,8 @@ pub(crate) use queries::decorate_progress_queries;
 static FIXTURES: OnceLock<Mutex<HashMap<PathBuf, Weak<ReceiveExports>>>> = OnceLock::new();
 
 pub(crate) struct ReceiveExports {
+    pub progress_connections: Mutex<Vec<Weak<dyn PeerConnection>>>,
+    pub progress_updates: AtomicUsize,
     pub protects: Mutex<Vec<BlobDigest>>,
     pub cache_misses: Mutex<Vec<BlobDigest>>,
     pub exports: Mutex<Vec<BlobDigest>>,
@@ -59,6 +61,8 @@ pub(crate) struct ReceiveExports {
 impl ReceiveExports {
     pub fn install(root: &Path, fail_at: usize, pause_at: usize) -> Arc<Self> {
         let fixture = Arc::new(Self {
+            progress_connections: Mutex::new(Vec::new()),
+            progress_updates: AtomicUsize::new(0),
             protects: Mutex::new(Vec::new()),
             cache_misses: Mutex::new(Vec::new()),
             exports: Mutex::new(Vec::new()),
@@ -157,7 +161,13 @@ impl ConnectivityBackend for ObservedProgressNetwork {
             cancel.cancelled().await;
             return Err(ConnectivityError::Stopped);
         }
-        self.inner.connect(target, address_hint, cancel).await
+        let connection = self.inner.connect(target, address_hint, cancel).await?;
+        self.fixture
+            .progress_connections
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&connection));
+        Ok(connection)
     }
 }
 

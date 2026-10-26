@@ -3,7 +3,7 @@ use super::super::conn_path::connection_channel;
 use super::super::observed_connections::close_reason;
 use super::super::session_generation::{begin_session_local_work, SessionLocalWork};
 #[cfg(feature = "test-util")]
-use super::super::test_support::register_blob_connection;
+use super::super::test_support::register_resource_connection;
 use super::stream::{wrap, wrap_receive, wrap_send};
 use async_trait::async_trait;
 use iroh::endpoint::{Connection, Side};
@@ -45,7 +45,7 @@ pub(crate) struct IrohPeerConnection {
 impl IrohPeerConnection {
     pub(crate) fn wrap(connection: Connection) -> Arc<dyn PeerConnection> {
         #[cfg(feature = "test-util")]
-        register_blob_connection(&connection);
+        register_resource_connection(&connection);
         let session_work = if connection.alpn() == BLOBS_ALPN {
             let work = begin_session_local_work();
             if work.is_none() {
@@ -93,7 +93,7 @@ impl IrohPeerConnection {
         events: broadcast::Receiver<PeerReachabilityChanged>,
     ) -> Arc<dyn PeerConnection> {
         #[cfg(feature = "test-util")]
-        register_blob_connection(&connection);
+        register_resource_connection(&connection);
         Arc::new(Self {
             _session_work: None,
             native: connection,

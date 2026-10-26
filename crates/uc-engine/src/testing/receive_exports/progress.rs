@@ -64,7 +64,9 @@ impl ProgressWirePort for ObservedWire {
     ) -> Result<(), ProgressReceiveError> {
         self.inner
             .update(stream, connection, notice, deadline, cancel)
-            .await
+            .await?;
+        self.fixture.progress_updates.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     async fn register(
         &self,

@@ -6,8 +6,12 @@ use iroh_blobs::store::fs::FsStore;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
+use uc_sync_protocol::transfer_progress::{
+    v2::TRANSFER_PROGRESS_ALPN, LEGACY_TRANSFER_PROGRESS_ALPN,
+};
 
 static NATIVE_HANDLES: Mutex<Vec<WeakConnectionHandle>> = Mutex::new(Vec::new());
+static PROGRESS_HANDLES: Mutex<Vec<WeakConnectionHandle>> = Mutex::new(Vec::new());
 static TAG_REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static NATIVE_OBSERVERS: AtomicUsize = AtomicUsize::new(0);
 
@@ -45,7 +49,7 @@ impl Drop for BlobNativeObservation {
     }
 }
 
-pub(crate) fn register_blob_connection(connection: &Connection) {
+pub(crate) fn register_resource_connection(connection: &Connection) {
     if connection.alpn() == BLOBS_ALPN
         && (std::env::var_os("UC_RECEIVE_RESOURCE_EVIDENCE_DIR").is_some()
             || NATIVE_OBSERVERS.load(Ordering::SeqCst) > 0)
@@ -55,6 +59,29 @@ pub(crate) fn register_blob_connection(connection: &Connection) {
             .unwrap_or_else(PoisonError::into_inner)
             .push(connection.weak_handle());
     }
+    if (connection.alpn() == TRANSFER_PROGRESS_ALPN
+        || connection.alpn() == LEGACY_TRANSFER_PROGRESS_ALPN)
+        && std::env::var_os("UC_RECEIVE_RESOURCE_EVIDENCE_DIR").is_some()
+    {
+        PROGRESS_HANDLES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(connection.weak_handle());
+    }
+}
+
+/// 只统计原进度连接的弱原生句柄；不返回连接或延长实际租约。
+pub fn progress_native_handle_counts() -> (usize, usize) {
+    let handles = PROGRESS_HANDLES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    (
+        handles.len(),
+        handles
+            .iter()
+            .filter(|handle| handle.upgrade().is_some())
+            .count(),
+    )
 }
 
 /// 已观察端侧原生句柄数与仍存活数；只持弱句柄，不添加任务或延长连接生命。

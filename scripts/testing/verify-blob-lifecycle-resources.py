@@ -30,6 +30,46 @@ def verify_lifecycle_reports(reports):
                and report['runtime_tasks_return_to_initial_verified'] for report in reports)
     assert all(report['actual_native_blob_handles_observed'] and report['native_blob_handles_returned_to_initial'] for report in reports)
 
+def verify_large_report(large):
+    assert large['bytes_per_file']>=1024**3 and large['completed_rounds']==2 and large['exact_bytes']
+    assert large['completed_exchange_rounds']==2, 'both rounds must finish the real inbound result and sender acknowledgement before sampling'
+    assert large['native_blob_connections_verified'] and large['thread_return_to_initial_verified']
+    assert large['tasks_without_sampler_return_to_initial_verified']
+    assert large['closed_after_idle']['fds']<=large['initial']['fds']
+    assert large['source_max_chunk_bytes']<=128*1024
+    assert large['peaks']['peak_rss_kib']-large['prepared']['peak_rss_kib']<512*1024
+    progress=large['progress_rounds']
+    assert len(progress)==2, 'both original file rounds require progress evidence'
+    previous_updates=0
+    for report in progress:
+        assert report['queries']==12 and report['reconciliations']==14 and report['reconnects']==2
+        assert report['exact_ack'] is True, 'actual exact terminal ACK missing'
+        assert report['updates']>previous_updates, 'each large file must emit actual live updates'
+        previous_updates=report['updates']
+        samples=report['samples']; handles=report['native_handles']
+        assert len(samples)==len(handles)==len(report['peaks'])==len(report['settlement_ms'])==3
+        assert all(0<=elapsed<=20000 for elapsed in report['settlement_ms'])
+        for index,(sample,peak) in enumerate(zip(samples,report['peaks'])):
+            assert sample['runtime_tasks']<=samples[0]['runtime_tasks']+4
+            assert sample['fds']<=samples[0]['fds']+4
+            assert sample['threads']<=samples[0]['threads']+2
+            assert sample['rss_kib']<=samples[0]['rss_kib']+64*1024
+            assert all(peak[key]>=sample[key] for key in ('runtime_tasks','fds','threads','rss_kib'))
+            assert handles[index][1]<=handles[0][1], 'closed progress handles kept growing'
+            if index: assert handles[index][0]>=handles[index-1][0]+2, 'new native endpoints after close missing'
+    first=progress[0]['samples'][0]
+    for report in progress:
+        for sample in report['samples']:
+            assert sample['runtime_tasks']<=first['runtime_tasks']+4
+            assert sample['fds']<=first['fds']+4
+            assert sample['threads']<=first['threads']+2
+            assert sample['rss_kib']<=first['rss_kib']+64*1024
+    assert progress[1]['native_handles'][0][0]>=progress[0]['native_handles'][-1][0], 'native observations cannot reset between files'
+    initial=large['progress_handles_initial']; closed=large['progress_handles_after_idle']
+    assert closed[0]>=progress[-1]['native_handles'][-1][0], 'native observations cannot reset before shutdown'
+    assert closed[0]>initial[0] and closed[1]==initial[1], 'actual progress native handles must return to baseline'
+
+
 def main():
     root=Path(sys.argv[1])
     reports=[json.loads(path.read_text()) for path in root.glob('receive-lifecycle-*.json')]
@@ -38,13 +78,7 @@ def main():
     assert len(tags)>=12, 'SDK store shutdown observations missing'
     assert all(report['store_open_during_count'] and report['sdk_temp_tags']==0 for report in tags)
     large=json.loads((root/'managed-engine-large.json').read_text())
-    assert large['bytes_per_file']>=1024**3 and large['completed_rounds']==2 and large['exact_bytes']
-    assert large['completed_exchange_rounds']==2, 'both rounds must finish the real inbound result and sender acknowledgement before sampling'
-    assert large['native_blob_connections_verified'] and large['thread_return_to_initial_verified']
-    assert large['tasks_without_sampler_return_to_initial_verified']
-    assert large['closed_after_idle']['fds']<=large['initial']['fds']
-    assert large['source_max_chunk_bytes']<=128*1024
-    assert large['peaks']['peak_rss_kib']-large['prepared']['peak_rss_kib']<512*1024
+    verify_large_report(large)
     schedulers=[]
     for path in root.glob('download-scheduler-*.jsonl'):
      records=[json.loads(line) for line in path.read_text().splitlines()]

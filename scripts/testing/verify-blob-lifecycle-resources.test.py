@@ -69,5 +69,74 @@ class LifecycleCoverage(unittest.TestCase):
                         validator.verify_lifecycle_reports(data)
 
 
+def large_report():
+    sample=dict(runtime_tasks=40,fds=20,threads=12,rss_kib=1000)
+    progress=[]
+    for index in range(2):
+        progress.append(dict(queries=12,reconciliations=14,reconnects=2,updates=(index+1)*10,
+            exact_ack=True,samples=[dict(sample) for _ in range(3)],peaks=[dict(sample) for _ in range(3)],
+            settlement_ms=[50,50,50],native_handles=[[index*6+4+burst*2,4] for burst in range(3)]))
+    return dict(bytes_per_file=1024**3,completed_rounds=2,exact_bytes=True,completed_exchange_rounds=2,
+        native_blob_connections_verified=True,thread_return_to_initial_verified=True,
+        tasks_without_sampler_return_to_initial_verified=True,closed_after_idle=dict(fds=10),initial=dict(fds=10),
+        source_max_chunk_bytes=128*1024,peaks=dict(peak_rss_kib=2000),prepared=dict(peak_rss_kib=1000),
+        progress_rounds=progress,progress_handles_initial=[0,0],progress_handles_after_idle=[14,0])
+
+
+class ProgressResources(unittest.TestCase):
+    def test_complete_original_load_and_real_progress_resources_pass(self):
+        validator.verify_large_report(large_report())
+
+    def test_missing_progress_evidence_is_rejected(self):
+        data=large_report(); del data['progress_rounds']
+        with self.assertRaises(KeyError): validator.verify_large_report(data)
+
+    def test_missing_query_reconnect_ack_or_live_update_is_rejected(self):
+        for field,value in [('queries',0),('reconciliations',0),('reconnects',0),('exact_ack',False),('updates',0)]:
+            with self.subTest(field=field):
+                data=large_report();data['progress_rounds'][0][field]=value
+                with self.assertRaises(AssertionError):validator.verify_large_report(data)
+
+    def test_second_file_without_new_live_updates_is_rejected(self):
+        data=large_report();data['progress_rounds'][1]['updates']=data['progress_rounds'][0]['updates']
+        with self.assertRaises(AssertionError):validator.verify_large_report(data)
+
+    def test_fake_reconnect_without_new_native_endpoints_is_rejected(self):
+        data=large_report();data['progress_rounds'][0]['native_handles'][1][0]=4
+        with self.assertRaises(AssertionError):validator.verify_large_report(data)
+
+    def test_live_native_handle_growth_and_shutdown_leak_are_rejected(self):
+        for shutdown in (False,True):
+            data=large_report()
+            if shutdown:data['progress_handles_after_idle'][1]=1
+            else:data['progress_rounds'][0]['native_handles'][1][1]=5
+            with self.assertRaises(AssertionError):validator.verify_large_report(data)
+
+    def test_original_resource_thresholds_and_peak_observation_are_preserved(self):
+        for field,excess in [('runtime_tasks',5),('fds',5),('threads',3),('rss_kib',64*1024+1)]:
+            with self.subTest(field=field):
+                data=large_report();data['progress_rounds'][0]['samples'][1][field]+=excess
+                data['progress_rounds'][0]['peaks'][1][field]+=excess
+                with self.assertRaises(AssertionError):validator.verify_large_report(data)
+        data=large_report();data['progress_rounds'][0]['peaks'][0]['runtime_tasks']=0
+        with self.assertRaises(AssertionError):validator.verify_large_report(data)
+
+    def test_growth_between_file_rounds_cannot_reset_the_baseline(self):
+        data=large_report()
+        for sample in data['progress_rounds'][1]['samples']+data['progress_rounds'][1]['peaks']:
+            sample['runtime_tasks']+=5
+        with self.assertRaises(AssertionError):validator.verify_large_report(data)
+
+    def test_native_counters_cannot_reset_before_shutdown(self):
+        data=large_report();data['progress_handles_after_idle'][0]=1
+        with self.assertRaises(AssertionError):validator.verify_large_report(data)
+
+    def test_original_file_load_and_sampling_boundary_remain_required(self):
+        for field,value in [('bytes_per_file',64*1024),('completed_rounds',1),('completed_exchange_rounds',1),('exact_bytes',False)]:
+            with self.subTest(field=field):
+                data=large_report();data[field]=value
+                with self.assertRaises(AssertionError):validator.verify_large_report(data)
+
+
 if __name__ == "__main__":
     unittest.main()
