@@ -894,3 +894,20 @@ Engine跳过项需要本机严格Collector与Jaeger，不记业务观测验收�
 相关Engine的nextest ci模式8项全部通过（59.005秒），复跑：
 `just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib -E 'test(/receive_retry::batch_outcomes::/) | test(/save_failure::real_engine_(first_save_failure|last_save_failure|post_download_save_failure)/)' --locked`。
 完整Application回归1395项通过／2项按原条件跳过；完整Engine接收回归50项通过／1项按原条件跳过（384.77秒）。Collector跳过项不记业务观测通过；未将设备、物理挂起、独立进程或完整三端矩阵记为完成。
+
+
+## 生命周期资源报告覆盖修复
+
+#304 的 Engine CI 中，完整 nextest 与8项外部资源测试本身通过，随后报告汇总失败。
+原始 artifact12651152583 的7份生命周期报告覆盖6个场景：删除场景按即时／延迟调度各产生一份；原脚本固定要求6份，稳定复放同一断言失败。
+因此不能把它记为资源泄漏，也不能用放宽文件数量绕过覆盖校验。
+
+[原资源脚本](../../../scripts/testing/run-blob-lifecycle-resources.sh)继续执行原8项真实测试，
+报告校验提取到[同一入口](../../../scripts/testing/verify-blob-lifecycle-resources.py)，
+按既有case身份严格核对6个场景及各自次数，删除必须2份，其他各1份。
+每份报告的FD／线程／任务及原生句柄归还检查、SDK tag、两份1GiB文件和下载配额断言保持。
+汇总分别记录场景数6和报告数7，不能用重复报告抵消缺失场景。
+
+[回归检查](../../../scripts/testing/verify-blob-lifecycle-resources.test.py)覆盖正确七份、遗漏第二次删除、六份重复掩盖缺场景、未知身份、额外重复及任一删除报告资源失败。
+旧实现6项中3项失败，修复后6项通过；同一CI原始产物完整重放也通过。
+当前候选原8项资源验收全部通过；含编译总478.663秒，实际报告严格核对6场景／7次，汇总与全部原16条资源断言通过。双1GiB两轮传输、实际provider配额及各生命周期均由原真实Engine产生证据，不据此宣称设备或完整网络矩阵完成。
