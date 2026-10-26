@@ -94,6 +94,10 @@ async fn run_scenario() {
 - `run_child_process` 在显式预算内 wait；超时后 kill 并再次 wait，资源 cleanup 写入报告。非零退出码由业务场景决定属于产品失败还是预期故障注入。
 - 外部资源只有调用方确实拥有其生命周期时才用 `record_external_resource` 登记结果。
 
+涉及等待者退出的用例，先通过既有完整查询或受控能力的开始屏障确认业务动作已进入负责人，再触发等待超时或取消。
+固定睡眠、future创建或等待期限到达本身不能证明动作已开始；调度延后可能让Engine在调用业务入口前就完成取消。
+只在确认开始后验证已启动工作继续受监督，并保持原清理、资源及期限断言；不要为测试扩大稳定Engine的业务步骤接口。
+
 nextest 仍是测试进程的最终超时负责人。场景预算应短于 nextest override，给 JSON/摘要写入和清理留出时间。
 
 进度连接的真实空闲回收用例 `actual_work_leases_survive_thirty_seconds_then_real_idle_timer_closes_the_connection`

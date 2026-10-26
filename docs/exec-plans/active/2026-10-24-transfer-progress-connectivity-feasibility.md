@@ -804,3 +804,20 @@ Application完整1390通过／2跳过；原生入站7通过（0.43秒），真�
 目录：`just cargo test -p uc-application --lib transfer::receive::work::catalog --locked`。
 本项使用受控存储／材料化port，证明完整用例的交接与权限行为，未证明实际三端拨号或SQLite输出提交。
 真实Engine文件成果链和实际三端矩阵仍分别按阶段3下一项及阶段5验收，不能据此勾选；正式31/59。
+
+
+## 放弃删除等待的调度边界验证
+
+#299的Engine CI在`real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state`的20秒完整清理巡检超时，
+首次失败保留。当前来源原用例独立进程运行23次通过，未据此认定已修复；随后只延后等待future首次poll 75毫秒，
+保留原50毫秒/20秒及全部删除条件，得到3次稳定失败。进一步通过原完整核对确认，导出仍持有时操作已报告取消，
+原接收来源仍保留为Running/Superseded，条目、接收状态及全部文件保持，说明受控复现没有进入删除负责人。
+旧CI未记录这些细分条件，因此不能从其泛化超时独立判定每次失败的全部原因。
+
+测试修正先以既有完整核对确认原来源，再与原删除并发观察NotRetained，确认删除已经退休该来源；
+随后才放弃50毫秒等待，放行实际导出后仍在原20秒内核对条目NotFound、无接收状态及全部缓存文件移除，
+并等待Cancelled完成事件后验证重复删除。覆盖首次立即调度与75毫秒延后，未增加稳定API或改变生产实现。
+
+复跑：`just cargo test -p uc-engine --features dev-tools --lib real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state --locked -- --nocapture`。
+原完整修正场景通过（8.36秒），相邻7个真实Engine接收回归通过（46.06秒）；同一固定二进制再重复3次通过（7.883／7.757／7.059秒）。
+该修复验证已开始动作的等待者退出语义，不扩大跨进程恢复或物理挂起证明；正式31/59保持。
