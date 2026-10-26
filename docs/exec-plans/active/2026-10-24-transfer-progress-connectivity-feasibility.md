@@ -1097,3 +1097,21 @@ Application 新增历史 get/list 与删除／成员退休交错的四种组合�
 原 Blob 矩阵继续使用它原先的 main `a461b89444efd60081c7ef63f927946f9dfc072d` 与a07，不替换成更易通过的版本；本次原十格也全量通过。新14格运行后到原十格结束，原矩阵记录的3062个源输入摘要逐项保持一致。此前旧旧Relay的历史`apply_failed`未在本次全量复现，不能因此登记历史根因已修复。CI原网络job现在先执行新14格（内含原旧旧4格），再执行原Blob10格，保留原入口和期限，并上传原始JSON／日志／构建来源。当前候选远端CI、物理挂起、设备／产品宿主、三端source/provider分离与Collector仍按后续未完成项验收。
 
 复现命令：`UC_NETWORK_UNPRIVILEGED=1 bash scripts/testing/run-progress-connectivity.sh`；具备既有sudo网络权限的CI沿用原方式。当前本机工件分别位于`target/progress-connectivity-evidence/runs/local-20261027-1/`与`target/blob-connectivity-evidence/runs/progress-regression-20261027-1/`，两次完整入口均保留首次运行和源码／锁文件／二进制及驱动摘要；全部节点与隔离拓扑实际清理通过。
+
+
+## 三端消息来源与提供端、双目标进度归属验证
+
+新增 `crates/uc-engine/src/runtime/blob_source_authorization/ownership.rs`，复用三个真实 ProductionRuntime 的既有完整 Application facade、独立 profile、Endpoint、当前成员授权和实际 SQLite／文件输出。三端位于同一测试进程；该证明不冒充三个独立 PID 或平台剪贴板捕获。源身份取自实际发布结果，原 raw 发送入口建立临时所有者，不向进度投影注入身份或成果；不扩大 Engine 稳定入口。
+
+| 实际场景 | 观察结果 |
+| --- | --- |
+| C 实际发布内容，B 发送引用 C 票据的消息，A 在真实导出边界暂停 | A 实际从 C 获得内容，B→A 保持 Processing／0完成。C 同时收到广播，其自指票据在缓存读取前被原对端准入拒绝为 AccessDenied；B→C 的真实失败不覆盖 A。释放 A 后，B→A 才以自己的 attempt 完成。 |
+| B 实际发布新内容，同一消息发给 A／C，A 输出暂停 | A／C 各观察到该 digest 的真实冷缓存未命中。C 先完成并取得自己的源端完成视图；A 仍保持 Processing／0完成，attempt 与 C 不同。释放 A 后，A 的原 attempt 完成，C 的 attempt 与逐项结果保持。 |
+
+每份成功成果都通过原 `GetHistoryEntryResource`／`ReadBlob` 读取最终文件 URI，确认仍在该接收端受管目录中并逐字节读回；没有把 export 中间临时文件当作最终成果。提供端 C 查询 B→A 的出站意图仍得到 None，不能凭提供字节取得消息作者的流程所有权。发送前经原 `QueryPeerConnections` 确认两个真实接收目标可达。
+
+首次用例错误地预期 C 自指缓存可成功，实际得到 AccessDenied。追溯确认 `MembershipLedger::admits_inbound_peer` 只放行对端，原 Blob 路径在读取缓存前执行同一准入；本项因此纠正测试预期，没有放宽生产授权。另一次在第三端加入后的成员前置等待超时（Active2／期望3），原始失败保留，不声称成员传播根因已修复。修正后的两种完整场景在普通测试中通过23.75秒；增加最终反向隔离断言后，原 Nextest ci 独占／60秒／零重试配置通过21.541秒。
+
+本次原 Native outbound 13项全绿（1.14秒），包含真实专属 profile 的旧登记／旧 attempt／迟到精确 ACK 拒绝，以及同绑定中旧 round／sequence 乱序、终态冲突不回退；Application progress 82项通过（16.91秒）。完整接收其余52项通过（475.857秒），原第三方提供端撤销后缓存仍拒绝的真实用例通过（11.762秒）。原固定九项资源全绿（364.918秒，含编译475.028秒），严格核验7个生命周期场景／8份报告／33个SDK关闭前零临时标签样本、双1GiB精确文件与ACK、FD／线程／任务／原生句柄，以及原4／2、64／16下载与排队额度。没有调整阈值、预算或启用重试。
+
+以上完成阶段5的三端归属与原乱序组合验收；跨设备真实读流／ACK阻塞隔离另按下一项验证，不能用输出边界暂停代替。物理挂起、设备／产品宿主与 Collector 继续保持未执行。
