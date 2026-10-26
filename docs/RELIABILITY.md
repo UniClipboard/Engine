@@ -50,3 +50,7 @@ Host suspension must use the confirmed lifecycle outcome for the same Engine ins
 Run `bash scripts/testing/run-blob-persistence.sh` for synthetic partial imports, successful and failed flushes,
 reopen recovery, observer termination, and a held-import deadline. The retained-context scenarios isolate a private
 state invariant. They do not establish the trigger or invalid state of a historical iOS crash.
+
+## Engine resource-release outcomes
+
+See [the release contract](design-docs/engine-resource-release.md) for complete outcomes, repeat-call semantics, resource scope and validation limits. `Stopped` is not a process-wide release certificate.

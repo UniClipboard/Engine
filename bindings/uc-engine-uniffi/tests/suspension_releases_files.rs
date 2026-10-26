@@ -724,8 +724,14 @@ fn suspended_engine_releases_every_owned_file_and_resumes() {
         .expect("write after deadline suspend");
     evidence.record("run_directories", run_directories(&network).len());
 
-    engine
-        .shutdown(SHUTDOWN_DEADLINE_MS)
-        .expect("engine shutdown");
+    use uc_engine_uniffi::BindingResourceRelease;
+    let receipt = engine.shutdown_with_outcome(SHUTDOWN_DEADLINE_MS);
+    assert_eq!(receipt, BindingResourceRelease::Released { error: None });
+    assert_eq!(engine.shutdown_with_outcome(SHUTDOWN_DEADLINE_MS), receipt);
+    assert_eq!(engine.suspend_with_outcome(SUSPEND_DEADLINE_MS), receipt);
+    let final_probe = probe(&root, &network);
+    record_probe(&mut evidence, "final_shutdown", &final_probe, &root);
+    assert_released(&final_probe, &root, "final shutdown receipt");
+    evidence.record("release_receipt.repeated", "released");
     evidence.record("outcome", "passed");
 }

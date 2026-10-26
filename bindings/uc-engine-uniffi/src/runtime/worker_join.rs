@@ -6,11 +6,11 @@ use uc_engine::observability::diagnostics::{record_task_join_failure, Diagnostic
 use uc_engine::observability::uc_warn;
 
 use super::{lock, shutdown::wait_timeout};
-use crate::BindingError;
+use crate::{BindingError, BindingResourceRelease};
 
 struct JoinState {
-    worker: Option<JoinHandle<Result<(), BindingError>>>,
-    result: Option<Result<(), BindingError>>,
+    worker: Option<Box<dyn FnOnce() -> BindingResourceRelease + Send>>,
+    result: Option<BindingResourceRelease>,
 }
 
 pub(super) struct WorkerJoin {
@@ -18,7 +18,19 @@ pub(super) struct WorkerJoin {
 }
 
 impl WorkerJoin {
-    pub(super) fn new(worker: JoinHandle<Result<(), BindingError>>) -> Self {
+    pub(super) fn new<T>(worker: JoinHandle<T>) -> Self
+    where
+        T: Into<BindingResourceRelease> + Send + 'static,
+    {
+        let worker = Box::new(move || match worker.join() {
+            Ok(result) => result.into(),
+            Err(_) => {
+                record_task_join_failure(DiagnosticTaskKind::MobileWorker);
+                BindingResourceRelease::Failed {
+                    error: BindingError::RuntimeUnavailable,
+                }
+            }
+        });
         Self {
             state: Arc::new((
                 Mutex::new(JoinState {
@@ -30,38 +42,48 @@ impl WorkerJoin {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn wait(&self, budget: Duration) -> Result<(), BindingError> {
-        let deadline = Instant::now()
-            .checked_add(budget)
-            .ok_or_else(wait_timeout)?;
+        self.wait_outcome(budget).into_result()
+    }
+
+    pub(super) fn wait_outcome(&self, budget: Duration) -> BindingResourceRelease {
+        let Some(deadline) = Instant::now().checked_add(budget) else {
+            return BindingResourceRelease::Failed {
+                error: wait_timeout(),
+            };
+        };
         let mut state = lock(&self.state.0);
         if let Some(worker) = state.worker.take() {
             let shared = Arc::clone(&self.state);
-            // reaper 是新线程，沿用等待方当前生效的订阅者，异常退出记录才会走同一条输出。
+            // reaper 启动失败时仍保留原 join 句柄。
+            let owned = Arc::new(Mutex::new(Some(worker)));
+            let joining = Arc::clone(&owned);
             let dispatch = tracing::dispatcher::get_default(Clone::clone);
             if thread::Builder::new()
                 .name("uc-engine-uniffi-reaper".to_owned())
                 .spawn(move || {
-                    let result = worker
-                        .join()
-                        // discarded-source[no-information]: the error value carries no usable diagnostic information
-                        .map_err(|_| {
-                            tracing::dispatcher::with_default(&dispatch, || {
-                                record_task_join_failure(DiagnosticTaskKind::MobileWorker);
-                            });
-                            BindingError::RuntimeUnavailable
-                        })
-                        .and_then(|result| result);
+                    let result = tracing::dispatcher::with_default(&dispatch, || {
+                        match lock(&joining).take() {
+                            Some(join) => join(),
+                            None => BindingResourceRelease::Failed {
+                                error: BindingError::RuntimeUnavailable,
+                            },
+                        }
+                    });
                     lock(&shared.0).result = Some(result);
                     shared.1.notify_all();
                 })
                 .is_err()
             {
+                state.worker = lock(&owned).take();
                 uc_warn!(
                     error_kind = "reaper_spawn_failed",
                     "engine worker reaper thread could not start"
                 );
-                state.result = Some(Err(BindingError::RuntimeUnavailable));
+                return BindingResourceRelease::Failed {
+                    error: BindingError::RuntimeUnavailable,
+                };
             }
         }
         loop {
@@ -70,7 +92,7 @@ impl WorkerJoin {
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(wait_timeout());
+                return BindingResourceRelease::Pending;
             }
             let (next, _) = self
                 .state
@@ -120,7 +142,9 @@ mod tests {
         let recorder = crate::runtime::event_recorder::EventRecorder::default();
         let dispatch = tracing::Dispatch::new(recorder.clone());
         tracing::dispatcher::with_default(&dispatch, || {
-            let owner = WorkerJoin::new(thread::spawn(|| panic!("PRIVATE_WORKER_FAILURE")));
+            let owner = WorkerJoin::new(thread::spawn(|| -> Result<(), BindingError> {
+                panic!("PRIVATE_WORKER_FAILURE")
+            }));
             assert_eq!(
                 owner.wait(Duration::from_secs(1)),
                 Err(BindingError::RuntimeUnavailable)
@@ -134,7 +158,9 @@ mod tests {
 
     #[test]
     fn repeated_wait_preserves_the_completed_worker_failure() {
-        let owner = WorkerJoin::new(thread::spawn(|| panic!("test worker failure")));
+        let owner = WorkerJoin::new(thread::spawn(|| -> Result<(), BindingError> {
+            panic!("test worker failure")
+        }));
         assert_eq!(
             owner.wait(Duration::from_secs(1)),
             Err(BindingError::RuntimeUnavailable)

@@ -19,6 +19,7 @@ use uc_observability_contract::{
 };
 
 use super::reusable_host::ReusableHost;
+use super::session_supervisor::lifecycle_error;
 use super::{profile_recovery_required_error, startup_error, ProductionRuntime};
 use crate::assembly::host::{
     derive_app_paths, profile_key_recovery_store, wire_host_capabilities_with_emitter,
@@ -45,6 +46,7 @@ use crate::{DevOperation, DevOperationResult};
 
 #[derive(Clone)]
 enum RuntimeMode {
+    Stopped,
     Ready {
         runtime: Arc<ProductionRuntime>,
         recovered: bool,
@@ -454,7 +456,9 @@ impl RecoverableRuntime {
         let mut mode = self.mode.write().await;
         let runtime = match &*mode {
             RuntimeMode::Ready { runtime, .. } => Arc::clone(runtime),
-            RuntimeMode::RestartRequired { .. } => return Err(restart_required_error_for_reset()),
+            RuntimeMode::Stopped | RuntimeMode::RestartRequired { .. } => {
+                return Err(restart_required_error_for_reset())
+            }
             RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { .. } => {
                 return Err(profile_recovery_required_error())
             }
@@ -677,7 +681,7 @@ impl EngineRuntime for RecoverableRuntime {
                     .await;
                 self.restrict_after_failure(&runtime, result).await
             }
-            RuntimeMode::RestartRequired { .. } => match operation {
+            RuntimeMode::Stopped | RuntimeMode::RestartRequired { .. } => match operation {
                 Operation::QueryProfileRecovery => {
                     Ok(OperationResult::ProfileRecovery(restart_required_summary()))
                 }
@@ -715,7 +719,9 @@ impl EngineRuntime for RecoverableRuntime {
             RuntimeMode::Recovery(_) | RuntimeMode::AdmissionRecovery { .. } => {
                 Err(profile_recovery_required_error())
             }
-            RuntimeMode::RestartRequired { .. } => Err(restart_required_error_for_reset()),
+            RuntimeMode::Stopped | RuntimeMode::RestartRequired { .. } => {
+                Err(restart_required_error_for_reset())
+            }
         }
     }
 
@@ -737,6 +743,7 @@ impl EngineRuntime for RecoverableRuntime {
             // 重置后的旧运行期已经停止，没有可挂起的内容。
             RuntimeMode::Recovery(_)
             | RuntimeMode::AdmissionRecovery { runtime: None, .. }
+            | RuntimeMode::Stopped
             | RuntimeMode::RestartRequired { .. } => Ok(()),
         }
     }
@@ -758,6 +765,7 @@ impl EngineRuntime for RecoverableRuntime {
             // 受限模式不重建业务会话；已启动的运行期保持挂起直到关闭。
             RuntimeMode::Recovery(_)
             | RuntimeMode::AdmissionRecovery { .. }
+            | RuntimeMode::Stopped
             | RuntimeMode::RestartRequired { .. } => Ok(()),
         }
     }
@@ -777,16 +785,24 @@ impl EngineRuntime for RecoverableRuntime {
             }
             RuntimeMode::Recovery(_)
             | RuntimeMode::AdmissionRecovery { runtime: None, .. }
+            | RuntimeMode::Stopped
             | RuntimeMode::RestartRequired { runtime: None } => {}
         }
-        // 变化流是宿主级资源，运行期只是借用；Engine 最终关闭时才真正关闭。
-        if let Err(error) = self.host.close_change_stream().await {
+        // 最终关闭成功后释放本实例保留的生产运行期。
+        // 不修改停止参与者为重置流程保留数据库的契约。
+        let previous = std::mem::replace(&mut *self.mode.write().await, RuntimeMode::Stopped);
+        drop(previous);
+        self.host.close_change_stream().await.map_err(|source| {
             uc_warn!(
                 error_kind = "change_stream_shutdown",
-                io_error_kind = io_error_kind(&error),
+                io_error_kind = io_error_kind(&source),
                 "host clipboard change stream shutdown failed"
             );
-        }
+            lifecycle_error(LifecycleError {
+                primary: anyhow::Error::new(source).context("close host change stream"),
+                additional: Vec::new(),
+            })
+        })?;
         Ok(())
     }
 }

@@ -216,7 +216,7 @@ impl NetworkLogRuntime {
             let mut phase = lock(&self.closing);
             match *phase {
                 ClosePhase::Open => *phase = ClosePhase::Parked,
-                ClosePhase::Parked => return SignalResult::Completed,
+                ClosePhase::Parked => {}
                 ClosePhase::Closing | ClosePhase::Closed => return SignalResult::AlreadyShutdown,
             }
         }

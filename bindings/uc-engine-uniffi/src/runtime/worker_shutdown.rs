@@ -3,34 +3,38 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use uc_engine::observability::uc_warn;
+#[cfg(test)]
 use uc_engine::EngineError;
+use uc_engine::ResourceReleaseOutcome;
 
 use super::EventQueue;
-use crate::BindingError;
+use crate::{BindingError, BindingResourceRelease};
 
-pub(super) async fn finish_shutdown(
-    shutdown: impl Future<Output = Result<(), EngineError>>,
+pub(super) async fn finish_shutdown<T>(
+    shutdown: impl Future<Output = T>,
     forwarder: JoinHandle<()>,
     events: Arc<EventQueue>,
-) -> Result<(), BindingError> {
-    let result = shutdown.await.map_err(BindingError::from);
-    // 只在实际关闭已返回失败后结束纯事件转发，不能等待永远不会出现的成功通知。
-    if result.is_err() {
+) -> BindingResourceRelease
+where
+    T: Into<ResourceReleaseOutcome>,
+{
+    let mut result = BindingResourceRelease::from(shutdown.await.into());
+    if !matches!(result, BindingResourceRelease::Released { .. }) {
         forwarder.abort();
     }
     let forwarded = forwarder.await;
     events.close();
-    result?;
-    // discarded-source[business-outcome]: the failure becomes a business outcome and is recorded once here with a fixed classification
-    forwarded.map_err(|_| {
-        // 关闭已成功，此时转发任务仍异常退出只可能是 panic；宿主只收到稳定错误码，原因在此留下记录。
+    if forwarded.is_err() && matches!(result, BindingResourceRelease::Released { .. }) {
         uc_warn!(
             operation = "engine_shutdown",
             error_kind = "event_forwarder_join_failed",
             "mobile operation failed"
         );
-        BindingError::RuntimeUnavailable
-    })
+        if let BindingResourceRelease::Released { error } = &mut result {
+            error.get_or_insert(BindingError::RuntimeUnavailable);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -87,7 +91,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(result, Err(BindingError::from(expected)));
+        assert_eq!(result.into_result(), Err(BindingError::from(expected)));
         assert!(released.load(Ordering::SeqCst));
         assert!(lock(&events.state).closed);
     }
@@ -117,6 +121,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+            .into_result()
             .unwrap();
         assert!(lock(&events.state).closed);
         assert!(matches!(
@@ -135,7 +140,7 @@ mod tests {
 
         let result = finish_shutdown(async { Ok(()) }, forwarder, events).await;
 
-        assert_eq!(result, Err(BindingError::RuntimeUnavailable));
+        assert_eq!(result.into_result(), Err(BindingError::RuntimeUnavailable));
         let lines = recorder.lines().join("\n");
         assert!(
             lines.contains("error_kind=event_forwarder_join_failed"),

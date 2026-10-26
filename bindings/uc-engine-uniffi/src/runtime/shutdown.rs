@@ -1,64 +1,79 @@
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{lock, LifecycleCommand, MobileEngine};
-use crate::{BindingError, BindingErrorCategory};
+use super::shutdown_wait::ShutdownReply;
+use super::{lock, LifecycleCommand, MobileEngine, ShutdownWait};
+use crate::{BindingError, BindingErrorCategory, BindingResourceRelease};
 
 impl MobileEngine {
-    pub(super) fn shutdown_inner(&self, budget: Duration, join: bool) -> Result<(), BindingError> {
-        let deadline = Instant::now()
-            .checked_add(budget)
-            .ok_or(BindingError::Engine {
-                code: 1003,
-                category: BindingErrorCategory::InvalidInput,
-                retryable: false,
-            })?;
-        // 停止普通请求，但失败或等待超时后仍保留生命周期通道供继续收尾。
+    pub(super) fn shutdown_inner(&self, budget: Duration, join: bool) -> BindingResourceRelease {
+        let Some(deadline) = Instant::now().checked_add(budget) else {
+            return BindingResourceRelease::Failed {
+                error: BindingError::Engine {
+                    code: 1003,
+                    category: BindingErrorCategory::InvalidInput,
+                    retryable: false,
+                },
+            };
+        };
         lock(&self.commands).take();
         if !lock(&self.events.state).closed {
             match self.request_shutdown(deadline) {
-                Ok(false) => {}
-                Ok(true) => return Err(wait_timeout()),
-                Err(error) => {
+                Ok(BindingResourceRelease::Pending) => return BindingResourceRelease::Pending,
+                Ok(BindingResourceRelease::Failed { error }) | Err(error) => {
                     self.shutdown_pending.store(false, Ordering::Release);
+                    // 接收端缺失不能证明清理已经执行。
                     if !lock(&self.events.state).closed {
-                        return Err(error);
+                        return BindingResourceRelease::Failed { error };
                     }
                 }
+                Ok(BindingResourceRelease::Released { .. }) => {}
             }
         }
         lock(&self.lifecycle_commands).take();
         if join {
-            self.join_worker(deadline.saturating_duration_since(Instant::now()))?;
+            return self
+                .worker
+                .wait_outcome(deadline.saturating_duration_since(Instant::now()));
         }
-        Ok(())
+        BindingResourceRelease::Pending
     }
 
-    /// `true` 表示请求已接受，但调用方的等待预算先耗尽。
-    fn request_shutdown(&self, deadline: Instant) -> Result<bool, BindingError> {
-        let commands = {
-            let commands = lock(&self.lifecycle_commands);
-            // 在同一临界区确定关闭请求所有者并保留发送者，避免并发等待者提前释放通道。
-            if self.shutdown_pending.swap(true, Ordering::AcqRel) {
-                return Ok(false);
+    fn request_shutdown(&self, deadline: Instant) -> Result<BindingResourceRelease, BindingError> {
+        let waiting = {
+            let mut pending = lock(&self.shutdown_wait);
+            if let Some(waiting) = pending.as_ref() {
+                waiting.clone()
+            } else {
+                let commands = lock(&self.lifecycle_commands)
+                    .clone()
+                    .ok_or(BindingError::AlreadyStopped)?;
+                let waiting = Arc::new(ShutdownWait::default());
+                commands
+                    .send(LifecycleCommand::Shutdown {
+                        deadline,
+                        response: ShutdownReply(waiting.clone()),
+                    })
+                    // discarded-source[channel]: the receiver is unavailable; no release is inferred
+                    .map_err(|_| BindingError::RuntimeUnavailable)?;
+                self.shutdown_pending.store(true, Ordering::Release);
+                *pending = Some(waiting.clone());
+                waiting
             }
-            commands.clone().ok_or(BindingError::AlreadyStopped)?
         };
-        let (response, result) = mpsc::channel();
-        commands
-            .send(LifecycleCommand::Shutdown { deadline, response })
-            // discarded-source[channel]: `tokio::sync::mpsc::error::SendError<LifecycleCommand>`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
-            .map_err(|_| BindingError::RuntimeUnavailable)?;
-        match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(result) => result.map(|()| false),
-            Err(RecvTimeoutError::Timeout) => Ok(true),
-            Err(RecvTimeoutError::Disconnected) => Err(BindingError::RuntimeUnavailable),
+        let outcome = waiting.wait(deadline);
+        if matches!(outcome, BindingResourceRelease::Failed { .. }) {
+            let mut pending = lock(&self.shutdown_wait);
+            // 旧等待方不能移除较新的显式重试。
+            if pending
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &waiting))
+            {
+                pending.take();
+            }
         }
-    }
-
-    pub(super) fn join_worker(&self, deadline: Duration) -> Result<(), BindingError> {
-        self.worker.wait(deadline)
+        Ok(outcome)
     }
 }
 
@@ -72,12 +87,12 @@ pub(super) fn wait_timeout() -> BindingError {
 
 #[cfg(test)]
 mod tests {
-    use super::{lock, mpsc, Duration, Instant, LifecycleCommand, MobileEngine};
+    use super::{lock, Duration, Instant, LifecycleCommand, MobileEngine};
     use crate::runtime::worker_join::WorkerJoin;
     use crate::runtime::EventQueue;
     use crate::{BindingError, BindingErrorCategory};
     use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex};
 
     #[test]
     fn closed_event_queue_does_not_turn_a_failed_worker_into_success() {
@@ -104,6 +119,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             shutdown_pending: AtomicBool::new(false),
+            shutdown_wait: Mutex::new(None),
             events,
             worker: WorkerJoin::new(worker),
         };
@@ -127,15 +143,18 @@ mod tests {
                 };
                 if attempt == 0 {
                     response
-                        .send(Err(BindingError::Engine {
-                            code: 1108,
-                            category: BindingErrorCategory::Internal,
-                            retryable: true,
-                        }))
+                        .send(
+                            Err(BindingError::Engine {
+                                code: 1108,
+                                category: BindingErrorCategory::Internal,
+                                retryable: true,
+                            })
+                            .into(),
+                        )
                         .unwrap();
                 } else {
                     worker_events.close();
-                    response.send(Ok(())).unwrap();
+                    response.send(Ok(()).into()).unwrap();
                 }
             }
             Ok(())
@@ -144,6 +163,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             shutdown_pending: AtomicBool::new(false),
+            shutdown_wait: Mutex::new(None),
             events,
             worker: WorkerJoin::new(worker),
         };
@@ -174,13 +194,14 @@ mod tests {
                 Duration::ZERO
             );
             worker_events.close();
-            let _ = response.send(Ok(()));
+            let _ = response.send(Ok(()).into());
             Ok(())
         });
         let engine = MobileEngine {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             shutdown_pending: AtomicBool::new(false),
+            shutdown_wait: Mutex::new(None),
             events,
             worker: WorkerJoin::new(worker),
         };
@@ -206,6 +227,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             shutdown_pending: AtomicBool::new(false),
+            shutdown_wait: Mutex::new(None),
             events: Arc::new(EventQueue::new(1)),
             worker: WorkerJoin::new(worker),
         };
@@ -234,6 +256,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             shutdown_pending: AtomicBool::new(false),
+            shutdown_wait: Mutex::new(None),
             events: Arc::new(EventQueue::new(1)),
             worker: WorkerJoin::new(worker),
         };
@@ -267,6 +290,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             shutdown_pending: AtomicBool::new(false),
+            shutdown_wait: Mutex::new(None),
             events,
             worker: WorkerJoin::new(worker),
         };
