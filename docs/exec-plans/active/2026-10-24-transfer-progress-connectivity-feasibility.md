@@ -1018,3 +1018,16 @@ taskset -c 0 just cargo nextest run --profile default -p uc-engine --features de
 原100毫秒只放弃等待、实际operation继续受监督、未归还导出仍存在、最终输出清理、原成功成果保持及缓存重试AccessDenied断言均保留。
 新增故障注入必须实际执行的检查，没有新增生产重试、稳定入口或持久化字段，也没有放宽原期限。
 修正后原完整场景3.37秒通过，nextest ci模式3.308秒通过；原8项资源验收全部通过（396.141秒含编译），严格6场景／7报告及FD／线程／任务、SDK tag／原生句柄、双1GiB与实际provider配额均通过；设备与完整网络矩阵保持原验收责任。
+
+
+## 终态丢失后的核对与同绑定重放验证
+
+本项沿用原接收成果负责人、Application 原子投影和有界通知负责人；没有修改生产实现、消息头、协议、持久格式或稳定 API，也没有新增测试专用生产入口。
+
+原双 Engine 案例 `real_engine_missing_terminal_converges_from_unknown_by_full_query_without_redownload` 先完成两项真实文件、保留一项 SQLite 保存失败，再只重试失败项。使用已有 wire 屏障阻止终态写线，实际接收仍完成 SQLite 提交与第三份文件保存。源端按原系统时钟等待 60 秒新鲜度到期，保留两项成功、将缺失结果的一项显示为未确认且不计失败；原 `ReconcileOutboundProgress` 随后取得同一尝试的完整真实结果，恢复三项成功。核对前后文件字节、既有路径、四次获取及四次导出保持一致。该场景在 Nextest CI profile 下实际通过 63.372 秒；仅为此精确函数配置 default／ci 的 120 秒外层预算，原内层期限和其他测试配置保持。
+
+原生 `ProfilePair` 案例 `lost_native_ack_and_event_replay_exact_result_without_duplicate_changes_or_terminal_rollback` 使用生产 Wire、Inbound 和全局 ProjectionRegistry：同一绑定中重复活动不增加版本／提示，旧轮次或序号被拒绝；Application 采用后销毁尚未编码 ACK 的真实入站流，发送方取得失败而接收投影已结算。随后三次重放均取得原精确 ACK，版本和事件不重复；字节、结果版本、轮次、序号及成功／失败冲突均不能改写原事实，迟到活动也不能重开终态。分别保留提示订阅者和丢弃全部订阅者，证明提示发送失败不回滚已采用结果，重新读取完整快照仍可恢复。两个模式在单个案例内实际通过 0.08 秒。接收侧冲突按既有协议编码 `InvalidScope`，发送侧映射 `InvalidPlan`，没有扩大线上错误词表。
+
+现有 Application `transfer::progress` 组还验证完整快照原子采用、后项冲突时整页不部分提交、重复核对不发布变化、迟到核对不跨越登记／意图替换，以及缺失／旧版回复不擦除真实终态；原生逐字段错误 ACK 和旧尝试围栏仍作为本项相关证据。本项主机执行不等于移动设备、物理挂起或固定旧新端完整网络矩阵通过。
+
+当前候选的相关验证共 98 项通过：Application `transfer::progress::` 78 项，原生 outbound 既有 12 项与新增真实重放 1 项，Engine `receive_retry::batch_outcomes` 既有 6 项与新增收敛 1 项。后两组按已执行的新场景与剩余回归分开运行，未把过滤项计为执行；Engine 明确启用 `dev-tools`，Nextest 使用 `--no-tests fail`。可复现命令分别为 `just cargo test -p uc-application --lib transfer::progress:: --locked`、`just cargo test -p uc-infra-p2p --lib lost_native_ack_and_event_replay_exact_result --locked`、`just cargo nextest run -p uc-infra-p2p --lib --profile ci --locked -E 'test(outbound_probe)'`，以及 `just cargo nextest run -p uc-engine --features dev-tools --lib --profile ci --locked -E 'test(receive_retry::batch_outcomes)'`。

@@ -333,3 +333,6 @@ async fn exact_native_ack_after_attempt_replacement_cannot_confirm_old_action_or
     .await??;
     Ok(())
 }
+
+#[path = "stream_terminal_delivery_probe.rs"]
+mod terminal_delivery_probe;
