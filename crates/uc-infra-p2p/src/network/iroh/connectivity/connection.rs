@@ -21,7 +21,9 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
-use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+use uc_sync_protocol::clipboard::{
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
 use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
 use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
@@ -112,7 +114,8 @@ impl PeerConnection for IrohPeerConnection {
     fn mode(&self) -> ConnectionMode {
         if matches!(
             self.native.alpn(),
-            MULTIPLEXED_CLIPBOARD_ALPN
+            ATTRIBUTED_CLIPBOARD_ALPN
+                | MULTIPLEXED_CLIPBOARD_ALPN
                 | MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN
                 | PEER_REACHABILITY_ALPN
                 | BLOBS_ALPN
@@ -133,6 +136,7 @@ impl PeerConnection for IrohPeerConnection {
             TRANSFER_PROGRESS_ALPN => ConnectionProtocol::TransferProgressV2,
             PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV2,
             LEGACY_PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV1,
+            ATTRIBUTED_CLIPBOARD_ALPN => ConnectionProtocol::AttributedClipboard,
             MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,
             ACTIVE_CLIPBOARD_PULL_ALPN => ConnectionProtocol::ActiveClipboardPull,
             ACTIVE_CLIPBOARD_ALPN => ConnectionProtocol::ActiveClipboardState,

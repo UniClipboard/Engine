@@ -254,6 +254,7 @@ async fn stream(
     wire::write_frame(
         &mut client,
         &ClipboardHeader {
+            source_entry: None,
             version: ClipboardHeader::CURRENT_VERSION,
             snapshot_hash: "a".repeat(64),
             captured_at_ms: 0,
@@ -504,6 +505,7 @@ async fn unchanged_clipboard_exchange_runs_on_a_second_backend() {
             .dispatch(
                 &DeviceId::new("memory-peer"),
                 &ClipboardHeader {
+                    source_entry: None,
                     version: ClipboardHeader::CURRENT_VERSION,
                     snapshot_hash: "b".repeat(64),
                     captured_at_ms: 0,

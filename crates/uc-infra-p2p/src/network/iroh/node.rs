@@ -74,7 +74,6 @@ use uc_application::deps::{
     SpaceAdmissionTransportPort,
 };
 
-use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::pairing_invitation::{
@@ -106,6 +105,7 @@ use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_RE
 #[cfg(test)]
 const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
+use super::connectivity::IrohTransferProgressHandler;
 use super::connectivity::{
     ConnectivityProfile, IrohClipboardHandler, IrohConnectionAdmission, IrohConnectivityBackend,
 };
@@ -128,18 +128,19 @@ use super::space_admission::{
     IrohSpaceAdmissionHandler, IrohSpaceAdmissionTransport, SpaceAdmissionChannelCredentialPort,
     SPACE_ADMISSION_ALPN,
 };
-use super::transfer_progress_adapter::{
-    InboundProgressEvent, IrohTransferProgressAdapter, TRANSFER_PROGRESS_ALPN,
-};
 use crate::network::clipboard::{ClipboardDispatchAdapter, ClipboardReceiverAdapter};
 #[cfg(test)]
 use uc_application::deps::ConnectivityPolicy;
 use uc_application::deps::{
     ConnectivityBackend, ConnectivityManager, HistoryConnectionRetentionPort, HistoryReceiverPort,
-    SessionConnectionAdmissionPort,
+    SessionConnectionAdmissionPort, TransferProgressTransport,
 };
-use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+use uc_sync_protocol::clipboard::{
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
 use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
+use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
+use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
 #[cfg(test)]
 mod discovery_tests;
@@ -209,16 +210,6 @@ pub struct BlobHandlers {
     pub transport: Arc<BlobTransport>,
     pub read_store: Arc<dyn BlobReadStorePort>,
     pub blob_transfer: Arc<dyn BlobTransferPort>,
-}
-
-/// [`IrohSessionBuilder::install_transfer_progress`] 产出的进度反向通道句柄。
-///
-/// `reporter` 给接收端 fetch sink 用,把字节进度推回 sender;
-/// `inbound_events` 给应用层 worker 订阅,翻译为前端 host event。
-/// 同一进程同时持两个角色 —— 谁是 sender / receiver 由当次传输方向决定。
-pub struct TransferProgressHandlers {
-    pub reporter: Arc<dyn OutboundProgressReporterPort>,
-    pub inbound_events: tokio::sync::broadcast::Receiver<InboundProgressEvent>,
 }
 
 /// Live iroh node with a spawned [`Router`].
@@ -830,11 +821,12 @@ impl IrohSessionBuilder {
     }
 }
 
-fn session_protocol_alpns() -> [&'static [u8]; 14] {
+fn session_protocol_alpns() -> [&'static [u8]; 16] {
     [
         SPACE_ADMISSION_ALPN,
         PEER_REACHABILITY_ALPN,
         LEGACY_PEER_REACHABILITY_ALPN,
+        ATTRIBUTED_CLIPBOARD_ALPN,
         MULTIPLEXED_CLIPBOARD_ALPN,
         CLIPBOARD_ALPN,
         GROUP_UPDATE_ALPN,
@@ -845,6 +837,7 @@ fn session_protocol_alpns() -> [&'static [u8]; 14] {
         ACTIVE_CLIPBOARD_ALPN,
         ACTIVE_CLIPBOARD_PULL_ALPN,
         TRANSFER_PROGRESS_ALPN,
+        LEGACY_TRANSFER_PROGRESS_ALPN,
         BLOBS_ALPN,
     ]
 }
@@ -1218,7 +1211,11 @@ impl IrohSessionBuilder {
     ) -> Result<ClipboardHandlers, IrohNodeError> {
         let receiver = Arc::new(ClipboardReceiverAdapter::new(manager.clone()));
         self.install_session_handler(
-            [MULTIPLEXED_CLIPBOARD_ALPN, CLIPBOARD_ALPN],
+            [
+                ATTRIBUTED_CLIPBOARD_ALPN,
+                MULTIPLEXED_CLIPBOARD_ALPN,
+                CLIPBOARD_ALPN,
+            ],
             IrohClipboardHandler::new(receiver.clone()),
         )?;
         Ok(ClipboardHandlers {
@@ -1426,47 +1423,17 @@ impl IrohSessionBuilder {
         })
     }
 
-    /// 安装"反向传输进度"通道(receiver → sender)。
-    ///
-    /// * 注册 [`TRANSFER_PROGRESS_ALPN`] 的 `ProtocolHandler`,sender 端
-    ///   接收 receiver 推送回来的字节级 fetch 进度帧。
-    /// * 返回 [`TransferProgressHandlers`]:reporter 端口给 application
-    ///   层在 `BlobProgressSink::report` 时旁路调用;inbound_events 给
-    ///   application 层 worker 订阅以翻译成 host event。
-    ///
-    /// 必须在 [`spawn`](Self::spawn) 之前调用。和 install_clipboard 复用
-    /// identities / fingerprint_factory 做对端身份验证,陌生 peer 推上
-    /// 来的进度直接被丢弃。
+    /// 将同一Application完整端点注册到两种能力；世代只关闭该handler一次。
     pub fn install_transfer_progress(
         &mut self,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        identities: Arc<dyn PeerIdentityDirectoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> Result<TransferProgressHandlers, IrohNodeError> {
-        let adapter = IrohTransferProgressAdapter::with_connections(
-            Arc::clone(&self.context.endpoint),
-            peer_addr_repo,
-            identities,
-            peer_admission,
-            fingerprint_factory,
-            self.admitted_connections.clone(),
-        );
-        let handler = adapter.handler();
-        let reporter = adapter.reporter();
-        let inbound_events = adapter.subscribe();
-
-        self.install_session_handler([TRANSFER_PROGRESS_ALPN], handler)?;
-
-        // adapter is dropped after this method returns; reporter and the
-        // broadcast subscriber both hold strong refs into the inner state
-        // so the handler keeps working.
-        let _ = adapter;
-
-        Ok(TransferProgressHandlers {
-            reporter,
-            inbound_events,
-        })
+        owner: Arc<TransferProgressTransport>,
+    ) -> Result<(), IrohNodeError> {
+        let handler = IrohTransferProgressHandler::new(owner);
+        self.install_session_handler(
+            [TRANSFER_PROGRESS_ALPN, LEGACY_TRANSFER_PROGRESS_ALPN],
+            handler,
+        )?;
+        Ok(())
     }
 
     /// 安装 iroh-blobs 传输能力。
@@ -2185,6 +2152,7 @@ mod tests {
             .dispatch(
                 &DeviceId::new("never-paired"),
                 &uc_core::ports::ClipboardHeader {
+                    source_entry: None,
                     version: uc_core::ports::ClipboardHeader::CURRENT_VERSION,
                     snapshot_hash: "0".repeat(64),
                     captured_at_ms: 0,
@@ -2917,6 +2885,27 @@ mod tests {
         use uc_sync_protocol::clipboard as clipboard_wire;
         use uc_sync_protocol::transfer_progress::{self as progress_wire, ProgressFrame};
 
+        use crate::network::iroh::transfer_progress_v2::TransferProgressInboundAdapter;
+        use uc_application::deps::{
+            transfer_progress_connectivity_policy, ProgressPageReply, ProgressProjectionEvent,
+            ProgressProjectionKey, ProgressProjectionRegistry, ProgressProjectionWorker,
+            ProgressReceiveError, ProgressSnapshotProviderPort, ProgressSnapshotQuery,
+        };
+        use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressItemKind};
+        use uc_infra_local::SystemElapsedClock;
+
+        struct RejectUnexpectedProgressQuery;
+        #[async_trait]
+        impl ProgressSnapshotProviderPort for RejectUnexpectedProgressQuery {
+            async fn snapshot_page(
+                &self,
+                _: &DeviceId,
+                _: ProgressSnapshotQuery,
+            ) -> Result<ProgressPageReply, ProgressReceiveError> {
+                panic!("sender-only membership fixture must not receive snapshot queries")
+            }
+        }
+
         const STEP: Duration = Duration::from_secs(5);
         const CLOSE_BUDGET: Duration = Duration::from_secs(3);
 
@@ -3005,7 +2994,8 @@ mod tests {
             admission: Arc<Admission>,
             peer_device: DeviceId,
             reachability: Arc<dyn PeerReachabilityPort>,
-            progress: TransferProgressHandlers,
+            progress: tokio::sync::broadcast::Receiver<ProgressProjectionEvent>,
+            _progress_worker: ProgressProjectionWorker,
             clipboard: ClipboardHandlers,
         }
 
@@ -3092,13 +3082,41 @@ mod tests {
                         )
                     })
                     .expect("install clipboard");
-                let progress = builder
-                    .install_transfer_progress(
-                        peer_addr_repo,
-                        identities,
-                        admission.clone(),
-                        fingerprints,
+                let clock = Arc::new(SystemElapsedClock);
+                let (registry, progress_worker) = ProgressProjectionRegistry::new(clock.clone());
+                registry
+                    .accept_intent(
+                        ProgressProjectionKey {
+                            peer: peer_device,
+                            source: ProgressIdentity::new([7; 16]),
+                        },
+                        vec![ProgressItem {
+                            kind: ProgressItemKind::File,
+                            index: 0,
+                        }],
                     )
+                    .expect("original send intent");
+                let progress = registry.subscribe();
+                let deps = builder.connectivity_deps(
+                    ConnectivityProfile::TransferProgress,
+                    peer_addr_repo,
+                    identities,
+                    admission.clone(),
+                    fingerprints,
+                    reachability.clone(),
+                );
+                let manager = ConnectivityManager::new(
+                    deps.backend,
+                    deps.admission,
+                    transfer_progress_connectivity_policy(clock.clone()),
+                );
+                let protocol = Arc::new(TransferProgressInboundAdapter::new(
+                    Arc::new(registry.clone()),
+                    Arc::new(registry.clone()),
+                    Arc::new(RejectUnexpectedProgressQuery),
+                ));
+                builder
+                    .install_transfer_progress(registry.inbound_transport(manager, protocol, clock))
                     .expect("install transfer progress");
                 let node = spawn_session(network, builder).await;
 
@@ -3112,6 +3130,7 @@ mod tests {
                     peer_device,
                     reachability,
                     progress,
+                    _progress_worker: progress_worker,
                     clipboard,
                 }
             }
@@ -3141,7 +3160,7 @@ mod tests {
             let mut fixture = Fixture::start().await;
             let connection = fixture
                 .peer
-                .connect(fixture.node_addr.clone(), TRANSFER_PROGRESS_ALPN)
+                .connect(fixture.node_addr.clone(), LEGACY_TRANSFER_PROGRESS_ALPN)
                 .await
                 .expect("connect");
             let mut send = connection.open_uni().await.expect("open stream");
@@ -3158,7 +3177,7 @@ mod tests {
             .expect("write frame");
             send.finish().expect("finish");
             // 对照：成员有效时事件被投递，证明连接已通过授权。
-            tokio::time::timeout(STEP, fixture.progress.inbound_events.recv())
+            tokio::time::timeout(STEP, fixture.progress.recv())
                 .await
                 .expect("event arrives")
                 .expect("event");
@@ -3205,6 +3224,7 @@ mod tests {
                     .dispatch(
                         &target,
                         &uc_core::ports::ClipboardHeader {
+                            source_entry: None,
                             version: uc_core::ports::ClipboardHeader::CURRENT_VERSION,
                             snapshot_hash: "9".repeat(64),
                             captured_at_ms: 1_700_000_000_000,
@@ -3249,6 +3269,7 @@ mod tests {
                 clipboard_wire::write_frame(
                     &mut send,
                     &uc_core::ports::ClipboardHeader {
+                        source_entry: None,
                         version: uc_core::ports::ClipboardHeader::CURRENT_VERSION,
                         snapshot_hash: "8".repeat(64),
                         captured_at_ms: 1_700_000_000_000,
@@ -3313,6 +3334,7 @@ mod tests {
             clipboard_wire::write_frame(
                 &mut send,
                 &uc_core::ports::ClipboardHeader {
+                    source_entry: None,
                     version: uc_core::ports::ClipboardHeader::CURRENT_VERSION,
                     snapshot_hash: "9".repeat(64),
                     captured_at_ms: 1_700_000_000_000,

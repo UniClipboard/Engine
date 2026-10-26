@@ -111,12 +111,12 @@ async fn local_final_progress_keeps_global_and_peer_download_capacity_until_sett
             blob_reference: Arc::new(TestReferences),
             transfer_cipher: Arc::new(TestCipher),
             host_event_emitter: Some(bus),
-            outbound_progress_reporter: None,
+
             file_transfer: None,
         }));
         let batch = grouped.then(|| Arc::new(ReceiveBatch::default()));
         if let Some(batch) = &batch {
-            batch.plan(active + 5, ((active + 5) * 5) as u64);
+            batch.plan(active + 5);
         }
         let fetch = |index: usize| {
             let facade = facade.clone();
@@ -143,8 +143,6 @@ async fn local_final_progress_keeps_global_and_peer_download_capacity_until_sett
                             peer_id: "peer".into(),
                             total_bytes: Some(5),
                             filename: String::new(),
-                            outbound_transfer_id: None,
-                            outbound_target: None,
                             batch_position: BatchPosition::Only,
                             individual_lifecycle: true,
                         }),
@@ -290,11 +288,11 @@ async fn failed_fetch_keeps_capacity_until_its_parent_finishes_local_cleanup() {
         blob_reference: Arc::new(TestReferences),
         transfer_cipher: Arc::new(TestCipher),
         host_event_emitter: None,
-        outbound_progress_reporter: None,
+
         file_transfer: None,
     }));
     let batch = Arc::new(ReceiveBatch::default());
-    batch.plan(3, 15);
+    batch.plan(3);
     let fetch = |index: usize| {
         let facade = facade.clone();
         let batch = batch.clone();
@@ -313,8 +311,6 @@ async fn failed_fetch_keeps_capacity_until_its_parent_finishes_local_cleanup() {
                         peer_id: "peer".into(),
                         total_bytes: Some(5),
                         filename: String::new(),
-                        outbound_transfer_id: None,
-                        outbound_target: None,
                         batch_position: BatchPosition::Only,
                         individual_lifecycle: true,
                     }),
@@ -417,7 +413,7 @@ async fn initial_local_preparation_obeys_global_peer_queue_and_cancellation_boun
             blob_reference: Arc::new(TestReferences),
             transfer_cipher: Arc::new(TestCipher),
             host_event_emitter: Some(bus),
-            outbound_progress_reporter: None,
+
             file_transfer: None,
         }));
         let fetch = |index: usize| {
@@ -444,8 +440,6 @@ async fn initial_local_preparation_obeys_global_peer_queue_and_cancellation_boun
                             peer_id: "peer".into(),
                             total_bytes: Some(5),
                             filename: String::new(),
-                            outbound_transfer_id: None,
-                            outbound_target: None,
                             batch_position: BatchPosition::Only,
                             individual_lifecycle: true,
                         }),
@@ -586,7 +580,7 @@ async fn final_progress_remains_inflight_for_duplicate_cancel_and_abandoned_call
         blob_reference: Arc::new(TestReferences),
         transfer_cipher: Arc::new(TestCipher),
         host_event_emitter: Some(bus),
-        outbound_progress_reporter: None,
+
         file_transfer: None,
     }));
     let command = FetchBlobCommand {
@@ -602,8 +596,6 @@ async fn final_progress_remains_inflight_for_duplicate_cancel_and_abandoned_call
             peer_id: "peer".into(),
             total_bytes: Some(5),
             filename: String::new(),
-            outbound_transfer_id: None,
-            outbound_target: None,
             batch_position: BatchPosition::Only,
             individual_lifecycle: true,
         }),

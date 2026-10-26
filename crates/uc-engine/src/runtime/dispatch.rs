@@ -52,6 +52,10 @@ use crate::operations::history::tags::{
     execute_list_history_tags, execute_merge_history_tags, execute_remove_history_tag_from_entries,
     execute_rename_history_tag, execute_summarize_history_entry_tags,
 };
+use crate::operations::history::transfer_progress::{
+    execute_list_outbound_progress, execute_query_outbound_progress,
+    execute_reconcile_outbound_progress,
+};
 use crate::operations::settings::config_migration::{
     execute_export_config, execute_preview_config_import, execute_stage_config_import,
 };
@@ -556,6 +560,20 @@ impl EngineRuntime for ProductionRuntime {
                 }
                 Operation::ClearHistory => {
                     execute_clear_history(self.current_facade().await?.as_ref()).await
+                }
+                Operation::QueryOutboundProgress(input) => {
+                    execute_query_outbound_progress(self.current_facade().await?.as_ref(), input)
+                        .await
+                }
+                Operation::ListOutboundProgress => {
+                    execute_list_outbound_progress(self.current_facade().await?.as_ref()).await
+                }
+                Operation::ReconcileOutboundProgress(input) => {
+                    execute_reconcile_outbound_progress(
+                        self.current_facade().await?.as_ref(),
+                        input,
+                    )
+                    .await
                 }
                 Operation::QueryEntryReceiveProgress(input) => {
                     execute_query_entry_receive_progress(

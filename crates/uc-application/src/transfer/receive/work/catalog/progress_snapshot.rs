@@ -66,7 +66,7 @@ impl ProgressSnapshotProviderPort for ReceiveWorkRegistry {
 }
 
 impl RegistryState {
-    fn progress_states(
+    pub(in super::super) fn progress_states(
         &self,
         entry: &EntryId,
         current: &ProgressSourceTask,

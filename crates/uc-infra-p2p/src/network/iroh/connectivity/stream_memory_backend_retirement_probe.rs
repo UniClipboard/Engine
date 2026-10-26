@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ProgressBound, ProgressClaimRefusal, ProgressProjectionAdmission, ProgressProjectionKey,
     ProgressProjectionRegistry, ProgressReceiveError, ProgressSourceTask,
-    ProgressTaskAuthorityPort, ProgressTerminalNotice, ProgressWirePort, TransferProgressProducer,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice, ProgressWirePort,
+    TransferProgressProducer,
 };
 use uc_core::file_transfer::{ProgressIdentity, ProgressItem};
 use uc_core::ids::DeviceId;
@@ -56,8 +57,7 @@ impl ProgressTaskAuthorityPort for HeldChallengeAuthority {
     fn claim_terminal(
         &self,
         _: &DeviceId,
-        _: ProgressIdentity,
-        _: ProgressIdentity,
+        _: ProgressTaskDescriptor,
         _: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
         panic!("完整登记和原帧重放不领取本地终态");

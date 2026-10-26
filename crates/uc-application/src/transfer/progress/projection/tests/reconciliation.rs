@@ -81,8 +81,7 @@ impl ProgressTaskAuthorityPort for Query {
     fn claim_terminal(
         &self,
         _: &DeviceId,
-        _: ProgressIdentity,
-        _: ProgressIdentity,
+        _: ProgressTaskDescriptor,
         _: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
         panic!("query cannot claim a notification");
@@ -657,4 +656,54 @@ async fn late_non_snapshot_replies_cannot_answer_a_new_same_key_intent() {
         assert!(current.items.iter().all(|(_, state)| state.is_none()));
         fixture.shutdown().await;
     }
+}
+
+struct UsableScope(DeviceId);
+#[async_trait]
+impl crate::deps::CurrentSpaceMemberScopePort for UsableScope {
+    async fn snapshot(
+        &self,
+    ) -> Result<crate::deps::CurrentSpaceMemberScope, crate::deps::CurrentSpaceMemberScopeError>
+    {
+        Ok(crate::deps::CurrentSpaceMemberScope {
+            revision: 1,
+            local_member_active: true,
+            usable_peer_device_ids: vec![self.0],
+            paused_peer_devices: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn complete_view_query_refuses_a_replaced_expected_attempt_before_network_work() {
+    use crate::transfer::progress::view::{ProgressViewOwner, TransferProgressReconciliation};
+    use uc_core::ids::EntryId;
+    use uuid::Uuid;
+    let fixture = Fixture::new(vec![terminal(0), terminal(1)], true).await;
+    let owner = ProgressViewOwner::new(
+        fixture.registry.clone(),
+        fixture.reconciler.clone(),
+        Arc::new(UsableScope(fixture.key.peer)),
+    );
+    let source = EntryId::from(Uuid::from_bytes(fixture.key.source.bytes()).to_string());
+    let old = Uuid::from_bytes(id(999).bytes()).to_string();
+    let result = timeout(
+        Duration::from_secs(1),
+        owner.reconcile(
+            fixture.key.peer,
+            &source,
+            Some(&old),
+            &CancellationToken::new(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result, TransferProgressReconciliation::Superseded);
+    assert!(
+        timeout(Duration::from_millis(10), fixture.query.entered.notified())
+            .await
+            .is_err()
+    );
+    fixture.shutdown().await;
 }

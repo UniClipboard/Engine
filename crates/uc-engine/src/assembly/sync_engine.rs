@@ -3,10 +3,9 @@
 //! 本模块选择并安装 Iroh、Infra 与观测 adapter，再通过一次性
 //! [`ApplicationNetworkBinding`] 取得 Router 必需的窄 endpoint。Space、
 //! Clipboard、Blob 与文件传输对象图及其关闭顺序均由 Application 持有；
-//! [`SyncSessionAssembly`] 只拥有当前 Space 会话的进度翻译 worker。
+//! 进度、剪贴板与文件业务运行期统一交给Application持有。
 
 use super::observability::{self, observe_peer_reachability};
-mod outbound_progress;
 #[cfg(all(test, feature = "dev-tools"))]
 use crate::testing::active_pull_publication::{decorate_blob, decorate_preparation};
 #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
@@ -19,11 +18,8 @@ use crate::testing::receive_streams;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use tokio::time::Instant;
 
 use tracing::instrument;
-
-use outbound_progress::OutboundProgressRuntime;
 
 use crate::assembly::deps::SyncEngineDeps;
 #[cfg(feature = "dev-tools")]
@@ -37,12 +33,11 @@ use uc_application::deps::{
     ApplicationSpaceAdapters, ApplyGroupUpdatePort, BlobDownloadResources, BlobTransport,
     ClipboardReceiverPort, ConnectivityManager, ConnectivityPolicy, GroupUpdateEndpoint,
     GroupUpdateLocalWorkPort, GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort,
-    IdleRetentionPolicy, LifecycleError, MembershipHistoryReceiver, MembershipHistoryTransport,
+    IdleRetentionPolicy, MembershipHistoryReceiver, MembershipHistoryTransport,
     PeerIdentityDirectoryPort, PeerReachabilityTransport, PeerReachabilityTransportPorts,
-    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
+    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters, TransferProgressNetwork,
 };
 use uc_application::facade::ApplicationAssembly;
-use uc_core::file_transfer::FileTransferCancellationReason;
 use uc_core::membership::{GroupUpdateDispatchPort, PeerAdmissionPort};
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardReceiverPort, ClipboardDispatchPort,
@@ -51,13 +46,17 @@ use uc_core::ports::{
 use uc_infra_local::fs::{
     FsAtomicPublisher, FsDirectoryStagingCleaner, FsHiddenPathMarker, FsInboundFileTarget,
 };
+use uc_infra_local::SystemElapsedClock;
+use uc_infra_p2p::network::iroh::transfer_progress_v2::{
+    TransferProgressInboundAdapter, TransferProgressWire,
+};
 use uc_infra_p2p::network::iroh::{
     blob_exchange::IrohBlobSourceResolver,
     connectivity::{ConnectivityProfile, PeerReachabilityWire},
     group_update_adapter::{GroupUpdateWire, IrohGroupUpdateAdapter, SessionGroupUpdateLocalWork},
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     IrohIdentityStore, IrohNodeError, IrohSessionBuilder, MembershipHistoryWire,
-    PreparedIrohSession, SessionMembershipHistoryLocalWork, TransferProgressHandlers,
+    PreparedIrohSession, SessionMembershipHistoryLocalWork,
 };
 use uc_infra_profile::security::Sha256IdentityFingerprintFactory;
 use uc_infra_profile::space::{
@@ -89,47 +88,17 @@ impl uc_core::ports::FindMobileDeviceByIdPort for UnavailableMobileDeviceLookup 
     }
 }
 
-/// Engine 持有的网络生命周期 owner。
-pub struct SyncSessionAssembly {
-    /// 反向"传输进度"翻译 worker 的 join handle。订阅
-    /// `IrohTransferProgressAdapter` 的 inbound 流,将每帧 progress 翻译
-    /// 为 `HostEvent::Transfer { direction: Sending, ... }` 并发到 emitter。
-    /// 与 sync assembly 同生命周期。
-    outbound_progress_translator: OutboundProgressRuntime,
-}
-
 /// Engine 完成网络装配后一次性交给 Application 的被动 adapter 集合。
 ///
-/// 该集合按值移交；`SyncSessionAssembly` 不保留 Clipboard 领域句柄。
+/// 该集合按值移交，领域运行期只由Application持有。
 pub(crate) struct SyncApplicationAdapters {
     pub binding: ApplicationNetworkBinding,
     pub active_pull_client: Arc<dyn uc_core::ports::ActiveClipboardPullClientPort>,
 }
 
 pub(crate) struct PreparedSyncSession {
-    pub session: SyncSessionAssembly,
     pub application: SyncApplicationAdapters,
     pub prepared_session: PreparedIrohSession,
-}
-
-impl SyncSessionAssembly {
-    /// 停止当前 Space 会话的进度翻译；长期网络由监督器独立关闭。
-    #[instrument(skip_all)]
-    pub async fn shutdown(
-        self,
-        transfer_reason: FileTransferCancellationReason,
-        _deadline: Option<Instant>,
-    ) -> Result<(), LifecycleError> {
-        let mut errors = Vec::new();
-        if let Err(error) = self
-            .outbound_progress_translator
-            .shutdown(transfer_reason)
-            .await
-        {
-            errors.push(anyhow::Error::new(error).context("stop outbound progress worker"));
-        }
-        LifecycleError::from_errors(errors)
-    }
 }
 
 /// 网络与 Application endpoint 装配失败；启动调用方将其作为致命错误处理。
@@ -333,26 +302,6 @@ pub async fn prepare_sync_session(
     } = builder.install_active_clipboard(active_manager)?;
     let active_clipboard_dispatch: Arc<dyn ActiveClipboardDispatchPort> = active_clipboard_dispatch;
     let active_clipboard_receiver: Arc<dyn ActiveClipboardReceiverPort> = active_clipboard_receiver;
-    // 反向"传输进度"通道(receiver → sender):同一节点装第四个 ALPN。
-    // 装在 install_blobs 之前是为了让 `IrohTransferProgressAdapter` 的
-    // reporter 能在 BlobTransferDeps 构造时一起接入 facade。inbound_events
-    // 由下面的 translator worker 消费,翻译为 host event。
-    let TransferProgressHandlers {
-        reporter: outbound_progress_reporter,
-        inbound_events: outbound_progress_events,
-    } = builder.install_transfer_progress(
-        Arc::clone(&space_setup.peer_addr_repo),
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
-        Arc::clone(&space_setup.fingerprint),
-    )?;
-
-    #[cfg(all(test, feature = "dev-tools"))]
-    let outbound_progress_reporter = receive_exports::decorate_reporter(
-        &space_setup.iroh_blob_store_dir,
-        outbound_progress_reporter,
-    );
-
     // 同一存储上的交换能力交给唯一 Application 负责人；Router 不再由 SDK 自管。
     // SQLite 引用与纯本地存储能力交给 transfer，完整条目提交仍归既有接收权威。
     let blob_connectivity = builder.connectivity_deps(
@@ -594,7 +543,33 @@ pub async fn prepare_sync_session(
             active_pull_hidden_marker: FsHiddenPathMarker::new(),
             staging_cleanup: FsDirectoryStagingCleaner::new(),
         });
+    let progress_connectivity = builder.connectivity_deps(
+        ConnectivityProfile::TransferProgress,
+        Arc::clone(&space_setup.peer_addr_repo),
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
+        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerAdmissionPort>,
+        Arc::clone(&space_setup.fingerprint),
+        Arc::clone(&peer_reachability),
+    );
+    let progress_backend = progress_connectivity.backend;
+    #[cfg(all(test, feature = "dev-tools"))]
+    let progress_backend = receive_exports::decorate_progress_backend(
+        &space_setup.iroh_blob_store_dir,
+        progress_backend,
+    );
     let application_network = application.assemble_network(ApplicationNetworkAdapters {
+        transfer_progress: TransferProgressNetwork {
+            backend: progress_backend,
+            admission: progress_connectivity.admission,
+            wire: Arc::new(TransferProgressWire),
+            snapshot_wire: Arc::new(TransferProgressWire),
+            inbound: Box::new(|receiver, legacy, queries| {
+                Arc::new(TransferProgressInboundAdapter::new(
+                    receiver, legacy, queries,
+                ))
+            }),
+            clock: Arc::new(SystemElapsedClock),
+        },
         blob_downloads: Arc::new(BlobDownloadResources {
             transport: blob_transport,
             store: blob_read_store,
@@ -605,7 +580,6 @@ pub async fn prepare_sync_session(
         }),
         blob_transfer: Arc::clone(&blob_transfer),
         blob_reference: Arc::clone(&space_setup.blob_reference_repo),
-        outbound_progress_reporter: Arc::clone(&outbound_progress_reporter),
         space: ApplicationSpaceAdapters {
             connection_hints: builder
                 .connection_hints(
@@ -682,6 +656,7 @@ pub async fn prepare_sync_session(
             ..ConnectivityPolicy::default()
         },
     );
+    builder.install_transfer_progress(application_network.transfer_progress_endpoint())?;
     let preparation = application_network.active_clipboard_pull_preparation();
     #[cfg(all(test, feature = "dev-tools"))]
     let preparation = decorate_preparation(&space_setup.iroh_blob_store_dir, preparation);
@@ -695,20 +670,8 @@ pub async fn prepare_sync_session(
 
     let prepared_session = builder.finish();
 
-    // Translator worker:从 sender 端的反向通道收 InboundProgressEvent,
-    // 翻译为 application 层 HostEvent(Sending 方向)发到 host_event_bus。
-    // 每次 progress → `TransferHostEvent::Progress`;终态 → 额外一帧
-    // `StatusChanged`。shutdown 会显式停止并等待该任务。
-    let outbound_progress_translator = OutboundProgressRuntime::spawn(
-        outbound_progress_events,
-        Arc::clone(&application.host_event_bus()),
-    );
-
     uc_info!("Iroh adapters registered against the Application network binding");
     Ok(PreparedSyncSession {
-        session: SyncSessionAssembly {
-            outbound_progress_translator,
-        },
         application: SyncApplicationAdapters {
             binding: application_network,
             active_pull_client: active_clipboard_pull_client,

@@ -4,8 +4,10 @@
 //! 断言失败：这类变化会破坏与已发布版本互通，必须改版本号或 ALPN，而不是改向量。
 
 use bytes::Bytes;
+use std::error::Error;
 use tokio::io::AsyncReadExt;
 use uc_core::file_transfer::OutboundProgressStatus;
+use uc_core::ids::EntryId;
 use uc_core::membership::{SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind};
 use uc_core::ports::ClipboardHeader;
 use uc_sync_protocol::active_clipboard_pull::{self, PullResponse};
@@ -35,6 +37,7 @@ async fn drain(mut reader: tokio::io::DuplexStream) -> Vec<u8> {
 
 fn clipboard_header() -> ClipboardHeader {
     ClipboardHeader {
+        source_entry: None,
         version: ClipboardHeader::CURRENT_VERSION,
         snapshot_hash: "a".repeat(64),
         captured_at_ms: 1_700_000_000_000,
@@ -187,4 +190,55 @@ fn membership_branch_recovery_messages() {
         &group_info,
         "010103010203",
     );
+}
+
+#[test]
+fn attributed_clipboard_header_has_distinct_layout_and_preserves_frozen_old_bytes() {
+    let mut header = ClipboardHeader {
+        source_entry: None,
+        version: 2,
+        snapshot_hash: "h".into(),
+        captured_at_ms: 1,
+        origin_device_id: "d".into(),
+        origin_device_name: "n".into(),
+        payload_version: 3,
+    };
+    let old = clipboard::encode_header(&header, None).unwrap();
+    assert_vector(
+        "original clipboard header",
+        &old,
+        "55435431020168020164016e0300",
+    );
+    assert_eq!(clipboard::decode_header(&old).unwrap(), header);
+    header.source_entry = Some(EntryId::from("42424242-4242-4242-4242-424242424242"));
+    let encoded = clipboard::encode_header(&header, None).unwrap();
+    assert_vector(
+        "attributed clipboard header",
+        &encoded,
+        "55435432020168020164016e030042424242424242424242424242424242",
+    );
+    assert_eq!(clipboard::decode_header(&encoded).unwrap(), header);
+    for cut in 0..encoded.len() {
+        assert!(clipboard::decode_header(&encoded[..cut]).is_err());
+    }
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert!(matches!(
+        clipboard::decode_header(&trailing),
+        Err(clipboard::WireDecodeError::TrailingHeaderBytes)
+    ));
+    let mut old_with_source = old;
+    old_with_source.extend_from_slice(&[0x42; 16]);
+    assert!(matches!(
+        clipboard::decode_header(&old_with_source),
+        Err(clipboard::WireDecodeError::TrailingHeaderBytes)
+    ));
+    header.source_entry = Some(EntryId::from("invalid-sensitive-source"));
+    let source = clipboard::encode_header(&header, None).unwrap_err();
+    assert!(matches!(
+        source,
+        clipboard::WireEncodeError::SourceIdentity(_)
+    ));
+    assert!(source.source().is_some());
+    assert!(!source.to_string().contains("invalid-sensitive-source"));
 }

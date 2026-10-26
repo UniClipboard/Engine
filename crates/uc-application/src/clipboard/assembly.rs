@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use uc_core::clipboard::ClipboardIntegrationMode;
-use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::ports::atomic_publish::AtomicPublishPort;
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::hidden_path::MarkHiddenPort;
@@ -126,7 +125,7 @@ pub(crate) struct ClipboardSessionDeps {
     pub known_peers: Arc<dyn PeerAddressRepositoryPort>,
     pub deliveries: Arc<dyn EntryDeliveryRepositoryPort>,
     pub trusted_peers: Arc<dyn TrustedPeerRepositoryPort>,
-    pub outbound_progress_reporter: Arc<dyn OutboundProgressReporterPort>,
+
     pub inbound_adapters: ClipboardInboundAdapters,
     pub inbound_events: Arc<dyn ClipboardInboundEventPort>,
 }
@@ -318,7 +317,7 @@ impl ClipboardAssembly {
                 provisional_receive: Arc::clone(
                     &self.deps.storage.file_transfer.finalize_provisional,
                 ),
-                outbound_progress_reporter: session.outbound_progress_reporter,
+
                 active_register: Arc::clone(&self.deps.clipboard.active_register),
                 mobile_consumability: self.deps.clipboard.mobile_consumability.clone(),
                 snapshot_deps: self.snapshot_deps(),

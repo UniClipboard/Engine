@@ -39,7 +39,6 @@ pub(crate) mod runtime_consts;
 mod session_generation;
 pub mod space_admission;
 pub(crate) use super::trace_context;
-pub mod transfer_progress_adapter;
 
 #[cfg(test)]
 pub(crate) struct StaticPeerAdmission(pub(crate) bool);
@@ -78,7 +77,6 @@ pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError, IrohNodeShutdownError,
     IrohRelayAccessToken, IrohSessionBuilder, PairingInvitationHandlers, PreparedIrohSession,
-    TransferProgressHandlers,
 };
 pub use peer_reachability_adapter::{
     IrohPeerReachabilityHandler, LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN,
@@ -99,6 +97,7 @@ pub fn product_alpns() -> Vec<&'static [u8]> {
     vec![
         BLOBS_ALPN,
         CLIPBOARD_ALPN,
+        uc_sync_protocol::clipboard::ATTRIBUTED_CLIPBOARD_ALPN,
         MULTIPLEXED_CLIPBOARD_ALPN,
         PEER_REACHABILITY_ALPN,
         LEGACY_PEER_REACHABILITY_ALPN,
@@ -110,7 +109,8 @@ pub fn product_alpns() -> Vec<&'static [u8]> {
         MEMBERSHIP_BRANCH_RECOVERY_ALPN,
         uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN,
         uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN,
-        transfer_progress_adapter::TRANSFER_PROGRESS_ALPN,
+        uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN,
+        uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN,
     ]
 }
 pub use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;

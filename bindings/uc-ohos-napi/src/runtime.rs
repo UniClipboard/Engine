@@ -12,7 +12,8 @@ use uc_engine::{
     ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent,
     EngineState, EntryReceiveProgressInput, EntryReceiveRetryOutcome, EventStream,
     ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
-    OperationResult, OperationTerminal, ReceiveProgressSummary, RecoverSessionInput, RefreshReason,
+    OperationResult, OperationTerminal, OutboundProgressInput, OutboundProgressSummary,
+    ReceiveProgressSummary, ReconcileOutboundProgressInput, RecoverSessionInput, RefreshReason,
     RemoveMemberInput, RestoreClipboardInput, RetryEntryReceiveInput, SecretString, SendFilesInput,
     SendImageInput, SendReportSummary, SendTextInput, StartupLifecycle, StartupLifecycleInput,
     StartupProgress, TransferCancellationReason,
@@ -21,9 +22,10 @@ use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhReceiveItem,
-    OhReceiveProgress, OhReceiveRetryOutcome, OhRelayOverview, OhRelayOverviewEntry, OhSendReport,
-    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhOutboundProgress,
+    OhOutboundProgressItem, OhReceiveItem, OhReceiveProgress, OhReceiveRetryOutcome,
+    OhRelayOverview, OhRelayOverviewEntry, OhSendReport, OhSessionRecovery, OhSpaceCreated,
+    OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -535,6 +537,62 @@ impl OhEngine {
         }
     }
 
+    #[napi]
+    pub async fn query_outbound_progress(
+        &self,
+        entry_id: String,
+        target_device_id: String,
+    ) -> napi::Result<Option<OhOutboundProgress>> {
+        match self
+            .engine
+            .execute(Operation::QueryOutboundProgress(OutboundProgressInput {
+                entry_id,
+                target_device_id,
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::OutboundProgress(value) => Ok(value.map(outbound_progress)),
+            _ => Err(unexpected_result()),
+        }
+    }
+    #[napi]
+    pub async fn list_outbound_progress(&self) -> napi::Result<Vec<OhOutboundProgress>> {
+        match self
+            .engine
+            .execute(Operation::ListOutboundProgress)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::OutboundProgressList(values) => {
+                Ok(values.into_iter().map(outbound_progress).collect())
+            }
+            _ => Err(unexpected_result()),
+        }
+    }
+    #[napi]
+    pub async fn reconcile_outbound_progress(
+        &self,
+        entry_id: String,
+        target_device_id: String,
+        expected_attempt_id: Option<String>,
+    ) -> napi::Result<String> {
+        match self
+            .engine
+            .execute(Operation::ReconcileOutboundProgress(
+                ReconcileOutboundProgressInput {
+                    entry_id,
+                    target_device_id,
+                    expected_attempt_id,
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::OutboundProgressReconciliation(value) => Ok(value.to_string()),
+            _ => Err(unexpected_result()),
+        }
+    }
     #[napi]
     pub async fn query_entry_receive_progress(
         &self,
@@ -1131,6 +1189,7 @@ mod tests {
     };
     use uc_engine::{
         EngineError, EngineErrorCategory, EngineEvent, OperationResult, OperationTerminal,
+        OutboundProgressInput, OutboundProgressSummary, ReconcileOutboundProgressInput,
         RefreshReason,
     };
 
@@ -1435,3 +1494,40 @@ fn receive_progress(progress: ReceiveProgressSummary) -> OhReceiveProgress {
 
 #[cfg(test)]
 mod receive_tests;
+
+fn outbound_progress(progress: OutboundProgressSummary) -> OhOutboundProgress {
+    OhOutboundProgress {
+        entry_id: progress.entry_id,
+        target_device_id: progress.target_device_id,
+        attempt_id: progress.attempt_id,
+        revision: progress.revision.to_string(),
+        freshness: progress.freshness.to_string(),
+        freshness_available: progress.freshness_available,
+        state: progress.state.to_string(),
+        items_total: progress.items_total,
+        items_waiting: progress.items_waiting,
+        items_running: progress.items_running,
+        items_completed: progress.items_completed,
+        items_failed: progress.items_failed,
+        items_cancelled: progress.items_cancelled,
+        items_unconfirmed: progress.items_unconfirmed,
+        items: progress
+            .items
+            .into_iter()
+            .map(|item| OhOutboundProgressItem {
+                kind: item.kind.to_string(),
+                index: item.index,
+                state: item.state.to_string(),
+                last_known_phase: item.last_known_phase.map(|value| value.to_string()),
+                round: item.round,
+                completed_bytes: item.completed_bytes.map(|value| value.to_string()),
+                total_bytes: item.total_bytes.map(|value| value.to_string()),
+                failure_reason: item.failure_reason.map(|value| value.to_string()),
+                cancellation_reason: item.cancellation_reason.map(|value| value.to_string()),
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod outbound_progress_tests;

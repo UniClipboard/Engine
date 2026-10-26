@@ -5,14 +5,16 @@ use super::{
     MockEntryRepo, NoopReceiveArtifactCleanup, RecordingLiveIndex, StoreOnlyPullDeps,
 };
 use crate::clipboard::entry_identity::EntryIdentityCoordinator;
-use crate::transfer::progress::ProgressTaskAuthorityPort;
+use crate::transfer::progress::{ProgressTaskAuthorityPort, ProgressTaskDescriptor};
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use async_trait::async_trait;
 use std::io;
 use std::sync::{atomic::AtomicUsize, Arc};
 use tokio::sync::{Notify, Semaphore};
-use uc_core::file_transfer::ProgressIdentity;
+use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
+use uc_core::file_transfer::{ProgressIdentity, ProgressItemState, ProgressTerminalOutcome};
 use uc_core::ids::EntryId;
 use uc_core::ports::{AttemptError, BeginReceiveAttemptPort, BeginReceiveOutcome};
 use uuid::Uuid;
@@ -134,9 +136,39 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
         let applying = tokio::spawn(async move { owner.execute(input).await });
         acceptance.entered.notified().await;
         assert!(work.current_task(&peer, id).is_none());
+        let observation = CancellationToken::new();
+        assert!(timeout(
+            Duration::from_millis(10),
+            work.next_progress_changes(&observation)
+        )
+        .await
+        .is_err());
         acceptance.release.add_permits(1);
         assert!(applying.await.unwrap().is_err());
         assert_eq!(work.current_task(&peer, id).is_none(), reject);
+        if !reject {
+            let changes = timeout(
+                Duration::from_secs(1),
+                work.next_progress_changes(&observation),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].peer, peer);
+            let snapshot = changes[0].snapshot.as_ref().unwrap();
+            assert!(snapshot.descriptor == work.current_task(&peer, id).unwrap().descriptor);
+            assert!(
+                matches!(snapshot.items.as_slice(), [ProgressItemState::Terminal(value)] if matches!(value.outcome, ProgressTerminalOutcome::Failed(_)))
+            );
+        }
+        // 观察真实事实不再制造一次变化；拒绝的CAS也不能生成通知资格。
+        assert!(timeout(
+            Duration::from_millis(10),
+            work.next_progress_changes(&observation)
+        )
+        .await
+        .is_err());
         receiver.shutdown().await.unwrap();
     }
 }
@@ -313,7 +345,16 @@ fn registration_authority_worker() {
                 },
                 index: request["index"].as_u64().unwrap() as u16,
             };
-            match registry.claim_terminal(&peer, source, attempt, item) {
+            let expected = ProgressTaskDescriptor {
+                producer: ProgressIdentity::new(
+                    serde_json::from_value(request["producer"].clone()).unwrap(),
+                ),
+                revision: request["revision"].as_u64().unwrap(),
+                source,
+                attempt,
+                item_count: u16::try_from(request["item_count"].as_u64().unwrap()).unwrap(),
+            };
+            match registry.claim_terminal(&peer, expected, item) {
                 Ok(task) => json!({"task":encode(task)}),
                 Err(reason) => json!({"refusal":format!("{reason:?}")}),
             }

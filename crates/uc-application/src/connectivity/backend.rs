@@ -27,6 +27,7 @@ pub enum ConnectionProtocol {
     ActiveClipboardPull,
     Clipboard,
     MultiplexedClipboard,
+    AttributedClipboard,
     GroupUpdate,
     LegacyGroupUpdate,
     MembershipHistory,

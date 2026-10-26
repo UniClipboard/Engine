@@ -661,3 +661,5 @@ pub use crate::transfer::progress::{
 pub use crate::transfer::progress::transfer_progress_connectivity_policy;
 
 pub use crate::transfer::progress::{ProgressInboundWirePort, TransferProgressTransport};
+
+pub use crate::transfer::progress::{ProgressInboundFactory, TransferProgressNetwork};

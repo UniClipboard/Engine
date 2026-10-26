@@ -260,7 +260,9 @@ async fn real_engine_offline_cancellation_ignores_permanently_blocked_progress()
     let case = receive_case(false).await;
     let _release = ReleaseOnDrop(case.exports.clone());
     case.source.shutdown_until_complete().await.unwrap();
-    case.exports.block_reports.store(true, Ordering::SeqCst);
+    case.exports
+        .block_progress_network
+        .store(true, Ordering::SeqCst);
     let OperationResult::EntryReceiveRetry(EntryReceiveRetryOutcome::Accepted { attempt_id }) =
         case.receiver
             .execute(Operation::RetryEntryReceive(case.retry_input()))
@@ -271,7 +273,7 @@ async fn real_engine_offline_cancellation_ignores_permanently_blocked_progress()
     };
     timeout(Duration::from_secs(20), async {
         case.exports.paused.notified().await;
-        case.exports.report_blocked.notified().await;
+        case.exports.progress_network_blocked.notified().await;
     })
     .await
     .expect("真实导出持完成权时，反向通知必须已经进入永久等待");

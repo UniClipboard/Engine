@@ -119,18 +119,45 @@ async fn latest_values_share_one_task_rate_and_actual_completion_cannot_create_a
         round,
     );
     service
-        .submit_live(peer(1), id(1), id(99), value(0, 1))
+        .submit_activity(
+            peer(1),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
+            Some(value(0, 1)),
+        )
         .unwrap();
     let stop = CancellationToken::new();
     let running = tokio::spawn(worker.run(stop.clone()));
     assert_eq!(event(&mut rx).await.1, Some(value(0, 1)));
     for seq in 2..=100 {
         service
-            .submit_live(peer(1), id(1), id(99), value(0, seq))
+            .submit_activity(
+                peer(1),
+                service
+                    .inner
+                    .authority
+                    .current_task(&peer(1), id(1))
+                    .unwrap()
+                    .descriptor,
+                Some(value(0, seq)),
+            )
             .unwrap();
     }
     service
-        .submit_live(peer(1), id(1), id(99), value(1, 1))
+        .submit_activity(
+            peer(1),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
+            Some(value(1, 1)),
+        )
         .unwrap();
     clock.0.store(5000, Ordering::SeqCst);
     service.inner.wake.notify_one();
@@ -175,13 +202,31 @@ async fn terminal_removes_pending_activity_and_waits_for_actual_live_work_withou
         round,
     );
     service
-        .submit_live(peer(1), id(1), id(99), value(0, 1))
+        .submit_activity(
+            peer(1),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
+            Some(value(0, 1)),
+        )
         .unwrap();
     let stop = CancellationToken::new();
     let running = tokio::spawn(worker.run(stop.clone()));
     event(&mut rx).await;
     service
-        .submit_live(peer(1), id(1), id(99), value(0, 2))
+        .submit_activity(
+            peer(1),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
+            Some(value(0, 2)),
+        )
         .unwrap();
     let result = ProgressTerminal {
         item: value(0, 1).item,
@@ -193,12 +238,30 @@ async fn terminal_removes_pending_activity_and_waits_for_actual_live_work_withou
         outcome: ProgressTerminalOutcome::Completed,
     };
     service
-        .submit_settled(peer(1), id(1), id(99), result)
+        .submit_settled(
+            peer(1),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
+            result,
+        )
         .unwrap();
     assert_eq!(service.inner.state.lock().unwrap().live.len(), 0);
     assert_eq!(
         service
-            .submit_live(peer(1), id(1), id(99), value(0, 3))
+            .submit_activity(
+                peer(1),
+                service
+                    .inner
+                    .authority
+                    .current_task(&peer(1), id(1))
+                    .unwrap()
+                    .descriptor,
+                Some(value(0, 3))
+            )
             .unwrap(),
         ProgressSubmission::Refused(ProgressClaimRefusal::AlreadyObserved)
     );
@@ -225,14 +288,10 @@ impl ProgressTaskAuthorityPort for Many {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
-        self.0
-            .lock()
-            .unwrap()
-            .claim_terminal(peer, source, attempt, item)
+        self.0.lock().unwrap().claim_terminal(peer, expected, item)
     }
 }
 fn source(peer: u8, n: u8) -> ProgressIdentity {
@@ -269,7 +328,16 @@ fn maximum_source_plans_keep_independent_latest_capacity_and_bounded_nonresettin
             for item in 0..1024 {
                 assert_eq!(
                     service
-                        .submit_live(peer(p), source(p, n), id(99), value(item, 1))
+                        .submit_activity(
+                            peer(p),
+                            service
+                                .inner
+                                .authority
+                                .current_task(&peer(p), source(p, n))
+                                .unwrap()
+                                .descriptor,
+                            Some(value(item, 1))
+                        )
                         .unwrap(),
                     ProgressSubmission::Retained
                 );
@@ -295,7 +363,16 @@ fn maximum_source_plans_keep_independent_latest_capacity_and_bounded_nonresettin
     // 被中间缓存淘汰的项仍保留已见序号，不重新排队或淘汰其他端。
     assert_eq!(
         service
-            .submit_live(peer(1), source(1, 63), id(99), value(0, 1))
+            .submit_activity(
+                peer(1),
+                service
+                    .inner
+                    .authority
+                    .current_task(&peer(1), source(1, 63))
+                    .unwrap()
+                    .descriptor,
+                Some(value(0, 1))
+            )
             .unwrap(),
         ProgressSubmission::Unchanged
     );
@@ -308,7 +385,16 @@ fn maximum_source_plans_keep_independent_latest_capacity_and_bounded_nonresettin
     );
     assert_eq!(
         service
-            .submit_live(peer(1), source(1, 64), id(99), value(0, 1))
+            .submit_activity(
+                peer(1),
+                service
+                    .inner
+                    .authority
+                    .current_task(&peer(1), source(1, 64))
+                    .unwrap()
+                    .descriptor,
+                Some(value(0, 1))
+            )
             .unwrap(),
         ProgressSubmission::Retained
     );

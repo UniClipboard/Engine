@@ -76,14 +76,15 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let source = expected.source;
+        let attempt = expected.attempt;
         let task = self
             .current_task(peer, source)
             .ok_or(ProgressClaimRefusal::NotRetained)?;
-        if task.descriptor.attempt != attempt {
+        if task.descriptor != expected {
             return Err(ProgressClaimRefusal::Superseded);
         }
         if !task.items.contains(&item) {

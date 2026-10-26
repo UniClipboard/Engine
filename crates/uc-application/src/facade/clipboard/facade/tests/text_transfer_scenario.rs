@@ -44,7 +44,7 @@ async fn text_transfer_scenario_encodes_and_dispatches_snapshot() {
             .withf(|_target, header, _payload| header.payload_version == 3)
             .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
 
-        let facade = build_facade(
+        let (facade, _progress_worker) = build_facade(
             repo,
             make_peer_reachability_unknown(),
             cipher,

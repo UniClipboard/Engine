@@ -44,7 +44,7 @@ async fn actual_receive_query_distinguishes_network_completion_from_commit_and_f
         ProgressPageReply::NotRetained
     ));
     action.accept_source(source);
-    action.batch.plan(3, 21);
+    action.batch.plan(3);
     let initial = current(registry.snapshot_page(&peer, query()).await.unwrap());
     assert_eq!(initial.items.len(), 3);
     assert!(initial.items.iter().all(|item| matches!(item, ProgressItemState::Active(value) if value.phase == ProgressPhase::Waiting)));
@@ -155,7 +155,7 @@ async fn saved_success_survives_other_item_failure_and_delete_retires_query_befo
     let action = registry.action();
     action.register(&entry, attempt).unwrap();
     action.accept_source(source);
-    action.batch.plan(3, 21);
+    action.batch.plan(3);
     action
         .batch
         .item_result(&planned[0].id, 7, OutboundProgressStatus::Completed, None);
@@ -213,7 +213,7 @@ async fn successful_files_and_directory_remain_queryable_after_retry_receipt_is_
         action.register(&entry, attempt).unwrap();
         action.prepare_plan(&source);
         action.accept_source(source);
-        action.batch.plan(planned.len(), 21);
+        action.batch.plan(planned.len());
         for plan in &planned {
             action.batch.item_result(
                 &plan.id,

@@ -10,7 +10,7 @@ use std::sync::{
 use uc_observability_contract::uc_info;
 
 use super::PEER_REACHABILITY_ALPN;
-use uc_sync_protocol::clipboard::MULTIPLEXED_CLIPBOARD_ALPN;
+use uc_sync_protocol::clipboard::{ATTRIBUTED_CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
 use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
 
 pub(super) struct ProtocolRouterBuilder {
@@ -44,12 +44,14 @@ impl ProtocolRouterBuilder {
         self.alpns.sort_by_key(|alpn| {
             if alpn.as_slice() == PEER_REACHABILITY_ALPN {
                 0
-            } else if alpn.as_slice() == MULTIPLEXED_CLIPBOARD_ALPN
+            } else if alpn.as_slice() == ATTRIBUTED_CLIPBOARD_ALPN
                 || alpn.as_slice() == TRANSFER_PROGRESS_ALPN
             {
                 1
-            } else {
+            } else if alpn.as_slice() == MULTIPLEXED_CLIPBOARD_ALPN {
                 2
+            } else {
+                3
             }
         });
         let ready = Arc::new(AtomicBool::new(false));
@@ -166,6 +168,96 @@ mod tests {
                 let expected = [TRANSFER_PROGRESS_ALPN, LEGACY_TRANSFER_PROGRESS_ALPN]
                     .into_iter()
                     .find(|alpn| registered.contains(alpn) && offered.contains(alpn));
+                let connecting = async {
+                    anyhow::Ok(
+                        client
+                            .connect_with_opts(
+                                router.endpoint().addr(),
+                                offered[0],
+                                ConnectOptions::new().with_additional_alpns(
+                                    offered[1..].iter().map(|alpn| alpn.to_vec()).collect(),
+                                ),
+                            )
+                            .await?
+                            .await?,
+                    )
+                };
+                let connected =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), connecting).await?;
+                match expected {
+                    Some(alpn) => {
+                        let connection = connected?;
+                        assert_eq!(connection.alpn(), alpn);
+                        connection.close(0u32.into(), b"test_complete");
+                    }
+                    None => assert!(connected.is_err(), "no common protocol must fail"),
+                }
+            }
+            router.shutdown().await?;
+        }
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clipboard_source_negotiation_chooses_highest_supported_without_registration_order(
+    ) -> anyhow::Result<()> {
+        use uc_sync_protocol::clipboard::CLIPBOARD_ALPN;
+
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await?;
+        for registered in [
+            vec![
+                ATTRIBUTED_CLIPBOARD_ALPN,
+                MULTIPLEXED_CLIPBOARD_ALPN,
+                CLIPBOARD_ALPN,
+            ],
+            vec![
+                CLIPBOARD_ALPN,
+                MULTIPLEXED_CLIPBOARD_ALPN,
+                ATTRIBUTED_CLIPBOARD_ALPN,
+            ],
+            vec![CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN],
+            vec![CLIPBOARD_ALPN],
+            vec![MULTIPLEXED_CLIPBOARD_ALPN],
+            vec![ATTRIBUTED_CLIPBOARD_ALPN],
+        ] {
+            let server = Endpoint::builder(iroh::endpoint::presets::N0)
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await?;
+            let mut builder = ProtocolRouterBuilder::new(server);
+            for alpn in &registered {
+                builder = builder.accept(alpn, Hold);
+            }
+            let router = builder.spawn();
+            for offered in [
+                vec![
+                    ATTRIBUTED_CLIPBOARD_ALPN,
+                    MULTIPLEXED_CLIPBOARD_ALPN,
+                    CLIPBOARD_ALPN,
+                ],
+                vec![
+                    CLIPBOARD_ALPN,
+                    MULTIPLEXED_CLIPBOARD_ALPN,
+                    ATTRIBUTED_CLIPBOARD_ALPN,
+                ],
+                vec![CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN],
+                vec![CLIPBOARD_ALPN],
+                vec![MULTIPLEXED_CLIPBOARD_ALPN],
+                vec![ATTRIBUTED_CLIPBOARD_ALPN],
+            ] {
+                let expected = [
+                    ATTRIBUTED_CLIPBOARD_ALPN,
+                    MULTIPLEXED_CLIPBOARD_ALPN,
+                    CLIPBOARD_ALPN,
+                ]
+                .into_iter()
+                .find(|alpn| registered.contains(alpn) && offered.contains(alpn));
                 let connecting = async {
                     anyhow::Ok(
                         client

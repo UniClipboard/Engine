@@ -1,5 +1,6 @@
 pub use super::output::BlobOutputTarget;
 use super::output::PreparedBlobPath;
+use super::BlobProgressSink;
 use crate::transfer::receive::batch::ReceiveBatch;
 use crate::transfer::receive::LocalSettlement;
 use std::collections::HashMap;
@@ -18,20 +19,15 @@ pub(crate) use terminal_repair::{FetchTerminalFailure, TerminalSettlementPending
 mod preparation;
 use tokio_util::sync::CancellationToken;
 
-use uc_core::file_transfer::{
-    FileTransferCancellationReason, FileTransferDirection, FileTransferFailureReason,
-    OutboundProgressReporterPort, OutboundProgressStatus,
-};
-use uc_core::ids::{DeviceId, EntryId};
+use uc_core::file_transfer::{FileTransferDirection, FileTransferFailureReason};
+use uc_core::ids::EntryId;
 use uc_core::ports::blob::{
-    BlobDigest, BlobProgressSink, BlobReferenceRepositoryPort, BlobTicket, BlobTransferPort,
-    PlaintextHash,
+    BlobDigest, BlobReferenceRepositoryPort, BlobTicket, BlobTransferPort, PlaintextHash,
 };
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{ContentHashPort, ReceiveItemRole};
 use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
-use super::notifications::OutboundNotifications;
 use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::transfer::blob::transport::{
     BlobDownloadResources, BlobExchangeError, BlobExchangeFailure, BlobTransport,
@@ -64,10 +60,7 @@ pub struct BlobTransferDeps {
     /// 状态变更(transferring / completed / failed)统一通过
     /// [`FileTransferFacade`] 走 lifecycle,不再由本 facade 直发。
     pub host_event_emitter: Option<SharedHostEventEmitter>,
-    /// 可选反向进度上报端口。提供时,fetch_blob 会在每次本地进度回调上额外
-    /// 推一帧给数据来源端(sender),让 sender UI 能实时展示对端接收字节进度。
-    /// 不提供则 fetch_blob 退化为只发本地 host event。
-    pub outbound_progress_reporter: Option<Arc<dyn OutboundProgressReporterPort>>,
+
     /// Optional process-wide file-transfer session owner. Tracked fetches use
     /// one session for registration, progress, terminal settlement, and cancel.
     pub file_transfer: Option<Arc<FileTransferFacade>>,
@@ -117,15 +110,7 @@ pub struct PublishBlobResult {
 /// - `filename` 是 receiver-side projection 已经 seed 好的真实文件名;
 ///   The receiver session records it in the initial event and projection.
 ///   rep-bound blob / 没有显式文件名的场景填空字符串。
-/// - `outbound_transfer_id` / `outbound_target`:可选的反向上报上下文。
-///   设置时,sink 在每次进度回调上会通过 `OutboundProgressReporterPort`
-///   把 (bytes, total, status) 推回数据来源端(sender),让 sender UI
-///   实时显示对端接收字节进度。两个字段必须成对设置:
-///   * `outbound_transfer_id` 是 sender 端的 entry_id(来自 V3 envelope
-///     `blob_refs[i].entry_id`),sender 端用它索引本地 entry。
-///   * `outbound_target` 是 sender 的 DeviceId,reporter 用它定位反向
-///     连接目标(同 `peer_id` 的语义,但强类型化以避免重复字符串解析)。
-///   只设置一个会被忽略 —— sink 拒绝出向上报。
+/// - 进度网络通知由完整接收负责人独立提交；下载回调只更新本地事实。
 ///
 /// 不提供 transfer_context 时 fetch_blob 表现等同于改造前——只拉数据,不发事件。
 #[derive(Debug, Clone)]
@@ -142,8 +127,6 @@ pub struct FetchTransferContext {
     pub peer_id: String,
     pub total_bytes: Option<u64>,
     pub filename: String,
-    pub outbound_transfer_id: Option<String>,
-    pub outbound_target: Option<DeviceId>,
     /// Multiple blob fetches may share one transfer session. The first fetch
     /// creates it, middle fetches reuse it, and the last fetch settles it.
     ///
@@ -292,7 +275,7 @@ pub struct BlobTransferFacade {
     /// 全部获取、通知和收尾任务由同一个传输负责人监督。
     pub(in super::super) transport: Arc<BlobTransport>,
     host_event_emitter: Option<SharedHostEventEmitter>,
-    outbound_progress_reporter: Option<Arc<OutboundNotifications>>,
+
     file_transfer: Option<Arc<FileTransferFacade>>,
     /// 以具体接收项登记取消；重复调用接入原来的真实完成通知。
     inflight_fetches: Arc<Mutex<HashMap<String, InflightFetch>>>,
@@ -301,9 +284,6 @@ pub struct BlobTransferFacade {
 impl BlobTransferFacade {
     #[doc(hidden)]
     pub fn new(deps: BlobTransferDeps) -> Self {
-        let outbound_progress_reporter = deps
-            .outbound_progress_reporter
-            .map(|reporter| OutboundNotifications::new(reporter, &deps.downloads.transport));
         let transport = deps.downloads.transport.clone();
         let publish_uc = Arc::new(PublishBlobUseCase::new(
             Arc::clone(&deps.hash),
@@ -323,7 +303,7 @@ impl BlobTransferFacade {
             fetch_uc,
             transport,
             host_event_emitter: deps.host_event_emitter,
-            outbound_progress_reporter,
+
             file_transfer: deps.file_transfer,
             inflight_fetches: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -467,13 +447,12 @@ impl BlobTransferFacade {
             })
             .unwrap_or_default();
         let iroh_tag_entry_id = command.entry_id.clone();
-        let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
+
         let cancel_token = command.cancellation.child_token();
         let prepared = Arc::new(FetchPreparationState::default());
         let preparation = self.prepare_fetch(
             command.transfer_context.clone(),
             Box::pin(async { Ok(String::new()) }),
-            outbound_ctx.clone(),
             cancel_token.clone(),
             prepared.clone(),
         );
@@ -485,7 +464,6 @@ impl BlobTransferFacade {
             entry_id: iroh_tag_entry_id,
         };
         let finalization = FetchFinalization {
-            owner: self.clone(),
             context: command.transfer_context.clone(),
             prepared: prepared.clone(),
             cancel: cancel_token.clone(),
@@ -541,7 +519,7 @@ impl BlobTransferFacade {
             })
             .unwrap_or_default();
         let iroh_tag_entry_id = command.entry_id.clone();
-        let outbound_ctx = self.build_outbound_context(command.transfer_context.as_ref());
+
         let cancel_token = command.cancellation.child_token();
         let prepared = Arc::new(FetchPreparationState::default());
         let target_path = PreparedBlobPath::default();
@@ -565,7 +543,6 @@ impl BlobTransferFacade {
                 output_path.publish(path)?;
                 Ok(cached_path)
             }),
-            outbound_ctx.clone(),
             cancel_token.clone(),
             prepared.clone(),
         );
@@ -578,7 +555,6 @@ impl BlobTransferFacade {
             target_path,
         };
         let finalization = FetchFinalization {
-            owner: self.clone(),
             context: command.transfer_context.clone(),
             prepared: prepared.clone(),
             cancel: cancel_token.clone(),
@@ -614,41 +590,17 @@ impl BlobTransferFacade {
         operation.await.map_err(transfer_error)
     }
 
-    /// 从 `FetchTransferContext` 构造 outbound report context。
-    ///
-    /// 同时配齐 reporter / outbound_transfer_id / outbound_target 才会返回
-    /// `Some` —— 否则反向上报功能未启用,sink 与 cancel 路径都跳过 outbound
-    /// 分支。让 sink 与 `InflightFetch` 共用同一份配置,避免两处构造逻辑
-    /// 分叉。
-    fn build_outbound_context(
-        &self,
-        ctx: Option<&FetchTransferContext>,
-    ) -> Option<OutboundReportContext> {
-        let ctx = ctx?;
-        let reporter = self.outbound_progress_reporter.clone()?;
-        let transfer_id = ctx.outbound_transfer_id.clone()?;
-        let target = ctx.outbound_target?;
-        Some(OutboundReportContext {
-            item: ctx.transfer_id.clone(),
-            batch: ctx.batch.clone(),
-            reporter,
-            transfer_id,
-            target,
-        })
-    }
-
     async fn build_progress_sink(
         &self,
         ctx: Option<&FetchTransferContext>,
         session: Option<Arc<ReceiverTransferHandle>>,
-        outbound: Option<OutboundReportContext>,
     ) -> Option<Arc<dyn BlobProgressSink>> {
         let ctx = ctx?;
         let base_bytes = match session.as_ref() {
             Some(session) => session.bytes_transferred().await,
             None => 0,
         };
-        if session.is_none() && self.host_event_emitter.is_none() && outbound.is_none() {
+        if session.is_none() && self.host_event_emitter.is_none() && ctx.batch.is_none() {
             return None;
         }
         Some(Arc::new(FileTransferProgressSink {
@@ -660,22 +612,8 @@ impl BlobTransferFacade {
             peer_id: ctx.peer_id.clone(),
             base_bytes,
             fallback_total: ctx.total_bytes,
-            outbound,
+            batch: ctx.batch.clone(),
         }))
-    }
-
-    /// fetch 收尾时把最终状态(Completed/Failed)推回 sender。中间进度
-    /// 由 sink 在 adapter 节流回调里推送,这里只补"最后一帧"。
-    async fn report_outbound_terminal(
-        &self,
-        ctx: &FetchTransferContext,
-        bytes_transferred: u64,
-        total_bytes: Option<u64>,
-        status: OutboundProgressStatus,
-    ) {
-        if let Some(outbound) = self.build_outbound_context(Some(ctx)) {
-            outbound.report(bytes_transferred, total_bytes, status);
-        }
     }
 }
 
@@ -698,50 +636,8 @@ fn cancellation_result(
     Err(BlobTransferError::Fetch(report.into()))
 }
 
-/// 反向上报上下文。同时配齐三个字段才会触发 outbound report。
-#[derive(Clone)]
-struct OutboundReportContext {
-    item: String,
-    batch: Option<Arc<ReceiveBatch>>,
-    reporter: Arc<OutboundNotifications>,
-    transfer_id: String,
-    target: DeviceId,
-}
-
-impl OutboundReportContext {
-    fn report(&self, bytes: u64, total: Option<u64>, status: OutboundProgressStatus) {
-        if let Some(batch) = &self.batch {
-            batch.record(
-                self.reporter.clone(),
-                self.target,
-                &self.transfer_id,
-                &self.item,
-                bytes,
-                status,
-            );
-        } else {
-            self.reporter
-                .report(&self.target, &self.transfer_id, bytes, total, status);
-        }
-    }
-}
-
-/// 把 receiver 视角的 cancel reason 翻转成 sender 视角的 reason。
-///
-/// `LocalUser` 与 `RemotePeer` 是 device-relative 的,沿反向通道发给对端
-/// 设备时必须对调,否则 sender 端 UI 会把"对方取消"误显示为"你取消"。
-/// `Timeout` / `Replaced` / `Unknown` 与设备无关,原样透传。
-fn flip_cancel_reason_perspective(
-    reason: FileTransferCancellationReason,
-) -> FileTransferCancellationReason {
-    match reason {
-        FileTransferCancellationReason::LocalUser => FileTransferCancellationReason::RemotePeer,
-        FileTransferCancellationReason::RemotePeer => FileTransferCancellationReason::LocalUser,
-        other => other,
-    }
-}
-
 struct FileTransferProgressSink {
+    batch: Option<Arc<ReceiveBatch>>,
     fallback_bus: Option<SharedHostEventEmitter>,
     session: Option<Arc<ReceiverTransferHandle>>,
     transfer_id: String,
@@ -750,11 +646,25 @@ struct FileTransferProgressSink {
     peer_id: String,
     base_bytes: u64,
     fallback_total: Option<u64>,
-    outbound: Option<OutboundReportContext>,
 }
 
 #[async_trait]
 impl BlobProgressSink for FileTransferProgressSink {
+    fn observe_round(&self, round: u32, bytes: u64, total: Option<u64>) {
+        if let Some(batch) = &self.batch {
+            batch.record_round(&self.transfer_id, round, bytes, total);
+        }
+    }
+    fn observe_retrying(&self, round: u32) {
+        if let Some(batch) = &self.batch {
+            batch.record_retrying(&self.transfer_id, round);
+        }
+    }
+    fn observe_obtained(&self, round: u32, verified_size: u64) {
+        if let Some(batch) = &self.batch {
+            batch.record_round(&self.transfer_id, round, verified_size, Some(verified_size));
+        }
+    }
     async fn report(&self, bytes_transferred: u64, total_bytes: Option<u64>) {
         let cumulative_bytes = self.base_bytes.saturating_add(bytes_transferred);
         let cumulative_total = total_bytes
@@ -783,14 +693,6 @@ impl BlobProgressSink for FileTransferProgressSink {
                 bytes_transferred: cumulative_bytes,
                 total_bytes: cumulative_total,
             }));
-        }
-
-        if let Some(ob) = self.outbound.as_ref() {
-            ob.report(
-                cumulative_bytes,
-                cumulative_total,
-                OutboundProgressStatus::InProgress,
-            );
         }
     }
 }
@@ -960,7 +862,7 @@ pub(super) mod tests {
             blob_reference: Arc::new(TestReferences),
             transfer_cipher: Arc::new(TestCipher),
             host_event_emitter: None,
-            outbound_progress_reporter: None,
+
             file_transfer: None,
         }));
         (facade, transport, protected)
@@ -1083,30 +985,12 @@ pub(super) mod tests {
         }
     }
 
-    struct BlockedReporter {
-        started: Semaphore,
-    }
-    #[async_trait]
-    impl OutboundProgressReporterPort for BlockedReporter {
-        async fn report(
-            &self,
-            _: &DeviceId,
-            _: &str,
-            _: u64,
-            _: Option<u64>,
-            _: OutboundProgressStatus,
-        ) {
-            self.started.add_permits(1);
-            std::future::pending::<()>().await;
-        }
-    }
+    use uc_core::file_transfer::FileTransferCancellationReason;
+    use uc_core::ids::DeviceId;
 
     #[tokio::test(start_paused = true)]
-    async fn attempt_cancel_settles_slow_local_work_with_a_permanently_blocked_reporter() {
+    async fn attempt_cancel_settles_slow_local_work_even_when_the_caller_is_abandoned() {
         for abandon_waiter in [false, true] {
-            let reporter = Arc::new(BlockedReporter {
-                started: Semaphore::new(0),
-            });
             let transfer = Arc::new(BlockingBlobTransfer::new());
             let facade = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
                 downloads: {
@@ -1131,7 +1015,7 @@ pub(super) mod tests {
                 blob_reference: Arc::new(TestReferences),
                 transfer_cipher: Arc::new(TestCipher),
                 host_event_emitter: None,
-                outbound_progress_reporter: Some(reporter.clone()),
+
                 file_transfer: None,
             }));
             let fetch = tokio::spawn({
@@ -1151,8 +1035,6 @@ pub(super) mod tests {
                                 peer_id: "peer".to_owned(),
                                 total_bytes: Some(5),
                                 filename: String::new(),
-                                outbound_transfer_id: Some("sender-image".to_owned()),
-                                outbound_target: Some(DeviceId::new("peer")),
                                 batch_position: BatchPosition::Only,
                                 individual_lifecycle: true,
                             }),
@@ -1163,12 +1045,6 @@ pub(super) mod tests {
             let permit = transfer.started.acquire().await.expect("fetch started");
             permit.forget();
 
-            reporter
-                .started
-                .acquire()
-                .await
-                .expect("reporter entered")
-                .forget();
             if abandon_waiter {
                 fetch.abort();
             }

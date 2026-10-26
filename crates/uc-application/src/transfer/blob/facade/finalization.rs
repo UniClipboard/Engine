@@ -1,9 +1,7 @@
 //! 最终本地交接也是原下载任务的一部分；完成通知不得早于实际结算。
 use super::preparation::FetchPreparationState;
 use super::terminal_repair::{finish_terminal, terminal_failure, TerminalIntent};
-use super::{
-    flip_cancel_reason_perspective, BlobTransferError, BlobTransferFacade, FetchTransferContext,
-};
+use super::{BlobTransferError, FetchTransferContext};
 use crate::transfer::blob::fetch_failure_reason;
 use crate::transfer::blob::transport::{
     BlobExchangeError, BlobExchangeFailure, BlobPreparationStop, DownloadResponse,
@@ -12,13 +10,10 @@ use crate::transfer::receive::DownloadSettlement;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use tokio_util::sync::CancellationToken;
-use uc_core::file_transfer::{
-    FileTransferCancellationReason, FileTransferFailureReason, OutboundProgressStatus,
-};
+use uc_core::file_transfer::{FileTransferCancellationReason, FileTransferFailureReason};
 use uc_core::ports::TrackedFileTransferStatus;
 
 pub(super) struct FetchFinalization {
-    pub(super) owner: BlobTransferFacade,
     pub(super) context: Option<FetchTransferContext>,
     pub(super) prepared: Arc<FetchPreparationState>,
     pub(super) cancel: CancellationToken,
@@ -56,7 +51,7 @@ impl FetchFinalization {
             }
         }
         match result {
-            Ok((value, bytes)) => {
+            Ok((value, _bytes)) => {
                 if let Some(context) = &self.context {
                     if context.individual_lifecycle || context.batch_position.is_last() {
                         if let Some(session) = session
@@ -67,27 +62,9 @@ impl FetchFinalization {
                                 finish_terminal(session, TerminalIntent::Completed, None, &response)
                                     .await
                             {
-                                self.owner
-                                    .report_outbound_terminal(
-                                        context,
-                                        0,
-                                        context.total_bytes,
-                                        OutboundProgressStatus::Failed,
-                                    )
-                                    .await;
                                 return Err(source);
                             }
                         }
-                    }
-                    if context.batch_position.is_last() || context.batch.is_some() {
-                        self.owner
-                            .report_outbound_terminal(
-                                context,
-                                bytes,
-                                context.total_bytes.or(Some(bytes)),
-                                OutboundProgressStatus::Completed,
-                            )
-                            .await;
                     }
                 }
                 Ok(value)
@@ -129,7 +106,6 @@ impl FetchFinalization {
                 } else {
                     TerminalIntent::Failed(fetch_failure_reason(&error.source))
                 };
-                let cancelled = matches!(intent, TerminalIntent::Cancelled(_));
                 let error =
                     if stopped_in_preparation && error.kind == BlobExchangeFailure::Settlement {
                         let status = match intent {
@@ -149,18 +125,7 @@ impl FetchFinalization {
                 } else {
                     None
                 };
-                if let Some(context) = &self.context {
-                    let status = if cancelled {
-                        OutboundProgressStatus::Cancelled {
-                            reason: flip_cancel_reason_perspective(reason),
-                        }
-                    } else {
-                        OutboundProgressStatus::Failed
-                    };
-                    self.owner
-                        .report_outbound_terminal(context, 0, context.total_bytes, status)
-                        .await;
-                }
+
                 Err(terminal_error.unwrap_or_else(|| BlobExchangeError::new(error.kind, error)))
             }
         }

@@ -459,8 +459,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             .map(|(index, _)| original_blob_indices[index])
             .collect::<Vec<_>>();
         let mut completed = Vec::new();
-        let (count, total) = receive_member_totals(&blob_refs, file_set_manifest.as_ref());
-        batch.plan(count, total);
+        let (count, _) = receive_member_totals(&blob_refs, file_set_manifest.as_ref());
+        batch.plan(count);
         if blob_refs.is_empty() && file_set_manifest.is_none() {
             return Ok(MaterializeResult::complete(snapshot));
         }
@@ -2004,8 +2004,6 @@ fn directory_member_transfer_context(
         peer_id: from_device.as_str().to_owned(),
         total_bytes: Some(blob_ref.size_bytes),
         filename: blob_ref.filename.clone().unwrap_or_default(),
-        outbound_transfer_id: Some(blob_ref.entry_id.as_ref().to_owned()),
-        outbound_target: Some(*from_device),
         batch_position,
         individual_lifecycle: true,
     }
@@ -2032,8 +2030,6 @@ fn directory_representation_transfer_context(
         peer_id: from_device.as_str().to_owned(),
         total_bytes: Some(blob_ref.size_bytes),
         filename: String::new(),
-        outbound_transfer_id: Some(blob_ref.entry_id.as_ref().to_owned()),
-        outbound_target: Some(*from_device),
         batch_position,
         individual_lifecycle: true,
     }

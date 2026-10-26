@@ -35,7 +35,6 @@ use crate::facade::host_event::{
 };
 
 use uc_core::clipboard::ClipboardRepositoryError;
-use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::blob::{BlobDigest, BlobTicket, PlaintextHash};
 use uc_core::ports::clipboard::{FindEntryIdBySnapshotHashPort, TouchClipboardEntryPort};
@@ -884,31 +883,6 @@ fn build_with_blob_materializer(
 #[derive(Default)]
 struct RecordingEmitter {
     events: Mutex<Vec<HostEvent>>,
-}
-
-#[derive(Default)]
-struct RecordingOutboundProgressReporter {
-    reports: Mutex<Vec<(String, String, u64, Option<u64>, OutboundProgressStatus)>>,
-}
-
-#[async_trait]
-impl OutboundProgressReporterPort for RecordingOutboundProgressReporter {
-    async fn report(
-        &self,
-        target: &DeviceId,
-        transfer_id: &str,
-        bytes_transferred: u64,
-        total_bytes: Option<u64>,
-        status: OutboundProgressStatus,
-    ) {
-        self.reports.lock().unwrap().push((
-            target.as_str().to_owned(),
-            transfer_id.to_owned(),
-            bytes_transferred,
-            total_bytes,
-            status,
-        ));
-    }
 }
 
 impl RecordingEmitter {
@@ -3469,10 +3443,8 @@ async fn available_match_is_skipped_before_download() {
     let mut write = MockWrite::new();
     write.expect_write().times(0);
 
-    let reporter = Arc::new(RecordingOutboundProgressReporter::default());
     let uc = build_with_blob_materializer(repo, capture, write, materializer)
-        .with_check_entry_availability(Arc::new(FakeAvailability { available: true }))
-        .with_outbound_progress_reporter(reporter.clone());
+        .with_check_entry_availability(Arc::new(FakeAvailability { available: true }));
     let outcome = uc.execute(input).await.expect("skip path ok");
     assert_eq!(
         outcome,
@@ -3480,17 +3452,6 @@ async fn available_match_is_skipped_before_download() {
             snapshot_hash: file_blob_input().snapshot_hash,
             existing_entry_id: held_id,
         }
-    );
-    assert_eq!(
-        *reporter.reports.lock().unwrap(),
-        vec![(
-            "peer-up".to_owned(),
-            "sender-entry".to_owned(),
-            10,
-            Some(10),
-            OutboundProgressStatus::Completed,
-        )],
-        "a fully-held file must still acknowledge remote delivery completion"
     );
 }
 

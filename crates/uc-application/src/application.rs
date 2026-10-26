@@ -11,7 +11,6 @@ use uc_core::error_class::ErrorClass;
 use uc_observability_contract::uc_warn;
 
 use uc_core::clipboard::ClipboardIntegrationMode;
-use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::ports::blob::{BlobReferenceRepositoryPort, BlobTransferPort};
 use uc_core::ports::{
     ActiveClipboardDispatchPort, ActiveClipboardPullClientPort, ActiveClipboardReceiverPort,
@@ -57,6 +56,10 @@ use crate::transfer::file::assembly::{
     FileTransferAssemblyDeps, InboundMaterializerDeps, ReceiveActionsDeps,
 };
 use crate::transfer::file::timeout_runtime::FileTransferTimeoutRuntime;
+use crate::transfer::progress::{
+    ProgressRuntime, ProgressRuntimeAssembly, ProgressViewOwner, TransferProgressNetwork,
+    TransferProgressTransport,
+};
 use crate::transfer::receive::reconciliation::EnsureReceiveReadyPort;
 
 mod shutdown;
@@ -104,10 +107,11 @@ pub struct ApplicationClipboardAdapters {
 
 /// Engine 一次提交给 Application 的网络 adapter 集合。
 pub struct ApplicationNetworkAdapters {
+    pub transfer_progress: TransferProgressNetwork,
     pub blob_downloads: Arc<BlobDownloadResources>,
     pub blob_transfer: Arc<dyn BlobTransferPort>,
     pub blob_reference: Arc<dyn BlobReferenceRepositoryPort>,
-    pub outbound_progress_reporter: Arc<dyn OutboundProgressReporterPort>,
+
     pub space: ApplicationSpaceAdapters,
     pub clipboard: ApplicationClipboardAdapters,
 }
@@ -124,6 +128,7 @@ pub struct ApplicationHostAdapters {
 /// Engine 只能读取必须注册到 Router 的窄端口，不能取得领域 assembly、
 /// use case 或生命周期 owner。注册完成后必须消费 `complete` 并交还运行期。
 pub struct ApplicationNetworkBinding {
+    progress: ProgressRuntimeAssembly,
     space: Arc<SpaceFacade>,
     blob_transfer: Arc<BlobTransferFacade>,
     blob_transfer_port: Arc<dyn BlobTransferPort>,
@@ -132,7 +137,7 @@ pub struct ApplicationNetworkBinding {
     member_scope: Arc<dyn CurrentSpaceMemberScopePort>,
     peer_reachability: Arc<dyn PeerReachabilityPort>,
     peer_addresses: Arc<dyn PeerAddressRepositoryPort>,
-    outbound_progress_reporter: Arc<dyn OutboundProgressReporterPort>,
+
     active_receiver: Arc<dyn ActiveClipboardReceiverPort>,
     active_dispatch: Arc<dyn ActiveClipboardDispatchPort>,
     active_pull_serve: Arc<dyn ActivePullPreparationPort>,
@@ -150,6 +155,11 @@ pub struct ApplicationAdapters {
 }
 
 impl ApplicationNetworkBinding {
+    /// 同一进度负责人的完整入站能力；Engine只注册Router端点。
+    pub fn transfer_progress_endpoint(&self) -> Arc<TransferProgressTransport> {
+        self.progress.session.inbound.clone()
+    }
+
     pub fn space_admission_endpoint(
         &self,
     ) -> Arc<dyn crate::deps::HandleAuthenticatedSpaceAdmissionMessagePort> {
@@ -417,13 +427,19 @@ impl ApplicationAssembly {
         adapters: ApplicationNetworkAdapters,
     ) -> ApplicationNetworkBinding {
         let ApplicationNetworkAdapters {
+            transfer_progress,
             blob_transfer,
             blob_reference,
             blob_downloads,
-            outbound_progress_reporter,
+
             space,
             clipboard,
         } = adapters;
+        let progress = ProgressRuntimeAssembly::new(
+            transfer_progress,
+            self.file_transfer.receive_registry(),
+            self.deps.host_event_bus.clone(),
+        );
         let blob = Arc::new(BlobTransferFacade::new(BlobTransferDeps {
             downloads: blob_downloads,
             hash: Arc::clone(&self.deps.system.hash),
@@ -431,7 +447,7 @@ impl ApplicationAssembly {
             blob_reference,
             transfer_cipher: Arc::clone(&self.deps.security.transfer_cipher),
             host_event_emitter: Some(Arc::clone(&self.deps.host_event_bus)),
-            outbound_progress_reporter: Some(Arc::clone(&outbound_progress_reporter)),
+
             file_transfer: Some(self.file_transfer.facade()),
         }));
         let ApplicationSpaceAdapters {
@@ -512,6 +528,7 @@ impl ApplicationAssembly {
         } = clipboard;
         let clipboard_sync = Arc::new(self.file_transfer.with_receive_actions(
             ClipboardSyncFacade::new(ClipboardSyncDeps {
+                progress: progress.session.projections.clone(),
                 peer_addr_repo: Arc::clone(&peer_addresses),
                 member_repo: Arc::clone(&self.deps.device.member_repo),
                 peer_scope: Arc::clone(&member_scope),
@@ -548,6 +565,7 @@ impl ApplicationAssembly {
         let active_pull_serve = self.clipboard.active_pull_serve(Arc::clone(&blob));
 
         ApplicationNetworkBinding {
+            progress,
             space,
             blob_transfer: Arc::clone(&blob),
             blob_transfer_port: blob_transfer,
@@ -556,7 +574,7 @@ impl ApplicationAssembly {
             member_scope,
             peer_reachability,
             peer_addresses,
-            outbound_progress_reporter,
+
             active_receiver,
             active_dispatch,
             active_pull_serve,
@@ -582,6 +600,7 @@ impl ApplicationAssembly {
             inbound_events,
         } = adapters;
         let ApplicationNetworkBinding {
+            progress,
             space,
             blob_transfer,
             blob_transfer_port,
@@ -590,7 +609,7 @@ impl ApplicationAssembly {
             member_scope,
             peer_reachability,
             peer_addresses,
-            outbound_progress_reporter,
+
             active_receiver,
             active_dispatch,
             active_pull_serve: _,
@@ -675,6 +694,11 @@ impl ApplicationAssembly {
             });
         }
 
+        let progress_view = Arc::new(ProgressViewOwner::new(
+            progress.session.projections.clone(),
+            progress.session.reconciliation.clone(),
+            member_scope.clone(),
+        ));
         let clipboard = self.clipboard.start_session(ClipboardSessionDeps {
             clipboard_sync: Arc::clone(&clipboard_sync),
             blob_transfer: Arc::clone(&blob_transfer),
@@ -684,7 +708,7 @@ impl ApplicationAssembly {
             known_peers: peer_addresses,
             deliveries: Arc::clone(&self.deps.entry_delivery_repo),
             trusted_peers: Arc::clone(&self.deps.trusted_peer_repo),
-            outbound_progress_reporter,
+
             inbound_adapters,
             inbound_events,
         });
@@ -693,6 +717,7 @@ impl ApplicationAssembly {
             .clipboard
             .restore(ClipboardIntegrationMode::Full, Some(restore_tx));
         let facade = Arc::new(AppFacade::new(AppFacadeParts {
+            progress: progress_view,
             space: Arc::clone(&space),
             probe_profile_key_access: Arc::new(
                 crate::profile::probe_profile_key_access::ProbeProfileKeyAccessUseCase::new(
@@ -720,6 +745,7 @@ impl ApplicationAssembly {
             upgrade: settings.upgrade,
             network_recovery,
         }));
+        let progress = progress.start();
         let history_maintenance = facade.start_history_maintenance().await;
         let inbound_clipboard = clipboard.apply_inbound();
         let file_transfer_timeout =
@@ -729,6 +755,7 @@ impl ApplicationAssembly {
             facade,
             inbound_clipboard,
             owners: Arc::new(tokio::sync::Mutex::new(Some(ApplicationRuntimeOwners {
+                progress,
                 history_maintenance,
                 file_transfer_timeout,
                 search,
@@ -763,6 +790,7 @@ pub struct ApplicationRuntime {
 }
 
 struct ApplicationRuntimeOwners {
+    progress: ProgressRuntime,
     history_maintenance: HistoryMaintenanceRuntime,
     file_transfer_timeout: FileTransferTimeoutRuntime,
     search: SearchAssembly,

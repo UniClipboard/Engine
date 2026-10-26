@@ -72,13 +72,17 @@ mod delivery;
 mod fanout;
 mod header;
 mod per_peer;
+mod progress;
 mod target_selector;
 
 #[cfg(test)]
 mod test_support;
 
 use super::work::WorkOwner;
+#[cfg(test)]
+use crate::connectivity::{ElapsedClockError, ElapsedClockPort};
 use crate::runtime_lifecycle::LifecycleError;
+use crate::transfer::progress::ProgressProjectionRegistry;
 use delivery::{
     classify_dispatch_result, spawn_deferred_drain, DeliveryRecorder, DispatchResultBucket,
 };
@@ -86,6 +90,7 @@ use fanout::DeadlineBoundedFanout;
 use header::OutboundHeaderFactory;
 use per_peer::PerPeerDispatcher;
 use target_selector::TargetSelector;
+use uuid::Uuid;
 
 use crate::facade::blob_transfer::SharedHostEventEmitter;
 
@@ -302,6 +307,7 @@ impl DispatchEntryRunner for DispatchClipboardEntryUseCase {
 /// the clock stamps the aggregate outcome and each peer's delivery record.
 pub(crate) struct DispatchClipboardEntryUseCase {
     work: WorkOwner,
+    progress: ProgressProjectionRegistry,
     cipher: Arc<dyn TransferCipherPort>,
     device_identity: Arc<dyn DeviceIdentityPort>,
     clock: Arc<dyn ClockPort>,
@@ -368,11 +374,7 @@ impl crate::deps::CurrentSpaceMemberScopePort for AllTestPeerScope {
 }
 
 impl DispatchClipboardEntryUseCase {
-    /// The 13-port positional signature is intentionally preserved so
-    /// bootstrap and tests keep wiring unchanged; the ports are reassembled
-    /// into the five concern-scoped collaborators here.
     #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
     pub(crate) fn new(
         peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
         member_repo: Arc<dyn MemberRepositoryPort>,
@@ -387,45 +389,13 @@ impl DispatchClipboardEntryUseCase {
         first_sync_state: Arc<dyn FirstSyncStatePort>,
         entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
         host_event_bus: SharedHostEventEmitter,
-    ) -> Self {
-        Self::new_with_scope(
-            peer_addr_repo,
-            member_repo,
-            peer_reachability,
-            transfer_cipher,
-            clipboard_dispatch,
-            device_identity,
-            local_identity,
-            settings,
-            clock,
-            analytics,
-            first_sync_state,
-            entry_delivery_repo,
-            host_event_bus,
-            Arc::new(AllTestPeerScope),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_scope(
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-        member_repo: Arc<dyn MemberRepositoryPort>,
-        peer_reachability: Arc<dyn PeerReachabilityPort>,
-        transfer_cipher: Arc<dyn TransferCipherPort>,
-        clipboard_dispatch: Arc<dyn ClipboardDispatchPort>,
-        device_identity: Arc<dyn DeviceIdentityPort>,
-        local_identity: Arc<dyn LocalIdentityPort>,
-        settings: Arc<dyn SettingsPort>,
-        clock: Arc<dyn ClockPort>,
-        analytics: Arc<dyn AnalyticsPort>,
-        first_sync_state: Arc<dyn FirstSyncStatePort>,
-        entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
-        host_event_bus: SharedHostEventEmitter,
         peer_scope: Arc<dyn crate::deps::CurrentSpaceMemberScopePort>,
+        progress: ProgressProjectionRegistry,
     ) -> Self {
         let header_clock = Arc::clone(&clock);
         Self {
             work: WorkOwner::default(),
+            progress,
             cipher: transfer_cipher,
             device_identity,
             clock,
@@ -477,7 +447,14 @@ impl DispatchClipboardEntryUseCase {
         //    fan-out (see `PerPeerDispatcher`).
         let local_device = self.device_identity.current_device_id();
         let candidates = self.selector.select(&input, &local_device).await?;
-        let header = self.header_factory.build(&input, &local_device).await;
+        let progress_plan = progress::original_plan(&input);
+        let source_entry = progress_plan
+            .as_ref()
+            .map(|plan| EntryId::from(Uuid::from_bytes(plan.source.bytes()).to_string()));
+        let header = self
+            .header_factory
+            .build(&input, &local_device, source_entry)
+            .await;
 
         if candidates.is_empty() {
             uc_info!("dispatch: no paired peers; skipping fan-out");
@@ -520,6 +497,9 @@ impl DispatchClipboardEntryUseCase {
                     intent_failures.push(*device_id);
                     continue;
                 }
+            }
+            if let Some(plan) = &progress_plan {
+                progress::accept_intent(&self.progress, *device_id, plan);
             }
             dispatch_candidates.push(*device_id);
             let dispatcher = Arc::clone(&self.dispatcher);
@@ -648,6 +628,19 @@ impl DispatchClipboardEntryUseCase {
 
 #[cfg(test)]
 mod tests {
+    use crate::transfer::progress::ProgressProjectionWorker;
+    use std::ops::Deref;
+    struct DispatchFixture {
+        use_case: DispatchClipboardEntryUseCase,
+        _progress_worker: ProgressProjectionWorker,
+    }
+    impl Deref for DispatchFixture {
+        type Target = DispatchClipboardEntryUseCase;
+        fn deref(&self) -> &Self::Target {
+            &self.use_case
+        }
+    }
+    mod progress;
     use super::*;
 
     use async_trait::async_trait;
@@ -790,6 +783,11 @@ mod tests {
     // ensure_reachable_all uses the same pattern (`FixedDevice`).
 
     struct FixedClock(i64);
+    impl ElapsedClockPort for FixedClock {
+        fn elapsed(&self) -> Result<Duration, ElapsedClockError> {
+            Ok(Duration::ZERO)
+        }
+    }
     impl ClockPort for FixedClock {
         fn now_ms(&self) -> i64 {
             self.0
@@ -923,7 +921,7 @@ mod tests {
         device_identity: MockDeviceId_,
         local_identity: MockLocalIdentity,
         settings: MockSettings_,
-    ) -> DispatchClipboardEntryUseCase {
+    ) -> DispatchFixture {
         build_uc_with_analytics(
             peer_addr_repo,
             member_repo,
@@ -952,7 +950,7 @@ mod tests {
         local_identity: MockLocalIdentity,
         settings: MockSettings_,
         analytics: Arc<dyn AnalyticsPort>,
-    ) -> DispatchClipboardEntryUseCase {
+    ) -> DispatchFixture {
         build_uc_with_first_sync_state(
             peer_addr_repo,
             member_repo,
@@ -980,7 +978,7 @@ mod tests {
         settings: MockSettings_,
         analytics: Arc<dyn AnalyticsPort>,
         first_sync_state: Arc<dyn FirstSyncStatePort>,
-    ) -> DispatchClipboardEntryUseCase {
+    ) -> DispatchFixture {
         build_uc_with_peer_reachability_and_first_sync_state(
             peer_addr_repo,
             member_repo,
@@ -1007,8 +1005,9 @@ mod tests {
         settings: MockSettings_,
         analytics: Arc<dyn AnalyticsPort>,
         first_sync_state: Arc<dyn FirstSyncStatePort>,
-    ) -> DispatchClipboardEntryUseCase {
-        DispatchClipboardEntryUseCase::new(
+    ) -> DispatchFixture {
+        let (progress, _progress_worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
+        let use_case = DispatchClipboardEntryUseCase::new(
             Arc::new(peer_addr_repo),
             Arc::new(member_repo),
             peer_reachability,
@@ -1022,7 +1021,13 @@ mod tests {
             first_sync_state,
             Arc::new(NoopEntryDeliveryRepo),
             Arc::new(crate::facade::host_event::HostEventBus::new()),
-        )
+            Arc::new(AllTestPeerScope),
+            progress,
+        );
+        DispatchFixture {
+            use_case,
+            _progress_worker,
+        }
     }
 
     /// Slice 8c-2 · "all flags already marked" fake: every `mark_*` returns
@@ -2146,6 +2151,7 @@ mod tests {
             });
 
         let spy = Arc::new(SpyEntryDeliveryRepo::default());
+        let (progress, _progress_worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
@@ -2160,6 +2166,8 @@ mod tests {
             Arc::new(AllMarkedFirstSyncState),
             Arc::clone(&spy) as Arc<dyn EntryDeliveryRepositoryPort>,
             Arc::new(crate::facade::host_event::HostEventBus::new()),
+            Arc::new(AllTestPeerScope),
+            progress,
         );
 
         let mut input = input();
@@ -2237,6 +2245,7 @@ mod tests {
             .returning(|plaintext| Ok(plaintext.to_vec()));
         let mut dispatch = MockDispatch::new();
         dispatch.expect_dispatch().times(0);
+        let (progress, _progress_worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
@@ -2251,6 +2260,8 @@ mod tests {
             Arc::new(AllMarkedFirstSyncState),
             Arc::new(RejectingDeliveryRepo),
             Arc::new(crate::facade::host_event::HostEventBus::new()),
+            Arc::new(AllTestPeerScope),
+            progress,
         );
         let mut input = input();
         input.entry_id = Some(EntryId::from("entry-without-intent"));
@@ -2293,6 +2304,7 @@ mod tests {
             });
 
         let spy = Arc::new(SpyEntryDeliveryRepo::default());
+        let (progress, _progress_worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
@@ -2307,6 +2319,8 @@ mod tests {
             Arc::new(AllMarkedFirstSyncState),
             Arc::clone(&spy) as Arc<dyn EntryDeliveryRepositoryPort>,
             Arc::new(crate::facade::host_event::HostEventBus::new()),
+            Arc::new(AllTestPeerScope),
+            progress,
         );
 
         let mut input = input();
@@ -2352,6 +2366,7 @@ mod tests {
             .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
 
         let spy = Arc::new(SpyEntryDeliveryRepo::default());
+        let (progress, _progress_worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
@@ -2366,6 +2381,8 @@ mod tests {
             Arc::new(AllMarkedFirstSyncState),
             Arc::clone(&spy) as Arc<dyn EntryDeliveryRepositoryPort>,
             Arc::new(crate::facade::host_event::HostEventBus::new()),
+            Arc::new(AllTestPeerScope),
+            progress,
         );
 
         let _ = uc.execute(input()).await.expect("dispatch ok");
@@ -2443,13 +2460,14 @@ mod tests {
         cipher: MockCipher,
         dispatch: MockDispatch,
         spy: Arc<SpyEntryDeliveryRepo>,
-    ) -> (DispatchClipboardEntryUseCase, Arc<RecordingEmitter>) {
+    ) -> (DispatchFixture, Arc<RecordingEmitter>) {
         let recorder = Arc::new(RecordingEmitter::default());
         let bus = Arc::new(HostEventBus::new());
         bus.register(
             "recorder",
             Arc::clone(&recorder) as Arc<dyn HostEventEmitterPort>,
         );
+        let (progress, _progress_worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
@@ -2464,8 +2482,16 @@ mod tests {
             Arc::new(AllMarkedFirstSyncState),
             spy as Arc<dyn EntryDeliveryRepositoryPort>,
             bus,
+            Arc::new(AllTestPeerScope),
+            progress,
         );
-        (uc, recorder)
+        (
+            DispatchFixture {
+                use_case: uc,
+                _progress_worker,
+            },
+            recorder,
+        )
     }
 
     /// 3 种成功/失败 outcome 都要 emit 一条对应的 Delivery 事件,且事件
@@ -2598,6 +2624,7 @@ mod tests {
             .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
 
         let spy = Arc::new(SpyEntryDeliveryRepo::default());
+        let (progress, _progress_worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
@@ -2612,6 +2639,8 @@ mod tests {
             Arc::new(AllMarkedFirstSyncState),
             Arc::clone(&spy) as Arc<dyn EntryDeliveryRepositoryPort>,
             Arc::new(HostEventBus::new()),
+            Arc::new(AllTestPeerScope),
+            progress,
         );
 
         let mut input = input();
@@ -2685,6 +2714,7 @@ mod tests {
             Arc::clone(&recorder) as Arc<dyn HostEventEmitterPort>,
         );
 
+        let (progress, _progress_worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
         let uc = DispatchClipboardEntryUseCase::new(
             Arc::new(repo),
             Arc::new(make_member_repo_all_enabled()),
@@ -2699,6 +2729,8 @@ mod tests {
             Arc::new(AllMarkedFirstSyncState),
             Arc::clone(&spy) as Arc<dyn EntryDeliveryRepositoryPort>,
             Arc::clone(&bus),
+            Arc::new(AllTestPeerScope),
+            progress,
         );
 
         let mut input = input();

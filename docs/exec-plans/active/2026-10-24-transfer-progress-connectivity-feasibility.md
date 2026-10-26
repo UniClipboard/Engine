@@ -677,3 +677,32 @@ Application `transfer/progress/inbound`统一原生连接交接后的准入、�
 最终候选Core／Application全量1766项通过、2项默认跳过；P2P全量410项通过、11项默认跳过，包含新增6项真实入站组合；原实际接收权威专用8项另行通过。
 源码冻结包含子模块及软链接共3343项。查询提供使用明确的受控本地事实，暂停及经过时间采用可控port；不是Engine／SQLite、物理系统挂起或完整Direct／Relay角色矩阵。
 此层交付可安装的完整入站能力；节点／会话协议安装、Engine组装、原发送意图／真实接收hook及设备验收仍未迁移，对应整项继续保持未完成。
+
+
+## 生产原意图关联的待补项
+
+接入实际对象图时发现，原型中纯空目录的源条目由测试显式注入
+`source_entry`；生产 `ClipboardInboundRuntime` 当前没有从消息传递该字段，而纯空目录
+又没有可回读源条目的 blob 引用。因此，既有空目录登记证据仅证明“已取得可靠源身份后”的
+权威、登记与退休规则，不能证明生产端已经取得该身份。不能以内容摘要生成替代 UUID、
+借用 tracing 字段或放宽旧头尾随字节检查来填补该缺口。
+
+用户于2026-10-26明确批准纳入兼容消息头扩展。实现按`clipboard-applied/3`协商可靠源身份，
+旧`/2`与`/1`保留原格式，不修改blob与V3；版本选择与源身份传递的真实证明仍待完成。
+原发送意图与接收hook的生产验收保持未完成。
+
+
+## 生产会话与稳定查询的主机验证
+
+2026-10-26，未合并任务分支`feat/transfer-progress-session-runtime`基于`47ef60b65fce66f6208a391ab8d87c1d98ff4150`：
+
+- 原接收CAS接受后一次冻结完整计划，后续dirty提示只读取同一权威事实；原始索引、来源设备、逻辑项、attempt与实际round进入同一通知负责人。源消息头使用已批准的clipboard-applied/3，旧头和blob/V3不变。
+- 原Native进度adapter、旧Application通知邮箱、Core reporter trait及Engine业务投影/推断取消已删除。生产节点同一Application端点注册新2/旧1；Application监督通知、投影、接收事实与宿主失效提示，真实关闭等待实际工作。
+- `just cargo test -p uc-application --lib transfer:: --locked`：188通过。包含冻结descriptor、旧producer拒绝、真实CAS、自动恢复分支及原高水位/期限、压缩表示总量、目录轮次、完整查询分类和预期尝试拒绝。压缩大小测试先复现明文1024被错误冻结为线上总量，再修复为实际32；没有借比例字节或格式变更绕过。
+- `just cargo test -p uc-infra-p2p --lib member_is_removed --locked`：4通过，真实节点成员撤销关闭旧进度连接、等待应用结算的剪贴板连接，并停止在途发送；旧帧先触发原意图变化，以此证明实际授权。
+- `just cargo test -p uc-engine --features dev-tools --lib real_engine_offline_cancellation_ignores_permanently_blocked_progress --locked`：1通过。来源离线后准确缓存重试，进度backend被屏障阻塞；本地取消、实际输出清理、原成功文件/路径及完整关闭仍完成。屏障只配合原CancellationToken结束，不替代本地流程。
+- `just cargo test -p uc-engine --features dev-tools --lib real_engine_outbound_progress_reports_actual_partial_result_and_reconciles_without_download --locked`：1通过。真实双Engine、认证P2P、SQLite及文件输出后，发送端收到失效事件并读到精确两成功/一StorageUnavailable失败；源与本机接收entry独立，attempt一致。完整核对返回Settled/旧预期Superseded，实际export次数不增加，原文件字节和路径保持。
+- `just cargo test -p uc-ohos-napi --lib outbound_view_preserves_large_integer_positions_and_unknown_totals_for_javascript --locked`：1通过，`u64::MAX`修订和字节位置保留十进制字符串，None总量不被改为0或100%。UniFFI/NAPI与Rust同版本完整查询入口均通过workspace全部targets编译。
+- 本次候选Rust源码通过metadata、workspace/all-targets、fmt、Rust style、Engine repository及diff检查。这里的定向结论不冒充最新源码的完整Core/App/P2P测试全集，也不复用父PR的CI作为当前head结论。
+
+尚未完成：原再次发送动作内核对、删除/成员/会话退休、实际表示解密暂停的全链路证明，以及新新/固定旧端/三端/Direct/Relay/1GiB、Collector和设备矩阵。物理挂起及移动产品宿主未执行，保持跳过及合入前必需验收，不据此登记整片完成。

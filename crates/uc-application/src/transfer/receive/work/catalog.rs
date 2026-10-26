@@ -1,4 +1,5 @@
 //! 同进程重试的原始资料与实际保存事实；不写入持久存储，也不输出敏感字段。
+use super::ReceiveProgressSignal;
 use super::{ReceiveAction, ReceiveBatch, ReceiveWorkRegistry};
 use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::transfer::receive::batch::ReceiveFacts;
@@ -177,7 +178,10 @@ impl ReceiveAction {
             .unwrap_or_else(PoisonError::into_inner)
             .get_or_insert_with(|| source.planned(&progress.entry, &progress.attempt).into())
             .clone();
-        state.accept_progress(&progress.entry, &progress.attempt, &source);
+        if let Some(changed) = state.accept_progress(&progress.entry, &progress.attempt, &source) {
+            self.batch
+                .observe_progress(ReceiveProgressSignal::new(&self.registry, changed));
+        }
         let expected_hash = source.expected_hash.clone();
         let previous = state.receipts.insert(
             progress.entry.clone(),
@@ -295,6 +299,8 @@ impl ReceiveAction {
         }
         if complete && receipt.landed.is_empty() {
             state.receipts.remove(&progress.entry);
+            drop(state);
+            self.batch.progress_changed();
             return;
         }
         if complete {
@@ -308,6 +314,8 @@ impl ReceiveAction {
         if let Some(source) = &mut receipt.source {
             source.original_wire = None;
         }
+        drop(state);
+        self.batch.progress_changed();
     }
 }
 

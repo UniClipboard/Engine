@@ -2289,7 +2289,7 @@ function repositorySources() {
       'membership_branch_recovery_adapter.rs',
       'membership_history_exchange_adapter.rs',
       'peer_reachability_adapter.rs',
-      'transfer_progress_adapter.rs',
+      'connectivity/progress_handler.rs',
     ].map(path => read(`crates/uc-infra-p2p/src/network/iroh/${path}`)).join('\n'),
     presenceTransport: productionSources('crates/uc-application/src/space/connectivity/peer_connections/transport'),
     presenceBridge: read('crates/uc-infra-p2p/src/network/iroh/connectivity/presence_handler.rs'),
