@@ -15,8 +15,10 @@ use uc_application::deps::{
 use uc_core::ids::DeviceId;
 use uc_core::ports::blob::BlobDigest;
 
+mod acknowledgements;
 mod progress;
 mod queries;
+pub(crate) use acknowledgements::decorate_progress_receiver;
 pub(crate) use progress::decorate_progress_wire;
 pub(crate) use queries::decorate_progress_queries;
 
@@ -47,6 +49,9 @@ pub(crate) struct ReceiveExports {
     pub hold_terminals: AtomicBool,
     pub terminal_held: Notify,
     pub terminal_release: Semaphore,
+    pub hold_ack_peer: Mutex<Option<DeviceId>>,
+    pub ack_held: Notify,
+    pub ack_release: Notify,
     terminal_acks: Mutex<Vec<ProgressTerminalNotice>>,
     terminal_ack_changed: Notify,
 }
@@ -78,6 +83,9 @@ impl ReceiveExports {
             hold_terminals: AtomicBool::new(false),
             terminal_held: Notify::new(),
             terminal_release: Semaphore::new(0),
+            hold_ack_peer: Mutex::new(None),
+            ack_held: Notify::new(),
+            ack_release: Notify::new(),
             terminal_acks: Mutex::new(Vec::new()),
             terminal_ack_changed: Notify::new(),
         });
@@ -93,6 +101,8 @@ impl ReceiveExports {
 pub(crate) struct ReleaseOnDrop(pub Arc<ReceiveExports>);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
+        *self.0.hold_ack_peer.lock().unwrap() = None;
+        self.0.ack_release.notify_waiters();
         self.0.release.add_permits(1);
         self.0.read_release.add_permits(1);
         self.0.terminal_release.add_permits(1);

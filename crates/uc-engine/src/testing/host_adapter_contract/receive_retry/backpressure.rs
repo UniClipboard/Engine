@@ -12,7 +12,7 @@ use crate::{
 use std::collections::{BTreeSet, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use uc_core::file_transfer::{ProgressIdentity, TERMINAL_PEER_CAPACITY};
 use uuid::Uuid;
 
@@ -166,6 +166,60 @@ async fn real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_ca
         .all(
             |item| item.state != OutboundProgressState::Completed && item.failure_reason.is_none()
         ));
+    // 原真实系统时钟跨过60秒联系期限；不通过核对、重登记或伪时钟制造未知。
+    let expired = timeout(Duration::from_secs(75), async {
+        loop {
+            let OperationResult::OutboundProgress(Some(view)) = case
+                .source
+                .execute(Operation::QueryOutboundProgress(input.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("retained original source intent")
+            };
+            if view.items[..count - TERMINAL_PEER_CAPACITY]
+                .iter()
+                .all(|item| item.state == OutboundProgressState::Unconfirmed)
+            {
+                break view;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("evicted results become unconfirmed under the original sixty-second policy");
+    assert_eq!(expired.attempt_id, before.attempt_id);
+    assert_eq!(
+        expired.state,
+        OutboundProgressBatchState::PartiallyUnconfirmed
+    );
+    assert_eq!(
+        (
+            expired.items_completed,
+            expired.items_cancelled,
+            expired.items_unconfirmed
+        ),
+        (
+            (TERMINAL_PEER_CAPACITY - 2) as u32,
+            2,
+            (count - TERMINAL_PEER_CAPACITY) as u32
+        )
+    );
+    assert_eq!(
+        (
+            expired.items_failed,
+            expired.items_running,
+            expired.items_waiting
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        &expired.items[count - TERMINAL_PEER_CAPACITY..],
+        &before.items[count - TERMINAL_PEER_CAPACITY..]
+    );
+    assert!(expired.items[..count - TERMINAL_PEER_CAPACITY]
+        .iter()
+        .all(|item| item.failure_reason.is_none()));
     assert_eq!(
         case.source
             .execute(Operation::ReconcileOutboundProgress(

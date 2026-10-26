@@ -125,6 +125,14 @@ impl ProgressWirePort for ObservedWire {
     }
 }
 impl ReceiveExports {
+    pub fn matching_ack_count(&self, source: ProgressIdentity, attempt: ProgressIdentity) -> usize {
+        self.terminal_acks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|notice| notice.source == source && notice.attempt == attempt)
+            .count()
+    }
     pub async fn matching_acks(
         &self,
         source: ProgressIdentity,
