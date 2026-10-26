@@ -1,4 +1,5 @@
 use super::events::observe_events;
+use super::reachability::observe_reachability;
 use super::receive::observe_receive;
 use crate::connectivity::ConnectivityError;
 use crate::facade::host_event::HostEventBus;
@@ -11,8 +12,10 @@ use crate::transfer::receive::work::ReceiveWorkRegistry;
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
+use uc_core::ports::PeerReachabilityChanged;
 use uc_observability_contract::diagnostics::{
     record_task_join_failure, DiagnosticTaskKind, ObservationContext,
 };
@@ -42,6 +45,7 @@ impl ProgressRuntime {
         exchange: ProgressExchangeWorker,
         receipts: Arc<ReceiveWorkRegistry>,
         host_events: Arc<HostEventBus>,
+        reachability: broadcast::Receiver<PeerReachabilityChanged>,
     ) -> Self {
         let stop = CancellationToken::new();
         let stopping = stop.clone();
@@ -53,6 +57,7 @@ impl ProgressRuntime {
             let mut jobs = JoinSet::new();
             jobs.spawn(projection.run(stopping.clone()));
             jobs.spawn(exchange.run(stopping.clone()));
+            jobs.spawn(observe_reachability(reachability, exchanges.clone(), stopping.clone()));
             jobs.spawn(observe_receive(receipts, exchanges, stopping.clone()));
             jobs.spawn(observe_events(events, host_events, stopping.clone()));
             let mut failure = None;

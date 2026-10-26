@@ -10,6 +10,8 @@ use crate::transfer::progress::{
 };
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::sync::Arc;
+use tokio::sync::broadcast;
+use uc_core::ports::PeerReachabilityChanged;
 
 /// 同一对象图统一收发、投影、核对与补发；Engine只注册完整入站端点。
 pub(crate) struct ProgressRuntimeAssembly {
@@ -82,13 +84,17 @@ impl ProgressRuntimeAssembly {
             host_events,
         }
     }
-    pub(crate) fn start(self) -> ProgressRuntime {
+    pub(crate) fn start(
+        self,
+        reachability: broadcast::Receiver<PeerReachabilityChanged>,
+    ) -> ProgressRuntime {
         ProgressRuntime::start(
             self.session,
             self.projection,
             self.exchange,
             self.receipts,
             self.host_events,
+            reachability,
         )
     }
 }

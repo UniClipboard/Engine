@@ -617,6 +617,7 @@ impl ApplicationAssembly {
             active_pull_adapters,
             is_unlocked,
         } = network;
+        let progress_reachability = space.subscribe_peer_reachability_events();
         if !space
             .start_application_runtime()
             .await
@@ -750,7 +751,7 @@ impl ApplicationAssembly {
             upgrade: settings.upgrade,
             network_recovery,
         }));
-        let progress = progress.start();
+        let progress = progress.start(progress_reachability);
         let history_maintenance = facade.start_history_maintenance().await;
         let inbound_clipboard = clipboard.apply_inbound();
         let file_transfer_timeout =

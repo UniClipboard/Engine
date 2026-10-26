@@ -1,4 +1,6 @@
 //! 生产Router、原生handler与Application完整入站负责人；不在测试里逐流编排服务端。
+#[path = "stream_reconnect_budget_probe.rs"]
+mod reconnect_budget;
 use super::{budget, descriptor, endpoint, item, manager, Authority, Directory, BUDGET, SOURCE};
 use crate::network::iroh::admitted_connections::AdmittedConnections;
 use crate::network::iroh::connectivity::{
@@ -20,13 +22,13 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    transfer_progress_connectivity_policy, ConnectionProtocol, ConnectivityManager,
-    CurrentProgressTaskPort, ElapsedClockError, ElapsedClockPort, ProgressBound,
-    ProgressContactNotice, ProgressPageReply, ProgressPageRequest, ProgressProjectionKey,
-    ProgressProjectionRegistry, ProgressReceiveError, ProgressReceiverPort, ProgressSnapshotPage,
-    ProgressSnapshotProviderPort, ProgressSnapshotQuery, ProgressSnapshotWirePort,
-    ProgressTerminalNotice, ProgressUpdateNotice, ProgressWirePort, TransferProgressProducer,
-    TransferProgressTransport,
+    transfer_progress_connectivity_policy, ConnectionProtocol, ConnectivityError,
+    ConnectivityManager, CurrentProgressTaskPort, ElapsedClockError, ElapsedClockPort,
+    ProgressBound, ProgressContactNotice, ProgressPageReply, ProgressPageRequest,
+    ProgressProjectionKey, ProgressProjectionRegistry, ProgressReceiveError, ProgressReceiverPort,
+    ProgressSnapshotPage, ProgressSnapshotProviderPort, ProgressSnapshotQuery,
+    ProgressSnapshotWirePort, ProgressTerminalNotice, ProgressUpdateNotice, ProgressWirePort,
+    TransferProgressProducer, TransferProgressTransport,
 };
 use uc_core::file_transfer::{
     OutboundProgressStatus, ProgressFreshnessView, ProgressIdentity, ProgressItemState,
@@ -71,6 +73,7 @@ impl PeerAdmissionPort for Admission {
 struct Adoption {
     registry: ProgressProjectionRegistry,
     calls: AtomicUsize,
+    lose_ack: AtomicBool,
     paused: AtomicBool,
     entered: Semaphore,
     release: Semaphore,
@@ -115,7 +118,15 @@ impl ProgressReceiverPort for Adoption {
             self.entered.add_permits(1);
             self.release.acquire().await.unwrap().forget();
         }
-        self.registry.adopt_terminal(peer, generation, notice).await
+        let adopted = self
+            .registry
+            .adopt_terminal(peer, generation, notice)
+            .await?;
+        if self.lose_ack.load(Ordering::SeqCst) {
+            // 真实采用之后结束原流，不向发送者交付ACK；原完整补发必须保留同一结果。
+            return Err(ConnectivityError::Offline.into());
+        }
+        Ok(adopted)
     }
 }
 fn result() -> ProgressTerminal {
@@ -258,6 +269,7 @@ impl Fixture {
         let adoption = Arc::new(Adoption {
             registry: registry.clone(),
             calls: AtomicUsize::new(0),
+            lose_ack: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
