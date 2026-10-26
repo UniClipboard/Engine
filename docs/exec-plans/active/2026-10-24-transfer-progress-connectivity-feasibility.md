@@ -911,3 +911,36 @@ Engine跳过项需要本机严格Collector与Jaeger，不记业务观测验收�
 [回归检查](../../../scripts/testing/verify-blob-lifecycle-resources.test.py)覆盖正确七份、遗漏第二次删除、六份重复掩盖缺场景、未知身份、额外重复及任一删除报告资源失败。
 旧实现6项中3项失败，修复后6项通过；同一CI原始产物完整重放也通过。
 当前候选原8项资源验收全部通过；含编译总478.663秒，实际报告严格核对6场景／7次，汇总与全部原16条资源断言通过。双1GiB两轮传输、实际provider配额及各生命周期均由原真实Engine产生证据，不据此宣称设备或完整网络矩阵完成。
+
+
+## 手动重试与旧尝试围栏的主机验证
+
+原双Engine／SQLite／文件成果场景沿用单一RetryEntryReceive动作，只选择原失败项。
+原尝试三份精确ACK确认后，暂停新导出；接收CAS接受不同attempt，源端完整核对显示2成功＋1Processing，
+原两项成功的完整字段保持。旧attempt取消和核对均为Superseded；放行后新attempt完整Settled／3成功，
+原成功文件内容及路径保持，保护与导出各只增加一次且只属于原失败项。
+新增用例`real_engine_manual_retry_replaces_source_attempt_and_preserves_unselected_successes`在nextest ci模式通过（4.591秒）。
+
+[实际专属连接验证](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/stream_retry_fence_probe.rs)
+复用真实身份准入的ProfilePair、生产Producer／Wire／Inbound及全局ProjectionRegistry：
+
+- 新描述取代旧描述后，旧尝试再次完成挑战也被拒绝；旧状态带更高序号／字节仍被拒绝，旧终态得到明确Stale拒绝而非ACK。当前binding、attempt、完整逐项事实、汇总、版本和事件均保持；随后当前尝试仍取得精确ACK。
+- 原结果已通过Application采用时，真实入站port暂缓返回，待接收权威切换attempt后才让原生ACK写回。Producer在取得精确ACK之后再核对当前权威并返回Stale；新尝试再通过完整登记／终态链取得自己的精确ACK和不同字节结果，不继承旧终态。
+
+专属连接中的当前描述由可控authority夹具提供；真实持久CAS及成功文件保留由前述双Engine场景证明，不将二者冒充同一个SQLite故障注入。
+原Application的迟到挑战、状态采用及通知监督围栏仍由完整进度测试组验证。
+原未选取消项保留、调用者放弃与失败清理，由既有manual_retry完整负责人测试验收，受控capture／fetch port范围保持原说明。
+
+同一候选相邻原生outbound组nextest ci模式12项全部通过（0.724秒），包含逐字段错误ACK及旧挑战／替换意图；
+Application完整进度组78项全部通过（16.21秒）；完整手动重试组30项通过（42.22秒），接收目录组23项通过（0.02秒），包含未选取消、旧交接及原始位置保持。完整Engine接收51项通过／1项按原Collector条件跳过（384.27秒），不记业务观测通过；设备与完整网络矩阵保持原责任。
+
+复跑入口：
+
+```bash
+just cargo nextest run --profile ci -p uc-infra-p2p --lib -E 'test(/outbound_probe::/)' --locked
+just cargo test -p uc-application --lib transfer::progress:: --locked
+just cargo test -p uc-application --lib clipboard::sync::apply_inbound::tests::manual_retry:: --locked
+just cargo test -p uc-application --lib transfer::receive::work::catalog::tests:: --locked
+just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib -E 'test(real_engine_manual_retry_replaces_source_attempt_and_preserves_unselected_successes)' --locked
+just cargo test -p uc-engine --features dev-tools --lib receive_retry:: --locked
+```
