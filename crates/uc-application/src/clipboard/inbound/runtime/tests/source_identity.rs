@@ -51,7 +51,7 @@ async fn runtime_passes_authenticated_source_identity_for_an_empty_directory() {
             root_index: 0,
             root_name: "directory".into(),
             root_is_file: false,
-            relative_path: String::new(),
+            relative_path: ".".into(),
             kind: FileSetMemberKind::EmptyDirectory,
             blob_ref_index: None,
         }],

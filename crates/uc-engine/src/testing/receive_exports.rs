@@ -35,6 +35,9 @@ pub(crate) struct ReceiveExports {
     pub read_paused: Notify,
     pub read_release: Semaphore,
     pub corrupt_read: AtomicBool,
+    pub hold_terminals: AtomicBool,
+    pub terminal_held: Notify,
+    pub terminal_release: Semaphore,
     terminal_acks: Mutex<Vec<ProgressTerminalNotice>>,
     terminal_ack_changed: Notify,
 }
@@ -56,6 +59,9 @@ impl ReceiveExports {
             read_paused: Notify::new(),
             read_release: Semaphore::new(0),
             corrupt_read: AtomicBool::new(false),
+            hold_terminals: AtomicBool::new(false),
+            terminal_held: Notify::new(),
+            terminal_release: Semaphore::new(0),
             terminal_acks: Mutex::new(Vec::new()),
             terminal_ack_changed: Notify::new(),
         });
@@ -73,6 +79,7 @@ impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
         self.0.release.add_permits(1);
         self.0.read_release.add_permits(1);
+        self.0.terminal_release.add_permits(1);
     }
 }
 

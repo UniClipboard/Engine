@@ -45,4 +45,6 @@ manifest：复用 dedup 计划的 `entry_file_set` 逐行表，每行以
    指向它时 mobile GET 保持上一个可消费值）。单文件与平铺多文件仍可由移动端
    消费。前置依赖：dedup 计划的 `entry_file_set` 表先落地。
 
+6. **选中根本身为空**：沿用捕获端既有的`EmptyDirectory`、`relative_path = "."`标记，且不引用blob。接收端只在该精确语义下将目标解析为已验证的根本身；该根不得同时声明其他成员。文件的`.`、嵌套`a/.`、空路径及父路径穿越仍拒绝。标记保留在原身份计算中，不新增线格式版本。
+
 领域术语见 `docs/references/domain-glossary.md` 的“文件集”；完整语义以本文为准。

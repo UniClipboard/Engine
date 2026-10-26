@@ -1,13 +1,14 @@
-//! 只观察同一真实wire返回的精确ACK；不提供另一套结果或确认路径。
+//! 仅测试观察或持有原wire边界；实际结果与确认仍通过同一原生实现。
 use super::{fixture_for, ReceiveExports};
 use async_trait::async_trait;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    ConnectionLease, PeerSendStream, ProgressBound, ProgressContactNotice,
+    ConnectionLease, ConnectivityError, PeerSendStream, ProgressBound, ProgressContactNotice,
     ProgressExchangeDeadline, ProgressReceiveError, ProgressTaskAuthorityPort,
     ProgressTerminalNotice, ProgressUpdateNotice, ProgressWirePort, StreamLease, UniStreamLease,
 };
@@ -86,6 +87,14 @@ impl ProgressWirePort for ObservedWire {
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ProgressTerminalNotice, ProgressReceiveError> {
+        if self.fixture.hold_terminals.load(Ordering::SeqCst) {
+            self.fixture.terminal_held.notify_one();
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(ConnectivityError::Stopped.into()),
+                permit = self.fixture.terminal_release.acquire() => permit.unwrap().forget(),
+            }
+        }
         let acknowledged = self
             .inner
             .terminal(stream, connection, notice, deadline, cancel)

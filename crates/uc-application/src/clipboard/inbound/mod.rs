@@ -84,7 +84,7 @@ impl InboundClipboardApplyPort for ApplyInboundClipboardUseCase {
     ) -> Result<InboundClipboardApplyOutcome, InboundClipboardApplyError> {
         let provisional = input.provisional;
         let input = ApplyInboundInput {
-            source_entry: None,
+            source_entry: input.source_entry,
             from_device: DeviceId::new(input.from_device),
             snapshot_hash: input.snapshot_hash,
             plaintext: input.plaintext,

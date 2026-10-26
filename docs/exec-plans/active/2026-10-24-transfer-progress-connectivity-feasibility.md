@@ -868,3 +868,29 @@ Engine跳过项需要本机严格Collector与Jaeger，不记业务观测验收�
 当前候选完整接收回归`receive_retry::`45项通过／1项按原条件跳过（355.00秒），包含原取消、生命周期、保存修复和流隔离。跳过项需要本机严格Collector与Jaeger，不记业务观测通过。
 
 同一候选nextest ci模式新组3项全部通过（33.865秒），分别6.857／9.086／17.908秒；该命令筛选外342项未运行，不是额外跳过失败。精确表示用例含两套双Engine流程，default／ci仅为该例设90秒外层预算，原单次操作期限与零重试保持。正式33/59。
+
+
+## 逐项结果与批次汇总的主机验证
+
+沿用原双Engine、SQLite和磁盘流程，从原消息源的完整查询及原生ACK核对：
+
+| 场景 | 实际源端事实 |
+| --- | --- |
+| 首／中／末项保存失败 | 各自2成功、1失败，零运行／等待／取消／未确认；逐项StorageUnavailable、原索引及三份ACK的轮次／字节一致，末项成功不覆盖前项失败 |
+| 单项重试运行→取消 | 原两项成功完全保持，当前尝试先2成功＋1运行，再2成功＋1取消；源端取消原因转换为RemotePeer，原文件和路径保持 |
+| 明确拒绝与未确认 | 锁定期间完整查询明确Unauthorized，不能冒充不可达；锁定／解锁退休目录后NotRetained，未结算项变未确认，原两项成功保持，失败数为0 |
+| 两成员目录成功 | 保存后实际URI只指向一个完整目录，两个成员字节完整读回；源端1项成功、1份DirectoryUnit ACK，不按子文件计交付 |
+| 目录事务失败与新尝试 | 原触发器真实拒绝capture，原目录回滚；首轮NoEntry后另一条已接受入站建立新attempt，旧查询Superseded，新尝试最终只有1项失败，已完成子文件不算目录成果；失败后未开始成员不被强制启动，既有独立成功文件不重做 |
+| 纯空根目录 | 不含blob引用，实际创建空目录；源端1项成功、1份零字节DirectoryUnit ACK，不因没有网络下载项变成空批次或未确认 |
+
+目录NoEntry捕获失败目前公开的失败原因是Unknown，仍是已确认Failed；它与Unconfirmed状态不同，前者计失败、后者不计失败。测试逐字段核对接收事实和源端采用，不制造更具体的失败原因。
+
+真实空根路径首次拒绝暴露两个实现缺口：捕获端既有的EmptyDirectory／`.`根标记被物化路径拒绝；完整入站port实现又把已认证消息传来的source_entry覆盖成None。
+根路径修复只允许规范的空根标记，拒绝文件`.`、空路径、嵌套点分量、父路径、带blob引用或同根同时列出其他成员；原身份和线格式不变，见[ADR-010](../../design-docs/decisions/010-directory-sync-as-file-set-manifest.md)。
+桥接改为保留原source_entry。原有／无源提示×CAS接受／拒绝四组合现在经过真实InboundClipboardApplyPort实现，红→绿；仍验证消息源与两种provider角色、blob归属条目及本机条目独立，不由provider推断来源。
+旧原型清单也使用捕获端的规范根标记，避免只验证不能实际物化的空路径输入。
+
+根空目录3测试通过，包含路径负向和矛盾清单；真实port交接4组合通过。
+相关Engine的nextest ci模式8项全部通过（59.005秒），复跑：
+`just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib -E 'test(/receive_retry::batch_outcomes::/) | test(/save_failure::real_engine_(first_save_failure|last_save_failure|post_download_save_failure)/)' --locked`。
+完整Application回归1395项通过／2项按原条件跳过；完整Engine接收回归50项通过／1项按原条件跳过（384.77秒）。Collector跳过项不记业务观测通过；未将设备、物理挂起、独立进程或完整三端矩阵记为完成。

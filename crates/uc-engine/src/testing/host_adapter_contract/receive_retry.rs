@@ -1,4 +1,5 @@
 //! 稳定Engine操作驱动真实网络、SQLite与文件成果；测试控制本地导出或保存故障。
+mod batch_outcomes;
 mod database;
 mod lifecycle;
 mod observation;
