@@ -1,4 +1,5 @@
 //! 稳定Engine操作驱动真实网络、SQLite与文件成果；测试控制本地导出或保存故障。
+mod backpressure;
 mod batch_outcomes;
 mod database;
 mod lifecycle;
@@ -32,6 +33,7 @@ use crate::{
 use database::open_control_connection;
 use diesel::sql_types::{Binary, Text};
 use diesel::{QueryableByName, RunQueryDsl, SqliteConnection};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -51,10 +53,17 @@ fn unavailable() -> HostCapabilityError {
         "test file unavailable",
     )
 }
+// 保留原三个固定内容，额外数字handle提供互不相同的冷缓存文件，避免以缓存命中冒充下载。
+fn file_bytes(handle: &HostFileHandle) -> Result<Cow<'static, [u8]>, HostCapabilityError> {
+    let index: usize = handle.as_str().parse().map_err(|_| unavailable())?;
+    Ok(match CONTENTS.get(index) {
+        Some(bytes) => Cow::Borrowed(*bytes),
+        None => Cow::Owned(format!("capacity-probe-file-{index}\n").into_bytes()),
+    })
+}
 impl HostFileAccess for Files {
     fn metadata(&self, handle: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
-        let index: usize = handle.as_str().parse().map_err(|_| unavailable())?;
-        let bytes = CONTENTS.get(index).ok_or_else(unavailable)?;
+        let bytes = file_bytes(handle)?;
         Ok(HostFileMetadata {
             display_name: NAME.into(),
             size_bytes: bytes.len() as u64,
@@ -67,8 +76,7 @@ impl HostFileAccess for Files {
         offset: u64,
         max_bytes: u32,
     ) -> Result<Vec<u8>, HostCapabilityError> {
-        let index: usize = handle.as_str().parse().map_err(|_| unavailable())?;
-        let bytes = CONTENTS.get(index).ok_or_else(unavailable)?;
+        let bytes = file_bytes(handle)?;
         let start = usize::try_from(offset)
             .map_err(|_| unavailable())?
             .min(bytes.len());

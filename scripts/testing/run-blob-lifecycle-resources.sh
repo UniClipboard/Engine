@@ -17,7 +17,7 @@ if previous.exists():
     shutil.copy2(previous,root/'previous-junit.xml')
     previous.unlink()
 PYSETUP
-filter='(package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::blob_resources::managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and_tasks)) | package(uc-engine) & kind(lib) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/) | (package(uc-engine) & kind(lib) & test(=runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author))'
+filter='(package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::blob_resources::managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and_tasks)) | package(uc-engine) & kind(lib) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/) | (package(uc-engine) & kind(lib) & test(=runtime::blob_source_authorization::quota::ticket_provider_budget_is_shared_with_a_different_message_author)) | (package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::backpressure::real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup))'
 if [[ "${UC_TEST_BUILD_SCOPE:-group}" == workspace ]]; then
   bash scripts/testing/run-test-group.sh workspace -E "$filter"
 else

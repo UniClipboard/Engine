@@ -22,6 +22,7 @@ static FIXTURES: OnceLock<Mutex<HashMap<PathBuf, Weak<ReceiveExports>>>> = OnceL
 
 pub(crate) struct ReceiveExports {
     pub protects: Mutex<Vec<BlobDigest>>,
+    pub cache_misses: Mutex<Vec<BlobDigest>>,
     pub exports: Mutex<Vec<BlobDigest>>,
     pub paths: Mutex<Vec<PathBuf>>,
     pub obstruct_failure: AtomicBool,
@@ -46,6 +47,7 @@ impl ReceiveExports {
     pub fn install(root: &Path, fail_at: usize, pause_at: usize) -> Arc<Self> {
         let fixture = Arc::new(Self {
             protects: Mutex::new(Vec::new()),
+            cache_misses: Mutex::new(Vec::new()),
             exports: Mutex::new(Vec::new()),
             paths: Mutex::new(Vec::new()),
             obstruct_failure: AtomicBool::new(false),
@@ -142,7 +144,11 @@ struct ObservedExports {
 impl BlobReadStorePort for ObservedExports {
     async fn protect(&self, digest: BlobDigest) -> Result<Option<BlobReceived>, BlobExchangeError> {
         self.fixture.protects.lock().unwrap().push(digest);
-        self.inner.protect(digest).await
+        let retained = self.inner.protect(digest).await?;
+        if retained.is_none() {
+            self.fixture.cache_misses.lock().unwrap().push(digest);
+        }
+        Ok(retained)
     }
 
     async fn read(&self, digest: BlobDigest) -> Result<Bytes, BlobExchangeError> {

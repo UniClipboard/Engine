@@ -24,17 +24,19 @@ def reports():
 
 
 class LifecycleCoverage(unittest.TestCase):
-    def test_all_six_scenarios_and_both_deletion_runs_pass(self):
+    def test_all_scenarios_and_both_deletion_runs_pass(self):
         validator.verify_lifecycle_reports(reports())
 
     def test_missing_second_deletion_run_is_rejected(self):
         data = reports()
-        del data[-2]
+        deletion = validator.PREFIX + "real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state"
+        index = next(index for index, report in enumerate(data) if report["case"] == deletion)
+        del data[index]
         with self.assertRaises(AssertionError):
             validator.verify_lifecycle_reports(data)
 
-    def test_duplicate_cannot_mask_missing_scenario_with_six_reports(self):
-        data = reports()[1:]
+    def test_duplicate_cannot_mask_missing_scenario_with_expected_report_count(self):
+        data = reports()
         data[0] = copy.deepcopy(data[1])
         with self.assertRaises(AssertionError):
             validator.verify_lifecycle_reports(data)
@@ -51,13 +53,20 @@ class LifecycleCoverage(unittest.TestCase):
         with self.assertRaises(AssertionError):
             validator.verify_lifecycle_reports(data)
 
-    def test_every_deletion_report_must_preserve_resource_checks(self):
-        for field in reports()[0].keys() - {"case"}:
-            with self.subTest(field=field):
-                data = reports()
-                data[-2][field] = False
-                with self.assertRaises(AssertionError):
-                    validator.verify_lifecycle_reports(data)
+    def test_missing_capacity_scenario_is_rejected(self):
+        capacity = validator.PREFIX + "backpressure::real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup"
+        data = [report for report in reports() if report["case"] != capacity]
+        with self.assertRaises(AssertionError):
+            validator.verify_lifecycle_reports(data)
+
+    def test_every_report_must_preserve_resource_checks(self):
+        for index, report in enumerate(reports()):
+            for field in report.keys() - {"case"}:
+                with self.subTest(case=report["case"], index=index, field=field):
+                    data = reports()
+                    data[index][field] = False
+                    with self.assertRaises(AssertionError):
+                        validator.verify_lifecycle_reports(data)
 
 
 if __name__ == "__main__":
