@@ -216,3 +216,11 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 完整终态、初始等待及过期回复的边界保持，后续完整核对可恢复确认但重复事实不能续期。
 验证入口及实际结果见[会话确认验证](2026-10-24-transfer-progress-connectivity-feasibility.md#会话退休后的确认验证)。
 此项独立修复不完成整个生命周期／物理挂起矩阵，正式进度仍为30/59。
+
+
+### 2026-10-26：活动接收暂停恢复与源端资料重开
+
+补齐真实双Engine四种会话动作，保留原文件结算、暂停等待和默认不重下责任；
+测试fixture保留原安全存储实例供资料重开，不改变生产持久化或恢复策略。
+实际动作与证明边界见[主机验证](2026-10-24-transfer-progress-connectivity-feasibility.md#暂停恢复与同资料重开的主机验证)。
+后续仍须独立进程、普通重连预算与平台矩阵，正式30/59保持。
