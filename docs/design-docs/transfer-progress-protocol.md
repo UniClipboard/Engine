@@ -359,7 +359,8 @@ Core `ProgressProjectionCapacity` 按原意图接受顺序保留全局256／每�
 
 `ConnectivityProfile::TransferProgress` 使用实际Iroh backend和既有ConnectivityManager，
 只发起一次原生拨号；`/2`与兼容`/1`在同一次TLS握手提供，不使用通用交错拨号器创建并发影子连接。
-Iroh按服务端ALPN注册顺序选择，接收Router必须先注册`/2`再注册`/1`；
+Iroh使用服务端ALPN偏好；生产`ProtocolRouterBuilder`统一将已注册的`/2`排在`/1`前，
+无论handler注册顺序或客户端提供顺序如何，双方都支持新版时选择`/2`。调用方只注册实际可用的handler；
 旧端只支持`/1`时仍协商原单向帧，不改变旧字节，也不因此切换LAN兼容线。
 
 Application `transfer_progress_connectivity_policy` 是组装所用策略入口：
