@@ -33,6 +33,8 @@ use uc_engine::{
     RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendTextInput,
     SettingsPatch, SyncSettingsPatch, UnlockSpaceInput,
 };
+#[cfg(feature = "transfer-progress")]
+use uc_engine::{EntryReceiveProgressInput, OutboundProgressInput, ReconcileOutboundProgressInput};
 
 use content::Clipboard;
 
@@ -531,6 +533,25 @@ async fn operation(
                 target_devices: vec![string(request, "peer")?.into()],
             })
         }
+        #[cfg(feature = "transfer-progress")]
+        "receive_progress" => Operation::QueryEntryReceiveProgress(EntryReceiveProgressInput {
+            entry_id: string(request, "entry")?.into(),
+        }),
+        #[cfg(feature = "transfer-progress")]
+        "outbound_progress" => Operation::QueryOutboundProgress(OutboundProgressInput {
+            entry_id: string(request, "entry")?.into(),
+            target_device_id: string(request, "peer")?.into(),
+        }),
+        #[cfg(feature = "transfer-progress")]
+        "outbound_progress_list" => Operation::ListOutboundProgress,
+        #[cfg(feature = "transfer-progress")]
+        "reconcile_outbound_progress" => {
+            Operation::ReconcileOutboundProgress(ReconcileOutboundProgressInput {
+                entry_id: string(request, "entry")?.into(),
+                target_device_id: string(request, "peer")?.into(),
+                expected_attempt_id: request["attempt"].as_str().map(str::to_owned),
+            })
+        }
         "history" => Operation::ListHistoryEntries(ListHistoryEntriesInput {
             limit: 100,
             offset: 0,
@@ -571,6 +592,14 @@ async fn operation(
         OperationResult::DeviceGroupChoices(choices) => serde_json::to_value(choices)?,
         #[cfg(feature = "current-engine")]
         OperationResult::MembershipDiagnostics(summary) => serde_json::to_value(summary)?,
+        #[cfg(feature = "transfer-progress")]
+        OperationResult::EntryReceiveProgress(view) => serde_json::to_value(view)?,
+        #[cfg(feature = "transfer-progress")]
+        OperationResult::OutboundProgress(view) => serde_json::to_value(view)?,
+        #[cfg(feature = "transfer-progress")]
+        OperationResult::OutboundProgressList(views) => serde_json::to_value(views)?,
+        #[cfg(feature = "transfer-progress")]
+        OperationResult::OutboundProgressReconciliation(outcome) => serde_json::to_value(outcome)?,
         OperationResult::EntrySent(report) => serde_json::to_value(report)?,
         OperationResult::SettingsUpdated(outcome) => serde_json::to_value(outcome)?,
         OperationResult::ActiveClipboard(active) => serde_json::to_value(active)?,
@@ -608,6 +637,7 @@ fn host_identity() -> Value {
             "connectivity-opportunity",
         ),
         (cfg!(feature = "startup-progress"), "startup-progress"),
+        (cfg!(feature = "transfer-progress"), "transfer-progress"),
         (cfg!(feature = "current-engine"), "space-work-events"),
         (
             cfg!(feature = "inbound-network-faults"),
