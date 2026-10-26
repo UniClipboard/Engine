@@ -38,7 +38,11 @@ with tempfile.TemporaryDirectory(prefix='release-runner-', dir=base) as work:
             result_file = case / 'evidence/result.json'
             records = json.loads(result_file.read_text()) if result_file.exists() else []
             if mode == 'missing':
-                passed = run.returncode != 0
+                passed = (run.returncode != 0 and len(records) == 1
+                          and records[0]['name'] == 'required-closer'
+                          and records[0]['exit_code'] == 0
+                          and 'Executable is unavailable: ' + str(Path(executable).resolve())
+                          in records[0]['evidence_errors'])
             else:
                 passed = run.returncode == 0 and len(records) == 3 and all(
                     r['exit_code'] == 0 and r['executable_sha256'] == {str(binary.resolve()): digest}

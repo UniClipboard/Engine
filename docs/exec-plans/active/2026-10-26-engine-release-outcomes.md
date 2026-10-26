@@ -1,6 +1,6 @@
 # Engine resource-release outcomes
 
-Status: implemented. Focused scenarios, legacy/concurrent binding checks and repository gates passed. Implementation commit: `193487ac3b0409bb523fe5cb923222f4b4d55f2a`. Network commit: `413531dd7503c87ce89f21b69196f8c26eed909d`. Use the verification commands below to generate a fresh source-pinned replay. Generated declarations must match the native library used by the host. Native/device acceptance remains open.
+Status: implemented. Focused scenarios and legacy/concurrent binding checks passed. Local metadata, workspace check, formatting, Rust style, repository architecture and diff checks passed. The full repository CI job remains blocked by the existing `crypto-bigint` audit finding `RUSTSEC-2026-0387`; these local results do not mean that job passed. Implementation commit: `193487ac3b0409bb523fe5cb923222f4b4d55f2a`. Network commit: `413531dd7503c87ce89f21b69196f8c26eed909d`. Use the verification commands below to generate a fresh source-pinned replay. Generated declarations must match the native library used by the host. Native/device acceptance remains open.
 
 ## Owner and scope
 
