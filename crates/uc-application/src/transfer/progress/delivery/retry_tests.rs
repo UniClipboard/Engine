@@ -1,6 +1,7 @@
 //! 通过原worker观察实际轮次，受控port故意等待本机工作结束才返回。
 use super::{authority, peer, result, submit, Clock, UnusedLive, UnusedSnapshot};
 use crate::connectivity::ConnectivityError;
+use crate::transfer::progress::runtime::observe_reachability;
 use crate::transfer::progress::{
     ProgressExchangeDeadline, ProgressExchangeService, ProgressReceiveError,
     ProgressTaskDescriptor, ProgressTerminalRoundPort,
@@ -8,11 +9,12 @@ use crate::transfer::progress::{
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::ProgressTerminal;
 use uc_core::ids::DeviceId;
+use uc_core::ports::{PeerReachabilityChanged, ReachabilityState};
 
 struct Call {
     at: u64,
@@ -173,4 +175,97 @@ async fn actual_worker_merges_recovery_and_missed_slots_without_overlap_or_budge
         .unwrap();
     drop(service);
     assert!(calls.recv().await.is_none());
+}
+
+#[tokio::test]
+async fn production_reachability_observer_consumes_original_retry_slots_without_renewing_retention()
+{
+    for lagged in [false, true] {
+        let clock = Arc::new(Clock(AtomicU64::new(0)));
+        let (started, mut calls) = mpsc::channel(8);
+        let (service, worker) = ProgressExchangeService::new(
+            clock.clone(),
+            authority(&[(1, 1)]),
+            Arc::new(Round {
+                clock: clock.clone(),
+                started,
+            }),
+            Arc::new(UnusedSnapshot),
+            Arc::new(UnusedLive),
+        );
+        submit(&service, 1, 0);
+        let stop = CancellationToken::new();
+        let running = tokio::spawn(worker.run(stop.clone()));
+        next(&mut calls, &service, 0, 5)
+            .await
+            .finish
+            .send(())
+            .unwrap();
+        until(|| service.inner.state.lock().unwrap().active.is_empty()).await;
+        clock.0.store(2, Ordering::SeqCst);
+        service.inner.wake.notify_one();
+        next(&mut calls, &service, 2, 7)
+            .await
+            .finish
+            .send(())
+            .unwrap();
+        until(|| service.inner.state.lock().unwrap().active.is_empty()).await;
+        advance(&service, &clock, 4, 0).await;
+        let (events, receiver) = broadcast::channel(if lagged { 1 } else { 32 });
+        let event = |device, state| PeerReachabilityChanged {
+            device_id: peer(device),
+            state,
+            at: chrono::Utc::now(),
+        };
+        if lagged {
+            // 在观察者启动前溢出队列；最新离线值不能抹去一次保守核对机会。
+            for _ in 0..4 {
+                events.send(event(1, ReachabilityState::Offline)).unwrap();
+            }
+        }
+        let observing = tokio::spawn(observe_reachability(
+            receiver,
+            service.clone(),
+            stop.clone(),
+        ));
+        if !lagged {
+            events.send(event(1, ReachabilityState::Offline)).unwrap();
+            events.send(event(1, ReachabilityState::Unknown)).unwrap();
+            events.send(event(2, ReachabilityState::Online)).unwrap();
+            assert!(timeout(Duration::from_millis(30), calls.recv())
+                .await
+                .is_err());
+            events.send(event(1, ReachabilityState::Online)).unwrap();
+        }
+        let third = next(&mut calls, &service, 4, 9).await;
+        for _ in 0..20 {
+            events.send(event(1, ReachabilityState::Online)).unwrap();
+        }
+        advance(&service, &clock, 5, 1).await;
+        assert!(!third.cancel.is_cancelled());
+        assert!(timeout(Duration::from_millis(30), calls.recv())
+            .await
+            .is_err());
+        // 恢复机会不能延长原t0+600秒，更不能丢下已启动的本地结算。
+        advance(&service, &clock, 600, 1).await;
+        assert!(third.cancel.is_cancelled());
+        assert!(service.inner.state.lock().unwrap().entries.is_empty());
+        for _ in 0..20 {
+            events.send(event(1, ReachabilityState::Online)).unwrap();
+        }
+        assert!(timeout(Duration::from_millis(30), calls.recv())
+            .await
+            .is_err());
+        third.finish.send(()).unwrap();
+        until(|| service.inner.state.lock().unwrap().active.is_empty()).await;
+        stop.cancel();
+        timeout(Duration::from_secs(2), observing)
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }

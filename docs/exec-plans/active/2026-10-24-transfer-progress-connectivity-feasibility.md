@@ -768,3 +768,21 @@ NotRetained／Unsupported、初始等待、全量终态、重复回复、相同�
 相邻发送侧实际网络回归7测试全部通过（71.89秒），同时覆盖删除、成员/Space退休、离线与再次发送。
 这是同进程不同Engine实例的资料重开证明；独立进程崩溃、物理挂起和移动设备矩阵仍未执行。
 正式30/59保持，完整生命周期项不提前勾选。
+
+
+## 普通重连与原预算的主机验证
+
+生产恢复观察者复用原Space可达性事件，在同一Application运行期内将Online交给原交换服务。
+实际worker组合覆盖Offline／Unknown及无关peer不授予当前项机会，重复与丢失提示只合并机会；
+原终态t0不变，原600秒退休后不能复活，已开始的本地收尾仍受监督。组合测试0.16秒通过。
+
+原生真实网络测试经生产Router、handler、受管manager、producer及接收投影完成结果采用后丢ACK，
+实际关闭旧连接，再由同一原通知worker在逻辑595秒补发同一producer／attempt／result；
+断言新connection id不同，逻辑599秒原deadline有效、600秒失效，此后20次恢复机会仍不再发送。
+真实采用共2次且原成果保持，真实网络用例0.19秒通过。没有重新submit终态或新建意图伪装重连。
+复跑：`just cargo test -p uc-infra-p2p --lib real_reconnection_keeps_original_terminal_retention_and_does_not_replay_expired_result --locked -- --nocapture`。
+
+这里使用可注入经过时间，实际连接确已断开／重拨，600秒不是墙钟等待，也不代替物理系统挂起。
+Application完整1390通过／2跳过；原生入站7通过（0.43秒），真实Engine发送侧7通过。
+这些Engine场景同时验证原运行期的启动／关闭、删除、成员退休、暂停恢复、资料重开和再次发送。
+正式30/59保持，普通恢复机会不授予新成员权限、不恢复文件任务、不更改逐项事实或下载预算。

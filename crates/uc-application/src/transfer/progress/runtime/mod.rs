@@ -3,7 +3,10 @@ mod assembly;
 mod events;
 mod owner;
 mod ports;
+mod reachability;
 mod receive;
 pub(crate) use assembly::ProgressRuntimeAssembly;
 pub(crate) use owner::ProgressRuntime;
 pub use ports::{ProgressInboundFactory, TransferProgressNetwork};
+#[cfg(test)]
+pub(super) use reachability::observe_reachability;

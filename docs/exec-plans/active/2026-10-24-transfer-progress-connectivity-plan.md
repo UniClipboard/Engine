@@ -224,3 +224,13 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 测试fixture保留原安全存储实例供资料重开，不改变生产持久化或恢复策略。
 实际动作与证明边界见[主机验证](2026-10-24-transfer-progress-connectivity-feasibility.md#暂停恢复与同资料重开的主机验证)。
 后续仍须独立进程、普通重连预算与平台矩阵，正式30/59保持。
+
+
+### 2026-10-26：普通恢复机会的生产接线与原预算
+
+核对发现原补发服务的network_recovered仅在测试调用，生产恢复没有获得该机会。
+Application在Space运行期启动前订阅原可达性事件，由原ProgressRuntime监督观察者；
+只在线事件触发对应peer机会，丢失提示合并一次全局机会，原worker继续决定资格、次数和原截止。
+关闭仍由原运行期统一完成，不新增Engine步骤、持久通知或第二个补发循环。
+实际观察者／worker与真实连接重建证明见[验证记录](2026-10-24-transfer-progress-connectivity-feasibility.md#普通重连与原预算的主机验证)。
+本项不完成整个物理挂起／生命周期矩阵，正式30/59保持。
