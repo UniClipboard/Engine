@@ -170,7 +170,7 @@ impl Transition {
         };
         self.report_result(LifecycleAction::Suspend, result)?;
         // 进程网络日志在发布暂停前交还文件：宿主读到 Suspended 即可结束后台任务。
-        self.log_activity.end().await?;
+        self.report_result(LifecycleAction::Suspend, self.log_activity.end().await)?;
         self.record_open_files().await;
         self.publish(EngineState::Suspended).await;
         Ok(())
@@ -195,7 +195,7 @@ impl Transition {
             self.publish(EngineState::Quiesced).await;
         }
         // 先重开网络日志，恢复中的网络启动记录才能落盘；恢复失败时保持登记，直到下一次暂停成功交还。
-        self.log_activity.begin().await?;
+        self.report_result(LifecycleAction::Resume, self.log_activity.begin().await)?;
         self.report_result(
             LifecycleAction::Resume,
             self.runtime.resume(cancellation.clone()).await,

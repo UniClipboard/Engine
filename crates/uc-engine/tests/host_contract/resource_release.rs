@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use uc_engine::{
-    CreateSpaceInput, Engine, EngineConfig, HostCapabilities, HostCapabilityError,
-    HostCapabilityErrorCategory, HostClipboard, HostClipboardChange, HostClipboardChangeStream,
-    HostClipboardSnapshot, HostDirectories, Operation, SecretString,
+    CreateSpaceInput, Engine, EngineConfig, EngineEvent, EngineState, HostCapabilities,
+    HostCapabilityError, HostCapabilityErrorCategory, HostClipboard, HostClipboardChange,
+    HostClipboardChangeStream, HostClipboardSnapshot, HostDirectories, LifecycleAction, Operation,
+    SecretString,
 };
 
 use super::{EmptyClipboard, EmptyFiles, MemorySecureStorage};
@@ -146,5 +147,103 @@ async fn required_closer_failure_retains_real_lock_for_retry() {
     evidence(
         "required-closer-recovered",
         serde_json::json!({"release_confirmed":true,"previous_error_preserved":true,"independent_lock_available":true,"repeat_did_not_close_again":true,"calls":count}),
+    );
+}
+
+/// 独立进程防止进程观测关闭影响其他测试。
+#[tokio::test(flavor = "multi_thread")]
+async fn network_log_park_failure_emits_lifecycle_failure() {
+    const CHILD: &str = "UC_TEST_LOG_PARK_FAILURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "resource_release::network_log_park_failure_emits_lifecycle_failure",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    use uc_observability_runtime::{
+        DeploymentEnvironment, NetworkLogBudget, NetworkLogConfig, NetworkProcessRole,
+        ObservabilityConfig, ObservabilityResource, OperatingSystem, ProcessObservabilityRuntime,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let config = ObservabilityConfig::new(
+        ObservabilityResource::new(
+            "1.0.0",
+            DeploymentEnvironment::Test,
+            OperatingSystem::Other,
+            "test",
+        )
+        .unwrap(),
+    )
+    .with_network_logs(
+        NetworkLogConfig::new(
+            root.path().join("network"),
+            NetworkProcessRole::MobileApp,
+            NetworkLogBudget {
+                record_bytes: 1024,
+                queue_records: 16,
+                file_bytes: 4096,
+                run_bytes: 8192,
+                root_bytes: 16384,
+                retention: Duration::from_secs(60),
+            },
+        )
+        .unwrap(),
+    );
+    let handle = ProcessObservabilityRuntime::install(config)
+        .unwrap()
+        .handle();
+    let host = HostCapabilities::new(
+        HostDirectories::new(
+            root.path().join("private"),
+            root.path().join("cache"),
+            root.path().join("temp"),
+            root.path().join("logs"),
+        ),
+        Box::new(MemorySecureStorage::default()),
+        Box::new(EmptyClipboard),
+        Box::new(EmptyFiles),
+    );
+    let (engine, mut events) = Engine::start(EngineConfig::new("1.0.0"), host)
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || handle.shutdown(Duration::from_secs(5)))
+        .await
+        .unwrap();
+    let error = engine.suspend().await.unwrap_err();
+    assert_eq!(engine.lifecycle_state().await, EngineState::Quiesced);
+    let observed = tokio::time::timeout(Duration::from_millis(500), async {
+        while let Some(event) = events.next().await {
+            if let EngineEvent::LifecycleFailed {
+                action,
+                error: observed,
+            } = event
+            {
+                assert_eq!(action, LifecycleAction::Suspend);
+                assert_eq!(observed, error);
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    evidence(
+        "network-log-park-event",
+        serde_json::json!({
+            "caller_received_error": true, "state_quiesced": true,
+            "lifecycle_failure_observed": observed,
+            "injection": "process observability shutdown before Engine suspend",
+        }),
+    );
+    assert!(
+        observed,
+        "network-log park failure must emit LifecycleFailed"
     );
 }
