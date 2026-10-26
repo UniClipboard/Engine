@@ -77,7 +77,7 @@ pub(super) async fn assert_file_failure(
     }
 }
 
-async fn reconciled_view(
+pub(super) async fn reconciled_view(
     case: &ReceiveCase,
     received: &ReceiveProgressSummary,
     expected: OutboundProgressReconciliation,

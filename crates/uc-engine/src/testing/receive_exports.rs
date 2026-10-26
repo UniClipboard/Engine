@@ -16,7 +16,9 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::blob::BlobDigest;
 
 mod progress;
+mod queries;
 pub(crate) use progress::decorate_progress_wire;
+pub(crate) use queries::decorate_progress_queries;
 
 static FIXTURES: OnceLock<Mutex<HashMap<PathBuf, Weak<ReceiveExports>>>> = OnceLock::new();
 
@@ -36,6 +38,12 @@ pub(crate) struct ReceiveExports {
     pub read_paused: Notify,
     pub read_release: Semaphore,
     pub corrupt_read: AtomicBool,
+    pub hold_registrations: AtomicBool,
+    pub registration_held: Notify,
+    pub registration_release: Semaphore,
+    pub pause_snapshot_reply: AtomicBool,
+    pub snapshot_held: Notify,
+    pub snapshot_release: Semaphore,
     pub hold_terminals: AtomicBool,
     pub terminal_held: Notify,
     pub terminal_release: Semaphore,
@@ -61,6 +69,12 @@ impl ReceiveExports {
             read_paused: Notify::new(),
             read_release: Semaphore::new(0),
             corrupt_read: AtomicBool::new(false),
+            hold_registrations: AtomicBool::new(false),
+            registration_held: Notify::new(),
+            registration_release: Semaphore::new(0),
+            pause_snapshot_reply: AtomicBool::new(false),
+            snapshot_held: Notify::new(),
+            snapshot_release: Semaphore::new(0),
             hold_terminals: AtomicBool::new(false),
             terminal_held: Notify::new(),
             terminal_release: Semaphore::new(0),
@@ -82,6 +96,8 @@ impl Drop for ReleaseOnDrop {
         self.0.release.add_permits(1);
         self.0.read_release.add_permits(1);
         self.0.terminal_release.add_permits(1);
+        self.0.registration_release.add_permits(1);
+        self.0.snapshot_release.add_permits(1);
     }
 }
 

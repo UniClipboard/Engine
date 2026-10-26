@@ -92,7 +92,7 @@
 * [x] 完整快照和状态核对由 Application facade 提供；查询关联绑定认证设备及当前 Space，不暴露任意本地 entry 枚举。 AppFacade仅提供完整get/list/reconcile，使用原意图目录与当前成员范围；真实双Engine/SQLite/文件证明读取源端原条目和接收尝试，来源与本机接收条目不同，核对不增加导出。
 * [x] 实现 Running／Settled／Superseded／NotRetained／Unsupported／Unreachable，区分 AccessDenied、存储读取失败和损坏。 统一App分类保持完整source chain；明确授权拒绝不冒充Unavailable/离线，expected_attempt已被替换返回Superseded。规则/查询全覆盖及真实Settled/Superseded核对通过，Busy按实际调度返回。
 * [x] 将再次发起的核对接入原完整动作；运行中继续原任务、真实结果返回、缺失或旧版说明后显式新尝试、离线不重复下载。 原ResendEntry统一核对及明确确认，逐目标返回完整事实与重复风险；消息头Delivered不跳过文件核对。App完整1387通过/2跳过，真实Engine运行/结算/明确失败项重投及离线无重复下载通过，UniFFI47、NAPI21、移动验收宿主26项通过；完整固定旧端/Direct/Relay及设备矩阵仍由阶段5验收。
-* [ ] 查询快照后重试／删除竞争仍由原 owner 最终 CAS 和清理围栏决定；不新增远端强制下载或取消操作。
+* [x] 查询快照后重试／删除竞争仍由原 owner 最终 CAS 和清理围栏决定；不新增远端强制下载或取消操作。 真实双Engine在已取旧页后交错本机重试、接收端删除及源端删除；实际显式重发保持新attempt／四次获取导出，迟到快照不授旧重试权限，源删除将旧核对退休为Superseded且远端文件保持。App最终检查及SQLite事务CAS分层验证通过，见[快照竞争验证](2026-10-24-transfer-progress-connectivity-feasibility.md#查询快照与最终准入竞争验证)。
 * [x] 发送侧事件和完整快照可区分设备、尝试及逻辑项；Rust、UniFFI、N-API 同版本映射，不让宿主汇总或推断协议阶段。 三套稳定入口已接同一完整App能力；OutboundProgressChanged只提示重读，真实双Engine事件/完整视图通过。两绑定all-targets编译通过；NAPI大整数/未知总量映射测试通过。移动设备实机仍未执行。
 * [x] 删除 Engine OutboundProgressRuntime 中的业务投影／取消推断，保留必要的组装及完整能力 decorator。 Engine旧模块和空SyncSessionAssembly已删除；投影、核对、通知和实际关闭统一归Application，Engine只提供网络能力及稳定DTO映射。真实本地取消/关闭不被阻塞进度网络拖住。
 * [ ] 暂停／恢复／后台／系统挂起按原期限检查，普通重连不重置预算；离组／撤销／切 Space 先封口再监督停止。
