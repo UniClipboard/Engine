@@ -41,6 +41,8 @@ pub struct ProgressRegistration<I> {
 }
 
 pub enum RegistrationInput<I> {
+    /// 当前任务无法再核对，退休绑定和在途挑战，保留原身份与修订围栏。
+    InvalidateBinding,
     /// 缺少尝试关联的通知只能影响尚未确认的原意图，不能授予任务身份。
     UnattributedNotification {
         source: I,
@@ -86,6 +88,8 @@ pub enum RegistrationRefusal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationEffect {
+    /// 调用方同步退休活动绑定后才发布未确认视图；重新挑战前不能采用旧通知。
+    BindingInvalidated,
     /// 调用方先保存未确认视图，再发布变化；不得采用逐项事实、绑定或刷新联系。
     MarkUnconfirmed,
     /// 保存初始查询描述后才可发布完整事实；待完成挑战仍受该描述围栏约束，不发送Bound。
@@ -116,6 +120,11 @@ impl<I: Copy + Eq> ProgressRegistration<I> {
 
     pub fn apply(&mut self, input: RegistrationInput<I>) -> RegistrationEffect {
         match input {
+            Input::InvalidateBinding => {
+                self.pending = None;
+                self.binding = None;
+                Effect::BindingInvalidated
+            }
             Input::UnattributedNotification { source } => {
                 if source != self.source {
                     return Effect::Refused(Refusal::WrongSource);

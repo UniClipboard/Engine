@@ -5,7 +5,7 @@ use super::*;
 use crate::{EngineState, UnlockSpaceInput};
 use std::sync::atomic::Ordering;
 
-async fn interrupted_retry(case: &ReceiveCase, attempt: &str) -> ReceiveProgressSummary {
+pub(super) async fn interrupted_retry(case: &ReceiveCase, attempt: &str) -> ReceiveProgressSummary {
     let current = timeout(Duration::from_secs(20), async {
         loop {
             if let OperationResult::EntryReceiveProgress(Some(current)) = case

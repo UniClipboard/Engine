@@ -734,3 +734,20 @@ Application `transfer/progress/inbound`统一原生连接交接后的准入、�
 
 以上是主机功能及绑定映射证明，不是移动设备执行、物理挂起、完整旧新Direct/Relay或Collector可视化证明。
 固定旧端无法核对的决策已由明确Unsupported结果验收，完整旧端网络及设备矩阵仍按阶段5单独执行。
+
+
+## 会话退休后的确认验证
+
+原真实双Engine接收重试在第四次实际输出处暂停；接收端锁定等待结算并清理未提交输出，
+解锁后原完整再次发送查询返回NotRetained。修复前源端仍有1项运行，修复后应立即未知，
+保留2项已保存成果，不重新下载；若真实取消／失败已先确认，则保持真实终态。
+完整负责人仍为Application transfer/progress，接收结算和文件清理由原接收负责人承担。
+
+复跑：`just cargo test -p uc-engine --features dev-tools --lib outbound_progress::lifecycle --locked -- --nocapture`。
+该组同时覆盖源端Engine.suspend/resume后的投影退休、同一设备身份、已保存文件及默认不重下。
+这些是进程内真实Engine动作，物理系统挂起、完整进程重开、移动设备与Collector矩阵尚未执行。
+
+Core注册回归覆盖旧绑定、在途挑战失效及修订高水位；Application完整核对回归覆盖
+NotRetained／Unsupported、初始等待、全量终态、重复回复、相同快照恢复但不续期、跨范围和新意图隔离。
+实际结果：Core 394通过，Application 1389通过／2跳过；上述真实Engine组2通过（11.07秒）。
+正式30/59不因独立修复提前增加。

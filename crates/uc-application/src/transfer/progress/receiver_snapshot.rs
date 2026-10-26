@@ -1,7 +1,7 @@
 //! 原投影负责人完成快照采用；查询可确认初始任务，但不能伪造通知绑定。
 use super::{
-    fresh_notification, ProgressFreshnessInput, ProgressFreshnessView, State,
-    TransferProgressReceiver,
+    fresh_notification, refresh_view, ProgressFreshnessEffect, ProgressFreshnessInput,
+    ProgressFreshnessView, State, TransferProgressReceiver,
 };
 use crate::transfer::progress::{
     ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotTarget, ProgressTaskDescriptor,
@@ -47,12 +47,31 @@ impl TransferProgressReceiver {
             return Err(ProgressReceiveError::Stale);
         }
         let ProgressSnapshotRead::Complete(snapshot) = reply else {
-            // 未保留等回复没有完整事实可与并发登记合流，不能据此判断另一任务。
-            return if current == expected {
-                Ok(())
-            } else {
-                Err(ProgressReceiveError::Stale)
-            };
+            // 没有完整事实的回复不能跨登记范围应用；只退休当前无法再核对的活动绑定。
+            if current != expected {
+                return Err(ProgressReceiveError::Stale);
+            }
+            if matches!(
+                reply,
+                ProgressSnapshotRead::NotRetained | ProgressSnapshotRead::Unsupported
+            ) && current.is_some()
+                && state.freshness.view(None) != ProgressFreshnessView::Settled
+            {
+                let changed = state
+                    .freshness
+                    .apply(ProgressFreshnessInput::VerificationLost)
+                    == ProgressFreshnessEffect::Advanced;
+                state
+                    .registration
+                    .apply(RegistrationInput::InvalidateBinding);
+                let unbound = state.bound.take().is_some();
+                state.queried_scope = current;
+                state.view = ProgressFreshnessView::Unconfirmed;
+                if changed || unbound {
+                    state.version = state.version.saturating_add(1);
+                }
+            }
+            return Ok(());
         };
         if expected
             .is_some_and(|expected| current != Some(expected) || snapshot.descriptor != expected)
@@ -101,11 +120,17 @@ impl TransferProgressReceiver {
         }
         state.snapshot_revision = Some(snapshot.revision);
         state.snapshot_content = Some(snapshot.items.clone());
+        let restored = state
+            .freshness
+            .apply(ProgressFreshnessInput::VerificationRestored)
+            == ProgressFreshnessEffect::Advanced;
         if let ProgressSnapshotMerge::Adopt(items) = merged {
             state.items = state.plan.iter().copied().zip(items).collect();
             fresh_notification(&self.clock, &mut state);
             settle(&mut state);
             state.version = state.version.saturating_add(1);
+        } else if restored {
+            refresh_view(&self.clock, &mut state);
         }
         Ok(())
     }

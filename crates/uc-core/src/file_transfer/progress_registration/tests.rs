@@ -400,3 +400,75 @@ fn matching_pending_registration_can_finish_after_initial_query_confirmation() {
         Effect::CheckNotification
     );
 }
+
+#[test]
+fn invalidation_rejects_old_notifications_and_challenges_without_losing_revision_fence() {
+    let mut owner = ProgressRegistration::new(1);
+    owner.apply(Input::ReplaceConnection { generation: 1 });
+    owner.apply(Input::Challenge {
+        generation: 1,
+        nonce: 10,
+    });
+    assert_eq!(
+        owner.apply(Input::Describe {
+            generation: 1,
+            nonce: 10,
+            binding: 11,
+            descriptor: descriptor(2, 8, 3)
+        }),
+        Effect::SendBound
+    );
+    owner.apply(Input::Challenge {
+        generation: 1,
+        nonce: 12,
+    });
+    assert_eq!(
+        owner.apply(Input::InvalidateBinding),
+        Effect::BindingInvalidated
+    );
+    assert_eq!(
+        owner.apply(Input::Describe {
+            generation: 1,
+            nonce: 12,
+            binding: 13,
+            descriptor: descriptor(2, 8, 3)
+        }),
+        Effect::Refused(Refusal::StaleChallenge)
+    );
+    assert_eq!(
+        owner.apply(Input::Notification {
+            generation: 1,
+            binding: 11,
+            source: 1,
+            attempt: 3,
+            revision: 8
+        }),
+        Effect::Refused(Refusal::WrongBinding)
+    );
+    owner.apply(Input::Challenge {
+        generation: 1,
+        nonce: 14,
+    });
+    assert_eq!(
+        owner.apply(Input::Describe {
+            generation: 1,
+            nonce: 14,
+            binding: 15,
+            descriptor: descriptor(2, 7, 3)
+        }),
+        Effect::Refused(Refusal::RevisionRegressed)
+    );
+    owner.apply(Input::Challenge {
+        generation: 1,
+        nonce: 16,
+    });
+    assert_eq!(
+        owner.apply(Input::Describe {
+            generation: 1,
+            nonce: 16,
+            binding: 17,
+            descriptor: descriptor(2, 8, 3)
+        }),
+        Effect::SendBound
+    );
+}
