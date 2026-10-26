@@ -1000,3 +1000,21 @@ taskset -c 0 just cargo nextest run --profile default -p uc-engine --features de
 ```
 
 本任务只调整完整验证用例的外层预算，正式35/59保持；原成员撤销查询失败及设备／完整网络矩阵仍独立验收。
+
+
+## 成员撤销确认等待的暂态查询拒绝
+
+原#307的[Engine任务121578635878](https://github.com/UniClipboard/Engine/actions/runs/40324797401/job/121578635878)
+在真实撤销期间，对QueryDeviceGroupChoices直接unwrap，遇到1211／Unavailable／retryable=true后失败（5.039秒）。
+现有稳定查询将该类拒绝声明为可重试；它不能被当作撤销已确认，也不必让原有有界确认轮询立即失败。
+原成员准备轮询已经尊重这个契约，本例的撤销确认等待却假设查询永远成功。
+
+[原真实场景](../../../crates/uc-engine/src/testing/host_adapter_contract/receive_retry/lifecycle.rs)
+每次仍执行真实Query，只将首次成功响应受控替换为观察到的可重试1211；原真实错误和其他响应不被覆盖。
+旧unwrap在同一完整场景3.92秒红测复现相同公开错误；这只证明消费者对该响应的处理缺口，不声称注入了实际SQLite故障或定位原CI的全部下层来源。
+修正只在原10秒撤销确认内重查精确的1211／Unavailable／retryable组合，其他错误或结果立即失败。
+必须由后续真实完整查询确认本机仍Active、旧源已非Active后才释放导出；持续不可用或撤销未完成仍按原期限失败。
+
+原100毫秒只放弃等待、实际operation继续受监督、未归还导出仍存在、最终输出清理、原成功成果保持及缓存重试AccessDenied断言均保留。
+新增故障注入必须实际执行的检查，没有新增生产重试、稳定入口或持久化字段，也没有放宽原期限。
+修正后原完整场景3.37秒通过，nextest ci模式3.308秒通过；原8项资源验收全部通过（396.141秒含编译），严格6场景／7报告及FD／线程／任务、SDK tag／原生句柄、双1GiB与实际provider配额均通过；设备与完整网络矩阵保持原验收责任。
