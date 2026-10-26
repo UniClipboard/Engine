@@ -5,6 +5,7 @@ mod database;
 mod lifecycle;
 mod observation;
 mod outbound_progress;
+mod process_restart;
 mod redelivery;
 mod result_chain;
 mod save_failure;

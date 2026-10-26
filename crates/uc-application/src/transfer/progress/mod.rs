@@ -68,3 +68,9 @@ mod view;
 pub use view::SentEntryReconciliation;
 pub(crate) use view::{ProgressViewOwner, ReconcileSentEntryPort};
 pub use view::{TransferProgressQueryError, TransferProgressReconciliation};
+
+mod history;
+pub use history::{
+    ProgressHistoryEvidence, ProgressHistoryReadError, ProgressHistoryRepresentation,
+    ReadProgressHistoryPort,
+};

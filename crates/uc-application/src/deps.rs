@@ -541,6 +541,8 @@ pub struct ApplicationDeps {
     pub trusted_peer_repo: Arc<dyn uc_core::TrustedPeerRepositoryPort>,
     /// 记录剪贴板条目向各 peer 投递状态的仓储端口。
     pub entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
+    /// 既有发送归属与清单的有界只读能力。
+    pub progress_history: Arc<dyn ReadProgressHistoryPort>,
     /// 剪贴板领域端口。
     pub clipboard: ClipboardPorts,
     /// 安全领域端口。
@@ -663,3 +665,8 @@ pub use crate::transfer::progress::transfer_progress_connectivity_policy;
 pub use crate::transfer::progress::{ProgressInboundWirePort, TransferProgressTransport};
 
 pub use crate::transfer::progress::{ProgressInboundFactory, TransferProgressNetwork};
+
+pub use crate::transfer::progress::{
+    ProgressHistoryEvidence, ProgressHistoryReadError, ProgressHistoryRepresentation,
+    ReadProgressHistoryPort,
+};

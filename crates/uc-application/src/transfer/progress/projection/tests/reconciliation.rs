@@ -697,6 +697,32 @@ impl crate::deps::CurrentSpaceMemberScopePort for UsableScope {
     }
 }
 
+struct UnexpectedHistory;
+#[async_trait]
+impl crate::transfer::progress::ReadProgressHistoryPort for UnexpectedHistory {
+    async fn list_owned(
+        &self,
+        _: uc_core::ids::DeviceId,
+        _: &[uc_core::ids::DeviceId],
+    ) -> Result<
+        Vec<(uc_core::ids::DeviceId, uc_core::ids::EntryId)>,
+        crate::transfer::progress::ProgressHistoryReadError,
+    > {
+        panic!("replaced expected attempt must refuse before history I/O")
+    }
+    async fn read_owned(
+        &self,
+        _: uc_core::ids::DeviceId,
+        _: uc_core::ids::DeviceId,
+        _: &uc_core::ids::EntryId,
+    ) -> Result<
+        Option<crate::transfer::progress::ProgressHistoryEvidence>,
+        crate::transfer::progress::ProgressHistoryReadError,
+    > {
+        panic!("replaced expected attempt must refuse before history I/O")
+    }
+}
+
 #[tokio::test]
 async fn complete_view_query_refuses_a_replaced_expected_attempt_before_network_work() {
     use crate::transfer::progress::view::{ProgressViewOwner, TransferProgressReconciliation};
@@ -707,6 +733,8 @@ async fn complete_view_query_refuses_a_replaced_expected_attempt_before_network_
         fixture.registry.clone(),
         fixture.reconciler.clone(),
         Arc::new(UsableScope(fixture.key.peer)),
+        Arc::new(UnexpectedHistory),
+        fixture.key.peer,
     );
     let source = EntryId::from(Uuid::from_bytes(fixture.key.source.bytes()).to_string());
     let old = Uuid::from_bytes(id(999).bytes()).to_string();
@@ -824,3 +852,5 @@ async fn missing_or_unsupported_queries_do_not_erase_adopted_terminal_facts_or_b
         }
     }
 }
+
+mod history;
