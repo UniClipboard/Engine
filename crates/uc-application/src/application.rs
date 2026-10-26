@@ -471,6 +471,7 @@ impl ApplicationAssembly {
         } = space;
         let re_pairing_state_store = Arc::clone(&runtime.admission.re_pairing_state_store);
         let space = Arc::new(SpaceFacade::new_dormant(SpaceFacadeDeps {
+            scope_retirement: Arc::new(progress.session.projections.clone()),
             connection_hints,
             application: self.deps.clone(),
             session: SpaceSessionDeps {

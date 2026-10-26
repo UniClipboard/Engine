@@ -706,3 +706,16 @@ Application `transfer/progress/inbound`统一原生连接交接后的准入、�
 - 本次候选Rust源码通过metadata、workspace/all-targets、fmt、Rust style、Engine repository及diff检查。这里的定向结论不冒充最新源码的完整Core/App/P2P测试全集，也不复用父PR的CI作为当前head结论。
 
 尚未完成：原再次发送动作内核对、删除/成员/会话退休、实际表示解密暂停的全链路证明，以及新新/固定旧端/三端/Direct/Relay/1GiB、Collector和设备矩阵。物理挂起及移动产品宿主未执行，保持跳过及合入前必需验收，不据此登记整片完成。
+
+
+## 成员发布与在途意图退休的主机验证
+
+成员正式提交、数据库切换和丢弃可信缓存时，同步退休发送侧派生关联；原发送在首次等待前取得的意图
+不能在目标退休后重新建卡。成员签名事实仍由原 Owner 提交，派生清理不产生第二份成员账本或文件取消结果。
+
+- Application 完整库测试：1384 通过、2 跳过。新增回归先证实原 `remove_peer` 允许旧在途动作重新建卡，再验证单目标退休、其他目标保留及长期阻塞动作的有界退休记录。
+- [正式成员组合测试](../../../crates/uc-application/src/space/membership/remove_space_member/tests.rs)不消费 watch，验证移除、同设备重新加入及单次输入更换实例、数据库世代变化、失败提交封口与重载。普通成员修订保留其他设备结果。
+- `just cargo test -p uc-engine --features dev-tools --lib real_engine_membership_removal_and_space_reset_retire_outbound_progress_and_keep_saved_files --locked`：1 通过（两种实际动作，10.90 秒）。真实双 Engine、P2P、SQLite 和文件输出证明原 `RemoveMember`／`ResetSpace` 后列表清空、旧目标查询明确拒绝，接收端既有成果保持。
+
+此证明覆盖成员发布与投影清理；暂停／恢复、后台、物理挂起、全部网络及设备矩阵仍按计划单独验收。
+正式计划保持 29/59，不以派生关联清理代替网络工作、原接收及资源的完整停止证明。
