@@ -244,22 +244,120 @@ pub fn socket_v6() -> Result<UdpSocket, SocketError> {
     })
 }
 
+/// UniClipboard 补丁：接口套接字创建的测试观察点。
+///
+/// 生产构建中为零大小类型，不改变行为；单元测试用它注入创建失败，并以弱引用
+/// 观察每个接口套接字是否已被所有持有者释放。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InterfaceProbe(#[cfg(test)] Option<Arc<probe::State>>);
+
+impl InterfaceProbe {
+    fn create(&self, addr: Ipv4Addr) -> Result<Arc<UdpSocket>, SocketError> {
+        #[cfg(test)]
+        if let Some(state) = &self.0 {
+            state.before_create(addr)?;
+        }
+        let socket = Arc::new(socket_v4(Some(addr))?);
+        #[cfg(test)]
+        if let Some(state) = &self.0 {
+            state.created_socket(addr, &socket);
+        }
+        Ok(socket)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod probe {
+    use super::{InterfaceProbe, SocketError, IP};
+    use std::{
+        net::Ipv4Addr,
+        sync::{Arc, Mutex, Weak},
+    };
+    use tokio::net::UdpSocket;
+
+    #[derive(Debug, Default)]
+    pub(crate) struct State {
+        inner: Mutex<Inner>,
+    }
+
+    #[derive(Debug, Default)]
+    struct Inner {
+        failures_remaining: usize,
+        attempts: Vec<Ipv4Addr>,
+        created: Vec<(Ipv4Addr, Weak<UdpSocket>)>,
+    }
+
+    impl State {
+        pub(crate) fn probe(self: &Arc<Self>) -> InterfaceProbe {
+            InterfaceProbe(Some(Arc::clone(self)))
+        }
+
+        /// 让接下来的 `count` 次接口套接字创建失败。
+        pub(crate) fn fail_next(&self, count: usize) {
+            self.inner.lock().unwrap().failures_remaining = count;
+        }
+
+        pub(crate) fn attempts(&self, addr: Ipv4Addr) -> usize {
+            let inner = self.inner.lock().unwrap();
+            inner.attempts.iter().filter(|a| **a == addr).count()
+        }
+
+        pub(crate) fn created(&self, addr: Ipv4Addr) -> usize {
+            let inner = self.inner.lock().unwrap();
+            inner.created.iter().filter(|(a, _)| *a == addr).count()
+        }
+
+        /// 仍被任意持有者（接口表、接收者或发送中的克隆）引用的接口套接字数量。
+        pub(crate) fn live(&self, addr: Ipv4Addr) -> usize {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .created
+                .iter()
+                .filter(|(a, socket)| *a == addr && socket.strong_count() > 0)
+                .count()
+        }
+
+        pub(super) fn before_create(&self, addr: Ipv4Addr) -> Result<(), SocketError> {
+            let mut inner = self.inner.lock().unwrap();
+            inner.attempts.push(addr);
+            if inner.failures_remaining > 0 {
+                inner.failures_remaining -= 1;
+                return Err(SocketError::NewSocket {
+                    domain: IP::Ipv4,
+                    source: std::io::Error::other("injected interface socket failure"),
+                });
+            }
+            Ok(())
+        }
+
+        pub(super) fn created_socket(&self, addr: Ipv4Addr, socket: &Arc<UdpSocket>) {
+            let mut inner = self.inner.lock().unwrap();
+            inner.created.push((addr, Arc::downgrade(socket)));
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Sockets {
     v4: Option<Arc<UdpSocket>>,
     v6: Option<Arc<UdpSocket>>,
     interface_sockets_v4: Arc<RwLock<HashMap<Ipv4Addr, Arc<UdpSocket>>>>,
+    probe: InterfaceProbe,
 }
 
 impl Sockets {
-    pub fn new(class: IpClass, multicast_interfaces: Vec<Ipv4Addr>) -> Result<Self, SocketError> {
+    pub(crate) fn new(
+        class: IpClass,
+        multicast_interfaces: Vec<Ipv4Addr>,
+        probe: InterfaceProbe,
+    ) -> Result<Self, SocketError> {
         // Create interface-specific sockets for multi-interface mode
         let mut interface_sockets_v4 = HashMap::new();
         for addr in &multicast_interfaces {
-            match socket_v4(Some(*addr)) {
+            match probe.create(*addr) {
                 Ok(socket) => {
                     tracing::debug!("Created interface-specific socket for {}", addr);
-                    interface_sockets_v4.insert(*addr, Arc::new(socket));
+                    interface_sockets_v4.insert(*addr, socket);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to create interface socket for {}: {}", addr, e);
@@ -274,6 +372,7 @@ impl Sockets {
                     v4: socket_v4(None).ok().map(Arc::new),
                     v6: socket_v6().ok().map(Arc::new),
                     interface_sockets_v4: interface_sockets_v4.clone(),
+                    probe,
                 };
                 if socket.v4.is_none() && socket.v6.is_none() {
                     return Err(SocketError::CannotBind);
@@ -290,6 +389,7 @@ impl Sockets {
                     .then(|| socket_v6().map(Arc::new))
                     .transpose()?,
                 interface_sockets_v4: interface_sockets_v4.clone(),
+                probe,
             },
         };
         for addr in sockets.get_all_interface_addresses_v4() {
@@ -353,14 +453,14 @@ impl Sockets {
         }
 
         // Create the interface-specific socket for sending
-        let socket = socket_v4(Some(addr))?;
+        let socket = self.probe.create(addr)?;
 
         {
             let mut interfaces = self.interface_sockets_v4.write().unwrap();
             // need to recheck since we dropped the lock in between
             interfaces.entry(addr).or_insert_with(|| {
                 tracing::info!("Added interface {} for multicast", addr);
-                Arc::new(socket)
+                socket
             });
         }
         self.join_group_on_main_v4(addr);

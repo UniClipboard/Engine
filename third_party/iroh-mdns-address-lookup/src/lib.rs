@@ -163,7 +163,8 @@ impl Subscribers {
 
 /// 返回当前应参与 mDNS 组播的本机 IPv4 接口地址。
 ///
-/// 启动时调用一次；之后每当本机发布的地址发生变化时再调用，并按差异增删接口。
+/// 启动时调用一次；之后每当本机发布的地址发生变化时再调用。结果是期望集合，
+/// 由 swarm-discovery 负责增删接口并重试安装失败的接口。
 #[derive(Clone)]
 pub struct MulticastInterfacesV4(Arc<dyn Fn() -> Vec<Ipv4Addr> + Send + Sync>);
 
@@ -207,7 +208,8 @@ impl MdnsAddressLookupBuilder {
     /// 在全部给定的 IPv4 接口上收发 mDNS，而不只是默认路由所在的接口。
     ///
     /// 未设置时保持上游行为：只使用默认路由接口。来源返回空列表时同样退回默认接口。
-    /// 单个接口无法建立组播套接字时只跳过该接口，不影响服务启动。
+    /// 单个接口无法建立组播套接字时只跳过该接口，不影响服务启动；该接口仍在期望集合中时
+    /// 按 1 秒起、最长 60 秒的有界退避重试。
     pub fn multicast_interfaces_v4(mut self, interfaces: MulticastInterfacesV4) -> Self {
         self.multicast_interfaces_v4 = Some(interfaces);
         self
@@ -322,19 +324,22 @@ impl MdnsAddressLookup {
         let (send, mut recv) = mpsc::channel(64);
         let task_sender = send.clone();
         let rt = tokio::runtime::Handle::current();
-        let mut active_interfaces_v4 = multicast_interfaces_v4
+        let initial_interfaces_v4 = multicast_interfaces_v4
             .as_ref()
-            .map(MulticastInterfacesV4::snapshot)
-            .unwrap_or_default();
+            .map(MulticastInterfacesV4::snapshot);
         let address_lookup = MdnsAddressLookup::spawn_discoverer(
             endpoint_id,
             advertise,
             task_sender.clone(),
             BTreeSet::new(),
-            active_interfaces_v4.iter().copied().collect(),
+            initial_interfaces_v4.iter().flatten().copied().collect(),
             service_name,
             &rt,
         )?;
+        // 接口集合只表达期望；是否安装成功由 swarm-discovery 判断，初始失败的接口由其重试。
+        if let Some(initial) = initial_interfaces_v4 {
+            address_lookup.set_interfaces_v4(initial);
+        }
 
         let local_addrs: Watchable<Option<EndpointData>> = Watchable::default();
         let mut addrs_change = local_addrs.watch();
@@ -355,16 +360,10 @@ impl MdnsAddressLookup {
                     }
                     Ok(Some(data)) = addrs_change.updated() => {
                         tracing::trace!(?data, "Mdns address changed");
-                        // 本机发布地址变化通常意味着网卡变化：按最新快照增删组播接口。
+                        // 本机发布地址变化通常意味着网卡变化：把最新快照作为期望集合交给
+                        // swarm-discovery，由它增删接口；集合未变时也会立即重试未安装的接口。
                         if let Some(interfaces) = &multicast_interfaces_v4 {
-                            let next = interfaces.snapshot();
-                            for removed in active_interfaces_v4.difference(&next) {
-                                address_lookup.remove_interface_v4(*removed);
-                            }
-                            for added in next.difference(&active_interfaces_v4) {
-                                address_lookup.add_interface_v4(*added);
-                            }
-                            active_interfaces_v4 = next;
+                            address_lookup.set_interfaces_v4(interfaces.snapshot());
                         }
                         address_lookup.remove_all();
 

@@ -8,9 +8,9 @@ mod updater;
 
 use acto::{AcTokio, ActoHandle, ActoRef, ActoRuntime, SupervisionRef, TokioJoinHandle};
 use hickory_proto::rr::Name;
-use socket::{SocketError, Sockets};
+use socket::{InterfaceProbe, SocketError, Sockets};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Display,
     net::{IpAddr, Ipv4Addr},
     str::FromStr,
@@ -102,6 +102,7 @@ pub struct Discoverer {
     phi: f32,
     class: IpClass,
     multicast_interfaces: Vec<Ipv4Addr>,
+    interface_probe: InterfaceProbe,
 }
 
 /// A peer discovered by the swarm discovery service.
@@ -238,6 +239,7 @@ impl Discoverer {
             phi: 1.0,
             class: IpClass::default(),
             multicast_interfaces: Vec::new(),
+            interface_probe: InterfaceProbe::default(),
         }
     }
 
@@ -371,13 +373,23 @@ impl Discoverer {
         self
     }
 
+    #[cfg(test)]
+    fn with_interface_probe(mut self, probe: InterfaceProbe) -> Self {
+        self.interface_probe = probe;
+        self
+    }
+
     /// Start the discovery service.
     ///
     /// This will spawn asynchronous tasks and return a guard which will stop the discovery when dropped.
     /// Changing the configuration is done by stopping the discovery and starting a new one.
     pub fn spawn(self, handle: &Handle) -> Result<DropGuard, SpawnError> {
         let _entered = handle.enter();
-        let sockets = Sockets::new(self.class, self.multicast_interfaces.clone())?;
+        let sockets = Sockets::new(
+            self.class,
+            self.multicast_interfaces.clone(),
+            self.interface_probe.clone(),
+        )?;
         tracing::trace!(?sockets, "created new sockets");
 
         let service_name = Name::from_str(&format!("_{}.{}.local.", self.name, self.protocol))
@@ -489,6 +501,19 @@ impl DropGuard {
         self.aref
             .send(guardian::Input::RemoveInterface(IpAddr::V4(interface)));
     }
+
+    /// 声明期望参与组播的完整 IPv4 接口集合（UniClipboard 补丁）。
+    ///
+    /// 后台把已安装接口调整为该集合：移除多余接口时先停止并等待其接收者退出，再释放
+    /// 套接字；只有套接字与接收者都已建立才算安装成功。仍有接口未安装时按 1 秒起、
+    /// 最长 60 秒的退避重试，直到安装成功或该接口离开期望集合；重复提交相同集合会立即
+    /// 再尝试一次。首次调用后，`add_interface_v4`/`remove_interface_v4` 也修改这个集合。
+    ///
+    /// 只影响 IPv4；IPv6 组播始终使用默认接口。
+    pub fn set_interfaces_v4(&self, interfaces: impl IntoIterator<Item = Ipv4Addr>) {
+        let interfaces: BTreeSet<Ipv4Addr> = interfaces.into_iter().collect();
+        self.aref.send(guardian::Input::SetInterfaces(interfaces));
+    }
 }
 
 impl Drop for DropGuard {
@@ -510,7 +535,10 @@ fn validate_txt_attribute(key: &str, value: Option<&str>) -> Result<(), TxtAttri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::{
+        net::{Ipv4Addr, Ipv6Addr},
+        sync::Arc,
+    };
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -592,5 +620,118 @@ mod tests {
 
         // Stop the discoverers
         drop(guard1);
+    }
+
+    /// 轮询条件直到成立；超时时以条件名称失败。
+    async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    /// 只在回环网卡上收发的后来者；被测发现服务收到它即说明接收路径仍然工作。
+    fn spawn_late_peer(service: String, interface: Ipv4Addr) -> DropGuard {
+        Discoverer::new(service, "late_peer".to_string())
+            .with_addrs(8000, [IpAddr::V4(interface)])
+            .with_multicast_interfaces_v4(vec![interface])
+            .with_cadence(Duration::from_millis(500))
+            .spawn(&tokio::runtime::Handle::current())
+            .expect("spawn late peer")
+    }
+
+    fn late_peer_callback(tx: mpsc::Sender<()>) -> impl FnMut(&str, &Peer) + Send + 'static {
+        move |id, peer| {
+            if id == "late_peer" && !peer.is_expiry() {
+                tx.try_send(()).ok();
+            }
+        }
+    }
+
+    /// UniClipboard 补丁：反复增删同一受控接口后，接收者与套接字数量回到基线，
+    /// 保留接口上的发现照常工作。
+    ///
+    /// Linux 上整个 127.0.0.0/8 都位于回环网卡，因此 127.0.0.2 可作为不影响主机网络的
+    /// 受控接口；其他平台没有可用的第二个回环地址，跳过本测试。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn removed_interface_releases_receiver_and_socket_while_retained_interface_discovers() {
+        let retained = Ipv4Addr::LOCALHOST;
+        let churned = Ipv4Addr::new(127, 0, 0, 2);
+        let service = format!("churn{}", std::process::id());
+        let state = Arc::new(socket::probe::State::default());
+        let (tx, mut rx) = mpsc::channel(10);
+        let guard = Discoverer::new(service.clone(), "churning_peer".to_string())
+            .with_cadence(Duration::from_millis(500))
+            .with_interface_probe(state.probe())
+            .with_callback(late_peer_callback(tx))
+            .spawn(&tokio::runtime::Handle::current())
+            .expect("spawn churning discoverer");
+        guard.set_interfaces_v4([retained]);
+        wait_until("retained interface installed", || state.live(retained) == 1).await;
+
+        for round in 1..=5 {
+            guard.set_interfaces_v4([retained, churned]);
+            wait_until("controlled interface installed", || {
+                state.live(churned) == 1
+            })
+            .await;
+            guard.set_interfaces_v4([retained]);
+            wait_until("controlled interface released", || state.live(churned) == 0).await;
+            assert_eq!(state.created(churned), round);
+        }
+        assert_eq!(state.live(retained), 1);
+        assert_eq!(state.created(retained), 1);
+
+        let _late = spawn_late_peer(service, retained);
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("retained interface still discovers new peers")
+            .expect("callback channel open");
+    }
+
+    /// UniClipboard 补丁：初始创建与首次协调都失败后，期望集合保持不变，后台重试
+    /// 在套接字真正建立后才把接口算作已安装。
+    #[tokio::test]
+    async fn failed_interface_installation_is_retried_without_a_new_interface_set() {
+        let interface = Ipv4Addr::LOCALHOST;
+        let service = format!("retry{}", std::process::id());
+        let state = Arc::new(socket::probe::State::default());
+        state.fail_next(2);
+        let (tx, mut rx) = mpsc::channel(10);
+        let guard = Discoverer::new(service.clone(), "retrying_peer".to_string())
+            .with_multicast_interfaces_v4(vec![interface])
+            .with_cadence(Duration::from_millis(500))
+            .with_interface_probe(state.probe())
+            .with_callback(late_peer_callback(tx))
+            .spawn(&tokio::runtime::Handle::current())
+            .expect("spawn retrying discoverer");
+        assert_eq!(state.attempts(interface), 1, "initial creation attempted");
+        assert_eq!(state.live(interface), 0, "initial failure is not installed");
+
+        guard.set_interfaces_v4([interface]);
+        wait_until("first reconciliation attempt", || {
+            state.attempts(interface) >= 2
+        })
+        .await;
+        assert_eq!(
+            state.live(interface),
+            0,
+            "a failed addition is not installed"
+        );
+
+        // 不再提交新的期望集合：只靠后台重试完成安装。
+        wait_until("retried installation", || state.live(interface) == 1).await;
+        assert_eq!(state.attempts(interface), 3);
+
+        let _late = spawn_late_peer(service, interface);
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("installed interface discovers peers")
+            .expect("callback channel open");
+        drop(guard);
     }
 }
