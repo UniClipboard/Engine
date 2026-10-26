@@ -1,4 +1,5 @@
 //! 稳定发送侧操作读取真实接收、SQLite结算和文件成果；核对不能启动新下载。
+mod lifecycle;
 use super::*;
 use crate::{
     OutboundProgressBatchState, OutboundProgressFreshness, OutboundProgressInput,

@@ -5,7 +5,7 @@ use crate::transfer::progress::{
     ProgressReceiverPort, ProgressSnapshot, ProgressSnapshotRead, ProgressSnapshotRound,
     ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceTask,
     ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, TransferProgressReconciler,
+    ProgressTerminalRoundPort, ProgressUpdateNotice, TransferProgressReconciler,
 };
 use async_trait::async_trait;
 use futures::poll;
@@ -606,7 +606,7 @@ async fn late_non_snapshot_reply_cannot_cross_a_registration_scope_change() {
 }
 
 #[tokio::test]
-async fn unchanged_non_snapshot_replies_preserve_the_result_and_do_not_publish_facts() {
+async fn non_snapshot_replies_only_invalidate_confirmation_when_task_cannot_be_verified() {
     for registered in [true, false] {
         for reply in 0..5 {
             let fixture = Fixture::new(vec![terminal(0), terminal(1)], registered).await;
@@ -624,14 +624,22 @@ async fn unchanged_non_snapshot_replies_preserve_the_result_and_do_not_publish_f
                 assert_eq!(current.revision, 2);
             }
             let after = fixture.registry.snapshot(fixture.key).unwrap();
-            assert_eq!(after.version, before.version);
             assert_eq!(after.items, before.items);
-            assert!(after.task == before.task && after.bound == before.bound);
-            assert_eq!(after.freshness.unwrap(), before.freshness.unwrap());
-            assert!(matches!(
-                events.try_recv(),
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-            ));
+            assert!(after.task == before.task);
+            if reply < 2 && before.task.is_some() {
+                assert!(after.version > before.version);
+                assert_eq!(after.freshness.unwrap(), ProgressFreshnessView::Unconfirmed);
+                assert!(after.bound.is_none());
+                assert!(events.try_recv().is_ok());
+            } else {
+                assert_eq!(after.version, before.version);
+                assert!(after.bound == before.bound);
+                assert_eq!(after.freshness.unwrap(), before.freshness.unwrap());
+                assert!(matches!(
+                    events.try_recv(),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                ));
+            }
             fixture.shutdown().await;
         }
     }
@@ -721,4 +729,98 @@ async fn complete_view_query_refuses_a_replaced_expected_attempt_before_network_
             .is_err()
     );
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn unretained_current_task_keeps_successes_but_loses_live_confirmation_and_old_binding() {
+    for registered in [true, false] {
+        for reply in 0..2 {
+            let fixture = Fixture::new(vec![terminal(0), active(1, 2, 3)], registered).await;
+            assert!(fixture.refresh().await.is_ok());
+            let before = fixture.registry.snapshot(fixture.key).unwrap();
+            assert_eq!(before.freshness.unwrap(), ProgressFreshnessView::Live);
+            *fixture.query.reply.lock().unwrap() = Some(non_snapshot_reply(reply, fixture.key));
+            let result = fixture.refresh().await;
+            assert!(result.is_ok());
+            let after = fixture.registry.snapshot(fixture.key).unwrap();
+            assert_eq!(after.freshness.unwrap(), ProgressFreshnessView::Unconfirmed);
+            assert_eq!(after.summary.counts.completed, 1);
+            assert_eq!(after.summary.counts.unconfirmed, 1);
+            assert_eq!(after.items, before.items);
+            assert!(after.task == before.task);
+            if let Some(bound) = fixture.bound {
+                let ProgressItemState::Active(update) = active(1, 3, 4) else {
+                    unreachable!()
+                };
+                assert!(matches!(
+                    fixture
+                        .registry
+                        .adopt_update(
+                            &fixture.key.peer,
+                            1,
+                            ProgressUpdateNotice {
+                                binding: bound.binding,
+                                source: fixture.key.source,
+                                attempt: bound.descriptor.attempt,
+                                revision: bound.descriptor.revision,
+                                update
+                            }
+                        )
+                        .await,
+                    Err(ProgressReceiveError::Stale)
+                ));
+            }
+            let version = fixture.registry.snapshot(fixture.key).unwrap().version;
+            *fixture.query.reply.lock().unwrap() = Some(non_snapshot_reply(reply, fixture.key));
+            assert!(fixture.refresh().await.is_ok());
+            assert_eq!(
+                fixture.registry.snapshot(fixture.key).unwrap().version,
+                version
+            );
+            // 完整核对可以恢复确认，但相同快照不延长最初有效联系期限。
+            fixture.clock.0.store(50, Ordering::SeqCst);
+            assert!(fixture.refresh().await.is_ok());
+            assert_eq!(
+                fixture
+                    .registry
+                    .snapshot(fixture.key)
+                    .unwrap()
+                    .freshness
+                    .unwrap(),
+                ProgressFreshnessView::Live
+            );
+            fixture.clock.0.store(60, Ordering::SeqCst);
+            assert_eq!(
+                fixture
+                    .registry
+                    .snapshot(fixture.key)
+                    .unwrap()
+                    .freshness
+                    .unwrap(),
+                ProgressFreshnessView::Unconfirmed
+            );
+            fixture.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_or_unsupported_queries_do_not_erase_adopted_terminal_facts_or_binding() {
+    for registered in [true, false] {
+        for reply in 0..2 {
+            let fixture = Fixture::new(vec![terminal(0), terminal(1)], registered).await;
+            assert!(fixture.refresh().await.is_ok());
+            let before = fixture.registry.snapshot(fixture.key).unwrap();
+            assert_eq!(before.freshness.unwrap(), ProgressFreshnessView::Settled);
+            *fixture.query.reply.lock().unwrap() = Some(non_snapshot_reply(reply, fixture.key));
+            assert!(fixture.refresh().await.is_ok());
+            let after = fixture.registry.snapshot(fixture.key).unwrap();
+            assert_eq!(after.version, before.version);
+            assert_eq!(after.items, before.items);
+            assert_eq!(after.summary, before.summary);
+            assert!(after.task == before.task && after.bound == before.bound);
+            assert_eq!(after.freshness.unwrap(), ProgressFreshnessView::Settled);
+            fixture.shutdown().await;
+        }
+    }
 }

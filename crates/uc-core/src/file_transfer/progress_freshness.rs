@@ -22,6 +22,10 @@ pub enum ProgressFreshnessInput {
         now: Duration,
     },
     ContinuityLost,
+    /// 当前任务无法核对；只改变确认程度，保留原联系时间与已知终态。
+    VerificationLost,
+    /// 完整当前事实重新通过核对；不续期原有效联系。
+    VerificationRestored,
     Settled,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +41,7 @@ pub struct ProgressFreshness {
     sequence: Option<u64>,
     received: bool,
     settled: bool,
+    verification_lost: bool,
 }
 impl ProgressFreshness {
     /// 原完整发送负责人接受意图时建立首次期限；登记不得重建此状态。
@@ -47,11 +52,15 @@ impl ProgressFreshness {
             sequence: None,
             received: false,
             settled: false,
+            verification_lost: false,
         }
     }
     pub fn view(&self, now: Option<Duration>) -> ProgressFreshnessView {
         if self.settled {
             return ProgressFreshnessView::Settled;
+        }
+        if self.verification_lost {
+            return ProgressFreshnessView::Unconfirmed;
         }
         if self
             .last
@@ -77,6 +86,7 @@ impl ProgressFreshness {
             self.last = self.accepted;
             self.received = false;
             self.settled = false;
+            self.verification_lost = false;
             return ProgressFreshnessEffect::Advanced;
         }
         if matches!(input, ProgressFreshnessInput::NewProducer) {
@@ -90,12 +100,25 @@ impl ProgressFreshness {
             ProgressFreshnessInput::NewAttempt | ProgressFreshnessInput::NewProducer => {
                 return ProgressFreshnessEffect::Ignored
             }
+            ProgressFreshnessInput::VerificationLost => {
+                if self.verification_lost {
+                    return ProgressFreshnessEffect::Ignored;
+                }
+                self.verification_lost = true;
+            }
+            ProgressFreshnessInput::VerificationRestored => {
+                if !self.verification_lost {
+                    return ProgressFreshnessEffect::Ignored;
+                }
+                self.verification_lost = false;
+            }
             ProgressFreshnessInput::Settled => self.settled = true,
             ProgressFreshnessInput::ContinuityLost => {
                 self.last = None;
                 self.accepted = None;
             }
             ProgressFreshnessInput::Notification(now) => {
+                self.verification_lost = false;
                 self.last = Some(self.last.map_or(now, |old| old.max(now)));
                 self.received = true;
             }
@@ -104,6 +127,7 @@ impl ProgressFreshness {
                     return ProgressFreshnessEffect::Ignored;
                 }
                 self.sequence = Some(sequence);
+                self.verification_lost = false;
                 self.last = Some(self.last.map_or(now, |old| old.max(now)));
                 self.received = true;
             }
