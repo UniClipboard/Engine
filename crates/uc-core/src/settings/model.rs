@@ -276,6 +276,15 @@ pub struct NetworkSettings {
     /// cost of reduced throughput on LAN paths. Requires daemon restart.
     #[serde(default)]
     pub congestion_controller: CongestionController,
+
+    /// P2P 直连使用的固定 UDP 端口。
+    ///
+    /// `None`（默认）= 每次启动由系统分配随机端口；`Some(port)` = IPv4 与 IPv6
+    /// 都监听同一端口，使对端保存的直连地址在重启后仍然有效，也便于防火墙、
+    /// 端口转发或 WireGuard 等隧道只放行一个已知端口。`0` 与 `None` 等价。
+    /// 端口被占用时网络节点启动失败。环境变量 `UC_IROH_BIND_PORT` 优先于本字段。
+    /// 修改后需重启 daemon 生效（iroh endpoint bind-time 常量）。
+    pub bind_port: Option<u16>,
 }
 
 // ======================================================================

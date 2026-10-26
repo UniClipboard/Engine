@@ -49,14 +49,13 @@ const STAGGERED_DELAYS: [Duration; 3] = [
 ];
 
 /// LAN-only Mode 反向防御：本端 `RelayMode::Disabled` **不阻止** iroh 用对端
-/// `EndpointAddr` 中的 `relay_url` 发起出站连接。已配对 peer 的 addr blob 在
-/// `to_persistable_addr` 阶段被收敛为"NodeId + Relay 提示"，所以 LAN-only
-/// 用户复制内容触发 dispatch 时仍会看到日志：
-///   `iroh::endpoint: connecting relay_url=Some(...) ip_addresses=[]`
+/// `EndpointAddr` 中的 `relay_url` 发起出站连接。已配对 peer 的地址记录可能在
+/// 开启 relay 时保存，同时带有 relay 与直连线索。
 ///
-/// 当 [`super::runtime_consts::lan_only`] 为 `true` 时剥掉 `TransportAddr::Relay`
-/// 项，强制 iroh 只能走 mDNS 重新解析的直连地址。如果对端不在同一子网
-/// （mDNS 不可达），connect 自然失败 —— 这正是 LAN-only 的设计意图。
+/// 当 [`super::runtime_consts::lan_only`] 为 `true` 时只剥掉 `TransportAddr::Relay`
+/// 项：存储的直连线索（例如固定端口的隧道地址）原样交给 iroh，并与 mDNS 等地址
+/// 发现**并行**使用，任何一条可用路径胜出；陈旧线索不会阻塞新发现的地址。既没有
+/// 可用直连线索、也发现不了对端时，connect 自然失败，这正是 LAN-only 的设计意图。
 ///
 /// 非 LAN-only 路径下零开销直接返回原 addr（一次 `Vec::iter().any` 短路）。
 pub(super) fn strip_relay_if_lan_only(addr: EndpointAddr) -> EndpointAddr {

@@ -368,6 +368,7 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
             congestion_controller: map_congestion_controller(
                 settings.network.congestion_controller,
             ),
+            bind_port: settings.network.bind_port,
         },
     }
 }
@@ -431,6 +432,7 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
             allow_overlay_network_addrs: value.allow_overlay_network_addrs,
             custom_relay_urls: value.custom_relay_urls,
             congestion_controller: value.congestion_controller.map(unmap_congestion_controller),
+            bind_port: value.bind_port,
         }),
     })
 }

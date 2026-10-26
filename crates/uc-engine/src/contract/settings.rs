@@ -198,6 +198,9 @@ pub struct NetworkSettingsSummary {
     pub allow_overlay_network_addrs: bool,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionControllerSummary,
+    /// 已保存的固定 P2P UDP 端口；`None` 表示每次启动随机端口。修改后需重启网络生效。
+    #[serde(default)]
+    pub bind_port: Option<u16>,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +209,9 @@ pub struct NetworkSettingsPatch {
     pub allow_overlay_network_addrs: Option<bool>,
     pub custom_relay_urls: Option<Vec<String>>,
     pub congestion_controller: Option<CongestionControllerSummary>,
+    /// `None` = 不修改；`Some(0)` = 恢复随机端口；其他值 = 固定该端口。
+    #[serde(default)]
+    pub bind_port: Option<u16>,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

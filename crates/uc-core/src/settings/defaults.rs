@@ -201,6 +201,7 @@ impl Default for NetworkSettings {
     /// - `allow_relay_fallback`: true
     /// - `allow_overlay_network_addrs`: false
     /// - `custom_relay_urls`: 空列表（使用产品内置 relay）
+    /// - `bind_port`: `None`（随机端口）
     ///
     // 默认 true = 允许 fallback。
     // 改成 false 会让所有跨网段老用户突然离线，属于 breaking change。
@@ -211,6 +212,7 @@ impl Default for NetworkSettings {
             allow_overlay_network_addrs: false,
             custom_relay_urls: Vec::new(),
             congestion_controller: CongestionController::default(),
+            bind_port: None,
         }
     }
 }
@@ -327,6 +329,24 @@ mod tests {
         let json = r#"{ "network": { "allow_relay_fallback": true } }"#;
         let s: Settings = serde_json::from_str(json).expect("parse explicit true");
         assert!(s.network.allow_relay_fallback);
+    }
+
+    /// 固定端口默认关闭：缺字段的旧 settings.json 与默认值都使用随机端口，
+    /// 显式端口原样读回，写出后再读回保持不变。
+    #[test]
+    fn bind_port_defaults_to_ephemeral_and_round_trips() {
+        assert_eq!(NetworkSettings::default().bind_port, None);
+        let old: Settings =
+            serde_json::from_str(r#"{ "network": { "allow_relay_fallback": false } }"#)
+                .expect("parse settings without bind_port");
+        assert_eq!(old.network.bind_port, None);
+
+        let pinned: Settings = serde_json::from_str(r#"{ "network": { "bind_port": 51821 } }"#)
+            .expect("parse settings with bind_port");
+        assert_eq!(pinned.network.bind_port, Some(51821));
+        let written = serde_json::to_string(&pinned).expect("serialize");
+        let reread: Settings = serde_json::from_str(&written).expect("reparse");
+        assert_eq!(reread.network.bind_port, Some(51821));
     }
 
     /// 默认值：默认过滤 overlay 网络地址，保持 v0.6.x 起的现行行为。

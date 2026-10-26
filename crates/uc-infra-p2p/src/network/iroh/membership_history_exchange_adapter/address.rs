@@ -1,5 +1,7 @@
 use super::super::peer_address_resolver::PeerAddressResolver;
-use super::super::persistable_addr::{observed_stable_remote_addr, persist_observed_stable_addr};
+use super::super::persistable_addr::{
+    observed_refreshed_remote_addr, persist_observed_stable_addr,
+};
 use async_trait::async_trait;
 use iroh::Endpoint;
 use std::sync::Arc;
@@ -39,7 +41,8 @@ impl RefreshVerifiedPeerAddressPort for IrohVerifiedPeerAddressRefresh {
                 return;
             }
         };
-        if let Some(observed) = observed_stable_remote_addr(&self.endpoint, address.id).await {
+        // 合并而不是替换：使用中的路径是新证据，未被否定的旧直连线索继续保留。
+        if let Some(observed) = observed_refreshed_remote_addr(&self.endpoint, &address).await {
             persist_observed_stable_addr(
                 self.repository.as_ref(),
                 self.clock.as_ref(),

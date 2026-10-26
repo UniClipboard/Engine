@@ -116,6 +116,8 @@ pub struct NetworkSettingsView {
     pub allow_overlay_network_addrs: bool,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionControllerView,
+    /// 固定的 P2P UDP 端口；`None` 表示随机端口。
+    pub bind_port: Option<u16>,
 }
 
 /// Mirror of `uc_core::settings::model::CongestionController` for the
@@ -216,6 +218,8 @@ pub struct NetworkSettingsPatch {
     pub allow_overlay_network_addrs: Option<bool>,
     pub custom_relay_urls: Option<Vec<String>>,
     pub congestion_controller: Option<CongestionControllerView>,
+    /// `None` = 不修改；`Some(0)` = 恢复随机端口；其他值 = 固定该端口。
+    pub bind_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -398,6 +402,7 @@ impl From<core::Settings> for SettingsView {
                 allow_overlay_network_addrs: value.network.allow_overlay_network_addrs,
                 custom_relay_urls: value.network.custom_relay_urls,
                 congestion_controller: value.network.congestion_controller.into(),
+                bind_port: value.network.bind_port,
             },
         }
     }
@@ -521,6 +526,10 @@ pub(crate) fn apply_settings_patch(
         if let Some(v) = network.congestion_controller {
             existing.network.congestion_controller = v.into();
         }
+        if let Some(port) = network.bind_port {
+            // 0 是“随机端口”哨兵，保存为未设置，使持久值保持规范形态。
+            existing.network.bind_port = (port != 0).then_some(port);
+        }
     }
 
     existing
@@ -598,6 +607,7 @@ mod network_settings_apply_patch_tests {
             allow_overlay_network_addrs: false,
             custom_relay_urls: Vec::new(),
             congestion_controller: Default::default(),
+            bind_port: None,
         };
         s
     }
@@ -609,8 +619,31 @@ mod network_settings_apply_patch_tests {
             allow_overlay_network_addrs: allow_overlay,
             custom_relay_urls: Vec::new(),
             congestion_controller: Default::default(),
+            bind_port: None,
         };
         s
+    }
+
+    /// 固定端口 patch：未带字段不修改，0 恢复随机端口，其他值固定该端口。
+    #[test]
+    fn bind_port_patch_sets_clears_and_keeps() {
+        let mut existing = baseline_with_network(true);
+        existing.network.bind_port = Some(51821);
+        let patch = |bind_port| SettingsPatch {
+            network: Some(NetworkSettingsPatch {
+                bind_port,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let kept = apply_settings_patch(existing.clone(), patch(None));
+        assert_eq!(kept.network.bind_port, Some(51821));
+        let changed = apply_settings_patch(existing.clone(), patch(Some(40000)));
+        assert_eq!(changed.network.bind_port, Some(40000));
+        let cleared = apply_settings_patch(existing, patch(Some(0)));
+        assert_eq!(cleared.network.bind_port, None);
+        assert_eq!(SettingsView::from(changed).network.bind_port, Some(40000));
     }
 
     /// NETSET-02 #2 硬约束：旧客户端 PUT 不带 `network` 段时，

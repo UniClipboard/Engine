@@ -57,6 +57,7 @@ pub async fn build_network_runtime(
         allow_overlay_network_addrs,
         relay_urls,
         congestion_controller,
+        prepared_network.bind_port,
         rendezvous_base_url,
     );
     // 内置 relay 不携带凭据；只有用户自定义路由才读取安全存储。
