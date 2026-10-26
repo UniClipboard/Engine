@@ -786,3 +786,21 @@ NotRetained／Unsupported、初始等待、全量终态、重复回复、相同�
 Application完整1390通过／2跳过；原生入站7通过（0.43秒），真实Engine发送侧7通过。
 这些Engine场景同时验证原运行期的启动／关闭、删除、成员退休、暂停恢复、资料重开和再次发送。
 正式30/59保持，普通恢复机会不授予新成员权限、不恢复文件任务、不更改逐项事实或下载预算。
+
+
+## 原接收owner交接验收
+
+复用完整ApplyInboundClipboardUseCase，将已有CAS先后场景扩为有／无消息源条目提示×接受／拒绝四组合。
+接受前没有当前进度任务或变化通知，拒绝后不调用材料化、不产生通知资格；接受后材料化入口的attempt
+与原BeginReceive结果一致，本机接收条目区别于源条目，三个原ticket及数组顺序完全保持。
+受控材料化能力明确把三个opaque ticket映射到两个provider角色，Application不解析或据此替换消息来源。
+
+材料化失败后，三个原逻辑项如实失败，变化目标与可查询范围仍是消息源；provider角色查询NotRetained。
+有新消息源提示时，以提示的源UUID关联，而不误用不同的blob归属条目UUID；旧格式仍要求一致blob来源。
+交接四组合通过（0.09秒），接收目录21测试通过，覆盖原计划／实际保存事实及跨attempt的旧动作围栏。
+源码核对首次接收仅在Begun后accept_source，手动重试在原expected-attempt CAS接受后才继承同一来源与成功项。
+
+复跑：`just cargo test -p uc-application --lib real_receive_handoffs_only_after_cas_begun_and_before_materialization --locked -- --nocapture`；
+目录：`just cargo test -p uc-application --lib transfer::receive::work::catalog --locked`。
+本项使用受控存储／材料化port，证明完整用例的交接与权限行为，未证明实际三端拨号或SQLite输出提交。
+真实Engine文件成果链和实际三端矩阵仍分别按阶段3下一项及阶段5验收，不能据此勾选；正式31/59。
