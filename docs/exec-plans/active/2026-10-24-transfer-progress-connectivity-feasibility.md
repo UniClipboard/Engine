@@ -1031,3 +1031,19 @@ taskset -c 0 just cargo nextest run --profile default -p uc-engine --features de
 现有 Application `transfer::progress` 组还验证完整快照原子采用、后项冲突时整页不部分提交、重复核对不发布变化、迟到核对不跨越登记／意图替换，以及缺失／旧版回复不擦除真实终态；原生逐字段错误 ACK 和旧尝试围栏仍作为本项相关证据。本项主机执行不等于移动设备、物理挂起或固定旧新端完整网络矩阵通过。
 
 当前候选的相关验证共 98 项通过：Application `transfer::progress::` 78 项，原生 outbound 既有 12 项与新增真实重放 1 项，Engine `receive_retry::batch_outcomes` 既有 6 项与新增收敛 1 项。后两组按已执行的新场景与剩余回归分开运行，未把过滤项计为执行；Engine 明确启用 `dev-tools`，Nextest 使用 `--no-tests fail`。可复现命令分别为 `just cargo test -p uc-application --lib transfer::progress:: --locked`、`just cargo test -p uc-infra-p2p --lib lost_native_ack_and_event_replay_exact_result --locked`、`just cargo nextest run -p uc-infra-p2p --lib --profile ci --locked -E 'test(outbound_probe)'`，以及 `just cargo nextest run -p uc-engine --features dev-tools --lib --profile ci --locked -E 'test(receive_retry::batch_outcomes)'`。
+
+
+## 通知容量与本地接收隔离验证
+
+新增主机案例 `real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup` 沿用原双 Engine、实际网络、SQLite 和文件能力：原独立批次已有两成功、一失败；新批次发送 67 份互不相同的内容，实际 `BlobReadStorePort::protect` 的未命中结果证明没有用缓存重试替代新下载。既有 wire 屏障阻止全部反向终态写线，原容量仍为每端 64、全局 256，不缩小参数制造超额。
+
+在前 65 项已提交并逐份读回后，第 66 项已完成真实获取与文件写出、仍由原导出步骤持有完成权，第 67 项尚未获取。原取消动作先进入 cancelling，等待输出归还完成权后清理第 66 项，保留新批次 65 项及原独立批次两项成功的文件和路径。新批次共 66 次实际冷缓存获取、66 次导出，没有提前获取末项。解除反向屏障后，恰好最后 64 项（索引 3..66）取得原生精确 ACK，证明前三项已由原终态账本实际淘汰而未被观察循环重新领取；源端完整核对随后从同一接收尝试补齐 65 成功、2 取消，获取、导出及缓存计数不增加。没有生产行为、协议、持久格式或 Engine 稳定接口改动。
+
+Linux 原资源监督同时记录实际 Blob 句柄从初始 `[0, 0]` 到累计创建／仍活跃 `[2, 0]`，关闭后 FD、线程、运行任务及活跃句柄均回到基线。完整案例直接执行通过 32.80 秒，其中资源空闲收尾 24.091 秒；Nextest ci profile 同场景与资源计数通过 32.893 秒。仅该精确用例的 default／ci 外层设置为 120 秒，容纳实际接收及原最长 45 秒资源收尾，原内层期限和其余配置保持。
+
+大批次测试与发送并行消费最早接收提示。最初先等发送返回再读事件的测试在实际新获取／导出已到 66 项后收到 `ConsumerLagged`，错过原有界事件中的 Pending；这是测试消费顺序问题，没有扩大原 256 项事件通道或修改业务事件语义，临时诊断已移除。本例实际触发每端 64 项淘汰；全局 256 项账本、中间值隔离和原交换槽位仍由 Application 进度组分别验证，不冒充多 Engine 全局满载。此主机验证不替代移动设备、物理挂起或固定旧新端完整网络矩阵。
+
+
+[固定资源入口](../../../scripts/testing/run-blob-lifecycle-resources.sh)现在保留原 8 项并强制加入容量场景，共 9 项；实际运行全部通过，含编译总 362.621 秒，新容量场景通过 33.194 秒。严格校验 7 个生命周期场景及 8 份报告（删除仍按两种调度各一份），SDK store 关闭前临时标签、原生句柄、FD／线程／任务、连续两份 1GiB 的精确读回及 ACK、原下载并发 4／2 和等待 64／16 均通过，原所有资源断言保持。[报告校验](../../../scripts/testing/verify-blob-lifecycle-resources.py)仅增加必需场景身份；[7 项反例检查](../../../scripts/testing/verify-blob-lifecycle-resources.test.py)包含缺少容量场景、缺少第二次删除、等量重复替换、未知身份、额外重复，以及逐报告逐资源字段的失败拒绝。新增缺场景检查在原校验器先失败，修正后通过；本次实际原 8 项产物也被新校验器明确拒绝，不能沿用旧覆盖冒充新入口通过。
+
+当前候选完整 Engine 接收范围共 53 项通过：其余 46 项、固定入口中原 6 项生命周期及新容量 1 项，重复执行不叠加计数；Application 进度 78 项通过，Collector 专属项仍跳过。可复现入口为 `just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked -E 'test(receive_retry::)'`、`just cargo test -p uc-application --lib transfer::progress:: --locked` 和上述固定资源脚本。移动设备与物理挂起等未执行项目仍保持原限制。

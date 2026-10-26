@@ -515,3 +515,12 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::batch_outcomes::mixed::real_engine_missing_terminal_converges_from_unknown_by_full_query_without_redownload)"
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 67项冷缓存接收、64项原生ACK及实际资源收尾，原完整用例实测32.80秒，超过全局20秒外层。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::backpressure::real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::backpressure::real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup)"
+slow-timeout = { period = "30s", terminate-after = 4 }

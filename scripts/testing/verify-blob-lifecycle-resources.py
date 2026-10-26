@@ -13,6 +13,7 @@ EXPECTED_CASE_COUNTS = {
     PREFIX + "lifecycle::space::real_engine_confirmed_local_removal_prevents_active_retry_from_publishing": 1,
     PREFIX + "real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state": 2,
     PREFIX + "save_failure::real_engine_shutdown_waits_for_failed_file_settlement_repair": 1,
+    PREFIX + "backpressure::real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup": 1,
 }
 
 
@@ -61,7 +62,7 @@ def main():
      'sdk_tags_and_native_connection_counts_directly_observed':True,
      'sdk_store_tag_observations':tags,'large_file_engine':large,
      'download_schedulers':schedulers,'cases':reports},indent=2)+'\n')
-    print('six native lifecycles and two 1GiB files: kernel resources, SDK tags and native handles, and download quotas passed')
+    print(f'{len(EXPECTED_CASE_COUNTS)} native lifecycle scenarios and two 1GiB files: kernel resources, SDK tags and native handles, and download quotas passed')
 
 
 if __name__ == "__main__":
