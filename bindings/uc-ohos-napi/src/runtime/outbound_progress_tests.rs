@@ -7,7 +7,25 @@ use uc_engine::{
 
 #[test]
 fn outbound_view_preserves_large_integer_positions_and_unknown_totals_for_javascript() {
-    let view = OutboundProgressSummary {
+    let view = example_view();
+    let mapped = outbound_progress(view);
+    assert_eq!(mapped.revision, "18446744073709551615");
+    assert_eq!(
+        mapped.items[0].completed_bytes.as_deref(),
+        Some("18446744073709551614")
+    );
+    assert_eq!(mapped.items[0].total_bytes, None);
+    assert_eq!(mapped.items[0].state, "retrying");
+    assert_eq!(
+        mapped.items[0].last_known_phase.as_deref(),
+        Some("retrying")
+    );
+    assert_eq!(mapped.items[0].round, Some(3));
+    assert_eq!(mapped.items[0].index, 7);
+}
+
+fn example_view() -> OutboundProgressSummary {
+    OutboundProgressSummary {
         entry_id: "source".into(),
         target_device_id: "peer".into(),
         attempt_id: Some("attempt".into()),
@@ -33,19 +51,47 @@ fn outbound_view_preserves_large_integer_positions_and_unknown_totals_for_javasc
             failure_reason: None,
             cancellation_reason: None,
         }],
-    };
-    let mapped = outbound_progress(view);
-    assert_eq!(mapped.revision, "18446744073709551615");
+    }
+}
+
+#[test]
+fn resend_maps_per_target_decisions_without_turning_running_into_new_acceptance() {
+    let mapped = super::resend_outcome(uc_engine::ResendEntryOutcome::Completed(
+        uc_engine::ResendReportSummary {
+            accepted: 0,
+            duplicate: 0,
+            offline: 0,
+            errored: 0,
+            pending: 0,
+            reconciled: vec![
+                uc_engine::ResendTargetProgressSummary {
+                    target_device_id: "running-peer".into(),
+                    state: uc_engine::OutboundProgressReconciliation::Running,
+                    current: Some(example_view()),
+                    new_transfer_requested: false,
+                    duplicate_files_possible: false,
+                },
+                uc_engine::ResendTargetProgressSummary {
+                    target_device_id: "legacy-peer".into(),
+                    state: uc_engine::OutboundProgressReconciliation::Unsupported,
+                    current: None,
+                    new_transfer_requested: false,
+                    duplicate_files_possible: true,
+                },
+            ],
+        },
+    ))
+    .unwrap();
+    assert_eq!(mapped.accepted, Some(0));
+    assert_eq!(mapped.reconciled[0].state, "running");
+    assert!(!mapped.reconciled[0].new_transfer_requested);
+    let current = mapped.reconciled[0].current.as_ref().unwrap();
+    assert_eq!(current.revision, u64::MAX.to_string());
     assert_eq!(
-        mapped.items[0].completed_bytes.as_deref(),
-        Some("18446744073709551614")
+        current.items[0].completed_bytes,
+        Some((u64::MAX - 1).to_string())
     );
-    assert_eq!(mapped.items[0].total_bytes, None);
-    assert_eq!(mapped.items[0].state, "retrying");
-    assert_eq!(
-        mapped.items[0].last_known_phase.as_deref(),
-        Some("retrying")
-    );
-    assert_eq!(mapped.items[0].round, Some(3));
-    assert_eq!(mapped.items[0].index, 7);
+    assert_eq!(current.items[0].total_bytes, None);
+    assert_eq!(mapped.reconciled[1].state, "unsupported");
+    assert!(mapped.reconciled[1].duplicate_files_possible);
 }

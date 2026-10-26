@@ -91,7 +91,7 @@
 
 * [x] 完整快照和状态核对由 Application facade 提供；查询关联绑定认证设备及当前 Space，不暴露任意本地 entry 枚举。 AppFacade仅提供完整get/list/reconcile，使用原意图目录与当前成员范围；真实双Engine/SQLite/文件证明读取源端原条目和接收尝试，来源与本机接收条目不同，核对不增加导出。
 * [x] 实现 Running／Settled／Superseded／NotRetained／Unsupported／Unreachable，区分 AccessDenied、存储读取失败和损坏。 统一App分类保持完整source chain；明确授权拒绝不冒充Unavailable/离线，expected_attempt已被替换返回Superseded。规则/查询全覆盖及真实Settled/Superseded核对通过，Busy按实际调度返回。
-* [ ] 将再次发起的核对接入原完整动作；运行中继续原任务、真实结果返回、缺失或旧版说明后显式新尝试、离线不重复下载。
+* [x] 将再次发起的核对接入原完整动作；运行中继续原任务、真实结果返回、缺失或旧版说明后显式新尝试、离线不重复下载。 原ResendEntry统一核对及明确确认，逐目标返回完整事实与重复风险；消息头Delivered不跳过文件核对。App完整1387通过/2跳过，真实Engine运行/结算/明确失败项重投及离线无重复下载通过，UniFFI47、NAPI21、移动验收宿主26项通过；完整固定旧端/Direct/Relay及设备矩阵仍由阶段5验收。
 * [ ] 查询快照后重试／删除竞争仍由原 owner 最终 CAS 和清理围栏决定；不新增远端强制下载或取消操作。
 * [x] 发送侧事件和完整快照可区分设备、尝试及逻辑项；Rust、UniFFI、N-API 同版本映射，不让宿主汇总或推断协议阶段。 三套稳定入口已接同一完整App能力；OutboundProgressChanged只提示重读，真实双Engine事件/完整视图通过。两绑定all-targets编译通过；NAPI大整数/未知总量映射测试通过。移动设备实机仍未执行。
 * [x] 删除 Engine OutboundProgressRuntime 中的业务投影／取消推断，保留必要的组装及完整能力 decorator。 Engine旧模块和空SyncSessionAssembly已删除；投影、核对、通知和实际关闭统一归Application，Engine只提供网络能力及稳定DTO映射。真实本地取消/关闭不被阻塞进度网络拖住。
@@ -190,3 +190,11 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 
 实际验证：Application 1384 通过／2 跳过，真实 Engine 两种完整动作通过；复跑入口和证明边界见
 [成员退休主机验证](2026-10-24-transfer-progress-connectivity-feasibility.md#成员发布与在途意图退休的主机验证)。
+
+
+### 2026-10-26：原再次发送动作内核对
+
+原ResendEntry已接上同一进度owner的完整核对，增加明确新传输意图及逐目标完整结果；不要求宿主拼接查询与下载。
+不依赖消息头送达推断文件成果，不要求为核对重建已丢失的原内容；原接收CAS和清理责任不变。
+实际行为、复跑入口和证明边界见[再次发送验证](2026-10-24-transfer-progress-connectivity-feasibility.md#原再次发送动作的主机验证)。
+本项功能验证后正式30/59；平台挂起、查询竞争完整矩阵、同资料重开及全部阶段5/6验收继续保持未完成。

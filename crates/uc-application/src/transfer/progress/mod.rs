@@ -65,5 +65,6 @@ pub use runtime::{ProgressInboundFactory, TransferProgressNetwork};
 pub(crate) use runtime::{ProgressRuntime, ProgressRuntimeAssembly};
 
 mod view;
-pub(crate) use view::ProgressViewOwner;
+pub use view::SentEntryReconciliation;
+pub(crate) use view::{ProgressViewOwner, ReconcileSentEntryPort};
 pub use view::{TransferProgressQueryError, TransferProgressReconciliation};

@@ -163,6 +163,7 @@ impl ExistingLocalEntryDeliveryRunner for ExistingLocalEntryDelivery {
         );
 
         Ok(ResendReport {
+            reconciled: Vec::new(),
             accepted: outcome.total_accepted,
             duplicate: outcome.total_duplicate,
             offline: outcome.total_offline,

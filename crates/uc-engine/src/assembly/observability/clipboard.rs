@@ -7,6 +7,7 @@ use uc_application::deps::ApplicationClipboardAdapters;
 use uc_application::facade::{
     ApplicationRuntimeError, ClipboardOutboundError, ClipboardOutboundOutcome,
     LocalClipboardOutcome, LocalClipboardProcessError, ResendEntryError, ResendReport,
+    TransferProgressQueryError, TransferProgressReconciliation,
 };
 use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError, ClipboardSelectionDecision};
 use uc_core::ids::DeviceId;
@@ -190,9 +191,31 @@ pub(crate) async fn observe_resend(
         let completion = match &result {
             Ok(report) => delivery_completion(
                 operation,
-                report.accepted != 0 || report.duplicate != 0,
-                report.offline != 0 || report.pending != 0,
-                report.errored != 0,
+                report.accepted != 0
+                    || report.duplicate != 0
+                    || report.reconciled.iter().any(|target| {
+                        target.progress.state == TransferProgressReconciliation::Settled
+                            && target
+                                .progress
+                                .current
+                                .as_ref()
+                                .is_some_and(|view| view.summary.counts.completed != 0)
+                    }),
+                report.offline != 0
+                    || report.pending != 0
+                    || report.reconciled.iter().any(|target| {
+                        !target.new_transfer_requested
+                            && target.progress.state != TransferProgressReconciliation::Settled
+                    }),
+                report.errored != 0
+                    || report.reconciled.iter().any(|target| {
+                        target.progress.state == TransferProgressReconciliation::Settled
+                            && !target.new_transfer_requested
+                            && target.progress.current.as_ref().is_some_and(|view| {
+                                view.summary.counts.failed != 0
+                                    || view.summary.counts.cancelled != 0
+                            })
+                    }),
                 elapsed,
             ),
             Err(
@@ -203,6 +226,28 @@ pub(crate) async fn observe_resend(
                 | ResendEntryError::EntryNotResendable { .. }
                 | ResendEntryError::TargetNotTrusted(_),
             ) => OperationCompletion::rejected(domain, operation, role, elapsed),
+            Err(ResendEntryError::Reconciliation(
+                TransferProgressQueryError::AccessDenied(_)
+                | TransferProgressQueryError::InvalidInput(_),
+            )) => OperationCompletion::rejected(domain, operation, role, elapsed),
+            Err(ResendEntryError::Reconciliation(TransferProgressQueryError::InvalidData(_))) => {
+                OperationCompletion::failed(
+                    domain,
+                    operation,
+                    role,
+                    DiagnosticErrorType::Corrupt,
+                    elapsed,
+                )
+            }
+            Err(ResendEntryError::Reconciliation(TransferProgressQueryError::Unavailable(_))) => {
+                OperationCompletion::failed(
+                    domain,
+                    operation,
+                    role,
+                    DiagnosticErrorType::Unavailable,
+                    elapsed,
+                )
+            }
             Err(ResendEntryError::Storage(_)) => OperationCompletion::failed(
                 domain,
                 operation,
@@ -428,6 +473,7 @@ mod tests {
         for (report, expected) in [
             (
                 ResendReport {
+                    reconciled: Vec::new(),
                     accepted: 1,
                     duplicate: 0,
                     offline: 1,
@@ -438,6 +484,7 @@ mod tests {
             ),
             (
                 ResendReport {
+                    reconciled: Vec::new(),
                     accepted: 0,
                     duplicate: 0,
                     offline: 1,

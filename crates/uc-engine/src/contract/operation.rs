@@ -2,7 +2,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{HostFileHandle, OutboundProgressInput, ReconcileOutboundProgressInput, SecretString};
+use super::{
+    HostFileHandle, OutboundProgressInput, OutboundProgressReconciliation, OutboundProgressSummary,
+    ReconcileOutboundProgressInput, SecretString,
+};
 use crate::{
     AbortMobileFileUploadInput, AppendMobileFileUploadInput, ApplyMobileSyncDocumentInput,
     AuthenticateMobileRequestInput, BeginMobileFileUploadInput, CustomRelayMutation,
@@ -1002,17 +1005,39 @@ pub struct ExportEntryInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResendEntryInput {
+    pub confirm_new_transfer: bool,
     pub entry_id: String,
     pub target_devices: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResendReportSummary {
+    pub reconciled: Vec<ResendTargetProgressSummary>,
     pub accepted: usize,
     pub duplicate: usize,
     pub offline: usize,
     pub errored: usize,
     pub pending: usize,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResendTargetProgressSummary {
+    pub target_device_id: String,
+    pub state: OutboundProgressReconciliation,
+    pub current: Option<OutboundProgressSummary>,
+    pub new_transfer_requested: bool,
+    pub duplicate_files_possible: bool,
+}
+
+impl fmt::Debug for ResendTargetProgressSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResendTargetProgressSummary")
+            .field("state", &self.state)
+            .field("new_transfer_requested", &self.new_transfer_requested)
+            .field("duplicate_files_possible", &self.duplicate_files_possible)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

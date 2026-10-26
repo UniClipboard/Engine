@@ -94,6 +94,8 @@ enum ProbeCommand {
         path: String,
     },
     ResendEntry {
+        #[serde(default)]
+        confirm_new_transfer: bool,
         entry_id: String,
     },
     Suspend {
@@ -464,10 +466,14 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             )
             .await
         }
-        ProbeCommand::ResendEntry { entry_id } => {
+        ProbeCommand::ResendEntry {
+            entry_id,
+            confirm_new_transfer,
+        } => {
             execute_operation(
                 state,
                 Operation::ResendEntry(ResendEntryInput {
+                    confirm_new_transfer,
                     entry_id,
                     target_devices: Vec::new(),
                 }),
@@ -1328,6 +1334,10 @@ fn operation_response(result: OperationResult) -> Value {
                 "ok": true,
                 "kind": "entry_resent",
                 "outcome": "completed",
+                "reconciled_target_count": report.reconciled.len(),
+                "reconciliation_states": report.reconciled.iter().map(|target| target.state).collect::<Vec<_>>(),
+                "new_transfer_requested": report.reconciled.iter().any(|target| target.new_transfer_requested),
+                "duplicate_files_possible": report.reconciled.iter().any(|target| target.duplicate_files_possible),
                 "accepted": report.accepted,
                 "duplicate": report.duplicate,
                 "offline": report.offline,
@@ -1781,6 +1791,7 @@ mod tests {
 
         let resend = operation_response(OperationResult::EntryResent(
             uc_engine::ResendEntryOutcome::Completed(uc_engine::ResendReportSummary {
+                reconciled: Vec::new(),
                 accepted: 1,
                 duplicate: 2,
                 offline: 3,

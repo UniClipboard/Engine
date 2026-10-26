@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::future::{pending, Future};
 use std::io;
 use std::path::PathBuf;
@@ -479,6 +480,7 @@ pub enum DeviceTrustChoice {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ResendEntryOutcome {
     Completed {
+        reconciled: Vec<ResendTargetProgress>,
         accepted: u64,
         duplicate: u64,
         offline: u64,
@@ -674,6 +676,7 @@ enum WorkerCommand {
         response: mpsc::Sender<Result<WorkspaceConvergence, BindingError>>,
     },
     ResendEntry {
+        confirm_new_transfer: bool,
         entry_id: String,
         target_devices: Vec<String>,
         response: mpsc::Sender<Result<ResendEntryOutcome, BindingError>>,
@@ -1282,8 +1285,10 @@ impl MobileEngine {
         &self,
         entry_id: String,
         target_devices: Vec<String>,
+        confirm_new_transfer: bool,
     ) -> Result<ResendEntryOutcome, BindingError> {
         self.request(|response| WorkerCommand::ResendEntry {
+            confirm_new_transfer,
             entry_id,
             target_devices,
             response,
@@ -1997,12 +2002,14 @@ async fn run_operations(
                 let _ = response.send(result);
             }
             WorkerCommand::ResendEntry {
+                confirm_new_transfer,
                 entry_id,
                 target_devices,
                 response,
             } => {
                 let result = engine
                     .execute(Operation::ResendEntry(ResendEntryInput {
+                        confirm_new_transfer,
                         entry_id,
                         target_devices,
                     }))
@@ -2629,6 +2636,9 @@ fn map_device_trust_snapshot(
 fn map_resend_outcome(result: OperationResult) -> Result<ResendEntryOutcome, BindingError> {
     unpack_operation!(result, OperationResult::EntryResent(outcome) => match outcome {
         uc_engine::ResendEntryOutcome::Completed(report) => ResendEntryOutcome::Completed {
+            reconciled: report.reconciled.into_iter().map(|target| ResendTargetProgress {
+                target_device_id: target.target_device_id, state: target.state.to_string(), current: target.current.map(outbound_progress), new_transfer_requested: target.new_transfer_requested, duplicate_files_possible: target.duplicate_files_possible,
+            }).collect(),
             accepted: count_to_u64(report.accepted)?,
             duplicate: count_to_u64(report.duplicate)?,
             offline: count_to_u64(report.offline)?,
@@ -4044,5 +4054,22 @@ fn outbound_progress(progress: OutboundProgressSummary) -> OutboundProgress {
                 cancellation_reason: item.cancellation_reason.map(|value| value.to_string()),
             })
             .collect(),
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ResendTargetProgress {
+    pub target_device_id: String,
+    pub state: String,
+    pub current: Option<OutboundProgress>,
+    pub new_transfer_requested: bool,
+    pub duplicate_files_possible: bool,
+}
+impl fmt::Debug for ResendTargetProgress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResendTargetProgress")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
     }
 }

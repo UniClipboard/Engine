@@ -701,6 +701,7 @@ impl ApplicationAssembly {
             member_scope.clone(),
         ));
         let clipboard = self.clipboard.start_session(ClipboardSessionDeps {
+            progress: progress_view.clone(),
             clipboard_sync: Arc::clone(&clipboard_sync),
             blob_transfer: Arc::clone(&blob_transfer),
             receiver: clipboard_receiver,

@@ -27,7 +27,7 @@ pub enum TransferProgressReconciliation {
 }
 
 pub(crate) struct ProgressViewOwner {
-    projections: ProgressProjectionRegistry,
+    pub(super) projections: ProgressProjectionRegistry,
     reconciliation: Arc<TransferProgressReconciler>,
     scope: Arc<dyn CurrentSpaceMemberScopePort>,
 }
@@ -109,7 +109,9 @@ impl ProgressViewOwner {
         }
         classify(outcome)
     }
-    async fn current_scope(&self) -> Result<CurrentSpaceMemberScope, TransferProgressQueryError> {
+    pub(super) async fn current_scope(
+        &self,
+    ) -> Result<CurrentSpaceMemberScope, TransferProgressQueryError> {
         self.scope.snapshot().await.map_err(|source| {
             let error = TransferProgressQueryError::from(source);
             uc_debug!(
@@ -132,7 +134,7 @@ fn key(
         source: ProgressIdentity::new(*source.as_bytes()),
     })
 }
-fn authorize(
+pub(super) fn authorize(
     scope: &CurrentSpaceMemberScope,
     peer: DeviceId,
 ) -> Result<(), TransferProgressQueryError> {
