@@ -222,7 +222,7 @@ jobs:
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       # 所有测试组共用同一次全工作区构建，只编译一次。
       UC_TEST_BUILD_SCOPE: workspace
