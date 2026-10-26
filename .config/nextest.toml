@@ -486,3 +486,13 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.ci.overrides]]
 filter = "package(uc-connectivity-host) & binary(profile_startup_overlap) & test(=startup_overlapping_a_closing_host_is_never_reported_as_corrupt)"
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 同一表示校验用例依次运行正常密文和真实AEAD损坏两套双Engine流程，主机实测18.86秒。
+# 外层覆盖两套完整fixture及coverage开销；原单次操作期限和零重试不变，仅匹配该新用例。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::settlement_boundaries::representation::real_engine_representation_waits_for_actual_decryption_then_acks_the_verified_result)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::settlement_boundaries::representation::real_engine_representation_waits_for_actual_decryption_then_acks_the_verified_result)"
+slow-timeout = { period = "30s", terminate-after = 3 }

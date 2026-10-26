@@ -31,6 +31,10 @@ pub(crate) struct ReceiveExports {
     pub release: Semaphore,
     pub block_progress_network: AtomicBool,
     pub progress_network_blocked: Notify,
+    pub pause_read: AtomicBool,
+    pub read_paused: Notify,
+    pub read_release: Semaphore,
+    pub corrupt_read: AtomicBool,
     terminal_acks: Mutex<Vec<ProgressTerminalNotice>>,
     terminal_ack_changed: Notify,
 }
@@ -48,6 +52,10 @@ impl ReceiveExports {
             release: Semaphore::new(0),
             block_progress_network: AtomicBool::new(false),
             progress_network_blocked: Notify::new(),
+            pause_read: AtomicBool::new(false),
+            read_paused: Notify::new(),
+            read_release: Semaphore::new(0),
+            corrupt_read: AtomicBool::new(false),
             terminal_acks: Mutex::new(Vec::new()),
             terminal_ack_changed: Notify::new(),
         });
@@ -64,6 +72,7 @@ pub(crate) struct ReleaseOnDrop(pub Arc<ReceiveExports>);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
         self.0.release.add_permits(1);
+        self.0.read_release.add_permits(1);
     }
 }
 
@@ -130,7 +139,19 @@ impl BlobReadStorePort for ObservedExports {
     }
 
     async fn read(&self, digest: BlobDigest) -> Result<Bytes, BlobExchangeError> {
-        self.inner.read(digest).await
+        let bytes = self.inner.read(digest).await?;
+        if self.fixture.pause_read.swap(false, Ordering::SeqCst) {
+            // SDK已完成真实接收；原FetchBlob尚未取得密文字节，实际AEAD尚未执行。
+            self.fixture.read_paused.notify_one();
+            self.fixture.read_release.acquire().await.unwrap().forget();
+        }
+        if self.fixture.corrupt_read.swap(false, Ordering::SeqCst) {
+            // 只破坏本次交给原解密器的副本，原SDK存储及其BAO验证事实不变。
+            let mut corrupted = bytes.to_vec();
+            *corrupted.last_mut().unwrap() ^= 1;
+            return Ok(Bytes::from(corrupted));
+        }
+        Ok(bytes)
     }
 
     async fn export(&self, digest: BlobDigest, target: &Path) -> Result<u64, BlobExchangeError> {

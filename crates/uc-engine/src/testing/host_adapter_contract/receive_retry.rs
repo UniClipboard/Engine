@@ -6,6 +6,7 @@ mod outbound_progress;
 mod redelivery;
 mod result_chain;
 mod save_failure;
+mod settlement_boundaries;
 #[cfg(target_os = "linux")]
 mod stream_isolation;
 #[cfg(target_os = "linux")]
