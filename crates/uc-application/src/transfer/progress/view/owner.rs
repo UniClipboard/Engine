@@ -4,13 +4,17 @@ use crate::connectivity::ConnectivityError;
 use crate::deps::{CurrentSpaceMemberScope, CurrentSpaceMemberScopePort};
 use crate::transfer::progress::{
     ProgressProjectionKey, ProgressProjectionRegistry, ProgressQueryResult, ProgressReceiveError,
-    ProgressSnapshotRead, TransferProgressReconciler,
+    ProgressSnapshotRead, ReadProgressHistoryPort, TransferProgressReconciler,
 };
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uc_core::error_class::ErrorClass;
-use uc_core::file_transfer::{ProgressIdentity, ProgressItemState, TransferProgressView};
+use uc_core::file_transfer::{
+    ProgressIdentity, ProgressItemState, TransferProgressView, PROJECTION_GLOBAL_CAPACITY,
+    PROJECTION_PEER_CAPACITY,
+};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_observability_contract::uc_debug;
 use uuid::Uuid;
@@ -30,17 +34,23 @@ pub(crate) struct ProgressViewOwner {
     pub(super) projections: ProgressProjectionRegistry,
     reconciliation: Arc<TransferProgressReconciler>,
     scope: Arc<dyn CurrentSpaceMemberScopePort>,
+    pub(super) history: Arc<dyn ReadProgressHistoryPort>,
+    pub(super) local: DeviceId,
 }
 impl ProgressViewOwner {
     pub(crate) fn new(
         projections: ProgressProjectionRegistry,
         reconciliation: Arc<TransferProgressReconciler>,
         scope: Arc<dyn CurrentSpaceMemberScopePort>,
+        history: Arc<dyn ReadProgressHistoryPort>,
+        local: DeviceId,
     ) -> Self {
         Self {
             projections,
             reconciliation,
             scope,
+            history,
+            local,
         }
     }
     pub(crate) async fn get(
@@ -51,10 +61,10 @@ impl ProgressViewOwner {
         let key = key(peer, source)?;
         let scope = self.current_scope().await?;
         authorize(&scope, peer)?;
-        Ok(self
-            .projections
-            .snapshot(key)
-            .map(|snapshot| present(key, snapshot)))
+        if let Some(snapshot) = self.projections.snapshot(key) {
+            return Ok(Some(present(key, snapshot)));
+        }
+        self.historical(key, source).await
     }
     pub(crate) async fn list(
         &self,
@@ -65,13 +75,71 @@ impl ProgressViewOwner {
                 NotCurrentMember,
             )));
         }
-        Ok(self
-            .projections
-            .snapshots()
+        let snapshots = self.projections.snapshots();
+        let runtime_keys = snapshots
+            .iter()
+            .map(|(key, _)| *key)
+            .collect::<HashSet<_>>();
+        let mut views = snapshots
             .into_iter()
             .filter(|(key, _)| scope.usable_peer_device_ids.contains(&key.peer))
             .map(|(key, snapshot)| present(key, snapshot))
-            .collect())
+            .collect::<Vec<_>>();
+        let mut fences = views
+            .iter()
+            .map(|view| self.projections.begin_intent(view.source_entry.clone()))
+            .collect::<Vec<_>>();
+        let owned = self
+            .history
+            .list_owned(self.local, &scope.usable_peer_device_ids)
+            .await
+            .map_err(|source| TransferProgressQueryError::Unavailable(Box::new(source)))?;
+        let mut per_peer = HashMap::<DeviceId, usize>::new();
+        for view in &views {
+            *per_peer.entry(view.peer).or_default() += 1;
+        }
+        for (peer, entry) in owned {
+            if views.len() >= PROJECTION_GLOBAL_CAPACITY {
+                break;
+            }
+            if per_peer.get(&peer).copied().unwrap_or_default() >= PROJECTION_PEER_CAPACITY
+                || views
+                    .iter()
+                    .any(|view| view.peer == peer && view.source_entry == entry)
+            {
+                continue;
+            }
+            let fence = self.projections.begin_intent(entry.clone());
+            if let Some(view) = self.get(peer, &entry).await? {
+                views.push(view);
+                fences.push(fence);
+                *per_peer.entry(peer).or_default() += 1;
+            }
+        }
+        let current = self.current_scope().await?;
+        if !current.local_member_active {
+            return Err(TransferProgressQueryError::AccessDenied(Box::new(
+                NotCurrentMember,
+            )));
+        }
+        let mut current_views = Vec::with_capacity(views.len());
+        for (view, fence) in views.into_iter().zip(fences) {
+            if !current.usable_peer_device_ids.contains(&view.peer)
+                || !fence.permits_history(view.peer)
+            {
+                continue;
+            }
+            let key = key(view.peer, &view.source_entry)?;
+            if runtime_keys.contains(&key) {
+                // 历史读取会等待存储；已删除或淘汰的实时范围不能由先前快照复活。
+                if let Some(snapshot) = self.projections.snapshot(key) {
+                    current_views.push(present(key, snapshot));
+                }
+            } else {
+                current_views.push(view);
+            }
+        }
+        Ok(current_views)
     }
     pub(crate) async fn reconcile(
         &self,

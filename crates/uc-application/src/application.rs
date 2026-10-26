@@ -700,6 +700,8 @@ impl ApplicationAssembly {
             progress.session.projections.clone(),
             progress.session.reconciliation.clone(),
             member_scope.clone(),
+            self.deps.progress_history.clone(),
+            self.deps.device.device_identity.current_device_id(),
         ));
         let clipboard = self.clipboard.start_session(ClipboardSessionDeps {
             progress: progress_view.clone(),

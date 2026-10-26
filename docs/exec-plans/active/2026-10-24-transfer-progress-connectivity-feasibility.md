@@ -1067,3 +1067,18 @@ Linux 原资源监督同时记录实际 Blob 句柄从初始 `[0, 0]` 到累计�
 当前源码的完整 Engine 接收范围共 56 项通过：新三例、其余 46 例，以及固定九项资源入口中的原七例接收场景，重复执行不叠加计数；Collector 专属项仍跳过。Application 进度组另 78 项通过。固定九项原生资源入口全部通过，含编译总 418.426 秒，严格核对 7 场景／8 报告、33 个 SDK 关闭前零临时标签样本，以及原生句柄、FD／线程／任务、连续两份 1GiB 的实际完成／ACK 和原下载 4／2、等待 64／16 配额。测试默认不启用新暂停信号，没有改变原资源入口、断言或期限。
 
 可复现三例：`just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked -E 'test(receive_retry::snapshot_cas::)'`。分层检查为 `just cargo test -p uc-application --lib apply_inbound::tests::manual_retry:: --locked` 与 `just cargo test -p uc-infra-storage --lib file_transfer_repo::retry::tests:: --locked`，完整接收、进度与固定资源入口沿用前节命令。
+
+
+## 同资料重开与真实进程重启验证
+
+原 Engine 同资料重开案例曾明确期望没有进度卡。新增真实三文件案例先得到红例：条目、目标投递归属及原文件清单仍持久存在，Query 却返回 None。修复将保守读取放回 Application 的完整查询负责人，Storage 复用原文件清单 adapter，以同一只读事务取得本机来源、既有目标归属、加密清单行及表示类型／长度，归还连接后认证这份固定清单。没有新增 schema、明文持久字段、通知 outbox 或永久原始计划映射；不能证明完整旧逻辑范围时不伪造项清单。规则和边界见[重启后的保守发送视图](../../design-docs/transfer-progress-protocol.md#重启后的保守发送视图)。
+
+三个实际 Engine 案例在 Nextest ci 配置下通过：同 profile 关闭重开（3.477秒）；独立 sender 子进程读取同一 profile（6.521秒）；receiver 在三份互不相同的冷内容已经完成 SQLite／文件交付、终态通知尚被原 wire 屏障持有时遭 kill／wait，再启动独立新进程（15.111秒）。前两例均显示三项未确认，attempt、轮次、字节和总量缺失，没有新导出；旧消息头投递成功不解释为远端文件完成。第三例逐份精确读回实际文件，新进程没有再次 protect／导出，原 Source 一次真实状态核对得到 NotRetained，保持0完成、3未确认且没有运行项。子进程测试安全存储只通过匿名 stdin 管道传递；IPC 连接及 child 均在资源收尾前回收，没有把凭据写入普通文件。
+
+receiver 两次新进程固定同一 UDP 端口，以单独核对进程重启。最初改变端口的测试在 Source 核对时得到真实 connection_timeout／1417，没有将传输错误冒充 NotRetained；固定端口后一次核对通过，不增加查询重试、不修改生产预算或失败分类。地址移动仍由后续网络矩阵验收。最初错误关闭发送开关引发的1253也作为测试准备失败保留，已经移除该设置；它不构成生产缺陷修复。
+
+Application 新增历史 get/list 与删除／成员退休交错的四种组合，证明读取不能越过原世代围栏；存储错误保留原 PermissionDenied 来源且不创建运行期 slot。另覆盖纯空目录的单一完整单元、图片位置依据、阈值与混合范围不得只展示子集。完整 Application 当前1399项通过，2个独立驱动／独占日志项按原条件跳过；SQLite 文件清单12项通过，包含认证后清单、来源与目标过滤、删除及全局256／每端64上限。
+
+完整 Engine 接收范围当前59项通过：普通接收入口52项，加原固定资源入口内7项接收场景，重复执行不叠加。固定九项资源全部通过，含编译480.178秒；严格校验7个生命周期场景、8份报告、SDK关闭前零临时标签、原生句柄及FD／线程／任务回归、连续两份1GiB精确读回与ACK，以及原下载4／2、等待64／16额度。资源脚本、断言及期限均保持。
+
+复现入口为 `just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked -E 'test(receive_retry::process_restart::)'`、原完整 Engine 接收入口、`just cargo test -p uc-application --lib --locked`、`just cargo test -p uc-infra-storage --lib entry_file_set_repo:: --locked` 及原固定九项资源脚本。物理挂起、设备／产品宿主及 Collector 等尚未执行部分继续保持未完成，不以独立PID或普通等待代替。

@@ -940,7 +940,7 @@ pub(crate) fn build_transfer_manifest(
 /// `original_text` in one of two shapes (see the capture side's
 /// `build_entry_file_set`): a raw `text/uri-list` line (`file://...`), or a
 /// bare filesystem path when the line came from a `LocalFile` rep.
-fn manifest_line_path(original_text: &str) -> Option<PathBuf> {
+pub(crate) fn manifest_line_path(original_text: &str) -> Option<PathBuf> {
     match parse_uri_list_line(original_text) {
         UriListLineKind::File(path) => Some(path),
         UriListLineKind::NonFile => {

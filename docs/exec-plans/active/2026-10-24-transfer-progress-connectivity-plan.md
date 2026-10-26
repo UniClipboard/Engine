@@ -97,7 +97,7 @@
 * [x] 删除 Engine OutboundProgressRuntime 中的业务投影／取消推断，保留必要的组装及完整能力 decorator。 Engine旧模块和空SyncSessionAssembly已删除；投影、核对、通知和实际关闭统一归Application，Engine只提供网络能力及稳定DTO映射。真实本地取消/关闭不被阻塞进度网络拖住。
 * [ ] 暂停／恢复／后台／系统挂起按原期限检查，普通重连不重置预算；离组／撤销／切 Space 先封口再监督停止。
 * [x] 删除清理临时投影，迟到帧不复活条目或进度卡；原文件资源清理和取消语义保持。 真实源删除红→绿覆盖已结算及输出暂停/迟到终态两种Engine/SQLite/文件场景；原发送在首次异步等待前冻结本机owner世代，History完整删除统一封口旧/在途意图，源UUID与本机owner分离。另一本机条目不受影响，接收端文件保持；Application1381通过/2跳过、真实进度stream82通过/8跳过，另强制原权威8项通过。成员/会话及再次发起仍按未完成项实施。
-* [ ] 同资料关闭重开及真实进程重启后，无持久依据的发送侧旧任务显示未知，不恢复通知队列、不伪造旧终态；本地接收已有事实保持。
+* [x] 同资料关闭重开及真实进程重启后，无持久依据的发送侧旧任务显示未知，不恢复通知队列、不伪造旧终态；本地接收已有事实保持。 Application只读已有本机条目／目标归属与完整清单，三文件重开及独立sender进程均无attempt／字节恢复；receiver在实际保存但终态未ACK时被kill，同profile新进程保留三份精确文件，原Source一次真实核对NotRetained并保持三项未确认。读取沿用原删除／成员围栏，无新schema/outbox，见[重启验证](2026-10-24-transfer-progress-connectivity-feasibility.md#同资料重开与真实进程重启验证)。
 * [x] 全部内部调用方迁移，删除无意义旧转发和测试默认空依赖；不新增 schema、通知 outbox 或敏感明文字段。 旧reporter所有生产/测试消费者及反向路由字段已删除，新端点能力显式装配；workspace全部targets、Root门禁通过。没有schema/outbox或新明文持久字段。
 
 交付物：完整产品查询／动作与绑定合同、唯一 Application owner 和受控生命周期。

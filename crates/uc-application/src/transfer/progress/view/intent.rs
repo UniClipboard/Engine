@@ -47,7 +47,7 @@ impl ReconcileSentEntryPort for ProgressViewOwner {
             [] => {
                 return Ok(SentEntryReconciliation {
                     state: TransferProgressReconciliation::NotRetained,
-                    current: None,
+                    current: self.get(peer, owner).await?,
                 })
             }
             [key] => *key,

@@ -131,6 +131,11 @@ pub struct ProgressIntent {
     peers: Arc<IntentPeers>,
 }
 impl ProgressIntent {
+    /// 同一世代也保护历史读取；不登记投影或创建通知义务。
+    pub(crate) fn permits_history(&self, peer: DeviceId) -> bool {
+        !self.owner.retired() && !self.peers.blocks(peer)
+    }
+
     pub fn accept(
         &self,
         key: ProgressProjectionKey,

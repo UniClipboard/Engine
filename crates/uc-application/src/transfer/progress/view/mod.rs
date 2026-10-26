@@ -3,6 +3,7 @@ mod error;
 mod intent;
 pub(crate) use intent::ReconcileSentEntryPort;
 pub use intent::SentEntryReconciliation;
+mod history;
 mod mapping;
 mod owner;
 pub use error::TransferProgressQueryError;

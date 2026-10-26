@@ -127,8 +127,16 @@ async fn real_engine_sender_resume_and_profile_reopen_retire_unpersisted_progres
         let expected = case.saved.clone();
         let after = case.exports.exports.lock().unwrap().len();
         case.shutdown().await;
-        assert_eq!(listed, OperationResult::OutboundProgressList(Vec::new()));
-        assert_eq!(queried, OperationResult::OutboundProgress(None));
+        let OperationResult::OutboundProgress(Some(unknown)) = queried else {
+            panic!("existing ownership stays unconfirmed")
+        };
+        assert_eq!(unknown.attempt_id, None);
+        assert_eq!(unknown.freshness, OutboundProgressFreshness::Unconfirmed);
+        assert_eq!((unknown.items_total, unknown.items_unconfirmed), (3, 3));
+        assert_eq!(
+            listed,
+            OperationResult::OutboundProgressList(vec![unknown.clone()])
+        );
         let OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(report)) = resent
         else {
             panic!("complete resumed resend")
@@ -138,6 +146,7 @@ async fn real_engine_sender_resume_and_profile_reopen_retire_unpersisted_progres
             report.reconciled[0].state,
             OutboundProgressReconciliation::NotRetained
         );
+        assert_eq!(report.reconciled[0].current.as_ref(), Some(&unknown));
         assert!(report.reconciled[0].duplicate_files_possible);
         assert!(!report.reconciled[0].new_transfer_requested);
         assert_eq!(after, exported);
