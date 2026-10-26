@@ -15,6 +15,8 @@
 //!
 //! [`install_peer_reachability`]: IrohSessionBuilder::install_peer_reachability
 //! [`install_clipboard`]: IrohSessionBuilder::install_clipboard
+#[cfg(test)]
+use uuid::Uuid;
 
 use super::blob_exchange::without_request_span;
 use super::discovery::endpoint_id;
@@ -1653,7 +1655,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use async_trait::async_trait;
-    use uc_core::ids::DeviceId;
+    use uc_core::ids::{DeviceId, EntryId};
     use uc_core::ports::{SecureStorageError, SecureStoragePort};
     use uc_core::settings::model::Settings;
 
@@ -3085,7 +3087,18 @@ mod tests {
                 let clock = Arc::new(SystemElapsedClock);
                 let (registry, progress_worker) = ProgressProjectionRegistry::new(clock.clone());
                 registry
-                    .accept_intent(
+                    .begin_intent(EntryId::from(
+                        Uuid::from_bytes(
+                            (ProgressProjectionKey {
+                                peer: peer_device,
+                                source: ProgressIdentity::new([7; 16]),
+                            })
+                            .source
+                            .bytes(),
+                        )
+                        .to_string(),
+                    ))
+                    .accept(
                         ProgressProjectionKey {
                             peer: peer_device,
                             source: ProgressIdentity::new([7; 16]),

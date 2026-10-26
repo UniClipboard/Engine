@@ -122,3 +122,84 @@ async fn real_engine_outbound_progress_reports_actual_partial_result_and_reconci
     );
     case.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_deleting_source_retires_outbound_view_without_touching_received_files() {
+    let _lock = ENGINE_TEST_LOCK.lock().await;
+    for paused in [false, true] {
+        let case = receive_case(paused).await;
+        let _release = ReleaseOnDrop(case.exports.clone());
+        let view = timeout(Duration::from_secs(20), async {
+            loop {
+                let OperationResult::OutboundProgressList(views) = case
+                    .source
+                    .execute(Operation::ListOutboundProgress)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("complete outbound list")
+                };
+                if let Some(view) = views.into_iter().find(|view| {
+                    view.attempt_id.as_deref() == Some(case.first.attempt_id.as_str())
+                        && (paused || view.state == OutboundProgressBatchState::PartiallyFailed)
+                }) {
+                    return view;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("actual receiver result");
+        case.source
+            .execute(Operation::DeleteHistoryEntry(HistoryEntryInput {
+                entry_id: view.entry_id.clone(),
+            }))
+            .await
+            .unwrap();
+        if paused {
+            // 完整本地输出随后归还，真实迟到终态仍会到达原发送端。
+            case.exports.release.add_permits(1);
+            progress(&case.receiver, &case.first.entry_id, "failed").await;
+        }
+        let queried = case
+            .source
+            .execute(Operation::QueryOutboundProgress(OutboundProgressInput {
+                entry_id: view.entry_id.clone(),
+                target_device_id: view.target_device_id,
+            }))
+            .await
+            .unwrap();
+        let listed = case
+            .source
+            .execute(Operation::ListOutboundProgress)
+            .await
+            .unwrap();
+        let saved = saved_files(
+            &case.receiver,
+            &case.first.entry_id,
+            case.receiver_root.path(),
+        )
+        .await;
+        let original = case.saved.clone();
+        case.shutdown().await;
+        assert_eq!(
+            queried,
+            OperationResult::OutboundProgress(None),
+            "deleted source cannot be recreated by late results"
+        );
+        let OperationResult::OutboundProgressList(listed) = listed else {
+            panic!("complete list")
+        };
+        assert!(!listed
+            .iter()
+            .any(|current| current.entry_id == view.entry_id));
+        assert_eq!(saved.len(), 2);
+        assert!(saved.contains_key(CONTENTS[0]) && saved.contains_key(CONTENTS[2]));
+        if !paused {
+            assert_eq!(
+                saved, original,
+                "source deletion cannot remove receiver-owned files"
+            );
+        }
+    }
+}

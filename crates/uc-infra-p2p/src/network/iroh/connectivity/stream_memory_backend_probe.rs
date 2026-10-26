@@ -1,4 +1,5 @@
 //! 同一真实codec和Application动作使用第二backend；不把内存字节流当作真实网络或密码握手证据。
+use uuid::Uuid;
 #[path = "stream_memory_backend_fixture.rs"]
 mod fixture;
 #[path = "stream_memory_backend_queued_query_probe.rs"]
@@ -32,7 +33,7 @@ use uc_core::file_transfer::{
     ProgressActive, ProgressFreshnessView, ProgressIdentity, ProgressItem, ProgressItemKind,
     ProgressItemState, ProgressPhase, ProgressTerminal, ProgressTerminalOutcome,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_infra_local::SystemElapsedClock;
 
 const SOURCE: ProgressIdentity = ProgressIdentity::new([1; 16]);
@@ -179,7 +180,7 @@ async fn memory_backend_runs_actual_registration_notifications_ack_and_complete_
         let clock = Arc::new(SystemElapsedClock);
         let (registry, projection_worker) = ProgressProjectionRegistry::new(clock.clone());
         let key = ProgressProjectionKey { peer: pair.receiver_id, source: SOURCE };
-        registry.accept_intent(key, (0..65).map(item).collect())?;
+        registry.begin_intent(EntryId::from(Uuid::from_bytes((key).source.bytes()).to_string())).accept(key, (0..65).map(item).collect())?;
         let stop = CancellationToken::new();
         let projections = tokio::spawn(projection_worker.run(stop.clone()));
         let producer = TransferProgressProducer::new(pair.receiver.clone(), Arc::new(TransferProgressWire), Arc::new(Authority { peer: pair.sender_id }), Arc::new(UnusedSnapshotProvider), clock.clone());

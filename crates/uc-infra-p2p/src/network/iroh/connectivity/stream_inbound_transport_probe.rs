@@ -32,7 +32,7 @@ use uc_core::file_transfer::{
     OutboundProgressStatus, ProgressFreshnessView, ProgressIdentity, ProgressItemState,
     ProgressTerminal, ProgressTerminalOutcome,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 use uc_infra_local::SystemElapsedClock;
@@ -40,6 +40,7 @@ use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
 use uc_sync_protocol::transfer_progress::{
     write_frame, ProgressFrame, LEGACY_TRANSFER_PROGRESS_ALPN,
 };
+use uuid::Uuid;
 
 struct Clock(AtomicU64);
 impl ElapsedClockPort for Clock {
@@ -249,7 +250,11 @@ impl Fixture {
             peer: caller,
             source: SOURCE,
         };
-        registry.accept_intent(key, vec![item()])?;
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, vec![item()])?;
         let adoption = Arc::new(Adoption {
             registry: registry.clone(),
             calls: AtomicUsize::new(0),

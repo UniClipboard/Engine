@@ -19,8 +19,9 @@ use uc_core::file_transfer::{
     ProgressFailureReason, ProgressFreshnessView, ProgressItemState, ProgressTerminal,
     ProgressTerminalOutcome,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_infra_local::SystemElapsedClock;
+use uuid::Uuid;
 
 pub(super) struct SettledSnapshot(pub(super) Arc<Authority>);
 #[async_trait]
@@ -142,7 +143,7 @@ async fn actual_failed_receive_results_cross_sixteen_real_inbound_query_pages() 
             let clock=Arc::new(SystemElapsedClock);
             let (registry,projection_worker)=ProgressProjectionRegistry::new(clock.clone());
             let key=ProgressProjectionKey { peer:fixture.peer,source:SOURCE };
-            registry.accept_intent(key,task.items.to_vec())?;
+            registry.begin_intent(EntryId::from(Uuid::from_bytes((key).source.bytes()).to_string())).accept(key,task.items.to_vec())?;
             let provider=SettledSnapshot(authority.authority.clone());
             let stop=CancellationToken::new();
             if registered {

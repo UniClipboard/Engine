@@ -28,7 +28,7 @@ use uc_core::file_transfer::{
     ProgressFreshnessView, ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal,
     ProgressTerminalOutcome,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
@@ -36,6 +36,7 @@ use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
 use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
+use uuid::Uuid;
 
 const BUDGET: Duration = Duration::from_secs(5);
 const SOURCE: ProgressIdentity = ProgressIdentity::new([1; 16]);
@@ -227,7 +228,11 @@ async fn real_backend_progress_profile_adopts_terminal_and_reuses_current_retain
             peer: sender,
             source: SOURCE,
         };
-        registry.accept_intent(key, vec![item()])?;
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, vec![item()])?;
         let stop = CancellationToken::new();
         let running = tokio::spawn(worker.run(stop.clone()));
         let producer = TransferProgressProducer::new(

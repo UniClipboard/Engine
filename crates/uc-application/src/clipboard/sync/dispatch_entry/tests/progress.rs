@@ -8,10 +8,14 @@ use crate::clipboard::sync::payload_codec::{
     encode_snapshot_with_blob_refs_to_v3_bytes, V3BlobRef,
 };
 use crate::transfer::progress::{ProgressProjectionKey, ProgressProjectionRegistry};
+use async_trait::async_trait;
 use std::sync::{Arc, OnceLock};
+use tokio::sync::{Notify, Semaphore};
+use tokio::time::{timeout, Duration};
 use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressItemKind};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::blob::BlobTicket;
+use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
 use uc_core::ports::DispatchAck;
 use uc_core::{ObservedClipboardRepresentation, SystemClipboardSnapshot};
 use uuid::Uuid;
@@ -144,4 +148,110 @@ async fn original_intent_is_complete_before_first_dispatch_and_does_not_wait_for
             source
         })
         .is_none());
+}
+
+struct PausedEncryption {
+    entered: Notify,
+    resume: Semaphore,
+}
+#[async_trait]
+impl TransferCipherPort for PausedEncryption {
+    async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, TransferCipherError> {
+        self.entered.notify_one();
+        self.resume.acquire().await.unwrap().forget();
+        Ok(plaintext.to_vec())
+    }
+    async fn decrypt(&self, _: &[u8]) -> Result<Vec<u8>, TransferCipherError> {
+        panic!("发送流程不得解密")
+    }
+}
+
+#[tokio::test]
+async fn original_dispatch_waiting_in_encryption_cannot_restore_an_entry_deleted_before_intent_adoption(
+) {
+    let source = ProgressIdentity::new([3; 16]);
+    let local = EntryId::from(Uuid::from_bytes([4; 16]).to_string());
+    let snapshot = SystemClipboardSnapshot {
+        ts_ms: 1,
+        representations: vec![ObservedClipboardRepresentation::new(
+            RepresentationId::new(),
+            FormatId::from("binary"),
+            None,
+            Vec::new(),
+        )],
+        file_content_digests: Vec::new(),
+        file_set_v1_component: None,
+    };
+    let refs = vec![V3BlobRef {
+        ticket: BlobTicket::from_bytes(vec![7]),
+        entry_id: EntryId::from(Uuid::from_bytes(source.bytes()).to_string()),
+        filename: None,
+        mime: None,
+        size_bytes: 10,
+        representation_index: Some(0),
+    }];
+    let (plaintext, snapshot_hash) =
+        encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &refs).unwrap();
+    let observed = Arc::new(OnceLock::<ProgressProjectionRegistry>::new());
+    let read = observed.clone();
+    let mut dispatch = MockDispatch::new();
+    dispatch
+        .expect_dispatch()
+        .times(1)
+        .returning(move |peer, _, _| {
+            assert!(
+                read.get()
+                    .unwrap()
+                    .snapshot(ProgressProjectionKey {
+                        peer: *peer,
+                        source
+                    })
+                    .is_none(),
+                "late original intent must stay retired"
+            );
+            dispatch_report(Ok(DispatchAck::Accepted))
+        });
+    let mut repo = MockPeerAddrRepo::new();
+    repo.expect_list().returning(|| Ok(vec![record("peer-a")]));
+    let mut fixture = build_uc(
+        repo,
+        make_member_repo_all_enabled(),
+        MockCipher::new(),
+        dispatch,
+        make_device_identity("self-device"),
+        make_local_identity_stub(),
+        make_settings_stub(),
+    );
+    let cipher = Arc::new(PausedEncryption {
+        entered: Notify::new(),
+        resume: Semaphore::new(0),
+    });
+    fixture.use_case.cipher = cipher.clone();
+    let fixture = Arc::new(fixture);
+    assert!(observed.set(fixture.progress.clone()).is_ok());
+    let mut request = input();
+    request.plaintext = plaintext;
+    request.snapshot_hash = snapshot_hash;
+    request.entry_id = Some(local.clone());
+    request.target_filter = Some(vec![DeviceId::new("peer-a")]);
+    let running = tokio::spawn({
+        let fixture = fixture.clone();
+        async move { fixture.execute(request).await }
+    });
+    timeout(Duration::from_secs(2), cipher.entered.notified())
+        .await
+        .unwrap();
+    let deleting = fixture.progress.deleting_entry(&local);
+    drop(deleting);
+    cipher.resume.add_permits(1);
+    let result = timeout(Duration::from_secs(2), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.total_accepted, 1,
+        "progress retirement cannot fabricate a different wire result"
+    );
+    assert!(fixture.progress.snapshots().is_empty());
 }

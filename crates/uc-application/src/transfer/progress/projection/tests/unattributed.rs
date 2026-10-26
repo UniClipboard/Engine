@@ -11,12 +11,19 @@ use uc_core::file_transfer::{
     ProgressActive, ProgressBatchState, ProgressFreshnessView, ProgressItemState, ProgressPhase,
     ProgressTerminal, ProgressTerminalOutcome,
 };
+use uc_core::ids::EntryId;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn unattributed_notice_marks_only_the_original_intent_unknown_and_publishes_once() {
     let (registry, _worker) = ProgressProjectionRegistry::new(Arc::new(Clock(AtomicU64::new(0))));
     let key = projection_key(1, 1);
-    registry.accept_intent(key, vec![item(0), item(1)]).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((key).source.bytes()).to_string(),
+        ))
+        .accept(key, vec![item(0), item(1)])
+        .unwrap();
     let before = registry.snapshot(key).unwrap();
     let mut events = registry.subscribe();
     registry
@@ -72,7 +79,12 @@ async fn unattributed_notice_preserves_both_registered_and_query_confirmed_facts
             let (registry, _worker) =
                 ProgressProjectionRegistry::new(Arc::new(Clock(AtomicU64::new(0))));
             let key = projection_key(1, 1);
-            registry.accept_intent(key, vec![item(0)]).unwrap();
+            registry
+                .begin_intent(EntryId::from(
+                    Uuid::from_bytes((key).source.bytes()).to_string(),
+                ))
+                .accept(key, vec![item(0)])
+                .unwrap();
             let task = descriptor(key, 1);
             let value = fact(terminal);
             if queried {
@@ -152,7 +164,12 @@ async fn unattributed_notice_never_creates_deleted_unknown_or_closed_intents() {
         Err(ProgressReceiveError::UnknownTask)
     ));
     assert!(registry.snapshots().is_empty());
-    registry.accept_intent(key, vec![item(0)]).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((key).source.bytes()).to_string(),
+        ))
+        .accept(key, vec![item(0)])
+        .unwrap();
     let old = registry.receiver(key).unwrap();
     registry.remove(key);
     assert!(matches!(
@@ -165,7 +182,12 @@ async fn unattributed_notice_never_creates_deleted_unknown_or_closed_intents() {
     ));
     assert!(registry.snapshots().is_empty());
     let other = projection_key(2, 2);
-    registry.accept_intent(other, vec![item(0)]).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((other).source.bytes()).to_string(),
+        ))
+        .accept(other, vec![item(0)])
+        .unwrap();
     registry.close();
     assert!(matches!(
         registry
@@ -180,7 +202,12 @@ async fn unattributed_notice_never_creates_deleted_unknown_or_closed_intents() {
 async fn unattributed_notice_does_not_prevent_a_later_verified_current_update() {
     let (registry, _worker) = ProgressProjectionRegistry::new(Arc::new(Clock(AtomicU64::new(0))));
     let key = projection_key(1, 1);
-    registry.accept_intent(key, vec![item(0)]).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((key).source.bytes()).to_string(),
+        ))
+        .accept(key, vec![item(0)])
+        .unwrap();
     registry
         .observe_unattributed(&key.peer, key.source)
         .await

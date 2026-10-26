@@ -725,7 +725,10 @@ impl ApplicationAssembly {
                 ),
             ),
             resource: self.clipboard.resource(),
-            clipboard_history: self.clipboard.history(Some(blob_transfer_port)),
+            clipboard_history: self.clipboard.history(
+                Some(blob_transfer_port),
+                progress.session.projections.clone(),
+            ),
             clipboard_capture: self.clipboard.capture(),
             clipboard_sync,
             blob_transfer: Arc::clone(&blob_transfer),

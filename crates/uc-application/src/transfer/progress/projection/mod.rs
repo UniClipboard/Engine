@@ -1,5 +1,7 @@
 //! 原发送意图拥有全局投影；网络帧只能查询已授权、仍保留的任务。
 mod handle;
+mod intent;
+pub use intent::ProgressIntent;
 mod model;
 mod receive;
 mod refresh;
