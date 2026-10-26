@@ -2,6 +2,7 @@ use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::sync::{Arc, Mutex};
 
 mod availability;
+mod directory_empty_root;
 mod directory_failure;
 mod directory_settlement;
 mod generation;

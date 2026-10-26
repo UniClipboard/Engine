@@ -5,6 +5,7 @@ use super::{
     MockEntryRepo, NoopReceiveArtifactCleanup, RecordingLiveIndex, StoreOnlyPullDeps,
 };
 use crate::clipboard::entry_identity::EntryIdentityCoordinator;
+use crate::clipboard::inbound::{InboundClipboardApplyInput, InboundClipboardApplyPort};
 use crate::clipboard::sync::payload_codec::{
     decode_v3_bytes_to_snapshot_and_blob_refs, encode_snapshot_with_blob_refs_to_v3_bytes,
 };
@@ -192,7 +193,19 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
             },
         ));
         let owner = receiver.clone();
-        let applying = tokio::spawn(async move { owner.execute(input).await });
+        let applying = tokio::spawn(async move {
+            owner
+                .apply(InboundClipboardApplyInput {
+                    source_entry: input.source_entry,
+                    from_device: input.from_device.as_str().to_owned(),
+                    snapshot_hash: input.snapshot_hash,
+                    plaintext: input.plaintext,
+                    provisional: None,
+                    resurface_intent: input.resurface_intent,
+                    activation_owner: input.activation_owner,
+                })
+                .await
+        });
         acceptance.entered.notified().await;
         assert!(work.current_task(&peer, id).is_none());
         let observation = CancellationToken::new();
@@ -310,7 +323,7 @@ fn registration_authority_worker() {
                         root_index: 0,
                         root_name: "folder".into(),
                         root_is_file: false,
-                        relative_path: String::new(),
+                        relative_path: ".".into(),
                         kind: FileSetMemberKind::EmptyDirectory,
                         blob_ref_index: None,
                     }],
