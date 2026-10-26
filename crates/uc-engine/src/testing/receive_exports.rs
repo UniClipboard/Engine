@@ -9,11 +9,14 @@ use tokio::sync::{Notify, Semaphore};
 use tokio_util::bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    BlobExchangeError, BlobExchangeFailure, BlobReadStorePort, BlobReceived,
+    BlobExchangeError, BlobExchangeFailure, BlobReadStorePort, BlobReceived, ConnectivityBackend,
+    ConnectivityError, PeerConnection, ProgressTerminalNotice,
 };
-use uc_application::deps::{ConnectivityBackend, ConnectivityError, PeerConnection};
 use uc_core::ids::DeviceId;
 use uc_core::ports::blob::BlobDigest;
+
+mod progress;
+pub(crate) use progress::decorate_progress_wire;
 
 static FIXTURES: OnceLock<Mutex<HashMap<PathBuf, Weak<ReceiveExports>>>> = OnceLock::new();
 
@@ -28,6 +31,8 @@ pub(crate) struct ReceiveExports {
     pub release: Semaphore,
     pub block_progress_network: AtomicBool,
     pub progress_network_blocked: Notify,
+    terminal_acks: Mutex<Vec<ProgressTerminalNotice>>,
+    terminal_ack_changed: Notify,
 }
 
 impl ReceiveExports {
@@ -43,6 +48,8 @@ impl ReceiveExports {
             release: Semaphore::new(0),
             block_progress_network: AtomicBool::new(false),
             progress_network_blocked: Notify::new(),
+            terminal_acks: Mutex::new(Vec::new()),
+            terminal_ack_changed: Notify::new(),
         });
         FIXTURES
             .get_or_init(Mutex::default)

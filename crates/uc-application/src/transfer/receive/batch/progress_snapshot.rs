@@ -96,6 +96,8 @@ impl ReceiveFacts {
                 };
                 // 实际失败／取消仍在清理时只能显示处理中，不提前发布终态。
                 let settling = !self.finished
+                    && (logical.kind == ProgressItemKind::DirectoryUnit
+                        || !local.is_some_and(|item| item.failure_settled))
                     && matches!(
                         outcome,
                         Some(

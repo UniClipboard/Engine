@@ -69,6 +69,8 @@ struct Item {
     status: OutboundProgressStatus,
     source: Option<Arc<SourceError>>,
     failure_reason: Option<ReceiveItemFailureReason>,
+    /// 原单项失败／取消已经完成实际本地结算；不代表父目录已回滚。
+    failure_settled: bool,
 }
 impl fmt::Debug for ReceiveBatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -148,6 +150,7 @@ impl ReceiveBatch {
             status: OutboundProgressStatus::InProgress,
             source: None,
             failure_reason: None,
+            failure_settled: false,
         });
         if !matches!(value.status, OutboundProgressStatus::InProgress) || round < value.round.index
         {
@@ -189,6 +192,7 @@ impl ReceiveBatch {
             status: OutboundProgressStatus::InProgress,
             source: None,
             failure_reason: None,
+            failure_settled: false,
         });
         if !matches!(value.status, OutboundProgressStatus::InProgress) || round < value.round.index
         {
@@ -201,6 +205,7 @@ impl ReceiveBatch {
         value.round.retrying = true;
     }
 
+    /// 仅在本项实际获取及输出清理结算后记录；仍持有本地工作时使用unsettled_fetch_failure。
     pub(crate) fn item_result(
         &self,
         item: &str,
@@ -258,6 +263,10 @@ impl ReceiveBatch {
                     bytes: verified,
                     status,
                     failure_reason: reason,
+                    failure_settled: matches!(
+                        status,
+                        OutboundProgressStatus::Failed | OutboundProgressStatus::Cancelled { .. }
+                    ),
                     source,
                 },
             );
@@ -280,7 +289,9 @@ impl ReceiveBatch {
             status: OutboundProgressStatus::InProgress,
             source: None,
             failure_reason: None,
+            failure_settled: false,
         });
+        item.failure_settled = false;
         item.status = if cancelled {
             OutboundProgressStatus::Cancelled {
                 reason: FileTransferCancellationReason::LocalUser,
@@ -313,6 +324,7 @@ impl ReceiveBatch {
                     status: OutboundProgressStatus::InProgress,
                     source: None,
                     failure_reason: None,
+                    failure_settled: false,
                 },
             );
         }
@@ -337,6 +349,7 @@ impl ReceiveBatch {
                     status: OutboundProgressStatus::Completed,
                     source: None,
                     failure_reason: None,
+                    failure_settled: false,
                 },
             );
             if let Some(local) = state.local_work.remove(item) {
@@ -363,6 +376,7 @@ impl ReceiveBatch {
                     status,
                     source: None,
                     failure_reason: previous.failure_reason,
+                    failure_settled: true,
                 },
             );
         }
@@ -394,6 +408,7 @@ impl ReceiveBatch {
                             bytes: item.bytes,
                             status: item.status,
                             failure_reason: item.failure_reason,
+                            failure_settled: item.failure_settled,
                             source: None,
                         },
                     )
