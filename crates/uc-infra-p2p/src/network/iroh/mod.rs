@@ -90,14 +90,16 @@ pub use space_admission::{
     SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
     SponsorOpaqueMaterial, SPACE_ADMISSION_ALPN,
 };
-pub use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+pub use uc_sync_protocol::clipboard::{
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
 
 /// 产品使用的全部 ALPN。网络日志只输出这些已知取值，对端发来的其他字符串一律不保留。
 pub fn product_alpns() -> Vec<&'static [u8]> {
     vec![
         BLOBS_ALPN,
         CLIPBOARD_ALPN,
-        uc_sync_protocol::clipboard::ATTRIBUTED_CLIPBOARD_ALPN,
+        ATTRIBUTED_CLIPBOARD_ALPN,
         MULTIPLEXED_CLIPBOARD_ALPN,
         PEER_REACHABILITY_ALPN,
         LEGACY_PEER_REACHABILITY_ALPN,

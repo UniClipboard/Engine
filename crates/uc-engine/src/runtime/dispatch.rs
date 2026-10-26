@@ -8,8 +8,8 @@ use tokio::time::Instant;
 use uc_core::ids::DeviceId;
 #[cfg(feature = "dev-tools")]
 use uc_infra_p2p::network::iroh::{
-    CLIPBOARD_ALPN, LEGACY_PEER_REACHABILITY_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
-    PEER_REACHABILITY_ALPN,
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, LEGACY_PEER_REACHABILITY_ALPN,
+    MULTIPLEXED_CLIPBOARD_ALPN, PEER_REACHABILITY_ALPN,
 };
 
 #[cfg(feature = "dev-tools")]
@@ -953,7 +953,11 @@ impl EngineRuntime for ProductionRuntime {
                         PEER_REACHABILITY_ALPN.to_vec(),
                     ]
                 } else {
-                    vec![MULTIPLEXED_CLIPBOARD_ALPN.to_vec(), CLIPBOARD_ALPN.to_vec()]
+                    vec![
+                        ATTRIBUTED_CLIPBOARD_ALPN.to_vec(),
+                        MULTIPLEXED_CLIPBOARD_ALPN.to_vec(),
+                        CLIPBOARD_ALPN.to_vec(),
+                    ]
                 };
                 Ok(DevOperationResult::NetworkPartitionUpdated {
                     blocked_peer_count: self

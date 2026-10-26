@@ -120,6 +120,10 @@ Engine，使用真实 SQLite、MLS 与本机回环 Iroh QUIC，配对 rendezvous
 内施加，使用真实时钟。该文件只在 `dev-tools` feature 下编译，因此 `cargo test -p uc-engine --locked` 不运行
 其中任何场景。nextest 为每个场景单独起进程，并按 `.config/nextest.toml` 的 `membership-e2e` 测试组限制并发、
 放宽慢测试期限；`cargo test` 会在一个进程中顺序运行全部场景，耗时约为前者的数倍且时序失真，只作为兼容入口保留。
+`RejectNewConnections` 的协议选择必须覆盖对应能力的全部当前版本；剪贴板协议新增能力版本时，
+同时更新 dev-tools 的内容拨号选择。真实故障测试必须核对实际拒绝计数，不能只启用开关就假定
+目标交换已经受影响；已有连接的复用与新拨号拒绝分别验收。
+
 场景按类别放在 `crates/uc-engine/tests/space_membership_auto_pairing_e2e/` 的模块中（`admission`、`topology`、
 `removal_convergence`、`space_switch`、`membership_history`、`automatic_connections` 等），共享测试台位于其
 `harness/`。`topology::` 下的多节点拓扑另属 `membership-topology` 测试组，并发更低。每个场景第一行是
