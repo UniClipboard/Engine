@@ -837,7 +837,7 @@ Application完整1390通过／2跳过；原生入站7通过（0.43秒），真�
 没有新增持久化字段、稳定查询或通知预算；重启仍按原未保留事实处理。
 
 最小真实链通过（9.43秒），复跑：
-`just cargo test -p uc-engine --features dev-tools --lib real_engine_outbound_progress_reports_actual_partial_result_and_reconciles_without_download --locked -- --nocapture`。
+`just cargo test -p uc-engine --features dev-tools --lib real_engine_file_is_durably_saved_while_batch_and_later_file_are_still_receiving --locked -- --nocapture`。
 完整Application1392通过／2跳过（141.27秒）；
 `just cargo test -p uc-engine --features dev-tools --lib receive_retry:: --locked -- --nocapture`通过42项／1跳过（325.95秒）。
 Engine跳过项需要本机严格Collector与Jaeger，不记业务观测验收通过；首次Engine编译重复导入已修正后完整重跑。
