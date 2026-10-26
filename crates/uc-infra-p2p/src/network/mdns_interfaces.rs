@@ -1,8 +1,10 @@
-//! 配对 mDNS 使用的本机网络接口快照。
+//! mDNS 使用的本机网络接口快照：配对发现与长期设备发现共用同一接口策略。
 //!
 //! 发布端和解析端必须使用同一组 IPv4 发送接口。只把地址写进 mDNS 记录并
-//! 不会让 `swarm-discovery` 从对应接口发送数据；多网卡主机必须显式调用
-//! `with_multicast_interfaces_v4`。
+//! 不会让 `swarm-discovery` 从对应接口发送数据；多网卡主机必须显式提供
+//! 组播接口（配对用 `with_multicast_interfaces_v4`，长期发现用
+//! `MdnsAddressLookupBuilder::multicast_interfaces_v4`）。没有组播能力的接口
+//! （例如 WireGuard）只会在建立该接口的套接字时被跳过，不影响其他接口。
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
@@ -10,27 +12,27 @@ use std::net::{IpAddr, Ipv4Addr};
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct MdnsInterfaceSnapshot {
+pub(crate) struct MdnsInterfaceSnapshot {
     advertised_addrs: Vec<IpAddr>,
     multicast_v4: Vec<Ipv4Addr>,
 }
 
 impl MdnsInterfaceSnapshot {
-    pub(super) fn capture() -> Self {
+    pub(crate) fn capture() -> Self {
         match if_addrs::get_if_addrs() {
             Ok(interfaces) => Self::from_addrs(interfaces.into_iter().map(|item| item.addr.ip())),
             Err(error) => {
                 uc_warn!(
                     error_kind = "address_enumeration",
                     io_error_kind = io_error_kind(&error),
-                    "if-addrs enumerate failed; pairing mDNS will use the default interface"
+                    "if-addrs enumerate failed; mDNS will use the default interface"
                 );
                 Self::default()
             }
         }
     }
 
-    pub(super) fn into_parts(self) -> (Vec<IpAddr>, Vec<Ipv4Addr>) {
+    pub(crate) fn into_parts(self) -> (Vec<IpAddr>, Vec<Ipv4Addr>) {
         (self.advertised_addrs, self.multicast_v4)
     }
 

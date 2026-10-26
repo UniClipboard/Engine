@@ -20,7 +20,8 @@ use super::{cloud::CloudDiscoveryProvider, mdns::MdnsDiscoveryProvider};
 use super::{decode, peer_id};
 
 pub(in super::super) struct DirectoryAddressLookupBuilder {
-    pub(in super::super) mdns: MdnsAddressLookup,
+    /// `None` 表示本机 mDNS 无法建立：目录只使用其余来源，endpoint 仍然启动。
+    pub(in super::super) mdns: Option<MdnsAddressLookup>,
     pub(in super::super) cloud_enabled: bool,
     pub(in super::super) recorder: NetworkRecorder,
     pub(in super::super) manager: Arc<OnceLock<Arc<DiscoveryManager>>>,
@@ -37,19 +38,25 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
         self,
         endpoint: &Endpoint,
     ) -> Result<impl AddressLookup, AddressLookupBuilderError> {
-        let mdns: Arc<dyn AddressLookup> = Arc::new(
-            ObservedAddressLookupBuilder::new(
-                self.mdns.clone(),
-                DiscoverySource::Mdns,
-                self.recorder.clone(),
-            )
-            .into_address_lookup(endpoint)?,
-        );
-        let mut providers: Vec<Arc<dyn DiscoveryProvider>> =
-            vec![Arc::new(MdnsDiscoveryProvider {
-                mdns: self.mdns,
-                lookup: mdns.clone(),
-            })];
+        let mut providers: Vec<Arc<dyn DiscoveryProvider>> = Vec::new();
+        let mdns = match self.mdns {
+            Some(service) => {
+                let lookup: Arc<dyn AddressLookup> = Arc::new(
+                    ObservedAddressLookupBuilder::new(
+                        service.clone(),
+                        DiscoverySource::Mdns,
+                        self.recorder.clone(),
+                    )
+                    .into_address_lookup(endpoint)?,
+                );
+                providers.push(Arc::new(MdnsDiscoveryProvider {
+                    mdns: service,
+                    lookup: lookup.clone(),
+                }));
+                Some(lookup)
+            }
+            None => None,
+        };
         if self.cloud_enabled {
             let cloud = ObservedAddressLookupBuilder::new(
                 DnsAddressLookup::n0_dns(),
@@ -74,7 +81,7 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
 /// 原连接调用继续交给 iroh；iroh 的 lookup 统一从发现负责人获得各来源候选。
 pub(in super::super) struct DirectoryAddressLookup {
     pub(in super::super) manager: Arc<DiscoveryManager>,
-    pub(in super::super) mdns: Arc<dyn AddressLookup>,
+    pub(in super::super) mdns: Option<Arc<dyn AddressLookup>>,
 }
 
 impl fmt::Debug for DirectoryAddressLookup {
@@ -85,7 +92,9 @@ impl fmt::Debug for DirectoryAddressLookup {
 
 impl AddressLookup for DirectoryAddressLookup {
     fn publish(&self, data: &EndpointData) {
-        self.mdns.publish(data);
+        if let Some(mdns) = &self.mdns {
+            mdns.publish(data);
+        }
     }
 
     fn resolve(&self, endpoint: EndpointId) -> Option<BoxStream<'static, Result<Item, Error>>> {

@@ -12,11 +12,15 @@ use uc_observability_contract::uc_warn;
 pub(in super::super) struct DiscoveryRuntime {
     manager: Arc<DiscoveryManager>,
     handle: Option<JoinHandle<Result<(), DiscoveryError>>>,
-    mdns: MdnsAddressLookup,
+    /// 本机 mDNS 不可用时为 `None`，其余发现与关闭流程不变。
+    mdns: Option<MdnsAddressLookup>,
 }
 
 impl DiscoveryRuntime {
-    pub(in super::super) fn start(manager: Arc<DiscoveryManager>, mdns: MdnsAddressLookup) -> Self {
+    pub(in super::super) fn start(
+        manager: Arc<DiscoveryManager>,
+        mdns: Option<MdnsAddressLookup>,
+    ) -> Self {
         let running = manager.clone();
         let handle = tokio::spawn(async move {
             let result = running.run().await;
@@ -51,9 +55,11 @@ impl DiscoveryRuntime {
                 }
             }
         }
-        if let Err(error) = self.mdns.shutdown().await {
-            record_task_join_failure(DiagnosticTaskKind::PeerDiscovery);
-            failure.get_or_insert_with(|| error.into());
+        if let Some(mdns) = &self.mdns {
+            if let Err(error) = mdns.shutdown().await {
+                record_task_join_failure(DiagnosticTaskKind::PeerDiscovery);
+                failure.get_or_insert_with(|| error.into());
+            }
         }
         failure.map_or(Ok(()), Err)
     }
@@ -64,7 +70,9 @@ impl Drop for DiscoveryRuntime {
         if let Some(handle) = &self.handle {
             handle.abort();
         }
-        self.mdns.abort();
+        if let Some(mdns) = &self.mdns {
+            mdns.abort();
+        }
         if self.manager.shutdown().is_err() {
             uc_warn!(
                 error_class = "discovery_shutdown_failed",

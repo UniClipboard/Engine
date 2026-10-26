@@ -55,7 +55,8 @@
 //! [`RelayUrl`]: iroh_base::RelayUrl
 use std::{
     collections::{BTreeSet, HashMap},
-    net::{IpAddr, SocketAddr},
+    fmt,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -160,12 +161,36 @@ impl Subscribers {
     }
 }
 
+/// 返回当前应参与 mDNS 组播的本机 IPv4 接口地址。
+///
+/// 启动时调用一次；之后每当本机发布的地址发生变化时再调用，并按差异增删接口。
+#[derive(Clone)]
+pub struct MulticastInterfacesV4(Arc<dyn Fn() -> Vec<Ipv4Addr> + Send + Sync>);
+
+impl MulticastInterfacesV4 {
+    /// 用接口快照函数创建来源。
+    pub fn new(snapshot: impl Fn() -> Vec<Ipv4Addr> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(snapshot))
+    }
+
+    fn snapshot(&self) -> BTreeSet<Ipv4Addr> {
+        (self.0)().into_iter().collect()
+    }
+}
+
+impl fmt::Debug for MulticastInterfacesV4 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MulticastInterfacesV4")
+    }
+}
+
 /// Builder for [`MdnsAddressLookup`].
 #[derive(Debug)]
 pub struct MdnsAddressLookupBuilder {
     advertise: bool,
     service_name: String,
     filter: AddrFilter,
+    multicast_interfaces_v4: Option<MulticastInterfacesV4>,
 }
 
 impl MdnsAddressLookupBuilder {
@@ -175,7 +200,17 @@ impl MdnsAddressLookupBuilder {
             advertise: true,
             service_name: N0_SERVICE_NAME.to_string(),
             filter: AddrFilter::default(),
+            multicast_interfaces_v4: None,
         }
+    }
+
+    /// 在全部给定的 IPv4 接口上收发 mDNS，而不只是默认路由所在的接口。
+    ///
+    /// 未设置时保持上游行为：只使用默认路由接口。来源返回空列表时同样退回默认接口。
+    /// 单个接口无法建立组播套接字时只跳过该接口，不影响服务启动。
+    pub fn multicast_interfaces_v4(mut self, interfaces: MulticastInterfacesV4) -> Self {
+        self.multicast_interfaces_v4 = Some(interfaces);
+        self
     }
 
     /// Sets whether this endpoint should advertise its presence.
@@ -216,7 +251,13 @@ impl MdnsAddressLookupBuilder {
         self,
         endpoint_id: EndpointId,
     ) -> Result<MdnsAddressLookup, AddressLookupBuilderError> {
-        MdnsAddressLookup::new(endpoint_id, self.advertise, self.service_name, self.filter)
+        MdnsAddressLookup::new(
+            endpoint_id,
+            self.advertise,
+            self.service_name,
+            self.filter,
+            self.multicast_interfaces_v4,
+        )
     }
 }
 
@@ -275,16 +316,22 @@ impl MdnsAddressLookup {
         advertise: bool,
         service_name: String,
         filter: AddrFilter,
+        multicast_interfaces_v4: Option<MulticastInterfacesV4>,
     ) -> Result<Self, AddressLookupBuilderError> {
         debug!("Creating new Mdns service");
         let (send, mut recv) = mpsc::channel(64);
         let task_sender = send.clone();
         let rt = tokio::runtime::Handle::current();
+        let mut active_interfaces_v4 = multicast_interfaces_v4
+            .as_ref()
+            .map(MulticastInterfacesV4::snapshot)
+            .unwrap_or_default();
         let address_lookup = MdnsAddressLookup::spawn_discoverer(
             endpoint_id,
             advertise,
             task_sender.clone(),
             BTreeSet::new(),
+            active_interfaces_v4.iter().copied().collect(),
             service_name,
             &rt,
         )?;
@@ -308,6 +355,17 @@ impl MdnsAddressLookup {
                     }
                     Ok(Some(data)) = addrs_change.updated() => {
                         tracing::trace!(?data, "Mdns address changed");
+                        // 本机发布地址变化通常意味着网卡变化：按最新快照增删组播接口。
+                        if let Some(interfaces) = &multicast_interfaces_v4 {
+                            let next = interfaces.snapshot();
+                            for removed in active_interfaces_v4.difference(&next) {
+                                address_lookup.remove_interface_v4(*removed);
+                            }
+                            for added in next.difference(&active_interfaces_v4) {
+                                address_lookup.add_interface_v4(*added);
+                            }
+                            active_interfaces_v4 = next;
+                        }
                         address_lookup.remove_all();
 
                         // apply user-supplied filter
@@ -505,6 +563,7 @@ impl MdnsAddressLookup {
         advertise: bool,
         sender: mpsc::Sender<Message>,
         socketaddrs: BTreeSet<SocketAddr>,
+        multicast_interfaces_v4: Vec<Ipv4Addr>,
         service_name: String,
         rt: &tokio::runtime::Handle,
     ) -> Result<DropGuard, AddressLookupBuilderError> {
@@ -527,7 +586,8 @@ impl MdnsAddressLookup {
             .to_ascii_lowercase();
         let mut discoverer = Discoverer::new_interactive(service_name, endpoint_id_str)
             .with_callback(callback)
-            .with_ip_class(IpClass::Auto);
+            .with_ip_class(IpClass::Auto)
+            .with_multicast_interfaces_v4(multicast_interfaces_v4);
         if advertise {
             let addrs = MdnsAddressLookup::socketaddrs_to_addrs(socketaddrs.iter());
             for addr in addrs {

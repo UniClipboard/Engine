@@ -79,7 +79,7 @@ async fn directory_lookup_establishes_real_multistream_connection_with_bidirecti
         .relay_mode(RelayMode::Disabled)
         .address_lookup(DirectoryAddressLookup {
             manager: manager.clone(),
-            mdns: Arc::new(MemoryLookup::new()),
+            mdns: Some(Arc::new(MemoryLookup::new())),
         })
         .bind()
         .await
@@ -138,4 +138,57 @@ async fn directory_lookup_establishes_real_multistream_connection_with_bidirecti
     serving.await.unwrap();
     server.close().await;
     manager.shutdown().unwrap();
+}
+
+/// 本机 mDNS 无法建立时，目录只用其余来源：endpoint 仍能构建，发布不报错，
+/// 显式地址照常连通，发现负责人照常初始化。
+#[tokio::test]
+async fn endpoint_builds_and_dials_explicit_addresses_without_local_mdns() {
+    use std::sync::OnceLock;
+
+    use uc_observability_contract::diagnostics::connectivity::NetworkRecorder;
+
+    use super::lookup::DirectoryAddressLookupBuilder;
+
+    const ALPN: &[u8] = b"uni-test/no-mdns";
+    let server = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await
+        .unwrap();
+    let manager = Arc::new(OnceLock::new());
+    let client = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .address_lookup(DirectoryAddressLookupBuilder {
+            mdns: None,
+            cloud_enabled: false,
+            recorder: NetworkRecorder::current(),
+            manager: manager.clone(),
+        })
+        .bind()
+        .await
+        .expect("endpoint starts without local mDNS");
+    assert!(
+        manager.get().is_some(),
+        "discovery owner is still initialized"
+    );
+
+    let accepting = tokio::spawn({
+        let server = server.clone();
+        async move {
+            let connection = server.accept().await?.await.ok()?;
+            connection.closed().await;
+            Some(())
+        }
+    });
+    let connection =
+        tokio::time::timeout(Duration::from_secs(10), client.connect(server.addr(), ALPN))
+            .await
+            .expect("dial finishes")
+            .expect("explicit address still connects without mDNS");
+    drop(connection);
+    accepting.abort();
+    client.close().await;
+    server.close().await;
 }

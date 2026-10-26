@@ -9,6 +9,7 @@
 - `Item.last_updated` 反映原观察时间，目录读取缓存不重新续期；时间无法确定的 mDNS 观察不进入目录。
 - 增加共用 actor 的显式 shutdown/abort：正常关闭等待任务析构并保留 JoinError，克隆不再使关闭后的服务继续广播。
 - 队列满的固定诊断不输出候选身份或地址。
+- 构建器增加 `multicast_interfaces_v4(MulticastInterfacesV4)`：启动时读取一次接口来源并交给 swarm-discovery 的多接口 IPv4 模式；本机发布地址变化时再次读取，按差异调用 `add_interface_v4`/`remove_interface_v4`。未设置时保持上游的默认路由接口行为。
 - 长期actor的span显式无parent；启动acto发现服务时不捕获短期调用span，防止延长启动计时或在跨subscriber的取消析构中释放错误parent。实际发现轮询和网络诊断仍正常运行。
 
 这些行为由 Engine 的 `mdns_discovery_contract` 验证；目录自身用有限 TTL 处理丢失的订阅事件。
