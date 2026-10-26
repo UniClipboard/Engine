@@ -2,6 +2,7 @@
 mod database;
 mod lifecycle;
 mod observation;
+mod outbound_progress;
 mod redelivery;
 mod save_failure;
 #[cfg(target_os = "linux")]
@@ -186,6 +187,7 @@ struct ReceiveCase {
     #[cfg(target_os = "linux")]
     resource_baseline: Option<ReceiveResourceBaseline>,
     source: Engine,
+    source_events: EventStream,
     receiver: Engine,
     source_id: String,
     receiver_root: TempDir,
@@ -263,7 +265,7 @@ async fn receive_case_with_progress(
     let config = EngineConfig::new("1.2.3")
         .with_rendezvous_base_url(server.uri())
         .with_test_relay_fallback(false);
-    let (source, _source_events) = Engine::start(config.clone(), host).await.unwrap();
+    let (source, source_events) = Engine::start(config.clone(), host).await.unwrap();
     let receiver_storage = MemoryHostSecureStorage::default();
     let (receiver, mut events) = Engine::start(
         config,
@@ -410,6 +412,7 @@ async fn receive_case_with_progress(
         #[cfg(target_os = "linux")]
         resource_baseline,
         source,
+        source_events,
         receiver,
         source_id,
         receiver_root,

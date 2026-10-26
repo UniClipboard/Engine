@@ -365,6 +365,9 @@ impl EngineHostEventEmitter {
 impl HostEventEmitterPort for EngineHostEventEmitter {
     fn emit(&self, event: HostEvent) -> Result<(), EmitError> {
         let event = match event {
+            HostEvent::Transfer(TransferHostEvent::OutboundProgressChanged) => {
+                EngineEvent::OutboundProgressChanged
+            }
             HostEvent::Transfer(TransferHostEvent::Progress {
                 transfer_id,
                 entry_id,
@@ -1018,11 +1021,7 @@ mod tests {
             network.accepts_protocol_for_test(b"uniclipboard/removal-notice/1"),
         );
         let deprecated_removal_protocols_reachable = exchange || late || notice;
-        prepared
-            .session
-            .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
-            .await
-            .unwrap();
+        drop(prepared.application);
         network.shutdown().await.unwrap();
         task_registry
             .shutdown(std::time::Duration::from_millis(500))

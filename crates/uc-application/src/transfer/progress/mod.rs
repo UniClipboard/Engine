@@ -7,6 +7,8 @@ mod deadline;
 mod error;
 pub use deadline::ProgressExchangeDeadline;
 mod model;
+mod plan;
+pub(crate) use plan::ProgressOriginalPlan;
 mod ports;
 mod producer;
 mod receiver;
@@ -57,3 +59,11 @@ pub use connectivity::transfer_progress_connectivity_policy;
 
 mod inbound;
 pub use inbound::{ProgressInboundWirePort, TransferProgressTransport};
+
+mod runtime;
+pub use runtime::{ProgressInboundFactory, TransferProgressNetwork};
+pub(crate) use runtime::{ProgressRuntime, ProgressRuntimeAssembly};
+
+mod view;
+pub(crate) use view::ProgressViewOwner;
+pub use view::{TransferProgressQueryError, TransferProgressReconciliation};

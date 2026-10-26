@@ -47,6 +47,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | --- | --- |
 | `StateChanged` | 生命周期状态已经改变 |
 | `IncomingEntry` | 收到一条具有完整摘要的新内容 |
+| `OutboundProgressChanged` | 发送侧完整进度已变化，宿主重新读取完整视图 |
 | `TransferProgress` | 文件传输进度发生变化 |
 | `DeviceTrustChanged { revision }` | 正式设备组状态已经变化；宿主重新调用 `QueryDeviceGroupChoices` 读取完整事实与待处理选择 |
 | `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
@@ -197,6 +198,9 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `ReadEntryFile` | 读取指定记录的首个已物化文件及下载文件名 |
 | `QueryEntryDelivery` | 返回指定记录的来源及每个当前仍有效且可信设备的投递状态；已移除设备不显示，当前成员范围无法确认时查询失败 |
 | `ClearHistory` | 清空全部历史，并返回删除数量和未删除条目标识 |
+| `QueryOutboundProgress` | 按原源条目和目标设备读取完整发送侧进度；没有保留资料时返回空 |
+| `ListOutboundProgress` | 列出当前授权范围内仍保留的完整发送侧进度 |
+| `ReconcileOutboundProgress` | 执行完整原任务核对，可指定预期尝试；不启动下载 |
 | `QueryEntryReceiveProgress` | 查询指定远端接收任务的当前聚合进度 |
 | `ListEntryReceiveProgress` | 列出全部尚未结束的远端接收任务进度 |
 | `CancelEntryReceive` | 按记录和尝试编号取消一次远端接收任务 |
@@ -597,3 +601,12 @@ because `QueryDiagnostics` still fails when the retained-import status cannot be
 
 A legacy `general.debug_mode` of any JSON type is ignored on load and not written on the next save.
 The settings schema version does not change.
+
+
+发送侧进度的 `OutboundProgressSummary` 按原始逻辑项保留完整结果和计数，联系状态独立于业务终态。
+失联只把未确认项标为 `Unconfirmed`，不推断远端失败或取消；失败只含固定类别。视图不暴露协议绑定、producer或线上序号。
+`ReconcileOutboundProgress` 返回 Running、Settled、Superseded、NotRetained、Unsupported、Unreachable或Busy；
+授权拒绝、损坏数据及本地读取失败仍走稳定错误，不能伪装成远端离线或没有资料。
+`expected_attempt_id` 已被替换时返回Superseded，宿主无需自行比较协议对象。
+`OutboundProgressChanged` 只提示缓存失效，事件丢失或滞后后可以重读列表；网络采用及ACK不等待宿主渲染。
+UniFFI与HarmonyOS绑定调用同一完整操作；HarmonyOS的字节数及修订号使用十进制字符串，避免JavaScript整数精度损失。

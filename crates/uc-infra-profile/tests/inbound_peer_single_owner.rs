@@ -61,7 +61,7 @@ const INBOUND_HANDLERS: [&str; 9] = [
     "crates/uc-infra-p2p/src/network/iroh/connectivity/admission.rs",
     "crates/uc-infra-p2p/src/network/iroh/active_clipboard/receiver_adapter.rs",
     "crates/uc-infra-p2p/src/network/iroh/active_clipboard/pull_serve_adapter.rs",
-    "crates/uc-infra-p2p/src/network/iroh/transfer_progress_adapter.rs",
+    "crates/uc-infra-p2p/src/network/iroh/connectivity/progress_handler.rs",
     "crates/uc-infra-p2p/src/network/iroh/membership_branch_recovery_adapter.rs",
     "crates/uc-infra-p2p/src/network/iroh/membership_history_exchange_adapter.rs",
     "crates/uc-infra-p2p/src/network/iroh/node.rs",

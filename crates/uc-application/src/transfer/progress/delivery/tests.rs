@@ -17,7 +17,8 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::time::{timeout, Duration};
 use uc_core::file_transfer::ProgressActive;
 use uc_core::file_transfer::{
-    ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
+    ProgressIdentity, ProgressItem, ProgressItemKind, ProgressPhase, ProgressTerminal,
+    ProgressTerminalOutcome,
 };
 use uc_core::ids::EntryId;
 
@@ -46,14 +47,10 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
-        self.0
-            .lock()
-            .unwrap()
-            .claim_terminal(peer, source, attempt, item)
+        self.0.lock().unwrap().claim_terminal(peer, expected, item)
     }
 }
 fn id(n: u8) -> ProgressIdentity {
@@ -94,7 +91,16 @@ fn authority(plans: &[(u8, u16)]) -> Arc<Authority> {
 }
 fn submit(delivery: &ProgressExchangeService, p: u8, n: u16) -> ProgressSubmission {
     delivery
-        .submit_settled(peer(p), id(p), id(99), result(n))
+        .submit_settled(
+            peer(p),
+            delivery
+                .inner
+                .authority
+                .current_task(&peer(p), id(p))
+                .unwrap()
+                .descriptor,
+            result(n),
+        )
         .unwrap()
 }
 struct Offline(mpsc::Sender<DeviceId>);
@@ -693,3 +699,96 @@ async fn explicit_denial_and_malformed_reply_stop_actual_delivery_but_temporary_
 
 #[path = "retry_tests.rs"]
 mod retry_tests;
+
+#[test]
+fn receipt_from_retired_producer_cannot_claim_a_reopened_attempt_notification() {
+    let authority = authority(&[(1, 1)]);
+    let expected = authority.current_task(&peer(1), id(1)).unwrap().descriptor;
+    // 保留的结算回调来自旧producer；新会话可能重开同一持久attempt。
+    {
+        let mut catalog = authority.0.lock().unwrap();
+        catalog.retire();
+        catalog.accept(
+            &EntryId::from("local-1"),
+            peer(1),
+            id(1),
+            id(99),
+            vec![item(0)],
+        );
+    }
+    let current = authority.current_task(&peer(1), id(1)).unwrap();
+    assert!(current.descriptor.producer != expected.producer);
+    let (events, _) = mpsc::channel(1);
+    let (delivery, _worker) = ProgressExchangeService::new(
+        Arc::new(Clock(AtomicU64::new(0))),
+        authority.clone(),
+        Arc::new(Offline(events)),
+        Arc::new(UnusedSnapshot),
+        Arc::new(UnusedLive),
+    );
+    let submitted = delivery
+        .submit_settled(peer(1), expected, result(0))
+        .unwrap();
+    assert!(matches!(
+        submitted,
+        ProgressSubmission::Refused(ProgressClaimRefusal::Superseded)
+    ));
+    assert!(authority
+        .current_task(&peer(1), id(1))
+        .unwrap()
+        .notification_closed
+        .is_empty());
+    assert!(delivery.inner.state.lock().unwrap().entries.is_empty());
+}
+
+#[test]
+fn stale_activity_cannot_refresh_a_reopened_producer_or_revision() {
+    for retire in [false, true] {
+        for has_value in [false, true] {
+            let authority = authority(&[(1, 1)]);
+            let expected = authority.current_task(&peer(1), id(1)).unwrap().descriptor;
+            {
+                let mut catalog = authority.0.lock().unwrap();
+                if retire {
+                    catalog.retire();
+                } else {
+                    catalog.clear();
+                }
+                catalog.accept(
+                    &EntryId::from("local-1"),
+                    peer(1),
+                    id(1),
+                    id(99),
+                    vec![item(0)],
+                );
+            }
+            let (events, _) = mpsc::channel(1);
+            let (delivery, _worker) = ProgressExchangeService::new(
+                Arc::new(Clock(AtomicU64::new(0))),
+                authority.clone(),
+                Arc::new(Offline(events)),
+                Arc::new(UnusedSnapshot),
+                Arc::new(UnusedLive),
+            );
+            let value = has_value.then(|| ProgressActive {
+                item: item(0),
+                round: 0,
+                sequence: 1,
+                bytes: 1,
+                total: Some(10),
+                phase: ProgressPhase::Transferring,
+            });
+            assert!(matches!(
+                delivery.submit_activity(peer(1), expected, value).unwrap(),
+                ProgressSubmission::Refused(ProgressClaimRefusal::Superseded)
+            ));
+            let state = delivery.inner.state.lock().unwrap();
+            assert!(state.live.is_empty() && state.live_tasks.is_empty());
+            assert!(authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .notification_closed
+                .is_empty());
+        }
+    }
+}

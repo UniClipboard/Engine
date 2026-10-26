@@ -12,8 +12,10 @@ mod operation;
 mod result;
 mod settings;
 mod startup;
+mod transfer_progress;
 mod upgrade;
 mod value;
+pub use transfer_progress::*;
 
 pub use config::*;
 pub use config_migration::*;

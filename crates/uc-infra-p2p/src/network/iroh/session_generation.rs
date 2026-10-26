@@ -13,7 +13,11 @@ use uc_observability_contract::{uc_info, uc_warn, wire_enum};
 
 use super::peer_reachability_adapter::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 use super::space_admission::{observe_space_admission_accepting, SPACE_ADMISSION_ALPN};
-use super::transfer_progress_adapter::TRANSFER_PROGRESS_ALPN;
+use uc_sync_protocol::clipboard::{
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
+use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
+use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
 #[derive(Debug)]
 pub(super) struct SessionProtocolRegistry {
@@ -292,7 +296,12 @@ fn alpn_class(alpn: &[u8]) -> &'static str {
         "space_admission"
     } else if alpn == PEER_REACHABILITY_ALPN || alpn == LEGACY_PEER_REACHABILITY_ALPN {
         "presence"
-    } else if alpn == TRANSFER_PROGRESS_ALPN {
+    } else if matches!(
+        alpn,
+        ATTRIBUTED_CLIPBOARD_ALPN | MULTIPLEXED_CLIPBOARD_ALPN | CLIPBOARD_ALPN
+    ) {
+        "clipboard"
+    } else if alpn == TRANSFER_PROGRESS_ALPN || alpn == LEGACY_TRANSFER_PROGRESS_ALPN {
         "transfer_progress"
     } else {
         "other"

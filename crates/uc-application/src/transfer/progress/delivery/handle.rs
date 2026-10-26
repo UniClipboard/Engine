@@ -2,7 +2,7 @@ use super::super::clock::Clock;
 use super::super::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
     ProgressLiveRoundPort, ProgressQueryResult, ProgressReceiveError, ProgressSnapshotRoundPort,
-    ProgressSnapshotTarget, ProgressSubmission, ProgressTaskAuthorityPort,
+    ProgressSnapshotTarget, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
     ProgressTerminalRoundPort,
 };
 use super::model::{clock_failure, Key, QueryKey};
@@ -61,8 +61,7 @@ impl ProgressExchangeService {
     pub fn submit_settled(
         &self,
         peer: DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         result: ProgressTerminal,
     ) -> Result<ProgressSubmission, ProgressReceiveError> {
         if self
@@ -78,7 +77,7 @@ impl ProgressExchangeService {
         let current = match self
             .inner
             .authority
-            .claim_terminal(&peer, source, attempt, result.item)
+            .claim_terminal(&peer, expected, result.item)
         {
             Ok(current) => current,
             Err(reason) => return Ok(ProgressSubmission::Refused(reason)),
@@ -231,32 +230,15 @@ impl ProgressExchangeService {
 }
 
 impl ProgressExchangeService {
-    /// 只提交本地最新活动值；不等待网络或交换额度，终态封口后拒绝后续活动值。
-    pub fn submit_live(
+    /// 交接原负责人冻结的当前任务事实；None表示尚无中间值，重复交接不刷新原期限。
+    /// 描述与实际权威逐字段一致后才可入队，不把旧快照归入重建后的producer。
+    pub fn submit_activity(
         &self,
         peer: DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
-        value: ProgressActive,
-    ) -> Result<ProgressSubmission, ProgressReceiveError> {
-        self.submit_activity(peer, source, attempt, Some(value))
-    }
-    /// 当前接收尝试接受后跟踪等待状态；重复调用不刷新首次联系或预算。
-    pub fn track_current(
-        &self,
-        peer: DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
-    ) -> Result<ProgressSubmission, ProgressReceiveError> {
-        self.submit_activity(peer, source, attempt, None)
-    }
-    fn submit_activity(
-        &self,
-        peer: DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         value: Option<ProgressActive>,
     ) -> Result<ProgressSubmission, ProgressReceiveError> {
+        let source = expected.source;
         if self
             .inner
             .state
@@ -271,7 +253,7 @@ impl ProgressExchangeService {
                 ProgressClaimRefusal::NotRetained,
             ));
         };
-        if task.descriptor.source != source || task.descriptor.attempt != attempt {
+        if task.descriptor != expected {
             return Ok(ProgressSubmission::Refused(
                 ProgressClaimRefusal::Superseded,
             ));

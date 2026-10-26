@@ -1,7 +1,10 @@
 //! 已接受接收尝试的运行期权威；不持久化来源材料，不按 UUID 大小排序。
 use super::{ProgressClaimRefusal, ProgressSnapshot, ProgressSourceTask, ProgressTaskDescriptor};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use uc_core::file_transfer::{
     valid_progress_plan, ProgressIdentity, ProgressItem, ProgressItemState,
 };
@@ -14,6 +17,7 @@ const GLOBAL_CAPACITY: usize = 256;
 const PEER_CAPACITY: usize = 64;
 type SourceKey = (DeviceId, ProgressIdentity);
 struct AcceptedTask {
+    changed: Arc<AtomicBool>,
     local_entry: EntryId,
     task: ProgressSourceTask,
     snapshot: Option<Arc<ProgressSnapshot>>,
@@ -86,6 +90,7 @@ impl ProgressSourceCatalog {
         self.tasks.insert(
             key,
             AcceptedTask {
+                changed: Arc::new(AtomicBool::new(true)),
                 local_entry: local_entry.clone(),
                 snapshot: None,
                 retained_states: None,
@@ -103,6 +108,24 @@ impl ProgressSourceCatalog {
             },
         );
     }
+    pub(crate) fn observe_changes(
+        &self,
+        peer: DeviceId,
+        source: ProgressIdentity,
+        attempt: ProgressIdentity,
+    ) -> Option<Arc<AtomicBool>> {
+        self.tasks
+            .get(&(peer, source))
+            .filter(|task| task.task.descriptor.attempt == attempt)
+            .map(|task| task.changed.clone())
+    }
+    pub(crate) fn take_changed(&self) -> Vec<(DeviceId, EntryId, ProgressSourceTask)> {
+        self.tasks
+            .iter()
+            .filter(|(_, task)| task.changed.swap(false, Ordering::AcqRel))
+            .map(|((peer, _), task)| (*peer, task.local_entry.clone(), task.task.clone()))
+            .collect()
+    }
     pub(crate) fn current(
         &self,
         peer: &DeviceId,
@@ -116,15 +139,15 @@ impl ProgressSourceCatalog {
     pub(crate) fn claim_terminal(
         &mut self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let source = expected.source;
         let current = self
             .tasks
             .get_mut(&(*peer, source))
             .ok_or(ProgressClaimRefusal::NotRetained)?;
-        if current.task.descriptor.attempt != attempt {
+        if current.task.descriptor != expected {
             return Err(ProgressClaimRefusal::Superseded);
         }
         if !current.task.items.contains(&item) {

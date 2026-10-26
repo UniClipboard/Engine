@@ -179,16 +179,17 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let source = expected.source;
+        let attempt = expected.attempt;
         let kind = match item.kind {
             ProgressItemKind::File => "file",
             ProgressItemKind::Representation => "representation",
             ProgressItemKind::DirectoryUnit => "directory",
         };
-        let reply=self.request(json!({"op":"claim","peer":peer.as_str(),"source":source.bytes(),"attempt":attempt.bytes(),"kind":kind,"index":item.index})).unwrap();
+        let reply=self.request(json!({"op":"claim","peer":peer.as_str(),"source":source.bytes(),"attempt":attempt.bytes(),"producer":expected.producer.bytes(),"revision":expected.revision,"item_count":expected.item_count,"kind":kind,"index":item.index})).unwrap();
         if !reply["task"].is_null() {
             return Ok(decode_task(reply["task"].clone()).unwrap());
         }
@@ -758,7 +759,7 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
             Arc::new(UnusedLive),
         );
         assert_eq!(
-            delivery.submit_settled(peer, SOURCE, accepted.descriptor.attempt, result)?,
+            delivery.submit_settled(peer, accepted.descriptor, result)?,
             ProgressSubmission::Retained
         );
         let supervise_stop = CancellationToken::new();
@@ -766,7 +767,7 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
         let ((), served) = tokio::join!(acknowledged.notified(), receive);
         served?;
         assert_eq!(
-            delivery.submit_settled(peer, SOURCE, accepted.descriptor.attempt, result)?,
+            delivery.submit_settled(peer, accepted.descriptor, result)?,
             ProgressSubmission::Refused(ProgressClaimRefusal::AlreadyObserved)
         );
         supervise_stop.cancel();

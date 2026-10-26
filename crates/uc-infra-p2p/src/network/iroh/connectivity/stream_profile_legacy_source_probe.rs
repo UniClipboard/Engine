@@ -14,7 +14,8 @@ use uc_application::deps::{
     ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal,
     ProgressExchangeDeadline, ProgressPageReply, ProgressReceiveError,
     ProgressSnapshotProviderPort, ProgressSnapshotQuery, ProgressSourceTask,
-    ProgressTaskAuthorityPort, ProgressTerminalRoundPort, TransferProgressProducer,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalRoundPort,
+    TransferProgressProducer,
 };
 use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressItemState};
 use uc_core::ids::DeviceId;
@@ -47,8 +48,7 @@ impl ProgressTaskAuthorityPort for HeldSnapshot {
     fn claim_terminal(
         &self,
         _: &DeviceId,
-        _: ProgressIdentity,
-        _: ProgressIdentity,
+        _: ProgressTaskDescriptor,
         _: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
         panic!("the complete legacy round cannot claim another actual result");

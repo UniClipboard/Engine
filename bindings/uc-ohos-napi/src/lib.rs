@@ -386,3 +386,35 @@ mod ohos_registration {
         }
     }
 }
+
+#[napi(object)]
+pub struct OhOutboundProgressItem {
+    pub kind: String,
+    pub index: u16,
+    pub state: String,
+    pub last_known_phase: Option<String>,
+    pub round: Option<u32>,
+    pub completed_bytes: Option<String>,
+    pub total_bytes: Option<String>,
+    pub failure_reason: Option<String>,
+    pub cancellation_reason: Option<String>,
+}
+
+#[napi(object)]
+pub struct OhOutboundProgress {
+    pub entry_id: String,
+    pub target_device_id: String,
+    pub attempt_id: Option<String>,
+    pub revision: String,
+    pub freshness: String,
+    pub freshness_available: bool,
+    pub state: String,
+    pub items_total: u32,
+    pub items_waiting: u32,
+    pub items_running: u32,
+    pub items_completed: u32,
+    pub items_failed: u32,
+    pub items_cancelled: u32,
+    pub items_unconfirmed: u32,
+    pub items: Vec<OhOutboundProgressItem>,
+}

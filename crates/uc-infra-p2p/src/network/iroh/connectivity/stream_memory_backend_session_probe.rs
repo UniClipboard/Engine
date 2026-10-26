@@ -10,8 +10,8 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectivityError, ProgressClaimRefusal, ProgressLiveRoundPort, ProgressReceiveError,
-    ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTerminalRoundPort,
-    TransferProgressProducer,
+    ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalRoundPort, TransferProgressProducer,
 };
 use uc_core::file_transfer::{ProgressActive, ProgressIdentity, ProgressItem, ProgressPhase};
 use uc_core::ids::DeviceId;
@@ -54,8 +54,7 @@ impl ProgressTaskAuthorityPort for HeldAuthority {
     fn claim_terminal(
         &self,
         _: &DeviceId,
-        _: ProgressIdentity,
-        _: ProgressIdentity,
+        _: ProgressTaskDescriptor,
         _: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
         panic!("complete producer round does not claim local results");

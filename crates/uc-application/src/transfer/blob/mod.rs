@@ -10,8 +10,9 @@
 pub(crate) mod facade;
 mod failure;
 mod fetch_blob;
-pub(super) mod notifications;
 mod output;
+mod progress;
+pub(super) use progress::BlobProgressSink;
 mod publish_blob;
 pub(crate) mod transport;
 

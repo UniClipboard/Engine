@@ -69,14 +69,14 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         logical: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let source = expected.source;
         let task = self
             .current_task(peer, source)
             .ok_or(ProgressClaimRefusal::NotRetained)?;
-        if attempt != task.descriptor.attempt {
+        if expected != task.descriptor {
             return Err(ProgressClaimRefusal::Superseded);
         }
         if !task.items.contains(&logical) {
@@ -215,6 +215,7 @@ async fn blocked_authenticated_peer_does_not_hold_up_another_peers_actual_termin
             },
             items: Arc::from([item()]),
         };
+        let expected = task.descriptor;
         let authority = Arc::new(Authority {
             tasks: HashMap::from([(a, task.clone()), (b, task)]),
             claimed: Mutex::new(HashSet::new()),
@@ -288,12 +289,12 @@ async fn blocked_authenticated_peer_does_not_hold_up_another_peers_actual_termin
         let stop = CancellationToken::new();
         let running = tokio::spawn(worker.run(stop.clone()));
         assert_eq!(
-            delivery.submit_settled(a, SOURCE, ATTEMPT, result())?,
+            delivery.submit_settled(a, expected, result())?,
             ProgressSubmission::Retained
         );
         timeout(Duration::from_secs(5), paused.entered.notified()).await?;
         assert_eq!(
-            delivery.submit_settled(b, SOURCE, ATTEMPT, result())?,
+            delivery.submit_settled(b, expected, result())?,
             ProgressSubmission::Retained
         );
         assert_eq!(

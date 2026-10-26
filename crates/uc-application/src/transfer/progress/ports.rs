@@ -70,12 +70,12 @@ pub trait ProgressUnattributedReceiverPort: Send + Sync {
 pub trait ProgressTaskAuthorityPort: Send + Sync {
     fn current_task(&self, peer: &DeviceId, source: ProgressIdentity)
         -> Option<ProgressSourceTask>;
-    /// 原结算之后领取当前项的通知意图；同一当前尝试/项至多成功一次。
+    /// 原结算后按完整冻结描述原子领取；同一当前尝试/项至多成功一次。
+    /// producer、修订、源、attempt及计划范围任一变化都拒绝，不把旧结果重新标记为当前任务。
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal>;
 }

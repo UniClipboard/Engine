@@ -54,7 +54,7 @@ impl FileTransferEventPublisherPort for SettledTerminalPublish {
 #[tokio::test]
 async fn terminal_write_failures_preserve_success_failure_and_cancel_settlement_sources() {
     for scenario in 0..4 {
-        let (facade, transport) = target_facade();
+        let (_facade, transport) = target_facade();
         let state = Arc::new(FetchPreparationState::default());
         let store = Arc::new(FailedTerminalStore {
             blocked: AtomicBool::new(true),
@@ -98,7 +98,6 @@ async fn terminal_write_failures_preserve_success_failure_and_cancel_settlement_
             cancel.cancel();
         }
         let finishing = FetchFinalization {
-            owner: (*facade).clone(),
             prepared: state,
             cancel: cancel.clone(),
             settlement: Default::default(),
@@ -111,8 +110,6 @@ async fn terminal_write_failures_preserve_success_failure_and_cancel_settlement_
                 peer_id: "peer".into(),
                 total_bytes: Some(5),
                 filename: String::new(),
-                outbound_transfer_id: None,
-                outbound_target: None,
                 batch_position: BatchPosition::Only,
                 individual_lifecycle: true,
             }),
@@ -238,7 +235,7 @@ impl FileTransferEventPublisherPort for BlockedTerminalPublisher {
 
 #[tokio::test]
 async fn persisted_terminal_wins_late_cancel_but_shutdown_waits_for_real_event_handoff() {
-    let (facade, transport) = target_facade();
+    let (_facade, transport) = target_facade();
     let state = Arc::new(FetchPreparationState::default());
     let store = Arc::new(RecordedTerminalStore::default());
     let publisher = Arc::new(BlockedTerminalPublisher {
@@ -266,7 +263,6 @@ async fn persisted_terminal_wins_late_cancel_but_shutdown_waits_for_real_event_h
     )));
     let cancel = CancellationToken::new();
     let finishing = FetchFinalization {
-        owner: (*facade).clone(),
         prepared: state,
         cancel: cancel.clone(),
         settlement: Default::default(),
@@ -279,8 +275,6 @@ async fn persisted_terminal_wins_late_cancel_but_shutdown_waits_for_real_event_h
             peer_id: "peer".into(),
             total_bytes: Some(5),
             filename: String::new(),
-            outbound_transfer_id: None,
-            outbound_target: None,
             batch_position: BatchPosition::Only,
             individual_lifecycle: true,
         }),

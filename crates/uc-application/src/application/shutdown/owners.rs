@@ -9,6 +9,7 @@ impl ApplicationRuntimeOwners {
         deadline: Option<Instant>,
     ) -> Result<(), LifecycleError> {
         let Self {
+            progress,
             history_maintenance,
             file_transfer_timeout,
             search,
@@ -18,6 +19,9 @@ impl ApplicationRuntimeOwners {
         } = self;
         // 这里仅停止各领域的工作；共享磁盘和密钥资源仍由上级在全部结束后交接。
         let tasks = vec![
+            begin("stop transfer progress runtime", async move {
+                progress.shutdown().await
+            }),
             begin("stop history maintenance", async move {
                 history_maintenance.shutdown().await
             }),

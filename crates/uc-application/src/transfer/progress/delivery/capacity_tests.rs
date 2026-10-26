@@ -89,7 +89,16 @@ async fn saturated_intermediate_cache_cannot_evict_terminal_results_or_bypass_pr
         for item in 0..64 {
             assert_eq!(
                 service
-                    .submit_live(peer(p), id(p), id(99), value(item, 1))
+                    .submit_activity(
+                        peer(p),
+                        service
+                            .inner
+                            .authority
+                            .current_task(&peer(p), id(p))
+                            .unwrap()
+                            .descriptor,
+                        Some(value(item, 1))
+                    )
                     .unwrap(),
                 ProgressSubmission::Retained
             );
@@ -97,7 +106,16 @@ async fn saturated_intermediate_cache_cannot_evict_terminal_results_or_bypass_pr
         for item in 512..576 {
             assert_eq!(
                 service
-                    .submit_settled(peer(p), id(p), id(99), settled(item))
+                    .submit_settled(
+                        peer(p),
+                        service
+                            .inner
+                            .authority
+                            .current_task(&peer(p), id(p))
+                            .unwrap()
+                            .descriptor,
+                        settled(item)
+                    )
                     .unwrap(),
                 ProgressSubmission::Retained
             );
@@ -120,20 +138,47 @@ async fn saturated_intermediate_cache_cannot_evict_terminal_results_or_bypass_pr
         for item in 64..128 {
             assert_eq!(
                 service
-                    .submit_live(peer(p), id(p), id(99), value(item, 1))
+                    .submit_activity(
+                        peer(p),
+                        service
+                            .inner
+                            .authority
+                            .current_task(&peer(p), id(p))
+                            .unwrap()
+                            .descriptor,
+                        Some(value(item, 1))
+                    )
                     .unwrap(),
                 ProgressSubmission::Retained
             );
         }
         assert_eq!(
             service
-                .submit_live(peer(p), id(p), id(99), value(0, 1))
+                .submit_activity(
+                    peer(p),
+                    service
+                        .inner
+                        .authority
+                        .current_task(&peer(p), id(p))
+                        .unwrap()
+                        .descriptor,
+                    Some(value(0, 1))
+                )
                 .unwrap(),
             ProgressSubmission::Unchanged
         );
         for sequence in 2..=100 {
             service
-                .submit_live(peer(p), id(p), id(99), value(127, sequence))
+                .submit_activity(
+                    peer(p),
+                    service
+                        .inner
+                        .authority
+                        .current_task(&peer(p), id(p))
+                        .unwrap()
+                        .descriptor,
+                    Some(value(127, sequence)),
+                )
                 .unwrap();
         }
     }

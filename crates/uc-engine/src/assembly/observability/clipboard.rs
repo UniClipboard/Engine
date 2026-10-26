@@ -747,6 +747,7 @@ mod tests {
         );
         let target = DeviceId::new("PRIVATE_DEVICE_ID");
         let header = ClipboardHeader {
+            source_entry: None,
             version: ClipboardHeader::CURRENT_VERSION,
             snapshot_hash: "PRIVATE_SNAPSHOT_HASH".to_owned(),
             captured_at_ms: 1,

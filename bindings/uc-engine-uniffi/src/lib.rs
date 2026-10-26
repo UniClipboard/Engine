@@ -14,10 +14,11 @@ pub use runtime::{
     CustomRelayMutationRejection, CustomRelayMutationResult, Device, EntryNotResendableReason,
     InvitationAvailability, InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus,
     JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle,
-    PeerConnectionRefresh, ReceiveItem, ReceiveProgress, ReceiveRetryOutcome, RejectedConfigImport,
-    RelayEntrySource, RelayOverview, RelayOverviewEntry, RelayRoutingMode, RelaySaveResult,
-    ResendEntryOutcome, SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState,
-    WorkspaceConvergence, WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
+    OutboundProgress, OutboundProgressItem, PeerConnectionRefresh, ReceiveItem, ReceiveProgress,
+    ReceiveRetryOutcome, RejectedConfigImport, RelayEntrySource, RelayOverview, RelayOverviewEntry,
+    RelayRoutingMode, RelaySaveResult, ResendEntryOutcome, SendReport, SessionRecovery,
+    SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
+    WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();
@@ -480,6 +481,7 @@ pub enum BindingEvent {
         completed_bytes: u64,
         total_bytes: Option<u64>,
     },
+    OutboundProgressChanged,
     TransferStatusChanged {
         transfer_id: String,
         entry_id: Option<String>,

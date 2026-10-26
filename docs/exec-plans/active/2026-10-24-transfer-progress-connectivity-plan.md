@@ -65,7 +65,7 @@
 * [ ] 只有真实能力不支持新版才使用旧协议；网络超时、错误来源、损坏帧、拒绝准入不触发降级。 出站完整通知已按实际`/1`协商读取同一原接收负责人的全量事实，经原受管单向流发送批次摘要；真实末项成功／先前失败、Processing、兄弟活动、Contact／Update与1024项实际失败事实均有证明。旧FIN不作业务ACK。受管原型入站仅将既有且尚未确认的原意图标记结果未确认，不采用旧逐项事实或覆盖新版确认范围；生产接线与完整新旧矩阵仍未完成，保持本项未勾选。
 * [ ] 入站与出站逐次核对当前成员及会话；旧连接、撤销、晚到拨号或本地读取不能发送到新世代。
 * [x] 单项停止只结束本流；真实本地工作未结束时继续持有许可，空闲回收不误关活动交换。真实旧/1两条流中停止一项后另一项按原字节读回，实际work未释放时下一项准入仍等待；新/2真实输出后的Application采用跨期限仍被监督。实际profile仅持work的31秒内连接不关闭，释放work后原空闲期限回收；Application另验证本机work／实际关闭两种顺序及晚到拨号收尾。生产Router与物理挂起仍单独验收。
-* [ ] 删除旧 reporter 自建原生连接缓存与独立业务发送循环，保留旧 codec 和兼容适配；不以 feature 留生产旁路。
+* [x] 删除旧 reporter 自建原生连接缓存与独立业务发送循环，保留旧 codec 和兼容适配；不以 feature 留生产旁路。 原Native adapter、Core reporter port、Application旧邮箱和Engine译送循环均已删除；生产节点只安装Application双版本完整端点，旧34字节codec保留。workspace全部targets及真实成员撤销4项通过。
 * [x] 第二 backend 验证业务边界可替换；真实 Iroh 分别证明单向／双向流、两流隔离和实际授权。独立内存字节流backend使用原manager／profile、真实/2 codec与Application完整流程，完成登记、Contact／Update、精确终态ACK、65项两页核对采用；授权撤销不能复用旧连接或改变投影，停止单流后同连接下一交换仍可用。固定测试身份不冒充密码握手，内存通道不作为Direct／Relay证据；实际Iroh与设备矩阵按各自证据维护。
 
 交付物：唯一受管协议接线及两版本真实收发。第二 backend 不作为 Direct／Relay 事实证据。
@@ -79,7 +79,7 @@
 * [ ] 受控暂停校验、输出、提交和清理，验证 Processing 及真实失败，无提前 Completed，无通知等待进入本地结算链。
 * [ ] 逐项终态和批次汇总覆盖成功、失败、取消、未确认及尚在运行；目录按完整单元，未知不计失败，末项成功不覆盖前项失败。
 * [ ] 手动重试只更新选中项并保留成功／未选结果；旧 attempt 的登记、状态、终态和 ACK 均不能污染新尝试。
-* [ ] 传递真实自动重试轮次；百分比允许本轮真实回落，保持原高水位、停滞期限和恢复预算不变，重复下载字节不冒充新进展。
+* [x] 传递真实自动重试轮次；百分比允许本轮真实回落，保持原高水位、停滞期限和恢复预算不变，重复下载字节不冒充新进展。 原下载负责人真实恢复分支交接轮次/Retrying，SDK重放20不超过原80高水位时仍按原300秒停滞到期；表示按实际压缩blob大小保留到保存结算。188项传输测试通过，fixture网络能力不冒充实际Iroh故障恢复。
 * [ ] 注入终态／ACK 丢失、重复、冲突及乱序，验证 Application 采用和事件发布幂等、未知可收敛而真实终态不回退。
 * [ ] 通知永久阻塞、终态容量不足及对端离线时，实际下载、取消、输出、既有成功项与原资源监督不受影响。
 
@@ -89,16 +89,16 @@
 
 目标：宿主只读取完整业务事实并提交原动作，对应 AC07／AC08／AC09。
 
-* [ ] 完整快照和状态核对由 Application facade 提供；查询关联绑定认证设备及当前 Space，不暴露任意本地 entry 枚举。
-* [ ] 实现 Running／Settled／Superseded／NotRetained／Unsupported／Unreachable，区分 AccessDenied、存储读取失败和损坏。
+* [x] 完整快照和状态核对由 Application facade 提供；查询关联绑定认证设备及当前 Space，不暴露任意本地 entry 枚举。 AppFacade仅提供完整get/list/reconcile，使用原意图目录与当前成员范围；真实双Engine/SQLite/文件证明读取源端原条目和接收尝试，来源与本机接收条目不同，核对不增加导出。
+* [x] 实现 Running／Settled／Superseded／NotRetained／Unsupported／Unreachable，区分 AccessDenied、存储读取失败和损坏。 统一App分类保持完整source chain；明确授权拒绝不冒充Unavailable/离线，expected_attempt已被替换返回Superseded。规则/查询全覆盖及真实Settled/Superseded核对通过，Busy按实际调度返回。
 * [ ] 将再次发起的核对接入原完整动作；运行中继续原任务、真实结果返回、缺失或旧版说明后显式新尝试、离线不重复下载。
 * [ ] 查询快照后重试／删除竞争仍由原 owner 最终 CAS 和清理围栏决定；不新增远端强制下载或取消操作。
-* [ ] 发送侧事件和完整快照可区分设备、尝试及逻辑项；Rust、UniFFI、N-API 同版本映射，不让宿主汇总或推断协议阶段。
-* [ ] 删除 Engine OutboundProgressRuntime 中的业务投影／取消推断，保留必要的组装及完整能力 decorator。
+* [x] 发送侧事件和完整快照可区分设备、尝试及逻辑项；Rust、UniFFI、N-API 同版本映射，不让宿主汇总或推断协议阶段。 三套稳定入口已接同一完整App能力；OutboundProgressChanged只提示重读，真实双Engine事件/完整视图通过。两绑定all-targets编译通过；NAPI大整数/未知总量映射测试通过。移动设备实机仍未执行。
+* [x] 删除 Engine OutboundProgressRuntime 中的业务投影／取消推断，保留必要的组装及完整能力 decorator。 Engine旧模块和空SyncSessionAssembly已删除；投影、核对、通知和实际关闭统一归Application，Engine只提供网络能力及稳定DTO映射。真实本地取消/关闭不被阻塞进度网络拖住。
 * [ ] 暂停／恢复／后台／系统挂起按原期限检查，普通重连不重置预算；离组／撤销／切 Space 先封口再监督停止。
 * [ ] 删除清理临时投影，迟到帧不复活条目或进度卡；原文件资源清理和取消语义保持。
 * [ ] 同资料关闭重开及真实进程重启后，无持久依据的发送侧旧任务显示未知，不恢复通知队列、不伪造旧终态；本地接收已有事实保持。
-* [ ] 全部内部调用方迁移，删除无意义旧转发和测试默认空依赖；不新增 schema、通知 outbox 或敏感明文字段。
+* [x] 全部内部调用方迁移，删除无意义旧转发和测试默认空依赖；不新增 schema、通知 outbox 或敏感明文字段。 旧reporter所有生产/测试消费者及反向路由字段已删除，新端点能力显式装配；workspace全部targets、Root门禁通过。没有schema/outbox或新明文持久字段。
 
 交付物：完整产品查询／动作与绑定合同、唯一 Application owner 和受控生命周期。
 
@@ -165,3 +165,12 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 - 2026-10-24 文档交付：相对链接、结构与决定覆盖检查，以及 metadata、workspace 全目标 check、fmt、Rust style、repository 和 diff 根门禁通过；不据此勾选上述实施验收。
 - 产品行为与默认预算已确认；技术前置状态按 spec §11 和阶段 0 记录维护，不把主机证明泛化为完整生产或平台矩阵。
 - 下一个实施动作：查询提供与完整快照原子采用已完成独立实现；继续阶段2准入／会话围栏与独立交换寿命验收，不等待前层CI。密码兼容修复已完成固定旧端、资料兼容与审计验证，见[依赖记录](../../design-docs/opaque-dependency-compatibility.md)；CI缓存fixture隔离已另行修复。阶段0实机挂起证据仍待提供，不记为通过；完整生产迁移与设备矩阵继续单独验收。
+
+
+### 2026-10-26：生产会话与稳定发送侧视图任务
+
+生产节点的双进度版本已进入同一Application对象图，原接收CAS/保存事实驱动登记、逐项通知、采用及ACK。
+用户已批准兼容消息头扩展；新clipboard-applied/3携带源UUID，旧2/1仍保留冻结字节，不能因失败重发旧格式。
+当前完成范围及复跑入口见[主机验证](2026-10-24-transfer-progress-connectivity-feasibility.md#生产会话与稳定查询的主机验证)。
+本任务创建未合并stack PR后继续原再次发送核对、删除/成员/会话退休接线；对应未完成复选框保持原状。
+实机挂起、完整旧新Direct/Relay/三端/资源和产品宿主矩阵仍未闭合，本片不登记完成，也不合入或发布当前stack。

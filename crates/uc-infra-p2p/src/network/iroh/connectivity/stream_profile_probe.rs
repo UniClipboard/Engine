@@ -173,8 +173,7 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         _: &DeviceId,
-        _: ProgressIdentity,
-        _: ProgressIdentity,
+        _: ProgressTaskDescriptor,
         _: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
         panic!("one round fixture does not submit a new intent")

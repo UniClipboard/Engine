@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{HostFileHandle, SecretString};
+use super::{HostFileHandle, OutboundProgressInput, ReconcileOutboundProgressInput, SecretString};
 use crate::{
     AbortMobileFileUploadInput, AppendMobileFileUploadInput, ApplyMobileSyncDocumentInput,
     AuthenticateMobileRequestInput, BeginMobileFileUploadInput, CustomRelayMutation,
@@ -123,6 +123,9 @@ pub enum OperationKind {
     ReadEntryFile,
     QueryEntryDelivery,
     ClearHistory,
+    QueryOutboundProgress,
+    ListOutboundProgress,
+    ReconcileOutboundProgress,
     QueryEntryReceiveProgress,
     ListEntryReceiveProgress,
     CancelEntryReceive,
@@ -237,6 +240,9 @@ impl fmt::Display for OperationKind {
             Self::ReadEntryFile => "read_entry_file",
             Self::QueryEntryDelivery => "query_entry_delivery",
             Self::ClearHistory => "clear_history",
+            Self::QueryOutboundProgress => "query_outbound_progress",
+            Self::ListOutboundProgress => "list_outbound_progress",
+            Self::ReconcileOutboundProgress => "reconcile_outbound_progress",
             Self::QueryEntryReceiveProgress => "query_entry_receive_progress",
             Self::ListEntryReceiveProgress => "list_entry_receive_progress",
             Self::CancelEntryReceive => "cancel_entry_receive",
@@ -395,6 +401,9 @@ pub enum Operation {
     ReadEntryFile(HistoryEntryInput),
     QueryEntryDelivery(HistoryEntryInput),
     ClearHistory,
+    QueryOutboundProgress(OutboundProgressInput),
+    ListOutboundProgress,
+    ReconcileOutboundProgress(ReconcileOutboundProgressInput),
     QueryEntryReceiveProgress(EntryReceiveProgressInput),
     ListEntryReceiveProgress,
     CancelEntryReceive(CancelEntryReceiveInput),
@@ -511,6 +520,9 @@ impl Operation {
             Self::ReadEntryFile(_) => OperationKind::ReadEntryFile,
             Self::QueryEntryDelivery(_) => OperationKind::QueryEntryDelivery,
             Self::ClearHistory => OperationKind::ClearHistory,
+            Self::QueryOutboundProgress(_) => OperationKind::QueryOutboundProgress,
+            Self::ListOutboundProgress => OperationKind::ListOutboundProgress,
+            Self::ReconcileOutboundProgress(_) => OperationKind::ReconcileOutboundProgress,
             Self::QueryEntryReceiveProgress(_) => OperationKind::QueryEntryReceiveProgress,
             Self::ListEntryReceiveProgress => OperationKind::ListEntryReceiveProgress,
             Self::CancelEntryReceive(_) => OperationKind::CancelEntryReceive,

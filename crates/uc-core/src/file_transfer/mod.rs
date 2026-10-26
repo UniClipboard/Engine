@@ -6,7 +6,7 @@ pub use event::{
     FileTransferCancellationReason, FileTransferDirection, FileTransferEvent,
     FileTransferFailureReason, FileTransferProgress,
 };
-pub use outbound_progress::{OutboundProgressReporterPort, OutboundProgressStatus};
+pub use outbound_progress::OutboundProgressStatus;
 pub use ports::{FileTransferEventPublisherPort, FileTransferEventStorePort};
 
 mod receive_settlement;
@@ -70,4 +70,9 @@ mod progress_summary;
 pub use progress_summary::{
     summarize_outbound_progress, summarize_progress, OutboundProgressSummary, ProgressBatchCounts,
     ProgressBatchState, ProgressBatchSummary,
+};
+
+mod progress_view;
+pub use progress_view::{
+    TransferProgressItemStatus, TransferProgressItemView, TransferProgressView,
 };

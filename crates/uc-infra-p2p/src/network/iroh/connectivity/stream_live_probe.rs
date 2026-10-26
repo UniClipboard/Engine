@@ -49,6 +49,10 @@ async fn managed_live_updates_coalesce_on_real_streams_and_terminal_seals_projec
             fixture.outbound.clone(),
             wire,
         ));
+        let expected = authority
+            .current_task(&fixture.sending.peer(), SOURCE)
+            .unwrap()
+            .descriptor;
         let (service, worker) = ProgressExchangeService::new(
             clock.clone(),
             authority,
@@ -79,7 +83,7 @@ async fn managed_live_updates_coalesce_on_real_streams_and_terminal_seals_projec
         };
         let send = async {
             assert_eq!(
-                service.submit_live(peer, SOURCE, ATTEMPT, active(1))?,
+                service.submit_activity(peer, expected, Some(active(1)))?,
                 ProgressSubmission::Retained
             );
             assert_eq!(
@@ -87,7 +91,7 @@ async fn managed_live_updates_coalesce_on_real_streams_and_terminal_seals_projec
                 Some(ProgressItemState::Active(active(1)))
             );
             for seq in 2..=100 {
-                service.submit_live(peer, SOURCE, ATTEMPT, active(seq))?;
+                service.submit_activity(peer, expected, Some(active(seq)))?;
             }
             clock.0.store(199, Ordering::SeqCst);
             service.network_recovered(Some(peer));
@@ -100,7 +104,7 @@ async fn managed_live_updates_coalesce_on_real_streams_and_terminal_seals_projec
             );
             // 同一时点直接提交真实已结算结果，不等下一份中间值资格。
             assert_eq!(
-                service.submit_settled(peer, SOURCE, ATTEMPT, terminal(10))?,
+                service.submit_settled(peer, expected, terminal(10))?,
                 ProgressSubmission::Retained
             );
             assert_eq!(
@@ -108,7 +112,7 @@ async fn managed_live_updates_coalesce_on_real_streams_and_terminal_seals_projec
                 Some(ProgressItemState::Terminal(terminal(10)))
             );
             assert_eq!(
-                service.submit_live(peer, SOURCE, ATTEMPT, active(101))?,
+                service.submit_activity(peer, expected, Some(active(101)))?,
                 ProgressSubmission::Refused(ProgressClaimRefusal::AlreadyObserved)
             );
             anyhow::Ok(())
@@ -179,7 +183,7 @@ async fn waiting_task_contact_uses_real_streams_and_old_sequence_cannot_renew_di
             )),
             producer.clone(),
         );
-        service.track_current(peer, SOURCE, ATTEMPT)?;
+        service.submit_activity(peer, expected, None)?;
         let stop = CancellationToken::new();
         let running = tokio::spawn(worker.run(stop.clone()));
         let serve = async {

@@ -20,7 +20,8 @@ use uc_engine::{
     ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
     HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
-    ObserveClipboardChangeInput, Operation, OperationResult, ReceiveProgressSummary,
+    ObserveClipboardChangeInput, Operation, OperationResult, OutboundProgressInput,
+    OutboundProgressSummary, ReceiveProgressSummary, ReconcileOutboundProgressInput,
     RecoverSessionInput, RemoveMemberInput, ResendEntryInput, RestoreClipboardInput,
     RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
     StartupLifecycleInput, StartupProgress, TransferCancellationReason,
@@ -745,6 +746,20 @@ enum WorkerCommand {
     },
     CancelInboundTransfer {
         transfer_id: String,
+        response: mpsc::Sender<Result<String, BindingError>>,
+    },
+    QueryOutboundProgress {
+        entry_id: String,
+        target_device_id: String,
+        response: mpsc::Sender<Result<Option<OutboundProgress>, BindingError>>,
+    },
+    ListOutboundProgress {
+        response: mpsc::Sender<Result<Vec<OutboundProgress>, BindingError>>,
+    },
+    ReconcileOutboundProgress {
+        entry_id: String,
+        target_device_id: String,
+        expected_attempt_id: Option<String>,
         response: mpsc::Sender<Result<String, BindingError>>,
     },
     QueryEntryReceiveProgress {
@@ -1536,6 +1551,33 @@ impl MobileEngine {
         })
     }
 
+    pub fn query_outbound_progress(
+        &self,
+        entry_id: String,
+        target_device_id: String,
+    ) -> Result<Option<OutboundProgress>, BindingError> {
+        self.request(|response| WorkerCommand::QueryOutboundProgress {
+            entry_id,
+            target_device_id,
+            response,
+        })
+    }
+    pub fn list_outbound_progress(&self) -> Result<Vec<OutboundProgress>, BindingError> {
+        self.request(|response| WorkerCommand::ListOutboundProgress { response })
+    }
+    pub fn reconcile_outbound_progress(
+        &self,
+        entry_id: String,
+        target_device_id: String,
+        expected_attempt_id: Option<String>,
+    ) -> Result<String, BindingError> {
+        self.request(|response| WorkerCommand::ReconcileOutboundProgress {
+            entry_id,
+            target_device_id,
+            expected_attempt_id,
+            response,
+        })
+    }
     pub fn query_entry_receive_progress(
         &self,
         entry_id: String,
@@ -2180,6 +2222,63 @@ async fn run_operations(
                     .and_then(map_inbound_transfer_cancellation);
                 let _ = response.send(result);
             }
+            WorkerCommand::QueryOutboundProgress {
+                entry_id,
+                target_device_id,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::QueryOutboundProgress(OutboundProgressInput {
+                        entry_id,
+                        target_device_id,
+                    }))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(|result| match result {
+                        OperationResult::OutboundProgress(value) => {
+                            Ok(value.map(outbound_progress))
+                        }
+                        _ => Err(BindingError::UnexpectedResult),
+                    });
+                let _ = response.send(result);
+            }
+            WorkerCommand::ListOutboundProgress { response } => {
+                let result = engine
+                    .execute(Operation::ListOutboundProgress)
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(|result| match result {
+                        OperationResult::OutboundProgressList(values) => {
+                            Ok(values.into_iter().map(outbound_progress).collect())
+                        }
+                        _ => Err(BindingError::UnexpectedResult),
+                    });
+                let _ = response.send(result);
+            }
+            WorkerCommand::ReconcileOutboundProgress {
+                entry_id,
+                target_device_id,
+                expected_attempt_id,
+                response,
+            } => {
+                let result = engine
+                    .execute(Operation::ReconcileOutboundProgress(
+                        ReconcileOutboundProgressInput {
+                            entry_id,
+                            target_device_id,
+                            expected_attempt_id,
+                        },
+                    ))
+                    .await
+                    .map_err(BindingError::from)
+                    .and_then(|result| match result {
+                        OperationResult::OutboundProgressReconciliation(value) => {
+                            Ok(value.to_string())
+                        }
+                        _ => Err(BindingError::UnexpectedResult),
+                    });
+                let _ = response.send(result);
+            }
             WorkerCommand::QueryEntryReceiveProgress { entry_id, response } => {
                 let result = engine
                     .execute(Operation::QueryEntryReceiveProgress(
@@ -2345,6 +2444,7 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
             completed_bytes: event.completed_bytes,
             total_bytes: event.total_bytes,
         },
+        uc_engine::EngineEvent::OutboundProgressChanged => BindingEvent::OutboundProgressChanged,
         uc_engine::EngineEvent::TransferStatusChanged(event) => {
             BindingEvent::TransferStatusChanged {
                 transfer_id: event.transfer_id,
@@ -3880,3 +3980,69 @@ mod tests {
 
 #[cfg(test)]
 mod receive_tests;
+
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OutboundProgressItem {
+    pub kind: String,
+    pub index: u16,
+    pub state: String,
+    pub last_known_phase: Option<String>,
+    pub round: Option<u32>,
+    pub completed_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub failure_reason: Option<String>,
+    pub cancellation_reason: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OutboundProgress {
+    pub entry_id: String,
+    pub target_device_id: String,
+    pub attempt_id: Option<String>,
+    pub revision: u64,
+    pub freshness: String,
+    pub freshness_available: bool,
+    pub state: String,
+    pub items_total: u32,
+    pub items_waiting: u32,
+    pub items_running: u32,
+    pub items_completed: u32,
+    pub items_failed: u32,
+    pub items_cancelled: u32,
+    pub items_unconfirmed: u32,
+    pub items: Vec<OutboundProgressItem>,
+}
+
+fn outbound_progress(progress: OutboundProgressSummary) -> OutboundProgress {
+    OutboundProgress {
+        entry_id: progress.entry_id,
+        target_device_id: progress.target_device_id,
+        attempt_id: progress.attempt_id,
+        revision: progress.revision,
+        freshness: progress.freshness.to_string(),
+        freshness_available: progress.freshness_available,
+        state: progress.state.to_string(),
+        items_total: progress.items_total,
+        items_waiting: progress.items_waiting,
+        items_running: progress.items_running,
+        items_completed: progress.items_completed,
+        items_failed: progress.items_failed,
+        items_cancelled: progress.items_cancelled,
+        items_unconfirmed: progress.items_unconfirmed,
+        items: progress
+            .items
+            .into_iter()
+            .map(|item| OutboundProgressItem {
+                kind: item.kind.to_string(),
+                index: item.index,
+                state: item.state.to_string(),
+                last_known_phase: item.last_known_phase.map(|value| value.to_string()),
+                round: item.round,
+                completed_bytes: item.completed_bytes,
+                total_bytes: item.total_bytes,
+                failure_reason: item.failure_reason.map(|value| value.to_string()),
+                cancellation_reason: item.cancellation_reason.map(|value| value.to_string()),
+            })
+            .collect(),
+    }
+}

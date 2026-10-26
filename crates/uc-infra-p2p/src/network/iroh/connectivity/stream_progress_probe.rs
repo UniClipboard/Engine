@@ -1,7 +1,6 @@
 //! 旧进度字节经过真实 Uni 单向流，停止只影响本流，实际工作持有原许可。
 use super::super::{ConnectivityProfile, IrohConnectionAdmission, IrohPeerConnection};
 use crate::network::iroh::admitted_connections::AdmittedConnections;
-use crate::network::iroh::transfer_progress_adapter::TRANSFER_PROGRESS_ALPN;
 use async_trait::async_trait;
 use iroh::{Endpoint, RelayMode};
 use iroh_blobs::ALPN as BLOBS_ALPN;
@@ -24,6 +23,7 @@ use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 use uc_infra_local::SystemElapsedClock;
+use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN as TRANSFER_PROGRESS_ALPN;
 use uc_sync_protocol::transfer_progress::{read_frame, write_frame, ProgressFrame};
 
 const BUDGET: Duration = Duration::from_secs(5);

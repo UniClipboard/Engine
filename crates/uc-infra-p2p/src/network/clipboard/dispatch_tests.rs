@@ -124,6 +124,7 @@ async fn seed_addr(repo: &MemRepo, device: &DeviceId, addr: &EndpointAddr) {
 
 fn sample_header() -> ClipboardHeader {
     ClipboardHeader {
+        source_entry: None,
         version: ClipboardHeader::CURRENT_VERSION,
         snapshot_hash: "c".repeat(64),
         captured_at_ms: 1_700_000_000_000,
@@ -881,3 +882,6 @@ async fn acquisition_capability_failures_keep_their_source_in_dispatch_reports()
         );
     }
 }
+
+#[path = "source_identity_tests.rs"]
+mod source_identity_tests;

@@ -57,14 +57,17 @@ impl ProgressTaskAuthorityPort for BlockingAuthority {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let source = expected.source;
         let current = self
             .current_task(peer, source)
             .ok_or(ProgressClaimRefusal::NotRetained)?;
-        if attempt != current.descriptor.attempt || !current.items.contains(&item) {
+        if expected != current.descriptor {
+            return Err(ProgressClaimRefusal::Superseded);
+        }
+        if !current.items.contains(&item) {
             return Err(ProgressClaimRefusal::InvalidItem);
         }
         if self.claimed.swap(true, Ordering::SeqCst) {
@@ -138,7 +141,7 @@ async fn queued_query_keeps_original_session_and_a_later_explicit_query_can_use_
         let authority = Arc::new(BlockingAuthority { peer: pair.receiver_id, claimed: AtomicBool::new(false) });
         let task = authority.task();
         let (service, worker) = ProgressExchangeService::new(clock, authority, blocking.clone(), Arc::new(TransferProgressSnapshotReader::new(pair.sender.clone(), Arc::new(TransferProgressWire))), Arc::new(UnusedNotifications));
-        assert_eq!(service.submit_settled(pair.receiver_id, task.descriptor.source, task.descriptor.attempt, terminal(0))?, ProgressSubmission::Retained);
+        assert_eq!(service.submit_settled(pair.receiver_id, task.descriptor, terminal(0))?, ProgressSubmission::Retained);
         let reconciler = TransferProgressReconciler::new(registry.clone(), service);
         let queries = tokio::spawn(worker.run(cancel.clone()));
         timeout(Duration::from_secs(2), blocking.entered.acquire()).await??.forget();

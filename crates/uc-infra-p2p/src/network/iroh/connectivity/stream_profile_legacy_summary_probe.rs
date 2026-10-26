@@ -130,8 +130,7 @@ impl ProgressTaskAuthorityPort for Facts {
     fn claim_terminal(
         &self,
         _: &DeviceId,
-        _: ProgressIdentity,
-        _: ProgressIdentity,
+        _: ProgressTaskDescriptor,
         _: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
         panic!("a complete round does not claim a second result");

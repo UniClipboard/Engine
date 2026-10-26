@@ -16,6 +16,9 @@ use uc_observability_contract::wire_enum;
 mod catalog;
 mod drain;
 mod progress;
+mod progress_changes;
+pub(crate) use progress::ReceiveProgressSignal;
+pub(crate) use progress_changes::ReceiveProgressChange;
 mod settlement;
 pub(crate) use catalog::{PlannedReceiveItem, ReceiveRepresentation, ReceiveSource};
 pub(crate) use settlement::{

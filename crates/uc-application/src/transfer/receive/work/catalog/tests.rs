@@ -61,7 +61,7 @@ fn query_includes_unstarted_items_and_requires_real_persistence_for_completed_do
             .register(&EntryId::from("receiver"), "attempt")
             .unwrap();
         action.accept_source(source());
-        action.batch.plan(3, 21);
+        action.batch.plan(3);
         action.batch.item_result(
             "receiver:attempt:attempt:member:0",
             7,

@@ -4,7 +4,9 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
-use uc_application::deps::{ConnectionLease, ConnectivityError, ConnectivityManager};
+use uc_application::deps::{
+    ConnectionLease, ConnectionProtocol, ConnectivityError, ConnectivityManager,
+};
 use uc_core::ids::DeviceId;
 use uc_core::ports::{
     ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, ConnectionChannel, DispatchAck,
@@ -40,9 +42,14 @@ impl ClipboardDispatchAdapter {
             .open_bi(deadline)
             .await
             .map_err(|error| ClipboardDispatchError::Io(Box::new(error)))?;
+        let mut wire_header = header.clone();
+        if connection.protocol() != ConnectionProtocol::AttributedClipboard {
+            // 实际协商的旧能力只发送冻结旧头；不追加尾随数据或在错误后重试旧格式。
+            wire_header.source_entry = None;
+        }
         clipboard_wire::write_frame(
             &mut stream.send,
-            header,
+            &wire_header,
             inject_current(),
             &payload.ciphertext,
         )
@@ -144,6 +151,11 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
 
 fn map_encode_err(err: WireEncodeError) -> ClipboardDispatchError {
     match err {
+        WireEncodeError::SourceIdentity(source) => ClipboardDispatchError::Internal(
+            anyhow::Error::new(source)
+                .context("source entry encode")
+                .into(),
+        ),
         WireEncodeError::Io(ioerr) => {
             ClipboardDispatchError::Io(anyhow::Error::new(ioerr).context("frame write").into())
         }

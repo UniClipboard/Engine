@@ -1,17 +1,17 @@
 //! 真实接收导出边界的存储故障与完成屏障；只由测试组合根安装，不替换网络或保存流程。
 use async_trait::async_trait;
 use std::collections::{BTreeSet, HashMap};
-use std::future::pending;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::bytes::Bytes;
+use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangeFailure, BlobReadStorePort, BlobReceived,
 };
-use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
+use uc_application::deps::{ConnectivityBackend, ConnectivityError, PeerConnection};
 use uc_core::ids::DeviceId;
 use uc_core::ports::blob::BlobDigest;
 
@@ -26,8 +26,8 @@ pub(crate) struct ReceiveExports {
     pub paused_exports: Mutex<BTreeSet<usize>>,
     pub paused: Notify,
     pub release: Semaphore,
-    pub block_reports: AtomicBool,
-    pub report_blocked: Notify,
+    pub block_progress_network: AtomicBool,
+    pub progress_network_blocked: Notify,
 }
 
 impl ReceiveExports {
@@ -41,8 +41,8 @@ impl ReceiveExports {
             paused_exports: Mutex::new(BTreeSet::from([pause_at])),
             paused: Notify::new(),
             release: Semaphore::new(0),
-            block_reports: AtomicBool::new(false),
-            report_blocked: Notify::new(),
+            block_progress_network: AtomicBool::new(false),
+            progress_network_blocked: Notify::new(),
         });
         FIXTURES
             .get_or_init(Mutex::default)
@@ -70,12 +70,12 @@ pub(crate) fn decorate(
     }
 }
 
-pub(crate) fn decorate_reporter(
+pub(crate) fn decorate_progress_backend(
     path: &Path,
-    inner: Arc<dyn OutboundProgressReporterPort>,
-) -> Arc<dyn OutboundProgressReporterPort> {
+    inner: Arc<dyn ConnectivityBackend>,
+) -> Arc<dyn ConnectivityBackend> {
     match fixture_for(path) {
-        Some(fixture) => Arc::new(ObservedReports { inner, fixture }),
+        Some(fixture) => Arc::new(ObservedProgressNetwork { inner, fixture }),
         None => inner,
     }
 }
@@ -88,28 +88,25 @@ fn fixture_for(path: &Path) -> Option<Arc<ReceiveExports>> {
         .find_map(|(root, fixture)| path.starts_with(root).then(|| fixture.upgrade()).flatten())
 }
 
-struct ObservedReports {
-    inner: Arc<dyn OutboundProgressReporterPort>,
+struct ObservedProgressNetwork {
+    inner: Arc<dyn ConnectivityBackend>,
     fixture: Arc<ReceiveExports>,
 }
 
 #[async_trait]
-impl OutboundProgressReporterPort for ObservedReports {
-    async fn report(
+impl ConnectivityBackend for ObservedProgressNetwork {
+    async fn connect(
         &self,
-        target: &DeviceId,
-        transfer_id: &str,
-        bytes_transferred: u64,
-        total_bytes: Option<u64>,
-        status: OutboundProgressStatus,
-    ) {
-        if self.fixture.block_reports.load(Ordering::SeqCst) {
-            self.fixture.report_blocked.notify_one();
-            pending::<()>().await;
+        target: DeviceId,
+        address_hint: Option<Vec<u8>>,
+        cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+        if self.fixture.block_progress_network.load(Ordering::SeqCst) {
+            self.fixture.progress_network_blocked.notify_one();
+            cancel.cancelled().await;
+            return Err(ConnectivityError::Stopped);
         }
-        self.inner
-            .report(target, transfer_id, bytes_transferred, total_bytes, status)
-            .await;
+        self.inner.connect(target, address_hint, cancel).await
     }
 }
 
