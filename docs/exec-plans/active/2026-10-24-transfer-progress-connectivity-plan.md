@@ -106,8 +106,8 @@
 
 目标：不借用单元测试证明网络或 UI 事实，对应 AC10／AC11／AC12。
 
-* [ ] 扩展现有 `tests/hosts/connectivity` 和网络 harness，新新与两种固定旧端 × 新端两角色 × Direct／强制 Relay，保留旧旧基线及全部必需结果。
-* [ ] 网络矩阵精确读回实际文件、核对真实 selected path／ALPN；旧端验证文件互通和新版保守投影，不强求旧端实现 ACK／查询。
+* [x] 扩展现有 `tests/hosts/connectivity` 和网络 harness，新新与两种固定旧端 × 新端两角色 × Direct／强制 Relay，保留旧旧基线及全部必需结果。 独立宿主能力不扩大冻结current-engine集合；main5cbca8与a07原库不打补丁，新新2／混合8／旧旧4共14格全量通过并接入原CI，原Blob10格继续完整执行，见[生产矩阵验证](2026-10-24-transfer-progress-connectivity-feasibility.md#生产新旧端网络矩阵验证)。
+* [x] 网络矩阵精确读回实际文件、核对真实 selected path／ALPN；旧端验证文件互通和新版保守投影，不强求旧端实现 ACK／查询。 20份方向进度由稳定完整操作与同连接实际握手的协议／路径证明；4份v2逐项完成及Settled，16份v1保持旧版保守语义，读取实际文件与升级前原件；严格门禁拒绝缺方向、缺原始记录、假终态、旧二进制及未命中双栈隔离。
 * [ ] 真实三端源设备／provider 分离，以及同条目向双设备并发传输、旧登记／尝试／轮次乱序均通过。
 * [ ] 真实阻塞一端读流／ACK 时，另一端仍前进且取消独立；队满、缓存淘汰和超大批次未知项结果准确。
 * [ ] 至少回归原 1GiB 负载，观察通知任务、连接、内存、FD、许可及清理前后；连续通知／查询／重连无持续资源增长。
@@ -152,6 +152,7 @@ just mbx-exec bash scripts/testing/run-test-group.sh workspace --no-fail-fast
 just mbx-exec bash scripts/testing/run-test-group.sh membership-e2e --no-fail-fast
 just mbx-exec bash scripts/testing/run-test-group.sh upgrade-matrix --smoke --no-fail-fast
 bash scripts/testing/run-blob-connectivity.sh
+bash scripts/testing/run-progress-connectivity.sh
 bash scripts/testing/run-blob-lifecycle-resources.sh
 bash scripts/testing/run-peer-reachability-connectivity.sh
 ```

@@ -9,7 +9,9 @@ publish = false
 # 对应关系见 tests/upgrade-matrix/host-features.json。
 [features]
 # 入站故障控制单独启用，冻结 main 复用源码时仍可选择原 current-engine 能力集。
-default = ["current-engine", "inbound-network-faults"]
+default = ["current-engine", "inbound-network-faults", "transfer-progress"]
+# 冻结旧端仍复用 current-engine；新增进度API只能由新宿主单独启用。
+transfer-progress = []
 inbound-network-faults = ["current-engine"]
 current-engine = [
   "connectivity-opportunity",

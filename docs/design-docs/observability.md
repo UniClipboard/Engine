@@ -487,7 +487,7 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 正文，也不原样写入诊断文件；系统日志中的编码只包含同一组固定分类。远程入口忽略这个本地 target，
 不将正常路由计为远程隐私拒收。
 
-实际握手完成的 `connection.protocol.negotiated` 只输出封闭类别：可达性v1／v2、`blob`或`other`。
+实际握手完成的 `connection.protocol.negotiated` 只输出封闭类别：可达性v1／v2、进度v1／v2、`blob`或`other`；进度版本直接取握手已协商的ALPN常量，不从对端版本或宿主能力推断。同一协商记录的`initial_path`复用该连接握手完成时实际选路的既有封闭分类；缺少该字段的旧记录仍可读取，但不能据此声称已证明连接路径。
 `blob`由固定SDK的ALPN匹配产生；不记录任意ALPN原文，不新增业务入口，未知协议继续归`other`。
 该记录仅进入本地连接诊断，远程入口仍忽略整个`uc.connectivity`，不扩大Collector字段。
 

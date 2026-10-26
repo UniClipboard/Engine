@@ -1082,3 +1082,18 @@ Application 新增历史 get/list 与删除／成员退休交错的四种组合�
 完整 Engine 接收范围当前59项通过：普通接收入口52项，加原固定资源入口内7项接收场景，重复执行不叠加。固定九项资源全部通过，含编译480.178秒；严格校验7个生命周期场景、8份报告、SDK关闭前零临时标签、原生句柄及FD／线程／任务回归、连续两份1GiB精确读回与ACK，以及原下载4／2、等待64／16额度。资源脚本、断言及期限均保持。
 
 复现入口为 `just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked -E 'test(receive_retry::process_restart::)'`、原完整 Engine 接收入口、`just cargo test -p uc-application --lib --locked`、`just cargo test -p uc-infra-storage --lib entry_file_set_repo:: --locked` 及原固定九项资源脚本。物理挂起、设备／产品宿主及 Collector 等尚未执行部分继续保持未完成，不以独立PID或普通等待代替。
+
+
+## 生产新旧端网络矩阵验证
+
+[完整入口](../../../scripts/testing/run-progress-connectivity.sh)复用原独立进程宿主与隔离网络驱动，不复制 Engine 业务。新宿主只通过稳定 Query／List／Reconcile 及本地完整接收查询读事实；独立 `transfer-progress` feature 只加入新端默认能力，冻结构建器沿用的 `current-engine` 集合保持。固定 main `5cbca8fc24a278fa7b01ae611bf4b925914bef13` 和 a07 `f6f305d9689e4e79e7ab6d0e4921061f9416e4a6` 均以原库实际构建，没有补丁旧 Engine。先保留两种旧端各自 Direct／Relay 的四格旧旧，再执行新新两格与两种旧端×新端两个角色×Direct／Relay八格；本机首次完整运行14格全部通过，无跳过。
+
+每格均逐字节读回双向文件，混合格额外从独立原始副本升级一侧，校验原身份、传输身份、成员、内容及旧文件继续可读。原旧进度 codec SHA-256仍为`4f8130692441496a436be085f09691cd60236b9c3cc509803a56c504c6d61d0b`。新阶段产生20份方向进度：4份实际v2，发送侧单项完成并明确核对Settled；16份实际v1，新发送端面对旧接收端保持Unsupported／未确认、没有旧attempt／字节／轮次伪造，旧发送端面对新接收端则验证实际本地保存及没有凭入站条目虚构出站意图，不要求旧端实现新版查询或ACK。原API返回的源条目和实际读回的接收条目直接驱动检查，不注入任务身份。
+
+原实际握手观测曾将进度归为`other`，不足以证明版本。本次在既有封闭协议词表加入进度v1／v2，并由同一`ConnectionLifetimeObservation`保留握手时已观察的选路分类；不输出原始ALPN、地址或业务身份，不增加业务root或Engine内部接口。缺少选路字段的旧记录仍可读取，但不算新路径证明。20份进度握手分别实测Direct十份、Relay十份，强制Relay同时核对两端IPv4／IPv6真实丢弃计数；不以presence在线通道或版本号推断进度连接。
+
+[严格汇总器](../../../scripts/testing/verify-progress-connectivity.mjs)要求全部14格、固定版本及二进制摘要、精确文件、原资料保留、原始握手／路径字段、完整方向、正确新旧角色、实际本地结果、保守旧版投影、进程／网络清理及明文探针。证据门禁与原发送报告检查共12项通过，包含缺格组成／缺方向、重复场景、缺原始记录、错误路径、stale host、旧端假成功／字节、伪造出站、清理失败及Relay任一协议族未命中的拒绝；它们不冒充实际网络结果。协议全集77项、观测合同全集84项通过；旧无路径记录及任意地址／ALPN拒绝仍有合同检查。
+
+原 Blob 矩阵继续使用它原先的 main `a461b89444efd60081c7ef63f927946f9dfc072d` 与a07，不替换成更易通过的版本；本次原十格也全量通过。新14格运行后到原十格结束，原矩阵记录的3062个源输入摘要逐项保持一致。此前旧旧Relay的历史`apply_failed`未在本次全量复现，不能因此登记历史根因已修复。CI原网络job现在先执行新14格（内含原旧旧4格），再执行原Blob10格，保留原入口和期限，并上传原始JSON／日志／构建来源。当前候选远端CI、物理挂起、设备／产品宿主、三端source/provider分离与Collector仍按后续未完成项验收。
+
+复现命令：`UC_NETWORK_UNPRIVILEGED=1 bash scripts/testing/run-progress-connectivity.sh`；具备既有sudo网络权限的CI沿用原方式。当前本机工件分别位于`target/progress-connectivity-evidence/runs/local-20261027-1/`与`target/blob-connectivity-evidence/runs/progress-regression-20261027-1/`，两次完整入口均保留首次运行和源码／锁文件／二进制及驱动摘要；全部节点与隔离拓扑实际清理通过。

@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, relayTransportReadyAt, terminateRelay } from './relay-recovery-support.mjs'
 import { verifyDelivery } from './clipboard-delivery-evidence.mjs'
+import { verifyTransferProgress } from './transfer-progress-evidence.mjs'
 import { ensureSessionReady } from './connection-recovery-session.mjs'
 
 const options = new Map()
@@ -50,6 +51,7 @@ const peerSide = Number(options.get('--peer-side') ?? 1)
 // P00 前置只使用旧库正常配对产生的资料；每次运行重新配对并复制，不写入人工资格。
 const prepairedHost = options.get('--prepaired-host')
 const blobBaseline = options.get('--blob-baseline') === '1'
+const progressBaseline = options.get('--progress-baseline') === '1'
 const oldPairOnly = options.get('--old-pair-only') === '1'
 assert(!blobBaseline || prepairedHost)
 assert(!oldPairOnly || (blobBaseline && resolve(prepairedHost) === binary))
@@ -74,6 +76,7 @@ const bridge = `${runId}br`.slice(0, 15)
 const root = mkdtempSync(join(tmpdir(), 'uc-connectivity-'))
 const records = []
 const deliveries = []
+const progressTransfers = []
 let activeScenario
 const faults = []
 const timingStartedAt = performance.now()
@@ -309,6 +312,8 @@ async function transferFile(left, right, marker) {
     const handle = `managed-${marker}-${sender.label}`
     const displayName = `evidence-${sender.label}.bin`
     const content = `managed-file-payload-${marker}-${sender.label}`
+    let sent
+    let receivedEntry
     await verifyDelivery(deliveries, {
       kind: 'file', from: sender.label, to: receiver.label, scenario: activeScenario ?? null,
     }, () => sender.call('send_file', {
@@ -317,13 +322,14 @@ async function transferFile(left, right, marker) {
       display_name: displayName,
       mime_type: 'application/octet-stream',
       content,
-    }), async () => {
+    }).then(report => { sent = report; return report }), async () => {
       await until(async () => {
         for (const entry of await receiver.call('history')) {
           if (entry.content_type !== 'file') continue
           const response = await receiver.raw({ command: 'read_file', entry: entry.entry_id })
           if (!response.ok || response.ok.file_name !== displayName) continue
           if (Buffer.from(response.ok.bytes).equals(Buffer.from(content))) {
+            receivedEntry = entry.entry_id
             receiver.expectedFiles ??= []
             receiver.expectedFiles.push({ entry: entry.entry_id, content, displayName })
             return true
@@ -332,6 +338,9 @@ async function transferFile(left, right, marker) {
         return false
       }, 60_000, 'exact file bytes did not arrive')
     })
+    if (progressBaseline && [sender, receiver].some(node => node.hostIdentity?.capabilities?.includes('transfer-progress'))) {
+      progressTransfers.push(await verifyTransferProgress({sender, receiver, sent, receivedEntry, until, mode, protocols: observedProgressHandshakes}))
+    }
   }
 }
 
@@ -876,7 +885,7 @@ async function prepairedUpgrade() {
 
 }
 
-async function negotiatedProtocol(node, expected) {
+async function observedNegotiatedProtocols(node) {
   await node.call('flush')
   const facts = []
   for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
@@ -887,7 +896,16 @@ async function negotiatedProtocol(node, expected) {
       } catch {}
     }
   }
-  assert(facts.includes(expected), 'actual negotiated protocol was not observed')
+  return facts
+}
+async function observedProgressHandshakes(node) {
+  await node.call('flush')
+  return localDiagnostics(node).filter(row => row.fields?.['event.name'] === 'connection.protocol.negotiated'
+    && ['transfer_progress_v1', 'transfer_progress_v2'].includes(row.fields.protocol))
+    .map(row => ({ protocol: row.fields.protocol, selected_path: row.fields.initial_path }))
+}
+async function negotiatedProtocol(node, expected) {
+  assert((await observedNegotiatedProtocols(node)).includes(expected), 'actual negotiated protocol was not observed')
   return { negotiated_protocol: expected, actual_handshake_observed: true }
 }
 
@@ -1195,7 +1213,7 @@ finally {
               node.networkDiagnostics.push({ timestamp: row.timestamp, ...Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'trigger', 'outcome', 'uc.outcome', 'error.phase', 'error.reason', 'error_kind', 'error_class', 'duration_ms', 'connected_count', 'known_count', 'attempt_index', 'protocol', 'direction', 'reason'].includes(key))) })
             }
             if (['relay.status.observed', 'address.loaded', 'address.used', 'connection.protocol.negotiated'].includes(fields['event.name'])) {
-              node.networkFacts.push(Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'connected_count', 'known_count', 'direct_count', 'relay_count', 'other_count', 'protocol'].includes(key))))
+              node.networkFacts.push(Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'connected_count', 'known_count', 'direct_count', 'relay_count', 'other_count', 'protocol', 'initial_path'].includes(key))))
             }
           } catch {}
         }
@@ -1230,7 +1248,7 @@ finally {
   rmSync(root, { recursive: true, force: true })
   const binaries = [binary, prepairedHost, legacyBinary, peerBinary, relayBinary, relayBinaryB, restartBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
-  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --prebuilt --host ${binary} --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}${blobBaseline ? ' --blob-baseline' : ''}${oldPairOnly ? ' --old-pair-only' : ''}${prepairedHost ? ` --prepaired-host ${prepairedHost} --upgrade-side ${upgradeSide} --presence-role ${presenceRole} --presence-protocol ${options.get('--presence-protocol') ?? 'peer_reachability_v1'}` : ''}${peerBinary ? ` --peer-host ${peerBinary} --peer-side ${peerSide}` : ''}`
+  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --prebuilt --host ${binary} --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}${blobBaseline ? ' --blob-baseline' : ''}${progressBaseline ? ' --progress-baseline' : ''}${oldPairOnly ? ' --old-pair-only' : ''}${prepairedHost ? ` --prepaired-host ${prepairedHost} --upgrade-side ${upgradeSide} --presence-role ${presenceRole} --presence-protocol ${options.get('--presence-protocol') ?? 'peer_reachability_v1'}` : ''}${peerBinary ? ` --peer-host ${peerBinary} --peer-side ${peerSide}` : ''}`
   const timingCompletedAt = performance.now()
   const scenarioStartedAt = firstScenarioStartedAt ?? cleanupStartedAt
   const timings = {
@@ -1239,6 +1257,6 @@ finally {
     cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
     total_ms: Math.round(timingCompletedAt - timingStartedAt),
   }
-  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, reproduction, binaries, faults, records, deliveries, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, progress_baseline: progressBaseline, progress_transfers: progressTransfers, reproduction, binaries, faults, records, deliveries, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0

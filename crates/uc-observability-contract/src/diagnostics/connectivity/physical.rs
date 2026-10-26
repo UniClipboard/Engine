@@ -16,6 +16,8 @@ wire_enum! {
         PeerReachabilityV1 => "peer_reachability_v1",
         PeerReachabilityV2 => "peer_reachability_v2",
         Blob => "blob",
+        TransferProgressV1 => "transfer_progress_v1",
+        TransferProgressV2 => "transfer_progress_v2",
         Other => "other",
     }
 }
@@ -56,6 +58,8 @@ pub(super) enum PhysicalEvent {
     },
     Negotiated {
         protocol: NegotiatedProtocol,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial_path: Option<NetworkPathKind>,
     },
     Closed {
         direction: ConnectionDirection,
@@ -139,6 +143,7 @@ pub struct ConnectionLifetimeObservation {
     recorder: NetworkRecorder,
     context: ObservationContext,
     direction: ConnectionDirection,
+    initial_path: NetworkPathKind,
     started: Instant,
     finished: bool,
 }
@@ -165,6 +170,7 @@ impl NetworkRecorder {
             recorder: self.clone(),
             context: with_connection_key(&peer_context(peer), key),
             direction,
+            initial_path,
             started: Instant::now(),
             finished: false,
         };
@@ -181,7 +187,13 @@ impl NetworkRecorder {
 
 impl ConnectionLifetimeObservation {
     pub fn negotiated(&self, protocol: NegotiatedProtocol) {
-        self.emit(PhysicalEvent::Negotiated { protocol }, None);
+        self.emit(
+            PhysicalEvent::Negotiated {
+                protocol,
+                initial_path: Some(self.initial_path),
+            },
+            None,
+        );
     }
     /// 观察任务未能登记时保留同一连接关联，不伪造完整关闭观察。
     pub fn unavailable(mut self, reason: ObserverFailure) {

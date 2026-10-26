@@ -33,7 +33,7 @@ anchors=json.loads(Path('tests/upgrade-matrix/anchors.json').read_text())['ancho
 assert next(a for a in anchors if a['id']=='a07')['engine_rev']==sys.argv[3]
 inputs=['Cargo.lock','scripts/testing/run-progress-legacy-baseline.sh',
         'scripts/testing/run-connection-recovery-e2e.sh','scripts/testing/connection-recovery-network.mjs',
-        'scripts/testing/clipboard-delivery-evidence.mjs',
+        'scripts/testing/clipboard-delivery-evidence.mjs','scripts/testing/transfer-progress-evidence.mjs',
         'crates/uc-sync-protocol/tests/fixtures/transfer-progress-v1.txt']
 (root/'sources.json').write_text(json.dumps({
     'driver_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
