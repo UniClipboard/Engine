@@ -36,7 +36,7 @@ Stopped remains a lifecycle state. Hosts must consume the result of their comple
 
 ## Validation boundary
 
-The real temporary-host E2E owns a real flock in a controlled required closer and probes it from a separate Python process. The real binding E2E samples selected SQLite/redb/lease/network-log descriptors and performs independent lock checks and cross-process data access. The controlled binding-owner scenarios do not enumerate real blob resources.
+The real temporary-host E2E runs on macOS/Linux. It owns a real flock in a controlled required closer and probes it from a separate Python process using `fcntl`. Other targets skip this probe; a skip is not a Windows runtime pass. The real binding E2E samples selected SQLite/redb/lease/network-log descriptors and performs independent lock checks and cross-process data access. The controlled binding-owner scenarios do not enumerate real blob resources.
 
 No held actual blob import at the binding boundary, iOS background transition or physical-device crash sequence is certified by these desktop scenarios. The original iOS crash root cause remains unproved.
 
