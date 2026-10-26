@@ -5,7 +5,13 @@ use super::{
     MockEntryRepo, NoopReceiveArtifactCleanup, RecordingLiveIndex, StoreOnlyPullDeps,
 };
 use crate::clipboard::entry_identity::EntryIdentityCoordinator;
-use crate::transfer::progress::{ProgressTaskAuthorityPort, ProgressTaskDescriptor};
+use crate::clipboard::sync::payload_codec::{
+    decode_v3_bytes_to_snapshot_and_blob_refs, encode_snapshot_with_blob_refs_to_v3_bytes,
+};
+use crate::transfer::progress::{
+    ProgressPageReply, ProgressSnapshotProviderPort, ProgressSnapshotQuery,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+};
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use async_trait::async_trait;
@@ -15,7 +21,8 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{ProgressIdentity, ProgressItemState, ProgressTerminalOutcome};
-use uc_core::ids::EntryId;
+use uc_core::ids::{DeviceId, EntryId};
+use uc_core::ports::blob::BlobTicket;
 use uc_core::ports::{AttemptError, BeginReceiveAttemptPort, BeginReceiveOutcome};
 use uuid::Uuid;
 
@@ -60,7 +67,7 @@ impl BeginReceiveAttemptPort for HeldAcceptance {
 
 #[tokio::test]
 async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization() {
-    for reject in [false, true] {
+    for (source_hint, reject) in [(false, false), (false, true), (true, false), (true, true)] {
         let work = Arc::new(ReceiveWorkRegistry::default());
         let attempts = AttemptGate::empty();
         let acceptance = Arc::new(HeldAcceptance {
@@ -72,7 +79,39 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
         let mut input = file_blob_input();
         let source = EntryId::from("00000000-0000-4000-8000-000000000001");
         let id = ProgressIdentity::new(*Uuid::parse_str(source.as_ref()).unwrap().as_bytes());
-        input.source_entry = Some(source);
+        let blob_source = EntryId::from("00000000-0000-4000-8000-000000000002");
+        let provider_roles = [DeviceId::new("provider-b"), DeviceId::new("provider-c")];
+        let (snapshot, original) =
+            decode_v3_bytes_to_snapshot_and_blob_refs(&input.plaintext).unwrap();
+        // Application不解析ticket定位信息；受控材料化port把三份opaque能力映射到两个provider角色。
+        let capabilities = (0..3)
+            .map(|index| {
+                (
+                    BlobTicket::from_bytes(vec![200 + index, 42]),
+                    provider_roles[index as usize % 2],
+                )
+            })
+            .collect::<Vec<_>>();
+        let references = capabilities
+            .iter()
+            .enumerate()
+            .map(|(index, (ticket, _))| {
+                let mut reference = original[0].clone();
+                reference.ticket = ticket.clone();
+                reference.entry_id = if source_hint {
+                    blob_source.clone()
+                } else {
+                    source.clone()
+                };
+                reference.filename = Some(format!("handoff-{index}.bin"));
+                reference
+            })
+            .collect::<Vec<_>>();
+        let (plaintext, hash) =
+            encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &references).unwrap();
+        input.plaintext = plaintext;
+        input.snapshot_hash = hash;
+        input.source_entry = source_hint.then_some(source.clone());
         let peer = input.from_device;
         let mut repo = MockEntryRepo::new();
         repo.expect_find_entry_id_by_snapshot_hash()
@@ -85,7 +124,21 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
             materializer
                 .expect_materialize_plan()
                 .times(1)
-                .returning(move |_| {
+                .returning(move |plan| {
+                    let (from_device, local_entry, _, blobs, directory, attempt, _, _, _) =
+                        plan.into_parts();
+                    assert_eq!(from_device, peer);
+                    assert_ne!(local_entry, source);
+                    assert!(directory.is_none());
+                    assert_eq!(blobs, references);
+                    for blob in &blobs {
+                        let (_, provider) = capabilities
+                            .iter()
+                            .find(|(ticket, _)| ticket == &blob.ticket)
+                            .expect("original provider capability");
+                        assert_ne!(*provider, from_device);
+                        assert!(registry.current_task(provider, id).is_none());
+                    }
                     let accepted = registry
                         .current_task(&peer, id)
                         .expect("authoritative before download");
@@ -94,7 +147,13 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
                         accepted.descriptor.attempt.bytes(),
                         *Uuid::parse_str(&current).unwrap().as_bytes()
                     );
-                    assert_eq!(accepted.descriptor.item_count, 1);
+                    assert_eq!(attempt.as_deref(), Some(current.as_str()));
+                    assert_eq!(accepted.descriptor.item_count, 3);
+                    assert!(accepted
+                        .items
+                        .iter()
+                        .enumerate()
+                        .all(|(index, item)| item.index == index as u16));
                     Err(io::Error::new(
                         io::ErrorKind::ConnectionAborted,
                         "fixture ends after accepted handoff",
@@ -158,9 +217,46 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
             assert_eq!(changes[0].peer, peer);
             let snapshot = changes[0].snapshot.as_ref().unwrap();
             assert!(snapshot.descriptor == work.current_task(&peer, id).unwrap().descriptor);
+            assert_eq!(snapshot.items.len(), 3);
+            assert!(snapshot.items.iter().all(|item| matches!(item, ProgressItemState::Terminal(value) if matches!(value.outcome, ProgressTerminalOutcome::Failed(_)))));
+            let current = work
+                .snapshot_page(
+                    &peer,
+                    ProgressSnapshotQuery {
+                        source: id,
+                        attempt: Some(snapshot.descriptor.attempt),
+                        offset: 0,
+                        revision: None,
+                    },
+                )
+                .await
+                .unwrap();
             assert!(
-                matches!(snapshot.items.as_slice(), [ProgressItemState::Terminal(value)] if matches!(value.outcome, ProgressTerminalOutcome::Failed(_)))
+                matches!(current, ProgressPageReply::Current(page) if page.descriptor == snapshot.descriptor && page.items == snapshot.items)
             );
+            for provider in provider_roles {
+                assert!(work.current_task(&provider, id).is_none());
+                assert!(matches!(
+                    work.snapshot_page(
+                        &provider,
+                        ProgressSnapshotQuery {
+                            source: id,
+                            attempt: None,
+                            offset: 0,
+                            revision: None
+                        }
+                    )
+                    .await
+                    .unwrap(),
+                    ProgressPageReply::NotRetained
+                ));
+            }
+            if source_hint {
+                let blob_id = ProgressIdentity::new(
+                    *Uuid::parse_str(blob_source.as_ref()).unwrap().as_bytes(),
+                );
+                assert!(work.current_task(&peer, blob_id).is_none());
+            }
         }
         // 观察真实事实不再制造一次变化；拒绝的CAS也不能生成通知资格。
         assert!(timeout(
