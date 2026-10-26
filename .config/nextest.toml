@@ -496,3 +496,13 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::settlement_boundaries::representation::real_engine_representation_waits_for_actual_decryption_then_acks_the_verified_result)"
 slow-timeout = { period = "30s", terminate-after = 3 }
+
+# 两项进度生命周期用例分别包含两套完整双Engine流程；单CPU原20秒外层实际截断正常流程。
+# 精确容纳完整动作及清理，各内层期限、断言、原测试组及零重试保持。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & (test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_receiver_session_retirement_does_not_leave_unretained_retry_running_on_sender) | test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_sender_resume_and_profile_reopen_retire_unpersisted_progress_without_redownload))"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & (test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_receiver_session_retirement_does_not_leave_unretained_retry_running_on_sender) | test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_sender_resume_and_profile_reopen_retire_unpersisted_progress_without_redownload))"
+slow-timeout = { period = "30s", terminate-after = 4 }
