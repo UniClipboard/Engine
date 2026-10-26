@@ -1,9 +1,7 @@
 //! 原发送动作在第一条网络消息之前登记完整意图；通知拒绝不改变原实际投递结果。
 use super::DispatchClipboardEntryInput;
 use crate::clipboard::sync::payload_codec::decode_v3_bytes_to_snapshot_blob_refs_and_file_set;
-use crate::transfer::progress::{
-    ProgressOriginalPlan, ProgressProjectionKey, ProgressProjectionRegistry,
-};
+use crate::transfer::progress::{ProgressIntent, ProgressOriginalPlan, ProgressProjectionKey};
 use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
 use uc_observability_contract::uc_debug;
@@ -33,12 +31,8 @@ pub(super) fn original_plan(input: &DispatchClipboardEntryInput) -> Option<Progr
     ProgressOriginalPlan::from_refs(hint, &blobs, manifest.is_some())
 }
 
-pub(super) fn accept_intent(
-    registry: &ProgressProjectionRegistry,
-    peer: DeviceId,
-    plan: &ProgressOriginalPlan,
-) {
-    if let Err(source) = registry.accept_intent(
+pub(super) fn accept_intent(intent: &ProgressIntent, peer: DeviceId, plan: &ProgressOriginalPlan) {
+    if let Err(source) = intent.accept(
         ProgressProjectionKey {
             peer,
             source: plan.source,

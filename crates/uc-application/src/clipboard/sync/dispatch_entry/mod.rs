@@ -426,6 +426,14 @@ impl DispatchClipboardEntryUseCase {
         input: DispatchClipboardEntryInput,
     ) -> Result<DispatchOutcome, DispatchSyncError> {
         let work = self.work.begin().ok_or(DispatchSyncError::Stopped)?;
+        let progress_plan = progress::original_plan(&input);
+        let progress_intent = progress_plan.as_ref().map(|plan| {
+            // 原raw入口没有本机历史归属时，使用其明确的原源UUID作为临时所有者。
+            let owner = input.entry_id.clone().unwrap_or_else(|| {
+                EntryId::from(Uuid::from_bytes(plan.source.bytes()).to_string())
+            });
+            self.progress.begin_intent(owner)
+        });
         // 1. Encrypt once. A locked session surfaces here — let it
         //    short-circuit so we don't spam the dispatch wire with retries.
         let ciphertext = match self.cipher.encrypt(&input.plaintext).await {
@@ -447,7 +455,6 @@ impl DispatchClipboardEntryUseCase {
         //    fan-out (see `PerPeerDispatcher`).
         let local_device = self.device_identity.current_device_id();
         let candidates = self.selector.select(&input, &local_device).await?;
-        let progress_plan = progress::original_plan(&input);
         let source_entry = progress_plan
             .as_ref()
             .map(|plan| EntryId::from(Uuid::from_bytes(plan.source.bytes()).to_string()));
@@ -498,8 +505,8 @@ impl DispatchClipboardEntryUseCase {
                     continue;
                 }
             }
-            if let Some(plan) = &progress_plan {
-                progress::accept_intent(&self.progress, *device_id, plan);
+            if let (Some(plan), Some(intent)) = (&progress_plan, &progress_intent) {
+                progress::accept_intent(intent, *device_id, plan);
             }
             dispatch_candidates.push(*device_id);
             let dispatcher = Arc::clone(&self.dispatcher);

@@ -12,11 +12,13 @@ use uc_application::deps::{
     ProgressReceiveError, TransferProgressProducer,
 };
 use uc_core::file_transfer::ProgressFreshnessView;
+use uc_core::ids::EntryId;
 use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::{
     write_frame, ActiveProgress, Envelope, ItemKind, LogicalItem, Message, Phase, TaskScope,
     TerminalOutcome, TerminalResult, WireId,
 };
+use uuid::Uuid;
 
 struct Clock(AtomicU64);
 impl ElapsedClockPort for Clock {
@@ -40,7 +42,11 @@ async fn ended_request_keeps_current_authority(operation: Operation) -> anyhow::
             peer: pair.receiver_id,
             source: descriptor().source,
         };
-        registry.accept_intent(key, (0..65).map(item).collect())?;
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, (0..65).map(item).collect())?;
         let snapshot = Snapshot {
             peer: pair.receiver_id,
             pages: AtomicUsize::new(0),

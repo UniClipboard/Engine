@@ -24,7 +24,8 @@ use uc_core::file_transfer::{
     ProgressItemState, ProgressPhase, ProgressSnapshotRefusal, ProgressTerminal,
     ProgressTerminalOutcome,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
+use uuid::Uuid;
 
 struct Query {
     entered: Notify,
@@ -139,7 +140,12 @@ impl Fixture {
         let key = key(1, 1);
         let clock = Arc::new(Clock(AtomicU64::new(0)));
         let (registry, projection_worker) = ProgressProjectionRegistry::new(clock.clone());
-        registry.accept_intent(key, vec![item(0), item(1)]).unwrap();
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, vec![item(0), item(1)])
+            .unwrap();
         let bound = if registered {
             Some(
                 registry
@@ -310,7 +316,10 @@ async fn delayed_query_cannot_repopulate_replaced_removed_or_closed_intent() {
             if action == 0 {
                 fixture
                     .registry
-                    .accept_intent(key, vec![item(0), item(1)])
+                    .begin_intent(EntryId::from(
+                        Uuid::from_bytes((key).source.bytes()).to_string(),
+                    ))
+                    .accept(key, vec![item(0), item(1)])
                     .unwrap();
             }
         }
@@ -401,7 +410,10 @@ async fn new_same_key_intent_never_shares_old_inflight_query_even_when_remote_de
         fixture.registry.remove(key);
         fixture
             .registry
-            .accept_intent(key, vec![item(0), item(1)])
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, vec![item(0), item(1)])
             .unwrap();
         if registered {
             fixture
@@ -640,7 +652,10 @@ async fn late_non_snapshot_replies_cannot_answer_a_new_same_key_intent() {
         fixture.registry.remove(key);
         fixture
             .registry
-            .accept_intent(key, vec![item(0), item(1)])
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, vec![item(0), item(1)])
             .unwrap();
         fixture.query.release.add_permits(1);
         let response = timeout(Duration::from_secs(2), querying)

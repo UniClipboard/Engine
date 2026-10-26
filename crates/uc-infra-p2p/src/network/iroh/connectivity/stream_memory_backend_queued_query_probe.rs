@@ -22,8 +22,9 @@ use uc_application::deps::{
     TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressTerminal};
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_infra_local::SystemElapsedClock;
+use uuid::Uuid;
 
 struct BlockingAuthority {
     peer: DeviceId,
@@ -129,7 +130,7 @@ async fn queued_query_keeps_original_session_and_a_later_explicit_query_can_use_
         let clock = Arc::new(SystemElapsedClock);
         let (registry, projection_worker) = ProgressProjectionRegistry::new(clock.clone());
         let key = ProgressProjectionKey { peer: pair.receiver_id, source: SOURCE };
-        registry.accept_intent(key, (0..65).map(item).collect())?;
+        registry.begin_intent(EntryId::from(Uuid::from_bytes((key).source.bytes()).to_string())).accept(key, (0..65).map(item).collect())?;
         let cancel = CancellationToken::new();
         let projections = tokio::spawn(projection_worker.run(cancel.clone()));
         let producer = TransferProgressProducer::new(pair.receiver.clone(), Arc::new(TransferProgressWire), Arc::new(Authority { peer: pair.sender_id }), Arc::new(UnusedSnapshotProvider), clock.clone());

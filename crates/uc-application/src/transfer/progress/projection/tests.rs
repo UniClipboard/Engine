@@ -14,7 +14,8 @@ use uc_core::file_transfer::{
     ProgressActive, ProgressFreshnessView, ProgressIdentity, ProgressItem, ProgressItemKind,
     ProgressPhase,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
+use uuid::Uuid;
 
 struct Clock(AtomicU64);
 impl ElapsedClockPort for Clock {
@@ -65,7 +66,12 @@ async fn original_intent_starts_waiting_and_worker_emits_expiry_without_a_snapsh
     let (registry, worker) = ProgressProjectionRegistry::new(clock.clone());
     let mut events = registry.subscribe();
     let key = key(1, 1);
-    registry.accept_intent(key, vec![item(0)]).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((key).source.bytes()).to_string(),
+        ))
+        .accept(key, vec![item(0)])
+        .unwrap();
     assert_eq!(
         events.recv().await.unwrap(),
         ProgressProjectionEvent::Changed(key)
@@ -78,7 +84,12 @@ async fn original_intent_starts_waiting_and_worker_emits_expiry_without_a_snapsh
     let running = tokio::spawn(worker.run(stop.clone()));
     clock.0.store(59, Ordering::SeqCst);
     assert_eq!(
-        registry.accept_intent(key, vec![item(0)]).unwrap(),
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string()
+            ))
+            .accept(key, vec![item(0)])
+            .unwrap(),
         ProgressProjectionAdmission::Unchanged
     );
     assert!(timeout(Duration::from_millis(30), events.recv())
@@ -98,14 +109,23 @@ async fn original_intent_starts_waiting_and_worker_emits_expiry_without_a_snapsh
         ProgressFreshnessView::Unconfirmed
     );
     assert!(matches!(
-        registry.accept_intent(key, vec![item(1)]),
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string()
+            ))
+            .accept(key, vec![item(1)]),
         Err(ProgressReceiveError::InvalidPlan)
     ));
     stop.cancel();
     running.await.unwrap();
     assert!(registry.snapshot(key).is_none());
     assert_eq!(
-        registry.accept_intent(key, vec![item(0)]).unwrap(),
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string()
+            ))
+            .accept(key, vec![item(0)])
+            .unwrap(),
         ProgressProjectionAdmission::Closed
     );
 }
@@ -119,7 +139,12 @@ async fn maximum_actual_projections_and_lagged_events_stay_bounded_and_eviction_
     for p in 0..4 {
         for n in 0..64 {
             let key = key(p, n);
-            registry.accept_intent(key, plan.clone()).unwrap();
+            registry
+                .begin_intent(EntryId::from(
+                    Uuid::from_bytes((key).source.bytes()).to_string(),
+                ))
+                .accept(key, plan.clone())
+                .unwrap();
             let bound = registry
                 .register(
                     &key.peer,
@@ -174,14 +199,29 @@ async fn maximum_actual_projections_and_lagged_events_stay_bounded_and_eviction_
     let old = key(0, 0);
     let pinned = registry.receiver(old).unwrap();
     assert_eq!(
-        registry.accept_intent(old, plan.clone()).unwrap(),
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((old).source.bytes()).to_string()
+            ))
+            .accept(old, plan.clone())
+            .unwrap(),
         ProgressProjectionAdmission::Unchanged
     );
-    registry.accept_intent(key(0, 64), plan.clone()).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((key(0, 64)).source.bytes()).to_string(),
+        ))
+        .accept(key(0, 64), plan.clone())
+        .unwrap();
     assert!(registry.snapshot(old).is_none());
     assert!(pinned.snapshot().items.is_empty());
     assert!(registry.snapshot(key(1, 0)).is_some());
-    registry.accept_intent(key(4, 0), plan).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((key(4, 0)).source.bytes()).to_string(),
+        ))
+        .accept(key(4, 0), plan)
+        .unwrap();
     assert!(registry.snapshot(key(0, 1)).is_none());
     assert_eq!(
         registry
@@ -196,7 +236,12 @@ async fn maximum_actual_projections_and_lagged_events_stay_bounded_and_eviction_
     registry.clear();
     assert!(registry.snapshots().is_empty());
     assert_eq!(
-        registry.accept_intent(old, vec![item(0)]).unwrap(),
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((old).source.bytes()).to_string()
+            ))
+            .accept(old, vec![item(0)])
+            .unwrap(),
         ProgressProjectionAdmission::Retained
     );
 }
@@ -225,7 +270,12 @@ async fn retired_pending_challenges_keep_four_one_admission_and_shutdown_waits_f
     let mut calls = Vec::new();
     for p in 0..4 {
         let key = key(p, 0);
-        registry.accept_intent(key, vec![item(0)]).unwrap();
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, vec![item(0)])
+            .unwrap();
         let entered = Arc::new(Notify::new());
         let signal = entered.clone();
         let gate = releases[usize::from(p)].clone();
@@ -249,7 +299,12 @@ async fn retired_pending_challenges_keep_four_one_admission_and_shutdown_waits_f
             .unwrap();
     }
     let extra = key(4, 0);
-    registry.accept_intent(extra, vec![item(0)]).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((extra).source.bytes()).to_string(),
+        ))
+        .accept(extra, vec![item(0)])
+        .unwrap();
     assert!(matches!(
         registry
             .register(
@@ -274,7 +329,12 @@ async fn retired_pending_challenges_keep_four_one_admission_and_shutdown_waits_f
         .await
         .is_ok());
     registry.remove(key(0, 0));
-    registry.accept_intent(key(0, 0), vec![item(0)]).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((key(0, 0)).source.bytes()).to_string(),
+        ))
+        .accept(key(0, 0), vec![item(0)])
+        .unwrap();
     let same = key(0, 0);
     assert!(matches!(
         registry
@@ -320,7 +380,12 @@ async fn retired_pending_challenges_keep_four_one_admission_and_shutdown_waits_f
 async fn source_deletion_and_peer_retirement_remove_only_their_authorized_scopes() {
     let (registry, _worker) = ProgressProjectionRegistry::new(Arc::new(Clock(AtomicU64::new(0))));
     for key in [key(0, 0), key(1, 0), key(1, 1), key(2, 2)] {
-        registry.accept_intent(key, vec![item(0)]).unwrap();
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, vec![item(0)])
+            .unwrap();
     }
     registry.remove_source(id(0));
     assert!(registry.snapshot(key(0, 0)).is_none());
@@ -349,7 +414,12 @@ async fn already_unconfirmed_views_stop_timer_polling_until_a_new_valid_notifica
     });
     let (registry, worker) = ProgressProjectionRegistry::new(clock.clone());
     let key = key(1, 1);
-    registry.accept_intent(key, vec![item(0)]).unwrap();
+    registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((key).source.bytes()).to_string(),
+        ))
+        .accept(key, vec![item(0)])
+        .unwrap();
     let mut events = registry.subscribe();
     let stop = CancellationToken::new();
     let running = tokio::spawn(worker.run(stop.clone()));
@@ -409,3 +479,5 @@ async fn already_unconfirmed_views_stop_timer_polling_until_a_new_valid_notifica
 
 mod reconciliation;
 mod unattributed;
+
+mod intent;

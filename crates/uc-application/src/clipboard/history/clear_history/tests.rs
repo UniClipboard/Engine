@@ -1,10 +1,13 @@
 use super::{ClearClipboardHistoryUseCase, ClearHistoryFailure, HistoryDeletionTargetsPort};
 use crate::clipboard::history::delete_entry::DeleteClipboardEntryUseCase;
+use crate::connectivity::{ElapsedClockError, ElapsedClockPort};
+use crate::transfer::progress::ProgressProjectionRegistry;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 use uc_core::clipboard::{
     ClipboardEntry, ClipboardRepositoryError, PersistedClipboardRepresentation,
 };
@@ -61,11 +64,14 @@ async fn clear_keeps_each_deletion_source_and_leaves_failed_admission_closed() {
     for second_succeeds in [false, true] {
         let targets = Arc::new(Targets { second_succeeds });
         let work = Arc::new(ReceiveWorkRegistry::default());
+        let (progress, _worker) =
+            ProgressProjectionRegistry::new(Arc::new(RejectUnexpectedElapsed));
         let deletion = Arc::new(DeleteClipboardEntryUseCase::from_ports(
             targets.clone(),
             targets.clone(),
             targets.clone(),
             work.clone(),
+            progress,
         ));
         let clear = ClearClipboardHistoryUseCase::new(targets, deletion, work.clone());
         let result = clear.execute().await;
@@ -94,5 +100,12 @@ async fn clear_keeps_each_deletion_source_and_leaves_failed_admission_closed() {
             }
         }
         assert!(!work.is_open());
+    }
+}
+
+struct RejectUnexpectedElapsed;
+impl ElapsedClockPort for RejectUnexpectedElapsed {
+    fn elapsed(&self) -> Result<Duration, ElapsedClockError> {
+        panic!("清空围栏不得读取进度时间")
     }
 }

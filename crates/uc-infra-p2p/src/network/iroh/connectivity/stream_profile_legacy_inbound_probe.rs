@@ -22,10 +22,11 @@ use uc_core::file_transfer::{
     FileTransferCancellationReason, OutboundProgressStatus, ProgressBatchState,
     ProgressFreshnessView, ProgressIdentity, ProgressItem, ProgressItemKind,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_sync_protocol::transfer_progress::{
     write_frame, ProgressFrame, ProgressWireError, FRAME_LEN,
 };
+use uuid::Uuid;
 
 struct Clock(AtomicU64);
 impl ElapsedClockPort for Clock {
@@ -103,15 +104,19 @@ impl Round {
             peer: remote.peer(),
             source: SOURCE,
         };
-        registry.accept_intent(
-            key,
-            (0..2)
-                .map(|index| ProgressItem {
-                    kind: ProgressItemKind::File,
-                    index,
-                })
-                .collect(),
-        )?;
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(
+                key,
+                (0..2)
+                    .map(|index| ProgressItem {
+                        kind: ProgressItemKind::File,
+                        index,
+                    })
+                    .collect(),
+            )?;
         let owner = Arc::new(Owner {
             registry,
             calls: AtomicUsize::new(0),
@@ -246,13 +251,19 @@ async fn legacy_inbound_authorized_peer_cannot_update_another_peers_intent() -> 
         peer: DeviceId::new("unrelated-peer"),
         source: SOURCE,
     };
-    round.owner.registry.accept_intent(
-        other,
-        vec![ProgressItem {
-            kind: ProgressItemKind::File,
-            index: 0,
-        }],
-    )?;
+    round
+        .owner
+        .registry
+        .begin_intent(EntryId::from(
+            Uuid::from_bytes((other).source.bytes()).to_string(),
+        ))
+        .accept(
+            other,
+            vec![ProgressItem {
+                kind: ProgressItemKind::File,
+                index: 0,
+            }],
+        )?;
     let stop = CancellationToken::new();
     let result = TransferProgressInbound::serve_legacy(
         round.receive.take().unwrap(),

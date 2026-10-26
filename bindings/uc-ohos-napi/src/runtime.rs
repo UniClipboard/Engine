@@ -1189,7 +1189,6 @@ mod tests {
     };
     use uc_engine::{
         EngineError, EngineErrorCategory, EngineEvent, OperationResult, OperationTerminal,
-        OutboundProgressInput, OutboundProgressSummary, ReconcileOutboundProgressInput,
         RefreshReason,
     };
 

@@ -2,6 +2,7 @@ use super::super::{
     ElapsedClockPort, ProgressInboundWirePort, ProgressProjectionSnapshot, ProgressReceiveError,
     TransferProgressReceiver, TransferProgressTransport,
 };
+use super::intent::{IntentLifetimes, IntentOwner};
 use super::model::{ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey};
 use super::worker::ProgressProjectionWorker;
 use crate::connectivity::{ConnectivityError, ConnectivityManager};
@@ -15,12 +16,14 @@ use uc_core::file_transfer::{
 use uc_core::ids::DeviceId;
 
 pub(super) struct Slot {
+    pub owner: IntentOwner,
     pub receiver: Arc<TransferProgressReceiver>,
     pub published: u64,
 }
 #[derive(Default)]
 pub(super) struct State {
     connection_generation: u64,
+    pub intents: IntentLifetimes,
     pub slots: HashMap<ProgressProjectionKey, Slot>,
     pub capacity: ProgressProjectionCapacity<DeviceId, ProgressProjectionKey>,
     pub registrations: ExchangeQueue<DeviceId, ()>,
@@ -78,8 +81,9 @@ impl ProgressProjectionRegistry {
         Ok(generation)
     }
     /// 仅由原完整发送负责人接受意图时调用；网络帧不得以此创建任务。
-    pub fn accept_intent(
+    pub(super) fn retain_intent(
         &self,
+        owner: &IntentOwner,
         key: ProgressProjectionKey,
         plan: Vec<ProgressItem>,
     ) -> Result<ProgressProjectionAdmission, ProgressReceiveError> {
@@ -91,11 +95,11 @@ impl ProgressProjectionRegistry {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if state.capacity.is_closed() {
+        if state.capacity.is_closed() || owner.retired() {
             return Ok(ProgressProjectionAdmission::Closed);
         }
         if let Some(slot) = state.slots.get(&key) {
-            return if slot.receiver.matches_plan(&plan) {
+            return if slot.receiver.matches_plan(&plan) && slot.owner.entry == owner.entry {
                 Ok(ProgressProjectionAdmission::Unchanged)
             } else {
                 Err(ProgressReceiveError::InvalidPlan)
@@ -118,6 +122,7 @@ impl ProgressProjectionRegistry {
                 state.slots.insert(
                     key,
                     Slot {
+                        owner: owner.clone(),
                         published: receiver.revision(),
                         receiver,
                     },
@@ -206,6 +211,7 @@ impl ProgressProjectionRegistry {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        state.intents.retire_all();
         let input = if close {
             ProjectionCapacityInput::Close
         } else {
@@ -278,4 +284,9 @@ fn retire(inner: &Inner, state: &mut State, key: ProgressProjectionKey) {
         slot.receiver.retire();
         let _ = inner.events.send(ProgressProjectionEvent::Removed(key));
     }
+}
+
+pub(super) fn remove_slot(inner: &Inner, state: &mut State, key: ProgressProjectionKey) {
+    state.capacity.apply(ProjectionCapacityInput::Remove(key));
+    retire(inner, state, key);
 }

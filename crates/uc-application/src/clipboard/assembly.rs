@@ -3,6 +3,7 @@
 //! 该 owner 创建进程内唯一的内容身份协调器与写入协调器，并集中构造
 //! capture、history、restore、resource 与 live-index 入口。Engine 只选择
 //! 平台/存储 adapter，不再逐项拼装 Clipboard use case。
+use crate::transfer::progress::ProgressProjectionRegistry;
 
 use crate::clipboard::active::transport::ActivePullPreparationPort;
 use crate::clipboard::inbound::ClipboardReceiverPort;
@@ -469,10 +470,12 @@ impl ClipboardAssembly {
     pub fn history(
         &self,
         blob_transfer: Option<Arc<dyn BlobTransferPort>>,
+        progress: ProgressProjectionRegistry,
     ) -> Arc<ClipboardHistoryFacade> {
         Arc::new(ClipboardHistoryFacade::new(ClipboardHistoryFacadeDeps {
             resource_snapshot: Arc::clone(&self.deps.clipboard.resource_snapshot),
             receive_work: self.file_transfer.receive_registry(),
+            progress,
             file_references: Arc::clone(&self.deps.clipboard.history_file_references),
             entry_ports: self.deps.clipboard.entry_ports.clone(),
             selection_repo: Arc::clone(&self.deps.clipboard.selection_repo),

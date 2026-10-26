@@ -16,8 +16,9 @@ use uc_application::deps::{
     TransferProgressProducer,
 };
 use uc_core::file_transfer::{ProgressIdentity, ProgressItem};
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_infra_local::SystemElapsedClock;
+use uuid::Uuid;
 
 struct HeldChallengeAuthority {
     authority: Authority,
@@ -113,7 +114,11 @@ async fn retired_intent_cannot_be_repopulated(retirement: Retirement) -> anyhow:
             peer: pair.receiver_id,
             source: descriptor().source,
         };
-        owner.accept_intent(key, (0..65).map(item).collect())?;
+        owner
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, (0..65).map(item).collect())?;
         let authority = Arc::new(HeldChallengeAuthority {
             authority: Authority {
                 peer: pair.sender_id,
@@ -179,7 +184,11 @@ async fn retired_intent_cannot_be_repopulated(retirement: Retirement) -> anyhow:
             Retirement::Close => {
                 owner.close();
                 assert!(matches!(
-                    owner.accept_intent(key, (0..65).map(item).collect())?,
+                    owner
+                        .begin_intent(EntryId::from(
+                            Uuid::from_bytes((key).source.bytes()).to_string()
+                        ))
+                        .accept(key, (0..65).map(item).collect())?,
                     ProgressProjectionAdmission::Closed
                 ));
                 assert!(timeout(Duration::from_millis(20), &mut running)
@@ -191,7 +200,11 @@ async fn retired_intent_cannot_be_repopulated(retirement: Retirement) -> anyhow:
         };
         assert!(owner.snapshot(key).is_none());
         assert!(matches!(
-            current.accept_intent(key, (0..65).map(item).collect())?,
+            current
+                .begin_intent(EntryId::from(
+                    Uuid::from_bytes((key).source.bytes()).to_string()
+                ))
+                .accept(key, (0..65).map(item).collect())?,
             ProgressProjectionAdmission::Retained
         ));
         let empty = current.snapshot(key).unwrap();

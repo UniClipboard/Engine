@@ -1,11 +1,14 @@
 #[cfg(unix)]
 use super::cache_files::CacheOwnershipRefusal;
 use super::DeleteClipboardEntryUseCase;
+use crate::connectivity::{ElapsedClockError, ElapsedClockPort};
+use crate::transfer::progress::{ProgressProjectionRegistry, ProgressProjectionWorker};
 use crate::transfer::receive::work::{ReceiveWorkError, ReceiveWorkRegistry};
 use async_trait::async_trait;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use uc_core::clipboard::{
     ClipboardEntry, ClipboardRepositoryError, PersistedClipboardRepresentation,
 };
@@ -18,6 +21,7 @@ use uc_core::MimeType;
 use url::Url;
 
 struct Store {
+    progress: ProjectionLife,
     entry: Mutex<Option<ClipboardEntry>>,
     receive: AtomicBool,
     read_error: AtomicBool,
@@ -55,6 +59,7 @@ async fn deleting_an_unsaved_receive_uses_atomic_state_deletion_after_actual_sto
         let work = Arc::new(ReceiveWorkRegistry::default());
         let entry = EntryId::from("pending-entry");
         let store = Arc::new(Store {
+            progress: ProjectionLife::new(),
             receive: AtomicBool::new(true),
             read_error: AtomicBool::new(false),
             entry: Mutex::new(None),
@@ -90,6 +95,7 @@ async fn delete_waits_for_receive_then_cleans_its_latest_event_and_only_managed_
         let old_event = EventId::new();
         let new_event = EventId::new();
         let store = Arc::new(Store {
+            progress: ProjectionLife::new(),
             receive: AtomicBool::new(true),
             read_error: AtomicBool::new(false),
             entry: Mutex::new(if explicit_event {
@@ -153,6 +159,7 @@ async fn deletion_preserves_actual_stop_failure_and_does_not_delete_after_it() {
     let work = Arc::new(ReceiveWorkRegistry::default());
     let entry = EntryId::from("entry");
     let store = Arc::new(Store {
+        progress: ProjectionLife::new(),
         receive: AtomicBool::new(true),
         read_error: AtomicBool::new(false),
         entry: Mutex::new(Some(ClipboardEntry::new(
@@ -188,7 +195,13 @@ async fn deletion_preserves_actual_stop_failure_and_does_not_delete_after_it() {
 }
 
 fn deletion(store: Arc<Store>, work: Arc<ReceiveWorkRegistry>) -> DeleteClipboardEntryUseCase {
-    DeleteClipboardEntryUseCase::from_ports(store.clone(), store.clone(), store, work)
+    DeleteClipboardEntryUseCase::from_ports(
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        work,
+        store.progress.registry.clone(),
+    )
 }
 #[async_trait]
 impl ListRepresentationsForEventPort for Store {
@@ -214,6 +227,7 @@ impl ListRepresentationsForEventPort for Store {
 async fn deletion_keeps_record_and_source_when_cleanup_representations_cannot_be_read() {
     let entry = EntryId::from("entry");
     let store = Arc::new(Store {
+        progress: ProjectionLife::new(),
         entry: Mutex::new(Some(ClipboardEntry::new(
             entry.clone(),
             EventId::new(),
@@ -277,6 +291,7 @@ async fn deletion_refuses_cache_parent_escape_and_symlink_before_changing_record
         );
         let entry = EntryId::from("entry");
         let store = Arc::new(Store {
+            progress: ProjectionLife::new(),
             entry: Mutex::new(Some(ClipboardEntry::new(
                 entry.clone(),
                 EventId::new(),
@@ -328,6 +343,7 @@ async fn deleting_through_the_configured_cache_root_alias_keeps_the_root_itself(
         .to_string();
     let entry = EntryId::from("entry");
     let store = Arc::new(Store {
+        progress: ProjectionLife::new(),
         entry: Mutex::new(Some(ClipboardEntry::new(
             entry.clone(),
             EventId::new(),
@@ -355,4 +371,24 @@ async fn deleting_through_the_configured_cache_root_alias_keeps_the_root_itself(
     assert!(!file.exists());
     assert!(cache.is_dir() && alias.is_dir());
     assert!(store.entry.lock().unwrap().is_none());
+}
+
+struct ProjectionLife {
+    registry: ProgressProjectionRegistry,
+    _worker: ProgressProjectionWorker,
+}
+struct RejectUnexpectedElapsed;
+impl ElapsedClockPort for RejectUnexpectedElapsed {
+    fn elapsed(&self) -> Result<Duration, ElapsedClockError> {
+        panic!("删除围栏不得读取进度时间")
+    }
+}
+impl ProjectionLife {
+    fn new() -> Self {
+        let (registry, worker) = ProgressProjectionRegistry::new(Arc::new(RejectUnexpectedElapsed));
+        Self {
+            registry,
+            _worker: worker,
+        }
+    }
 }
