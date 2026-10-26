@@ -188,6 +188,7 @@ struct ReceiveCase {
     resource_baseline: Option<ReceiveResourceBaseline>,
     source: Engine,
     source_events: EventStream,
+    source_storage: MemoryHostSecureStorage,
     receiver: Engine,
     source_id: String,
     receiver_root: TempDir,
@@ -251,6 +252,7 @@ async fn receive_case_with_progress(
         observed_at_ms: 0,
         representations: Vec::new(),
     }));
+    let source_storage = MemoryHostSecureStorage::default();
     let host = HostCapabilities::new(
         HostDirectories::new(
             source_root.path().join("private"),
@@ -258,7 +260,7 @@ async fn receive_case_with_progress(
             source_root.path().join("temporary"),
             source_root.path().join("logs"),
         ),
-        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(source_storage.clone()),
         Box::new(ReceiveClipboard(clipboard.clone())),
         Box::new(Files),
     );
@@ -413,6 +415,7 @@ async fn receive_case_with_progress(
         resource_baseline,
         source,
         source_events,
+        source_storage,
         receiver,
         source_id,
         receiver_root,
