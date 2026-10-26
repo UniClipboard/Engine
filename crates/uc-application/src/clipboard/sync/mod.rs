@@ -24,8 +24,8 @@ pub(crate) mod sync_runtime;
 mod work;
 
 pub(crate) use dispatch_entry::{
-    DispatchClipboardEntryInput, DispatchClipboardEntryUseCase, DispatchOutcome, DispatchPerTarget,
-    DispatchSyncError, RecoverableDeliveryFeed,
+    DeliveryResult, DeliveryResultFeed, DeliveryResultKind, DispatchClipboardEntryInput,
+    DispatchClipboardEntryUseCase, DispatchOutcome, DispatchPerTarget, DispatchSyncError,
 };
 pub(crate) use outbound_plan::OutboundSyncPlanner;
 pub(crate) use outbound_plan_types::{FileCandidate, FileSyncIntent};

@@ -106,15 +106,9 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
         {
             Ok(connection) => connection,
             Err(error) => {
-                // 既有稳定端口的离线分类是最后的业务边界；manager 内保留完整来源。
-                let outcome = if error.is_unavailable() {
-                    ClipboardDispatchError::Offline
-                } else {
-                    map_connectivity_err(error)
-                };
                 return DispatchReport {
                     transport: ConnectionChannel::Unknown,
-                    outcome: Err(outcome),
+                    outcome: Err(map_acquisition_err(error)),
                 };
             }
         };
@@ -141,7 +135,21 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
     }
 }
 
-/// 暂时性连接或容量失败可重试；其余连接失败（本机负责人停止、地址资料读取失败、
+/// 取得连接失败的分类。准入授权拒绝（含经共享拨号结果返回的拒绝）是终态失败，必须先于
+/// 既有的宽泛不可用判断处理，否则会被记为可恢复的离线并被反复重试；其余真正的不可达
+/// （无地址、无可用连接、底层拨号失败）仍归为离线，交给恢复负责人。终态分类保留原始来源。
+fn map_acquisition_err(error: ConnectivityError) -> ClipboardDispatchError {
+    if error.is_denied() {
+        ClipboardDispatchError::Io(Box::new(error))
+    } else if error.is_unavailable() {
+        // 既有稳定端口的离线分类是最后的业务边界；manager 内保留完整来源。
+        ClipboardDispatchError::Offline
+    } else {
+        map_connectivity_err(error)
+    }
+}
+
+/// 暂时性连接或容量失败可重试；其余连接失败（准入拒绝、本机负责人停止、地址资料读取失败、
 /// 准入结算失败等）保持不可重试。
 fn map_connectivity_err(error: ConnectivityError) -> ClipboardDispatchError {
     if error.is_transient() {

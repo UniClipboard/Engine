@@ -86,9 +86,35 @@ impl RetrySchedule {
         Some(target)
     }
 
+    /// 恢复轮次已向目标补发 `entry`、结果尚未通知：记下所等待的条目，保留已累计的轮数，
+    /// 以便随后的可恢复结果沿用当前间隔、已结算结果能清除该目标。目标没有退避状态时
+    /// （例如由上线事件触发的轮次）不新建状态，随后的可恢复结果会从首项开始排期。
+    pub(super) fn await_result(&mut self, target: &DeviceId, entry: EntryId) {
+        if let Some(retry) = self.targets.get_mut(target) {
+            retry.entry = Some(entry);
+        }
+    }
+
+    /// 目标最近等待或记录的条目已结算（送达、重复确认或终态失败）时清除其退避。
+    /// 其他条目的结算（例如较旧内容的后台收尾）不影响仍在等待的最新内容。
+    pub(super) fn settle(&mut self, target: &DeviceId, entry: &EntryId) {
+        if self
+            .targets
+            .get(target)
+            .is_some_and(|retry| retry.entry.as_ref() == Some(entry))
+        {
+            self.targets.remove(target);
+        }
+    }
+
     /// 目标已送达、进入终态，或改由上线事件负责时清除退避状态。
     pub(super) fn clear(&mut self, target: &DeviceId) {
         self.targets.remove(target);
+    }
+
+    #[cfg(test)]
+    fn is_tracking(&self, target: &DeviceId) -> bool {
+        self.targets.contains_key(target)
     }
 }
 
@@ -163,6 +189,42 @@ mod tests {
         assert_eq!(schedule.take_due(now + RETRY_BACKOFF[0]), Some(target()));
         schedule.record_recoverable(target(), None, now);
         assert_eq!(schedule.next_due(), Some(now + RETRY_BACKOFF[1]));
+    }
+
+    #[test]
+    fn settling_the_awaited_entry_drops_the_target_but_other_entries_do_not() {
+        let now = Instant::now();
+        let mut schedule = RetrySchedule::default();
+        let entry = EntryId::from("entry");
+        schedule.record_recoverable(target(), None, now);
+        assert_eq!(schedule.take_due(now + RETRY_BACKOFF[0]), Some(target()));
+        schedule.await_result(&target(), entry.clone());
+
+        schedule.settle(&target(), &EntryId::from("older"));
+        assert!(schedule.is_tracking(&target()));
+
+        schedule.settle(&target(), &entry);
+        assert!(!schedule.is_tracking(&target()));
+    }
+
+    #[test]
+    fn awaiting_a_result_keeps_the_grown_interval_for_the_next_recoverable_result() {
+        let now = Instant::now();
+        let mut schedule = RetrySchedule::default();
+        let entry = EntryId::from("entry");
+        schedule.record_recoverable(target(), None, now);
+        assert_eq!(schedule.take_due(now + RETRY_BACKOFF[0]), Some(target()));
+        schedule.await_result(&target(), entry.clone());
+        schedule.record_recoverable(target(), Some(entry), now);
+        assert_eq!(schedule.next_due(), Some(now + RETRY_BACKOFF[1]));
+    }
+
+    #[test]
+    fn awaiting_without_retry_state_creates_none() {
+        let mut schedule = RetrySchedule::default();
+        schedule.await_result(&target(), EntryId::from("entry"));
+        assert!(!schedule.is_tracking(&target()));
+        assert_eq!(schedule.next_due(), None);
     }
 
     #[test]

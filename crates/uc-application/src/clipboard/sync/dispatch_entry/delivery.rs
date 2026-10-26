@@ -208,36 +208,63 @@ pub(crate) fn classify_dispatch_result(
     }
 }
 
-/// 可恢复结果通知的缓冲上限；恢复负责人落后时按丢失处理并重新扫描在线目标。
-const RECOVERABLE_DELIVERY_CAPACITY: usize = 64;
+/// 投递结果通知的缓冲上限；恢复负责人落后时按丢失处理并重新扫描在线目标。
+const DELIVERY_RESULT_CAPACITY: usize = 64;
 
-/// 已经落库的一条可恢复投递结果（`Unreachable`）。只说明哪个目标需要再试，不携带内容。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecoverableDelivery {
-    pub entry_id: EntryId,
-    pub target_device_id: DeviceId,
+/// 一条投递结果对自动恢复的含义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeliveryResultKind {
+    /// 结果已落库为 `Unreachable`：目标需要再试。
+    Recoverable,
+    /// 意图或最终结果未能落库：持久状态停留在此前的 `Pending`/`Unreachable`，
+    /// 恢复负责人必须继续承担这次投递，而不是等待一个不会到来的可恢复结果。
+    NotPersisted,
+    /// 结果已落库为送达、重复确认或终态失败：这条内容对该目标不再需要重试。
+    Settled,
 }
 
-/// 可恢复投递结果的订阅入口。只由投递记录负责人在结果持久化之后发布，
+/// 一条投递结果通知。只说明哪个目标的哪条内容得到了何种结果，不携带内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeliveryResult {
+    pub entry_id: EntryId,
+    pub target_device_id: DeviceId,
+    pub kind: DeliveryResultKind,
+}
+
+/// 投递结果的订阅入口。只由投递记录负责人在每次写入结束后发布（成功落库或写入失败），
 /// 自动投递、后台收尾、恢复补发与手动重发共用同一来源。
 #[derive(Clone)]
-pub(crate) struct RecoverableDeliveryFeed(broadcast::Sender<RecoverableDelivery>);
+pub(crate) struct DeliveryResultFeed(broadcast::Sender<DeliveryResult>);
 
-impl RecoverableDeliveryFeed {
+impl DeliveryResultFeed {
     pub(crate) fn new() -> Self {
-        Self(broadcast::channel(RECOVERABLE_DELIVERY_CAPACITY).0)
+        Self(broadcast::channel(DELIVERY_RESULT_CAPACITY).0)
     }
 
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<RecoverableDelivery> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<DeliveryResult> {
         self.0.subscribe()
     }
 
-    fn publish(&self, record: &EntryDeliveryRecord) {
-        // 没有订阅者只说明恢复负责人尚未启动或已停止；结果已落库，启动扫描会再处理。
-        let _ = self.0.send(RecoverableDelivery {
-            entry_id: record.entry_id.clone(),
-            target_device_id: record.target_device_id,
+    fn publish(&self, entry_id: &EntryId, target_device_id: DeviceId, kind: DeliveryResultKind) {
+        // 没有订阅者只说明恢复负责人尚未启动或已停止；启动扫描会按持久状态再处理。
+        let _ = self.0.send(DeliveryResult {
+            entry_id: entry_id.clone(),
+            target_device_id,
+            kind,
         });
+    }
+}
+
+/// 已落库状态对自动恢复的含义；`Pending` 只由意图写入产生，按未结束处理。
+fn persisted_result_kind(status: &EntryDeliveryStatus) -> DeliveryResultKind {
+    match status {
+        EntryDeliveryStatus::Pending | EntryDeliveryStatus::Unreachable => {
+            DeliveryResultKind::Recoverable
+        }
+        EntryDeliveryStatus::Delivered
+        | EntryDeliveryStatus::Duplicate
+        | EntryDeliveryStatus::Superseded
+        | EntryDeliveryStatus::Failed { .. } => DeliveryResultKind::Settled,
     }
 }
 
@@ -247,7 +274,7 @@ pub(crate) struct DeliveryRecorder {
     host_event_bus: SharedHostEventEmitter,
     current: Arc<Mutex<HashMap<(EntryId, DeviceId), Weak<()>>>>,
     attempt: Option<Arc<()>>,
-    recoverable: RecoverableDeliveryFeed,
+    results: DeliveryResultFeed,
 }
 
 impl DeliveryRecorder {
@@ -261,12 +288,12 @@ impl DeliveryRecorder {
             host_event_bus: self.host_event_bus.clone(),
             current: self.current.clone(),
             attempt: Some(attempt),
-            recoverable: self.recoverable.clone(),
+            results: self.results.clone(),
         })
     }
 
-    pub(crate) fn recoverable_deliveries(&self) -> RecoverableDeliveryFeed {
-        self.recoverable.clone()
+    pub(crate) fn delivery_results(&self) -> DeliveryResultFeed {
+        self.results.clone()
     }
     fn is_current(
         &self,
@@ -288,7 +315,8 @@ impl DeliveryRecorder {
         now_ms: i64,
     ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
         let mut current = self.current.lock().await;
-        self.entry_delivery_repo
+        if let Err(error) = self
+            .entry_delivery_repo
             .record_attempt(&EntryDeliveryRecord {
                 entry_id: entry_id.clone(),
                 target_device_id,
@@ -296,7 +324,13 @@ impl DeliveryRecorder {
                 reason_detail: None,
                 updated_at_ms: now_ms,
             })
-            .await?;
+            .await
+        {
+            // 本次不会发送；此前已持久的待恢复状态仍需恢复负责人按退避继续承担。
+            self.results
+                .publish(entry_id, target_device_id, DeliveryResultKind::NotPersisted);
+            return Err(error);
+        }
         // 意图提交成功后才转交结果写入权；失败时原在途尝试仍可结算。
         if let Some(attempt) = &self.attempt {
             current.insert(
@@ -341,15 +375,17 @@ impl DeliveryRecorder {
             host_event_bus,
             current: Arc::new(Mutex::new(HashMap::new())),
             attempt: None,
-            recoverable: RecoverableDeliveryFeed::new(),
+            results: DeliveryResultFeed::new(),
         }
     }
 
     /// Sequentially `record_attempt` each record then `emit_or_warn` the
     /// matching refetch ping. Write-then-emit order is load-bearing — the
     /// host event carries no payload, so the frontend's follow-up read must
-    /// observe the write. Errors only `warn!`; this is an observability
-    /// side-effect that must not mask dispatch's real success/failure.
+    /// observe the write.
+    ///
+    /// 写入失败不改写发送方已得到的对端结果，但必须交给恢复负责人：持久状态仍是此前的
+    /// `Pending`/`Unreachable`，只有通知才能让它按退避继续承担，而不是永远停在未结算状态。
     pub(crate) async fn flush(&self, records: &[EntryDeliveryRecord]) {
         for record in records {
             // 与新尝试登记共用写锁，检查及落库不可被另一尝试穿插。
@@ -364,6 +400,11 @@ impl DeliveryRecorder {
                     entry_id = log_id(&record.entry_id),
                     "failed to record entry delivery"
                 );
+                self.results.publish(
+                    &record.entry_id,
+                    record.target_device_id,
+                    DeliveryResultKind::NotPersisted,
+                );
                 continue;
             }
             self.host_event_bus.emit_or_warn(HostEvent::Delivery(
@@ -372,9 +413,11 @@ impl DeliveryRecorder {
                     target_device_id: record.target_device_id.as_str().to_string(),
                 },
             ));
-            if record.status == EntryDeliveryStatus::Unreachable {
-                self.recoverable.publish(record);
-            }
+            self.results.publish(
+                &record.entry_id,
+                record.target_device_id,
+                persisted_result_kind(&record.status),
+            );
         }
     }
 }
@@ -689,9 +732,10 @@ mod tests {
         }
     }
 
-    /// 只有已持久化的可恢复结果才通知恢复负责人；终态、成功与写入失败都不通知。
+    /// 每条结果写入结束都通知恢复负责人，并区分可恢复、已结算与未能落库三类；
+    /// 写入失败的最终结果（无论原状态）按未落库通知，恢复负责人据此继续承担。
     #[tokio::test]
-    async fn only_persisted_recoverable_results_are_announced() {
+    async fn every_result_write_is_announced_with_its_recovery_meaning() {
         struct Repo;
         #[async_trait::async_trait]
         impl EntryDeliveryRepositoryPort for Repo {
@@ -714,7 +758,7 @@ mod tests {
         }
         let recorder =
             DeliveryRecorder::new(Arc::new(Repo), Arc::new(crate::facade::HostEventBus::new()));
-        let mut results = recorder.recoverable_deliveries().subscribe();
+        let mut results = recorder.delivery_results().subscribe();
         let record = |target: &str, status, updated_at_ms| EntryDeliveryRecord {
             entry_id: eid(),
             target_device_id: dev(target),
@@ -733,15 +777,71 @@ mod tests {
                     1,
                 ),
                 record("not-persisted", EntryDeliveryStatus::Unreachable, 99),
+                record(
+                    "delivered-not-persisted",
+                    EntryDeliveryStatus::Delivered,
+                    99,
+                ),
                 record("unreachable", EntryDeliveryStatus::Unreachable, 1),
             ])
             .await;
 
+        let announced: Vec<_> = std::iter::from_fn(|| results.try_recv().ok())
+            .map(|result| (result.target_device_id, result.kind))
+            .collect();
+        assert_eq!(
+            announced,
+            vec![
+                (dev("delivered"), DeliveryResultKind::Settled),
+                (dev("failed"), DeliveryResultKind::Settled),
+                (dev("not-persisted"), DeliveryResultKind::NotPersisted),
+                (
+                    dev("delivered-not-persisted"),
+                    DeliveryResultKind::NotPersisted
+                ),
+                (dev("unreachable"), DeliveryResultKind::Recoverable),
+            ]
+        );
+    }
+
+    /// 意图写入失败时本次不发送，但要通知恢复负责人：此前的持久待恢复状态仍需继续承担。
+    #[tokio::test]
+    async fn a_failed_intent_write_is_announced_as_not_persisted() {
+        struct Repo;
+        #[async_trait::async_trait]
+        impl EntryDeliveryRepositoryPort for Repo {
+            async fn record_attempt(
+                &self,
+                _: &EntryDeliveryRecord,
+            ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+                Err(uc_core::clipboard::EntryDeliveryError::InvalidStatus)
+            }
+            async fn list_by_entry(
+                &self,
+                _: &EntryId,
+            ) -> Result<Vec<EntryDeliveryRecord>, uc_core::clipboard::EntryDeliveryError>
+            {
+                Ok(vec![])
+            }
+        }
+        let recorder = Arc::new(DeliveryRecorder::new(
+            Arc::new(Repo),
+            Arc::new(crate::facade::HostEventBus::new()),
+        ));
+        let mut results = recorder.delivery_results().subscribe();
+        let attempt = recorder.begin_attempt().await;
+
+        assert!(attempt
+            .record_pending(&eid(), dev("peer"), 1)
+            .await
+            .is_err());
+
         assert_eq!(
             results.try_recv().unwrap(),
-            RecoverableDelivery {
+            DeliveryResult {
                 entry_id: eid(),
-                target_device_id: dev("unreachable"),
+                target_device_id: dev("peer"),
+                kind: DeliveryResultKind::NotPersisted,
             }
         );
         assert!(results.try_recv().is_err());

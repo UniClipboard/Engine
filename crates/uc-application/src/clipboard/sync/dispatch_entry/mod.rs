@@ -76,17 +76,17 @@ mod progress;
 mod target_selector;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use super::work::WorkOwner;
 #[cfg(test)]
 use crate::connectivity::{ElapsedClockError, ElapsedClockPort};
 use crate::runtime_lifecycle::LifecycleError;
 use crate::transfer::progress::ProgressProjectionRegistry;
-pub(crate) use delivery::RecoverableDeliveryFeed;
 use delivery::{
     classify_dispatch_result, spawn_deferred_drain, DeliveryRecorder, DispatchResultBucket,
 };
+pub(crate) use delivery::{DeliveryResult, DeliveryResultFeed, DeliveryResultKind};
 // 恢复负责人的测试经真实记录负责人落库并发布结果，不另造发布入口。
 #[cfg(test)]
 pub(crate) use delivery::DeliveryRecorder as RecordingOwner;
@@ -618,8 +618,8 @@ impl DispatchClipboardEntryUseCase {
     }
 
     /// 本用例落库的可恢复结果；离线投递恢复负责人据此安排重试。
-    pub(crate) fn recoverable_deliveries(&self) -> RecoverableDeliveryFeed {
-        self.recorder.recoverable_deliveries()
+    pub(crate) fn delivery_results(&self) -> DeliveryResultFeed {
+        self.recorder.delivery_results()
     }
 }
 
@@ -2336,7 +2336,7 @@ mod tests {
             Arc::new(AllTestPeerScope),
             progress,
         );
-        let mut results = uc.recoverable_deliveries().subscribe();
+        let mut results = uc.delivery_results().subscribe();
 
         let mut input = input();
         input.entry_id = Some(EntryId::from("entry-reset"));
@@ -2350,9 +2350,10 @@ mod tests {
         assert_eq!(attempts[1].status, EntryDeliveryStatus::Unreachable);
         assert_eq!(
             results.try_recv().expect("recoverable result announced"),
-            delivery::RecoverableDelivery {
+            delivery::DeliveryResult {
                 entry_id: EntryId::from("entry-reset"),
                 target_device_id: DeviceId::new("peer-io"),
+                kind: DeliveryResultKind::Recoverable,
             }
         );
     }

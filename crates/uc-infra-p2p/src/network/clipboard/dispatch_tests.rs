@@ -942,5 +942,71 @@ async fn acquisition_capability_failures_keep_their_source_in_dispatch_reports()
     }
 }
 
+/// 取得连接时的准入拒绝（经共享拨号结果返回）是终态授权失败：不能被宽泛的不可用判断
+/// 记为可恢复的离线，并保留原始拒绝来源；真正的底层拨号失败仍是可恢复的离线。
+#[tokio::test]
+async fn acquisition_denial_is_a_terminal_failure_while_unreachable_stays_offline() {
+    use std::error::Error;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use uc_application::deps::{ConnectivityBackend, ConnectivityError, PeerConnection};
+    struct FailingBackend {
+        deny: bool,
+        connects: AtomicUsize,
+    }
+    #[async_trait]
+    impl ConnectivityBackend for FailingBackend {
+        async fn connect(
+            &self,
+            _: DeviceId,
+            _address_hint: Option<Vec<u8>>,
+            _cancel: CancellationToken,
+        ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+            self.connects.fetch_add(1, Ordering::SeqCst);
+            Err(if self.deny {
+                ConnectivityError::Denied
+            } else {
+                ConnectivityError::Backend(Box::new(std::io::Error::from(
+                    std::io::ErrorKind::HostUnreachable,
+                )))
+            })
+        }
+    }
+    for deny in [true, false] {
+        let backend = Arc::new(FailingBackend {
+            deny,
+            connects: AtomicUsize::new(0),
+        });
+        let adapter = super::test_support::dispatch_with_backend(
+            Arc::clone(&backend) as Arc<dyn ConnectivityBackend>,
+            Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+            ConnectivityPolicy::default(),
+        );
+        let error = adapter
+            .dispatch(
+                &DeviceId::new("peer"),
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"unused"),
+                },
+            )
+            .await
+            .outcome
+            .unwrap_err();
+        assert_eq!(backend.connects.load(Ordering::SeqCst), 1);
+        if !deny {
+            assert!(matches!(error, ClipboardDispatchError::Offline), "{error}");
+            continue;
+        }
+        assert!(matches!(error, ClipboardDispatchError::Io(_)), "{error}");
+        let source = error
+            .source()
+            .and_then(|source| source.downcast_ref::<ConnectivityError>());
+        assert!(
+            source.is_some_and(ConnectivityError::is_denied),
+            "dispatch mapping must retain the typed denial"
+        );
+    }
+}
+
 #[path = "source_identity_tests.rs"]
 mod source_identity_tests;

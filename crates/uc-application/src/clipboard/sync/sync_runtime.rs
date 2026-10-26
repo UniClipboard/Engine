@@ -18,7 +18,7 @@ use uc_observability_contract::diagnostics::connectivity::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
 
-use super::RecoverableDeliveryFeed;
+use super::DeliveryResultFeed;
 use crate::clipboard::inbound::ClipboardInboundRuntime;
 use crate::clipboard::outbound::{
     ClipboardOutboundError, ClipboardOutboundFacade, ClipboardOutboundInput,
@@ -43,7 +43,7 @@ pub struct ClipboardSyncRuntime {
 pub struct ClipboardSyncRuntimeDeps {
     pub outbound: Arc<ClipboardOutboundFacade>,
     /// 出站投递记录负责人发布的可恢复结果；恢复负责人据此安排有界退避重试。
-    pub(crate) recoverable_deliveries: RecoverableDeliveryFeed,
+    pub(crate) delivery_results: DeliveryResultFeed,
     pub settings: Arc<dyn SettingsPort>,
     pub inbound: ClipboardInboundRuntime,
     pub peer_reachability: Arc<dyn PeerReachabilityPort>,
@@ -70,7 +70,7 @@ impl ClipboardSyncRuntime {
             device_identity: deps.device_identity,
             clock: deps.clock,
             delivery: Arc::clone(&deps.outbound) as Arc<dyn RecoveryDeliveryPort>,
-            recoverable_deliveries: deps.recoverable_deliveries,
+            delivery_results: deps.delivery_results,
             delivery_gate: Arc::clone(&delivery_gate),
         });
         Self {

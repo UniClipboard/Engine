@@ -18,15 +18,23 @@ use std::collections::VecDeque;
 use tokio::sync::Notify;
 
 use super::schedule::RETRY_BACKOFF;
+use crate::clipboard::sync::dispatch_entry::test_support as dispatch_test_support;
 use crate::clipboard::sync::dispatch_entry::RecordingOwner;
+use crate::clipboard::sync::DispatchClipboardEntryUseCase;
+use crate::deps::ConnectivityError;
 use crate::deps::{
     CurrentSpaceMemberScope, CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort,
     PausedSpaceMember, SpaceMemberPauseReason,
 };
 use crate::facade::HostEventBus;
+use crate::transfer::progress::ProgressProjectionWorker;
 use uc_core::clipboard::{ClipboardEntry, ClipboardRepositoryError};
 use uc_core::ids::{EntryId, EventId};
 use uc_core::ports::peer_reachability::{PeerReachabilityChanged, PeerReachabilityError};
+use uc_core::ports::{
+    ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, ConnectionChannel, DispatchAck,
+    DispatchReport, SyncPayload,
+};
 use uc_core::settings::model::Settings;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 
@@ -616,7 +624,7 @@ fn recovery_deps(
         device_identity: Arc::new(LocalDevice(DeviceId::new("local"))),
         clock: Arc::new(FixedClock),
         delivery,
-        recoverable_deliveries: RecoverableDeliveryFeed::new(),
+        delivery_results: DeliveryResultFeed::new(),
         delivery_gate: Arc::new(tokio::sync::Mutex::new(())),
     }
 }
@@ -1482,7 +1490,7 @@ impl RetryHarness {
         );
         deps.peer_reachability = Arc::clone(&reachability) as Arc<dyn PeerReachabilityPort>;
         deps.delivery = Arc::clone(&delivery) as Arc<dyn RecoveryDeliveryPort>;
-        deps.recoverable_deliveries = recorder.recoverable_deliveries();
+        deps.delivery_results = recorder.delivery_results();
         Self {
             recovery: OfflineDeliveryRecovery::start(deps),
             recorder,
@@ -1662,4 +1670,435 @@ async fn a_failed_recovery_round_is_retried_with_backoff() {
     assert_eq!(harness.delivery.calls(), 2);
     assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
     harness.recovery.shutdown().await.unwrap();
+}
+
+// ── 经真实发送用例与记录负责人的端到端重试 ────────────────────────────
+
+/// 下一次写入失败的种类；命中一次后存储即恢复。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrokenWrite {
+    /// 发送前的 `Pending` 意图写入。
+    Intent,
+    /// 发送后的最终结果写入。
+    Final,
+}
+
+/// 可注入一次写入失败的投递记录仓库；读取与其余写入照常经内存仓库。
+struct FlakyDeliveries {
+    inner: Deliveries,
+    next_failure: Mutex<Option<BrokenWrite>>,
+}
+
+impl FlakyDeliveries {
+    fn fail_next(&self, write: BrokenWrite) {
+        *self.next_failure.lock().unwrap() = Some(write);
+    }
+}
+
+#[async_trait]
+impl EntryDeliveryRepositoryPort for FlakyDeliveries {
+    async fn record_attempt(
+        &self,
+        record: &EntryDeliveryRecord,
+    ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+        let write = if record.status == EntryDeliveryStatus::Pending {
+            BrokenWrite::Intent
+        } else {
+            BrokenWrite::Final
+        };
+        {
+            let mut next_failure = self.next_failure.lock().unwrap();
+            if *next_failure == Some(write) {
+                *next_failure = None;
+                return Err(uc_core::clipboard::EntryDeliveryError::Storage {
+                    source: anyhow::anyhow!("PRIVATE_STORAGE_DETAIL"),
+                });
+            }
+        }
+        self.inner.record_attempt(record).await
+    }
+
+    async fn list_by_entry(
+        &self,
+        entry_id: &EntryId,
+    ) -> Result<Vec<EntryDeliveryRecord>, uc_core::clipboard::EntryDeliveryError> {
+        self.inner.list_by_entry(entry_id).await
+    }
+}
+
+/// 对端在一次投递中的表现。
+#[derive(Clone, Copy)]
+enum PeerStep {
+    /// 确认前连接被重置，内容未保存。
+    Interrupted,
+    /// 收下内容；同一快照再次到达时按接收端去重返回重复确认。
+    Receive,
+    /// 经过给定时长才收下并确认，用于越过前台期限、进入后台收尾。
+    ReceiveAfter(Duration),
+    /// 取得连接时准入被拒绝（经共享拨号结果返回）。
+    Denied,
+}
+
+/// 按脚本应答的对端：只在真正收下内容时保存一份副本。
+struct ScriptedPeer {
+    steps: Mutex<VecDeque<PeerStep>>,
+    dials: AtomicUsize,
+    stored: Mutex<Vec<String>>,
+}
+
+impl ScriptedPeer {
+    fn new(steps: &[PeerStep]) -> Arc<Self> {
+        Arc::new(Self {
+            steps: Mutex::new(steps.iter().copied().collect()),
+            dials: AtomicUsize::new(0),
+            stored: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn dials(&self) -> usize {
+        self.dials.load(Ordering::SeqCst)
+    }
+
+    fn copies(&self) -> usize {
+        self.stored.lock().unwrap().len()
+    }
+
+    fn receive(&self, snapshot_hash: &str) -> DispatchAck {
+        let mut stored = self.stored.lock().unwrap();
+        if stored.iter().any(|hash| hash == snapshot_hash) {
+            DispatchAck::DuplicateIgnored
+        } else {
+            stored.push(snapshot_hash.to_owned());
+            DispatchAck::Accepted
+        }
+    }
+}
+
+#[async_trait]
+impl ClipboardDispatchPort for ScriptedPeer {
+    async fn dispatch(
+        &self,
+        _target: &DeviceId,
+        header: &ClipboardHeader,
+        _payload: SyncPayload,
+    ) -> DispatchReport {
+        self.dials.fetch_add(1, Ordering::SeqCst);
+        let step = self
+            .steps
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected extra delivery attempt");
+        let outcome = match step {
+            PeerStep::Interrupted => Err(ClipboardDispatchError::Transient(Box::new(
+                io::Error::from(io::ErrorKind::ConnectionReset),
+            ))),
+            PeerStep::Receive => Ok(self.receive(&header.snapshot_hash)),
+            PeerStep::ReceiveAfter(delay) => {
+                tokio::time::sleep(delay).await;
+                Ok(self.receive(&header.snapshot_hash))
+            }
+            PeerStep::Denied => Err(ClipboardDispatchError::Io(Box::new(
+                ConnectivityError::Shared(Arc::new(ConnectivityError::Denied)),
+            ))),
+        };
+        DispatchReport {
+            transport: ConnectionChannel::Direct,
+            outcome,
+        }
+    }
+}
+
+/// 恢复补发经真实发送用例；只省略从仓库重建快照这一步，快照哈希保持不变以便接收端去重。
+struct RealDelivery(Arc<DispatchClipboardEntryUseCase>);
+
+impl RealDelivery {
+    async fn send(
+        &self,
+        entry_id: EntryId,
+        targets: Option<Vec<DeviceId>>,
+    ) -> Result<ResendReport, ResendEntryError> {
+        let mut input = dispatch_test_support::dispatch_input();
+        input.entry_id = Some(entry_id);
+        input.target_filter = targets;
+        let outcome = self
+            .0
+            .execute(input)
+            .await
+            .map_err(|error| ResendEntryError::Dispatch(anyhow::Error::new(error)))?;
+        Ok(ResendReport {
+            reconciled: Vec::new(),
+            accepted: outcome.total_accepted,
+            duplicate: outcome.total_duplicate,
+            offline: outcome.total_offline,
+            errored: outcome.total_errored,
+            pending: outcome.total_pending,
+        })
+    }
+}
+
+#[async_trait]
+impl RecoveryDeliveryPort for RealDelivery {
+    async fn deliver_existing_local_entry(
+        &self,
+        entry_id: EntryId,
+        targets: Vec<DeviceId>,
+    ) -> Result<ResendReport, ResendEntryError> {
+        self.send(entry_id, Some(targets)).await
+    }
+}
+
+struct RealPathHarness {
+    recovery: OfflineDeliveryRecovery,
+    _progress_worker: ProgressProjectionWorker,
+    delivery: Arc<RealDelivery>,
+    deliveries: Arc<FlakyDeliveries>,
+    peer: Arc<ScriptedPeer>,
+    entry: ClipboardEntry,
+    target: DeviceId,
+}
+
+impl RealPathHarness {
+    fn start(steps: &[PeerStep]) -> Self {
+        let entry = entry("copied-entry", "local-event");
+        let target = DeviceId::new("target");
+        let deliveries = Arc::new(FlakyDeliveries {
+            inner: Deliveries {
+                records: Mutex::new(HashMap::new()),
+            },
+            next_failure: Mutex::new(None),
+        });
+        let peer = ScriptedPeer::new(steps);
+        // presence 始终在线，整个测试不产生任何上线事件。
+        let reachability = SwitchablePeerReachability::new(ReachabilityState::Online);
+        let scope = Arc::new(FixedMemberScope {
+            usable: vec![target],
+            paused: Vec::new(),
+        });
+        let (use_case, progress_worker) = dispatch_test_support::dispatch_use_case(
+            &[target],
+            Arc::clone(&peer) as Arc<dyn ClipboardDispatchPort>,
+            Arc::clone(&deliveries) as Arc<dyn EntryDeliveryRepositoryPort>,
+            Arc::clone(&reachability) as Arc<dyn PeerReachabilityPort>,
+            Arc::clone(&scope) as Arc<dyn CurrentSpaceMemberScopePort>,
+        );
+        let use_case = Arc::new(use_case);
+        let delivery = Arc::new(RealDelivery(Arc::clone(&use_case)));
+        let mut deps = recovery_deps(
+            true,
+            vec![entry.clone()],
+            HashMap::from([(entry.event_id.clone(), DeviceId::new("local"))]),
+            Arc::new(Deliveries {
+                records: Mutex::new(HashMap::new()),
+            }),
+            Arc::new(RecordingDispatch {
+                commands: Mutex::new(Vec::new()),
+                result: DispatchResult::Delivered,
+            }),
+        );
+        deps.peer_reachability = reachability;
+        deps.member_scope = scope;
+        deps.deliveries = Arc::clone(&deliveries) as Arc<dyn EntryDeliveryRepositoryPort>;
+        deps.delivery = Arc::clone(&delivery) as Arc<dyn RecoveryDeliveryPort>;
+        deps.delivery_results = use_case.delivery_results();
+        Self {
+            recovery: OfflineDeliveryRecovery::start(deps),
+            _progress_worker: progress_worker,
+            delivery,
+            deliveries,
+            peer,
+            entry,
+            target,
+        }
+    }
+
+    /// 本机复制后的自动发送。
+    async fn copy(&self) {
+        self.delivery
+            .send(self.entry.entry_id.clone(), None)
+            .await
+            .unwrap();
+    }
+
+    /// 用户对同一条内容的手动重发。
+    async fn resend(&self) {
+        self.delivery
+            .send(self.entry.entry_id.clone(), Some(vec![self.target]))
+            .await
+            .unwrap();
+    }
+
+    fn status(&self) -> Option<EntryDeliveryStatus> {
+        self.deliveries
+            .inner
+            .records
+            .lock()
+            .unwrap()
+            .get(&self.entry.entry_id)
+            .and_then(|records| records.first())
+            .map(|record| record.status.clone())
+    }
+
+    async fn shutdown(self) {
+        self.recovery.shutdown().await.unwrap();
+        self.delivery.0.shutdown().await.unwrap();
+    }
+}
+
+/// 让发送、记录、后台收尾与恢复任务处理完已经就绪的工作。
+async fn drain() {
+    for _ in 0..256 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// 在线目标的重试轮次里 `Pending` 意图写入失败一次：恢复负责人仍按退避再试，
+/// 存储恢复后送达，对端只保存一份副本。
+#[tokio::test(start_paused = true)]
+async fn a_failed_retry_intent_write_keeps_the_delivery_in_recovery() {
+    let harness = RealPathHarness::start(&[PeerStep::Interrupted, PeerStep::Receive]);
+    drain().await;
+    harness.copy().await;
+    drain().await;
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Unreachable));
+
+    harness.deliveries.fail_next(BrokenWrite::Intent);
+    tokio::time::sleep(RETRY_BACKOFF[0] + JUST_BEFORE).await;
+    drain().await;
+    assert_eq!(
+        harness.peer.dials(),
+        1,
+        "a failed intent write sends nothing"
+    );
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Unreachable));
+
+    tokio::time::sleep(RETRY_BACKOFF[1]).await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 2);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    assert_eq!(harness.peer.copies(), 1);
+
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 2, "a delivered target is not retried");
+    harness.shutdown().await;
+}
+
+/// 在线目标的重试轮次再次中断，且最终 `Unreachable` 写入失败一次（持久状态停在 `Pending`）：
+/// 恢复负责人仍按退避再试，存储恢复后送达，对端只保存一份副本。
+#[tokio::test(start_paused = true)]
+async fn a_failed_retry_result_write_keeps_the_delivery_in_recovery() {
+    let harness = RealPathHarness::start(&[
+        PeerStep::Interrupted,
+        PeerStep::Interrupted,
+        PeerStep::Receive,
+    ]);
+    drain().await;
+    harness.copy().await;
+    drain().await;
+
+    harness.deliveries.fail_next(BrokenWrite::Final);
+    tokio::time::sleep(RETRY_BACKOFF[0] + JUST_BEFORE).await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 2);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Pending));
+
+    tokio::time::sleep(RETRY_BACKOFF[1]).await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 3);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    assert_eq!(harness.peer.copies(), 1);
+    harness.shutdown().await;
+}
+
+/// 首次自动发送的最终写入失败（持久状态停在 `Pending`）：结果仍交给恢复负责人，
+/// 无需新的上线事件或重新复制即可送达。
+#[tokio::test(start_paused = true)]
+async fn an_initial_send_whose_result_write_failed_still_reaches_recovery() {
+    let harness = RealPathHarness::start(&[PeerStep::Interrupted, PeerStep::Receive]);
+    drain().await;
+    harness.deliveries.fail_next(BrokenWrite::Final);
+    harness.copy().await;
+    drain().await;
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Pending));
+
+    tokio::time::sleep(RETRY_BACKOFF[0] + JUST_BEFORE).await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 2);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    assert_eq!(harness.peer.copies(), 1);
+    harness.shutdown().await;
+}
+
+/// 重试以准入拒绝终结：落为终态失败、不再重试，且该目标的退避状态被清除。
+/// 清除与否由之后同一内容的新可恢复结果的首个间隔区分：残留状态会沿用已增长的间隔。
+#[tokio::test(start_paused = true)]
+async fn a_retry_that_ends_terminally_clears_the_target_backoff() {
+    let harness = RealPathHarness::start(&[
+        PeerStep::Interrupted,
+        PeerStep::Denied,
+        PeerStep::Interrupted,
+        PeerStep::Receive,
+    ]);
+    drain().await;
+    harness.copy().await;
+    drain().await;
+    tokio::time::sleep(RETRY_BACKOFF[0] + JUST_BEFORE).await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 2);
+    assert_eq!(
+        harness.status(),
+        Some(EntryDeliveryStatus::Failed {
+            reason: DeliveryFailureReason::Io
+        })
+    );
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 2, "a denied delivery is not retried");
+
+    harness.resend().await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 3);
+    tokio::time::sleep(RETRY_BACKOFF[0] + JUST_BEFORE).await;
+    drain().await;
+    assert_eq!(
+        harness.peer.dials(),
+        4,
+        "the next recoverable result starts from the first interval"
+    );
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    harness.shutdown().await;
+}
+
+/// 重试越过前台期限、随后在后台收尾中送达：该目标的退避状态被清除。
+#[tokio::test(start_paused = true)]
+async fn a_retry_completed_by_the_deferred_drain_clears_the_target_backoff() {
+    let harness = RealPathHarness::start(&[
+        PeerStep::Interrupted,
+        PeerStep::ReceiveAfter(Duration::from_secs(6)),
+        PeerStep::Interrupted,
+        PeerStep::Receive,
+    ]);
+    drain().await;
+    harness.copy().await;
+    drain().await;
+    tokio::time::sleep(RETRY_BACKOFF[0] + Duration::from_secs(6) + JUST_BEFORE).await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 2);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    assert_eq!(harness.peer.copies(), 1);
+
+    harness.resend().await;
+    drain().await;
+    assert_eq!(harness.peer.dials(), 3);
+    tokio::time::sleep(RETRY_BACKOFF[0] + JUST_BEFORE).await;
+    drain().await;
+    assert_eq!(
+        harness.peer.dials(),
+        4,
+        "the next recoverable result starts from the first interval"
+    );
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Duplicate));
+    assert_eq!(harness.peer.copies(), 1);
+    harness.shutdown().await;
 }

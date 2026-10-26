@@ -97,6 +97,15 @@ impl ConnectivityError {
             _ => false,
         }
     }
+    /// 准入授权拒绝（含经共享拨号结果返回的拒绝）。`is_unavailable` 为既有调用方把它算作
+    /// 不可用；需要区分终态授权失败的边界必须先用本判断。
+    pub fn is_denied(&self) -> bool {
+        match self {
+            Self::Denied => true,
+            Self::Shared(error) => error.is_denied(),
+            _ => false,
+        }
+    }
     /// 暂时性的传输或容量失败：稍后重试同一请求可能成功。准入拒绝、本机负责人
     /// 停止、本机时钟失效、流能力不可用、地址资料读取失败与本机结算失败都不属于此类。
     pub fn is_transient(&self) -> bool {
@@ -217,6 +226,25 @@ mod tests {
             ConnectivityError::Admission(stream()),
         ] {
             assert!(!error.is_transient(), "{}", error.class());
+        }
+    }
+
+    /// 授权拒绝可穿过共享拨号结果识别；不改变既有不可用判断。
+    #[test]
+    fn denial_is_recognized_through_shared_results() {
+        let shared = ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Shared(
+            std::sync::Arc::new(ConnectivityError::Denied),
+        )));
+        assert!(shared.is_denied());
+        assert!(shared.is_unavailable());
+        for error in [
+            ConnectivityError::Offline,
+            ConnectivityError::AddressMissing,
+            ConnectivityError::Backend(Box::new(std::io::Error::other("unreachable"))),
+            ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Offline)),
+        ] {
+            assert!(!error.is_denied(), "{}", error.class());
+            assert!(error.is_unavailable(), "{}", error.class());
         }
     }
 }
