@@ -221,3 +221,107 @@ async fn real_engine_batch_unknown_does_not_become_failure_or_erase_known_succes
     }
     case.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_missing_terminal_converges_from_unknown_by_full_query_without_redownload() {
+    let _lock = ENGINE_TEST_LOCK.lock().await;
+    let case = receive_case(false).await;
+    let _release = ReleaseOnDrop(case.exports.clone());
+    assert_file_failure(&case, &case.first, 1).await;
+    case.exports.hold_terminals.store(true, Ordering::SeqCst);
+    let active = active_retry(&case).await;
+    timeout(
+        Duration::from_secs(20),
+        case.exports.terminal_held.notified(),
+    )
+    .await
+    .unwrap();
+    case.exports.release.add_permits(1);
+    let received = progress(&case.receiver, &case.first.entry_id, "completed").await;
+    assert_eq!(
+        Some(received.attempt_id.as_str()),
+        active.attempt_id.as_deref()
+    );
+    let saved = saved_files(
+        &case.receiver,
+        &case.first.entry_id,
+        case.receiver_root.path(),
+    )
+    .await;
+    assert_eq!(saved.len(), 3);
+    for (bytes, path) in &case.saved {
+        assert_eq!(saved.get(bytes), Some(path));
+    }
+    let exports = case.exports.exports.lock().unwrap().clone();
+    let protects = case.exports.protects.lock().unwrap().clone();
+    assert_eq!(exports.len(), 4);
+    assert_eq!(protects.len(), 4);
+    let input = OutboundProgressInput {
+        entry_id: active.entry_id.clone(),
+        target_device_id: active.target_device_id.clone(),
+    };
+    // 使用实际系统时钟等原60秒新鲜度到期；本地已提交，不把未送达通知推断为失败。
+    let unknown = timeout(Duration::from_secs(75), async {
+        loop {
+            let OperationResult::OutboundProgress(Some(view)) = case
+                .source
+                .execute(Operation::QueryOutboundProgress(input.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("original retained projection")
+            };
+            if view.freshness == OutboundProgressFreshness::Unconfirmed {
+                break view;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("missing notification expires at the original freshness boundary");
+    assert_eq!(
+        unknown.state,
+        OutboundProgressBatchState::PartiallyUnconfirmed
+    );
+    assert_eq!(
+        (
+            unknown.items_completed,
+            unknown.items_unconfirmed,
+            unknown.items_failed
+        ),
+        (2, 1, 0)
+    );
+    assert_eq!(unknown.items[0], active.items[0]);
+    assert_eq!(unknown.items[2], active.items[2]);
+    assert_eq!(unknown.items[1].state, OutboundProgressState::Unconfirmed);
+    assert_eq!(unknown.items[1].failure_reason, None);
+    // 原Reconcile读取接收owner的真实SQLite成果；不发起新尝试，不重新下载。
+    let settled = reconciled_view(&case, &received, OutboundProgressReconciliation::Settled).await;
+    assert_eq!(settled.state, OutboundProgressBatchState::Completed);
+    assert_eq!(settled.freshness, OutboundProgressFreshness::Settled);
+    assert_eq!(settled.attempt_id, active.attempt_id);
+    assert_eq!(
+        (
+            settled.items_completed,
+            settled.items_unconfirmed,
+            settled.items_failed
+        ),
+        (3, 0, 0)
+    );
+    for index in [0, 2] {
+        assert_eq!(settled.items[index], active.items[index]);
+    }
+    assert_eq!(settled.items[1].state, OutboundProgressState::Completed);
+    assert_eq!(
+        saved_files(
+            &case.receiver,
+            &case.first.entry_id,
+            case.receiver_root.path()
+        )
+        .await,
+        saved
+    );
+    assert_eq!(*case.exports.exports.lock().unwrap(), exports);
+    assert_eq!(*case.exports.protects.lock().unwrap(), protects);
+    case.shutdown().await;
+}

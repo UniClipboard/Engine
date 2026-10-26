@@ -506,3 +506,12 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & kind(lib) & (test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_receiver_session_retirement_does_not_leave_unretained_retry_running_on_sender) | test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_sender_resume_and_profile_reopen_retire_unpersisted_progress_without_redownload))"
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 此项使用实际系统时钟验证原60秒未确认边界，再执行完整核对与双Engine关闭。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::batch_outcomes::mixed::real_engine_missing_terminal_converges_from_unknown_by_full_query_without_redownload)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::batch_outcomes::mixed::real_engine_missing_terminal_converges_from_unknown_by_full_query_without_redownload)"
+slow-timeout = { period = "30s", terminate-after = 4 }
