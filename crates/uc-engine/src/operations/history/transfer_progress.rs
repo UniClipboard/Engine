@@ -62,7 +62,7 @@ pub(crate) async fn execute_reconcile_outbound_progress(
         reconciliation(value),
     ))
 }
-fn map_error(source: TransferProgressQueryError) -> EngineError {
+pub(super) fn map_error(source: TransferProgressQueryError) -> EngineError {
     uc_debug!(
         error_class = source.class(),
         error = &source as &dyn Error,
@@ -93,7 +93,7 @@ fn map_error(source: TransferProgressQueryError) -> EngineError {
     };
     EngineError::new(code, category, retryable)
 }
-fn present(view: TransferProgressView) -> OutboundProgressSummary {
+pub(super) fn present(view: TransferProgressView) -> OutboundProgressSummary {
     let counts = view.summary.counts;
     OutboundProgressSummary {
         entry_id: view.source_entry.as_ref().to_owned(),
@@ -181,7 +181,9 @@ fn batch_state(value: ProgressBatchState) -> OutboundProgressBatchState {
     }
 }
 
-fn reconciliation(value: TransferProgressReconciliation) -> OutboundProgressReconciliation {
+pub(super) fn reconciliation(
+    value: TransferProgressReconciliation,
+) -> OutboundProgressReconciliation {
     match value {
         TransferProgressReconciliation::Running => OutboundProgressReconciliation::Running,
         TransferProgressReconciliation::Settled => OutboundProgressReconciliation::Settled,

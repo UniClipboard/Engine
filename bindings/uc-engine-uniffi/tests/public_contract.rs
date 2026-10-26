@@ -688,7 +688,7 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     );
 
     let resend = engine
-        .resend_entry("missing-entry".to_owned(), Vec::new())
+        .resend_entry("missing-entry".to_owned(), Vec::new(), false)
         .expect("missing entry must remain a structured business outcome");
     assert!(matches!(
         resend,

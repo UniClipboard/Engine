@@ -271,3 +271,192 @@ async fn real_engine_membership_removal_and_space_reset_retire_outbound_progress
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_resend_reconciles_original_task_and_only_explicit_transfer_retries_failed_item(
+) {
+    let _lock = ENGINE_TEST_LOCK.lock().await;
+    for paused in [true, false] {
+        let case = receive_case(paused).await;
+        let _release = ReleaseOnDrop(case.exports.clone());
+        let view = timeout(Duration::from_secs(20), async {
+            loop {
+                let OperationResult::OutboundProgressList(views) = case
+                    .source
+                    .execute(Operation::ListOutboundProgress)
+                    .await
+                    .unwrap()
+                else {
+                    panic!("outbound views")
+                };
+                if let Some(view) = views.into_iter().find(|view| {
+                    view.attempt_id.as_deref() == Some(case.first.attempt_id.as_str())
+                        && (paused || view.state == OutboundProgressBatchState::PartiallyFailed)
+                }) {
+                    return view;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let before = case.exports.exports.lock().unwrap().len();
+        let resend = |confirm| {
+            case.source
+                .execute(Operation::ResendEntry(crate::ResendEntryInput {
+                    entry_id: view.entry_id.clone(),
+                    target_devices: vec![view.target_device_id.clone()],
+                    confirm_new_transfer: confirm,
+                }))
+        };
+        if paused {
+            for confirm in [false, true] {
+                let OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(report)) =
+                    resend(confirm).await.unwrap()
+                else {
+                    panic!("complete original action")
+                };
+                assert_eq!(report.accepted + report.duplicate + report.pending, 0);
+                assert_eq!(
+                    report.reconciled[0].state,
+                    OutboundProgressReconciliation::Running
+                );
+                assert!(!report.reconciled[0].new_transfer_requested);
+                assert_eq!(case.exports.exports.lock().unwrap().len(), before);
+            }
+            case.exports.release.add_permits(1);
+            progress(&case.receiver, &case.first.entry_id, "failed").await;
+        }
+        let settled_exports = case.exports.exports.lock().unwrap().len();
+        let OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(report)) =
+            resend(false).await.unwrap()
+        else {
+            panic!("settled original action")
+        };
+        assert_eq!(report.accepted + report.duplicate + report.pending, 0);
+        assert_eq!(report.reconciled.len(), 1);
+        assert_eq!(
+            report.reconciled[0].state,
+            OutboundProgressReconciliation::Settled
+        );
+        assert_eq!(
+            report.reconciled[0]
+                .current
+                .as_ref()
+                .unwrap()
+                .items_completed,
+            2
+        );
+        assert_eq!(
+            report.reconciled[0].current.as_ref().unwrap().items_failed,
+            1
+        );
+        assert!(!report.reconciled[0].new_transfer_requested);
+        assert_eq!(case.exports.exports.lock().unwrap().len(), settled_exports);
+        if !paused {
+            let releasing = async {
+                timeout(Duration::from_secs(20), case.exports.paused.notified())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    case.exports.exports.lock().unwrap().len(),
+                    settled_exports + 1
+                );
+                assert_eq!(
+                    saved_files(
+                        &case.receiver,
+                        &case.first.entry_id,
+                        case.receiver_root.path()
+                    )
+                    .await,
+                    case.saved
+                );
+                case.exports.release.add_permits(1);
+            };
+            let (result, ()) = tokio::join!(resend(true), releasing);
+            let OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(report)) =
+                result.unwrap()
+            else {
+                panic!("explicit original redelivery")
+            };
+            assert!(report.reconciled[0].new_transfer_requested);
+            assert_eq!(report.accepted + report.pending, 1);
+            let complete = progress(&case.receiver, &case.first.entry_id, "completed").await;
+            assert_ne!(complete.attempt_id, case.first.attempt_id);
+            let files = saved_files(
+                &case.receiver,
+                &case.first.entry_id,
+                case.receiver_root.path(),
+            )
+            .await;
+            assert_eq!(files.len(), 3);
+            for (bytes, path) in &case.saved {
+                assert_eq!(files.get(bytes), Some(path));
+            }
+            assert_eq!(
+                case.exports.exports.lock().unwrap().len(),
+                settled_exports + 1
+            );
+        }
+        case.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_engine_resend_does_not_redownload_when_receiver_is_offline_even_with_confirmation() {
+    let _lock = ENGINE_TEST_LOCK.lock().await;
+    let case = receive_case(false).await;
+    let _release = ReleaseOnDrop(case.exports.clone());
+    let view = timeout(Duration::from_secs(20), async {
+        loop {
+            let OperationResult::OutboundProgressList(views) = case
+                .source
+                .execute(Operation::ListOutboundProgress)
+                .await
+                .unwrap()
+            else {
+                panic!("outbound list")
+            };
+            if let Some(view) = views.into_iter().find(|view| {
+                view.attempt_id.as_deref() == Some(case.first.attempt_id.as_str())
+                    && view.state == OutboundProgressBatchState::PartiallyFailed
+            }) {
+                return view;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let original = case.saved.clone();
+    let exports = case.exports.exports.lock().unwrap().len();
+    case.receiver.shutdown_until_complete().await.unwrap();
+    let result = case
+        .source
+        .execute(Operation::ResendEntry(crate::ResendEntryInput {
+            entry_id: view.entry_id,
+            target_devices: vec![view.target_device_id],
+            confirm_new_transfer: true,
+        }))
+        .await;
+    match result {
+        Ok(OperationResult::EntryResent(crate::ResendEntryOutcome::Completed(report))) => {
+            assert_eq!(report.accepted + report.duplicate + report.pending, 0);
+            assert_eq!(
+                report.reconciled[0].state,
+                OutboundProgressReconciliation::Unreachable
+            );
+            assert!(!report.reconciled[0].new_transfer_requested);
+        }
+        Err(error) => assert_eq!(
+            error.code(),
+            crate::error_codes::OUTBOUND_PROGRESS_UNAVAILABLE_CODE
+        ),
+        other => panic!("offline must remain unverified: {other:?}"),
+    }
+    assert_eq!(case.exports.exports.lock().unwrap().len(), exports);
+    for (bytes, path) in original {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    case.shutdown().await;
+}

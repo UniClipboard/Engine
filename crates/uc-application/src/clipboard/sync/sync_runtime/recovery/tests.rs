@@ -496,6 +496,7 @@ impl RecoveryDeliveryPort for RecordingDispatch {
         self.commands.lock().unwrap().push((entry_id, targets));
         match self.result {
             DispatchResult::Delivered => Ok(ResendReport {
+                reconciled: Vec::new(),
                 accepted: 1,
                 duplicate: 0,
                 offline: 0,

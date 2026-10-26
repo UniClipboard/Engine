@@ -3,7 +3,7 @@
 //! 该 owner 创建进程内唯一的内容身份协调器与写入协调器，并集中构造
 //! capture、history、restore、resource 与 live-index 入口。Engine 只选择
 //! 平台/存储 adapter，不再逐项拼装 Clipboard use case。
-use crate::transfer::progress::ProgressProjectionRegistry;
+use crate::transfer::progress::{ProgressProjectionRegistry, ReconcileSentEntryPort};
 
 use crate::clipboard::active::transport::ActivePullPreparationPort;
 use crate::clipboard::inbound::ClipboardReceiverPort;
@@ -118,6 +118,7 @@ pub(crate) struct ClipboardInboundAdapters {
 
 /// 单个网络 session 注入 Clipboard 的被动能力。
 pub(crate) struct ClipboardSessionDeps {
+    pub progress: Arc<dyn ReconcileSentEntryPort>,
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
     pub blob_transfer: Arc<BlobTransferFacade>,
     pub receiver: Arc<dyn ClipboardReceiverPort>,
@@ -272,6 +273,7 @@ impl ClipboardAssembly {
 
     pub fn start_session(&self, session: ClipboardSessionDeps) -> ClipboardSession {
         let outbound = Arc::new(ClipboardOutboundFacade::new(ClipboardOutboundDeps {
+            progress: session.progress,
             settings: Arc::clone(&self.deps.settings),
             clipboard_sync: Arc::clone(&session.clipboard_sync),
             blob_transfer: Arc::clone(&session.blob_transfer),

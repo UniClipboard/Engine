@@ -628,6 +628,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
             if matches!(
                 sponsor
                     .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
+                        confirm_new_transfer: false,
                         entry_id: first_entry_id.clone(),
                         target_devices: vec![joiner_device_id.clone()],
                     }))
@@ -718,6 +719,7 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
     ));
     let file_resend = sponsor
         .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
+            confirm_new_transfer: true,
             entry_id: file_entry_id.clone(),
             target_devices: vec![joiner_device_id.clone()],
         }))
@@ -779,12 +781,13 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
     assert_eq!(
         sponsor
             .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
+                confirm_new_transfer: false,
                 entry_id: file_entry_id,
                 target_devices: Vec::new(),
             }))
             .await
             .unwrap(),
-        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::NoEligibleTargets)
+        crate::OperationResult::EntryResent(crate::ResendEntryOutcome::SynchronizationDisabled)
     );
 
     sponsor
@@ -3505,6 +3508,7 @@ async fn engine_start_builds_a_resumable_real_session() {
     assert_eq!(
         engine
             .execute(crate::Operation::ResendEntry(crate::ResendEntryInput {
+                confirm_new_transfer: false,
                 entry_id: "missing-entry".into(),
                 target_devices: Vec::new(),
             },))

@@ -13,7 +13,7 @@ use uc_core::file_transfer::{
     valid_progress_plan, ExchangeQueue, ProgressIdentity, ProgressItem, ProgressProjectionCapacity,
     ProjectionCapacityInput, ProjectionRetention,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 
 pub(super) struct Slot {
     pub owner: IntentOwner,
@@ -140,6 +140,17 @@ impl ProgressProjectionRegistry {
                 Err(ProgressReceiveError::Stale)
             }
         }
+    }
+    pub(crate) fn owned_keys(&self, peer: DeviceId, owner: &EntryId) -> Vec<ProgressProjectionKey> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .slots
+            .iter()
+            .filter(|(key, slot)| key.peer == peer && slot.owner.entry == *owner)
+            .map(|(key, _)| *key)
+            .collect()
     }
     pub fn subscribe(&self) -> broadcast::Receiver<ProgressProjectionEvent> {
         self.inner.events.subscribe()

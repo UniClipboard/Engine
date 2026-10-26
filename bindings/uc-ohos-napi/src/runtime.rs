@@ -10,13 +10,14 @@ use uc_engine::{
     CancelEntryReceiveInput, CancelInboundTransferInput, CancelJoinSpaceInput,
     ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput, ClipboardRestoreMode,
     ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent,
-    EngineState, EntryReceiveProgressInput, EntryReceiveRetryOutcome, EventStream,
-    ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
-    OperationResult, OperationTerminal, OutboundProgressInput, OutboundProgressSummary,
+    EngineState, EntryNotResendableReason, EntryReceiveProgressInput, EntryReceiveRetryOutcome,
+    EventStream, ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput,
+    Operation, OperationResult, OperationTerminal, OutboundProgressInput, OutboundProgressSummary,
     ReceiveProgressSummary, ReconcileOutboundProgressInput, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, RestoreClipboardInput, RetryEntryReceiveInput, SecretString, SendFilesInput,
-    SendImageInput, SendReportSummary, SendTextInput, StartupLifecycle, StartupLifecycleInput,
-    StartupProgress, TransferCancellationReason,
+    RemoveMemberInput, ResendEntryInput, ResendEntryOutcome, RestoreClipboardInput,
+    RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
+    SendTextInput, StartupLifecycle, StartupLifecycleInput, StartupProgress,
+    TransferCancellationReason,
 };
 use zeroize::Zeroizing;
 
@@ -24,8 +25,8 @@ use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
     OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhOutboundProgress,
     OhOutboundProgressItem, OhReceiveItem, OhReceiveProgress, OhReceiveRetryOutcome,
-    OhRelayOverview, OhRelayOverviewEntry, OhSendReport, OhSessionRecovery, OhSpaceCreated,
-    OhWorkspaceConvergence,
+    OhRelayOverview, OhRelayOverviewEntry, OhResendOutcome, OhResendTargetProgress, OhSendReport,
+    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -537,6 +538,27 @@ impl OhEngine {
         }
     }
 
+    #[napi]
+    pub async fn resend_entry(
+        &self,
+        entry_id: String,
+        target_devices: Vec<String>,
+        confirm_new_transfer: Option<bool>,
+    ) -> napi::Result<OhResendOutcome> {
+        match self
+            .engine
+            .execute(Operation::ResendEntry(ResendEntryInput {
+                entry_id,
+                target_devices,
+                confirm_new_transfer: confirm_new_transfer.unwrap_or(false),
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EntryResent(outcome) => resend_outcome(outcome),
+            _ => Err(unexpected_result()),
+        }
+    }
     #[napi]
     pub async fn query_outbound_progress(
         &self,
@@ -1530,3 +1552,63 @@ fn outbound_progress(progress: OutboundProgressSummary) -> OhOutboundProgress {
 
 #[cfg(test)]
 mod outbound_progress_tests;
+
+fn resend_outcome(outcome: ResendEntryOutcome) -> napi::Result<OhResendOutcome> {
+    let mut result = OhResendOutcome {
+        kind: String::new(),
+        accepted: None,
+        duplicate: None,
+        offline: None,
+        errored: None,
+        pending: None,
+        reconciled: Vec::new(),
+        entry_id: None,
+        device_id: None,
+        reason: None,
+    };
+    match outcome {
+        ResendEntryOutcome::Completed(report) => {
+            result.kind = "completed".into();
+            result.accepted = Some(count(report.accepted)?);
+            result.duplicate = Some(count(report.duplicate)?);
+            result.offline = Some(count(report.offline)?);
+            result.errored = Some(count(report.errored)?);
+            result.pending = Some(count(report.pending)?);
+            result.reconciled = report
+                .reconciled
+                .into_iter()
+                .map(|target| OhResendTargetProgress {
+                    target_device_id: target.target_device_id,
+                    state: target.state.to_string(),
+                    current: target.current.map(outbound_progress),
+                    new_transfer_requested: target.new_transfer_requested,
+                    duplicate_files_possible: target.duplicate_files_possible,
+                })
+                .collect();
+        }
+        ResendEntryOutcome::SynchronizationDisabled => {
+            result.kind = "synchronization_disabled".into()
+        }
+        ResendEntryOutcome::NoEligibleTargets => result.kind = "no_eligible_targets".into(),
+        ResendEntryOutcome::EntryNotFound { entry_id } => {
+            result.kind = "entry_not_found".into();
+            result.entry_id = Some(entry_id);
+        }
+        ResendEntryOutcome::EntryNotResendable { entry_id, reason } => {
+            result.kind = "entry_not_resendable".into();
+            result.entry_id = Some(entry_id);
+            result.reason = Some(
+                match reason {
+                    EntryNotResendableReason::RemoteOrigin => "remote_origin",
+                    EntryNotResendableReason::PayloadLost => "payload_lost",
+                }
+                .into(),
+            );
+        }
+        ResendEntryOutcome::TargetNotTrusted { device_id } => {
+            result.kind = "target_not_trusted".into();
+            result.device_id = Some(device_id);
+        }
+    }
+    Ok(result)
+}

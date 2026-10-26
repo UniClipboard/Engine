@@ -1,6 +1,7 @@
 use crate::clipboard::active::transport::{
     ActivePullPreparationCancelled, ActivePullPreparationStop,
 };
+use crate::transfer::progress::ReconcileSentEntryPort;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -154,6 +155,7 @@ pub trait ClipboardOutboundPort: Send + Sync {
 /// Bootstrap assembles this once from its wiring deps; the facade
 /// constructs the dispatcher + resend use case internally.
 pub struct ClipboardOutboundDeps {
+    pub(crate) progress: Arc<dyn ReconcileSentEntryPort>,
     // ── dispatcher path ────────────────────────────────────────────────
     pub settings: Arc<dyn SettingsPort>,
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
@@ -528,6 +530,7 @@ impl ClipboardOutboundFacade {
         let dispatch_runner = deps.clipboard_sync.dispatch_runner();
         let blob_publisher: Arc<dyn OutboundBlobPublishGateway> = deps.blob_transfer.clone();
         let (resend_uc, existing_entry_delivery) = ResendEntryUseCase::build(ResendEntryDeps {
+            progress: deps.progress,
             entry_repo: deps.entry_repo,
             event_repo: deps.event_repo,
             selection_repo: deps.selection_repo,
@@ -1664,6 +1667,7 @@ mod tests {
     #[tokio::test]
     async fn resend_entry_forwards_command_to_runner() {
         let canned = ResendReport {
+            reconciled: Vec::new(),
             accepted: 2,
             duplicate: 0,
             offline: 1,
@@ -1681,6 +1685,7 @@ mod tests {
         );
 
         let cmd = ResendEntryCommand {
+            confirm_new_transfer: false,
             entry_id: EntryId::from("entry-xyz"),
             target_filter: Some(vec![
                 uc_core::ids::DeviceId::new("peer-a"),

@@ -16,8 +16,8 @@ pub use runtime::{
     JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle,
     OutboundProgress, OutboundProgressItem, PeerConnectionRefresh, ReceiveItem, ReceiveProgress,
     ReceiveRetryOutcome, RejectedConfigImport, RelayEntrySource, RelayOverview, RelayOverviewEntry,
-    RelayRoutingMode, RelaySaveResult, ResendEntryOutcome, SendReport, SessionRecovery,
-    SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
+    RelayRoutingMode, RelaySaveResult, ResendEntryOutcome, ResendTargetProgress, SendReport,
+    SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
     WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 

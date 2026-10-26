@@ -418,3 +418,26 @@ pub struct OhOutboundProgress {
     pub items_unconfirmed: u32,
     pub items: Vec<OhOutboundProgressItem>,
 }
+
+#[napi(object)]
+pub struct OhResendTargetProgress {
+    pub target_device_id: String,
+    pub state: String,
+    pub current: Option<OhOutboundProgress>,
+    pub new_transfer_requested: bool,
+    pub duplicate_files_possible: bool,
+}
+
+#[napi(object)]
+pub struct OhResendOutcome {
+    pub kind: String,
+    pub accepted: Option<u32>,
+    pub duplicate: Option<u32>,
+    pub offline: Option<u32>,
+    pub errored: Option<u32>,
+    pub pending: Option<u32>,
+    pub reconciled: Vec<OhResendTargetProgress>,
+    pub entry_id: Option<String>,
+    pub device_id: Option<String>,
+    pub reason: Option<String>,
+}
