@@ -476,3 +476,13 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/)"
 slow-timeout = { period = "30s", terminate-after = 3 }
+
+# 关闭重叠场景连续12轮创建、关闭并重启独立宿主；单CPU固定二进制实测26.42秒。
+# 只为该完整场景保留120秒外层预算，容纳coverage开销；每次操作原期限、12轮及零重试不变。
+[[profile.default.overrides]]
+filter = "package(uc-connectivity-host) & binary(profile_startup_overlap) & test(=startup_overlapping_a_closing_host_is_never_reported_as_corrupt)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-connectivity-host) & binary(profile_startup_overlap) & test(=startup_overlapping_a_closing_host_is_never_reported_as_corrupt)"
+slow-timeout = { period = "30s", terminate-after = 4 }
