@@ -4,6 +4,7 @@ mod lifecycle;
 mod observation;
 mod outbound_progress;
 mod redelivery;
+mod result_chain;
 mod save_failure;
 #[cfg(target_os = "linux")]
 mod stream_isolation;
@@ -373,6 +374,7 @@ async fn receive_case_with_progress(
         );
         assert!(committed.contains_key(CONTENTS[0]));
         assert_eq!(exports.exports.lock().unwrap().len(), 3);
+        result_chain::assert_chain(&source, &report.entry_id, &receiving, &exports, false).await;
         exports.release.add_permits(1);
     }
     let (first, saved) = if pause_first {
@@ -411,6 +413,9 @@ async fn receive_case_with_progress(
         assert!(saved.contains_key(CONTENTS[0]) && saved.contains_key(CONTENTS[2]));
         (first, saved)
     };
+    if prove_progress {
+        result_chain::assert_chain(&source, &report.entry_id, &first, &exports, true).await;
+    }
     ReceiveCase {
         #[cfg(target_os = "linux")]
         resource_baseline,

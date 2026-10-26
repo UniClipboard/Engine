@@ -4,8 +4,12 @@ use super::{
 use crate::transfer::progress::{
     ProgressPageReply, ProgressReceiveError, ProgressSnapshotProviderPort, ProgressSnapshotQuery,
 };
+use crate::transfer::receive::materialization::InboundFileSetManifest;
+use crate::transfer::receive::work::ReceiveWorkError;
+use std::io;
 use uc_core::file_transfer::{
-    ProgressIdentity, ProgressItemState, ProgressPhase, ProgressTerminalOutcome,
+    FileTransferCancellationReason, ProgressIdentity, ProgressItemState, ProgressPhase,
+    ProgressTerminalOutcome,
 };
 use uuid::Uuid;
 
@@ -60,18 +64,18 @@ async fn actual_receive_query_distinguishes_network_completion_from_commit_and_f
         current(registry.snapshot_page(&peer, query()).await.unwrap()).revision,
         processing.revision
     );
-    action
-        .batch
-        .item_result(&planned[1].id, 0, OutboundProgressStatus::Failed, None);
+    action.batch.unsettled_fetch_failure(
+        &planned[1].id,
+        false,
+        &io::Error::other("failure cleanup is still held").into(),
+    );
     let cleaning = current(registry.snapshot_page(&peer, query()).await.unwrap());
     assert!(
         matches!(cleaning.items[1], ProgressItemState::Active(value) if value.phase == ProgressPhase::Processing)
     );
-    action.finish(Err(Arc::new(
-        crate::transfer::receive::work::ReceiveWorkError::Action(
-            std::io::Error::other("actual receive action failed").into(),
-        ),
-    )));
+    action.finish(Err(Arc::new(ReceiveWorkError::Action(
+        std::io::Error::other("actual receive action failed").into(),
+    ))));
     drop(action);
     let settled = current(registry.snapshot_page(&peer, query()).await.unwrap());
     assert!(settled.items.iter().all(|item| matches!(item, ProgressItemState::Terminal(value) if matches!(value.outcome, ProgressTerminalOutcome::Failed(_)))));
@@ -240,4 +244,88 @@ async fn successful_files_and_directory_remain_queryable_after_retry_receipt_is_
         assert!(completed.items.iter().all(|item| matches!(item, ProgressItemState::Terminal(value) if value.outcome == ProgressTerminalOutcome::Completed)));
         assert!(registry.state.lock().unwrap().receipts.is_empty());
     }
+}
+
+#[tokio::test]
+async fn settled_file_failures_and_cancellations_do_not_wait_for_other_items_or_publish_pending_cleanup(
+) {
+    for cancelled in [false, true] {
+        let registry = Arc::new(ReceiveWorkRegistry::default());
+        let action = registry.action();
+        let entry = EntryId::from("receiver");
+        let attempt = "00000000-0000-4000-8000-000000000009";
+        let mut original = source();
+        original.source_entry = Some(EntryId::from("00000000-0000-4000-8000-000000000001"));
+        let peer = original.from_device;
+        let planned = original.planned(&entry, attempt);
+        action.register(&entry, attempt).unwrap();
+        action.prepare_plan(&original);
+        action.accept_source(original);
+        action.batch.plan(3);
+        let failure = io::Error::from(io::ErrorKind::StorageFull).into();
+        action
+            .batch
+            .unsettled_fetch_failure(&planned[1].id, cancelled, &failure);
+        let pending = current(registry.snapshot_page(&peer, query()).await.unwrap());
+        assert!(
+            matches!(pending.items[1], ProgressItemState::Active(value) if value.phase == ProgressPhase::Processing)
+        );
+        let status = if cancelled {
+            OutboundProgressStatus::Cancelled {
+                reason: FileTransferCancellationReason::LocalUser,
+            }
+        } else {
+            OutboundProgressStatus::Failed
+        };
+        // 原单项清理已经实际完成，其他文件仍未开始，不等父批次结束才承认本项结果。
+        action
+            .batch
+            .item_result(&planned[1].id, 0, status, Some(failure));
+        let settled = current(registry.snapshot_page(&peer, query()).await.unwrap());
+        assert!(
+            matches!(settled.items[1], ProgressItemState::Terminal(value) if if cancelled { matches!(value.outcome, ProgressTerminalOutcome::Cancelled(_)) } else { matches!(value.outcome, ProgressTerminalOutcome::Failed(_)) })
+        );
+        assert!(
+            matches!(settled.items[0], ProgressItemState::Active(value) if value.phase == ProgressPhase::Waiting)
+        );
+        assert!(
+            matches!(settled.items[2], ProgressItemState::Active(value) if value.phase == ProgressPhase::Waiting)
+        );
+        registry.close();
+    }
+}
+
+#[tokio::test]
+async fn directory_failure_keeps_whole_unit_pending_until_parent_cleanup_finishes() {
+    let registry = Arc::new(ReceiveWorkRegistry::default());
+    let action = registry.action();
+    let entry = EntryId::from("receiver");
+    let attempt = "00000000-0000-4000-8000-000000000009";
+    let mut original = source();
+    original.source_entry = Some(EntryId::from("00000000-0000-4000-8000-000000000001"));
+    original.blob_refs.clear();
+    original.manifest = Some(InboundFileSetManifest {
+        members: Vec::new(),
+    });
+    let peer = original.from_device;
+    let planned = original.planned(&entry, attempt);
+    action.register(&entry, attempt).unwrap();
+    action.prepare_plan(&original);
+    action.accept_source(original);
+    action.batch.plan(0);
+    action
+        .batch
+        .item_result(&planned[0].id, 0, OutboundProgressStatus::Failed, None);
+    let pending = current(registry.snapshot_page(&peer, query()).await.unwrap());
+    assert!(
+        matches!(pending.items[0], ProgressItemState::Active(value) if value.phase == ProgressPhase::Processing)
+    );
+    action.finish(Err(Arc::new(ReceiveWorkError::Action(
+        io::Error::other("directory cleanup finished").into(),
+    ))));
+    let settled = current(registry.snapshot_page(&peer, query()).await.unwrap());
+    assert!(
+        matches!(settled.items[0], ProgressItemState::Terminal(value) if matches!(value.outcome, ProgressTerminalOutcome::Failed(_)))
+    );
+    registry.close();
 }

@@ -821,3 +821,24 @@ Application完整1390通过／2跳过；原生入站7通过（0.43秒），真�
 复跑：`just cargo test -p uc-engine --features dev-tools --lib real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state --locked -- --nocapture`。
 原完整修正场景通过（8.36秒），相邻7个真实Engine接收回归通过（46.06秒）；同一固定二进制再重复3次通过（7.883／7.757／7.059秒）。
 该修复验证已开始动作的等待者退出语义，不扩大跨进程恢复或物理挂起证明；正式31/59保持。
+
+
+## 真实文件成果与精确ACK链路
+
+复用真实双Engine的原发送／接收动作、原SQLite和磁盘导出，在第三项实际输出屏障持有期间，
+核对第一项已提交且文件可读、第二项实际存储失败、第三项仍处理中；原生进度wire完成两份精确ACK。
+放行后核对第三项实际成功及文件读回，原发送端完整查询采用Completed／Failed／Completed，
+同一源条目、实际接收attempt及原始索引不变，三份ACK的round／bytes／total与采用视图一致。
+仅测试装配观察原wire返回值；生产传输、采用、确认策略和接收流程没有替代实现。
+
+首轮只能收到第一项ACK。查询回归进一步证明，原快照把单项已实际清理结算的失败也等待父批次结束。
+原ReceiveBatch增加私有内存结算事实：实际单项失败／取消结算后可发布，仍持有本地工作的失败继续Processing；
+目录失败仍须等待整体回滚。待清理→已结算的失败和取消两格红→绿，目录负向及目录组23项通过。
+没有新增持久化字段、稳定查询或通知预算；重启仍按原未保留事实处理。
+
+最小真实链通过（9.43秒），复跑：
+`just cargo test -p uc-engine --features dev-tools --lib real_engine_outbound_progress_reports_actual_partial_result_and_reconciles_without_download --locked -- --nocapture`。
+完整Application1392通过／2跳过（141.27秒）；
+`just cargo test -p uc-engine --features dev-tools --lib receive_retry:: --locked -- --nocapture`通过42项／1跳过（325.95秒）。
+Engine跳过项需要本机严格Collector与Jaeger，不记业务观测验收通过；首次Engine编译重复导入已修正后完整重跑。
+本项完成阶段3最小成果链，正式32/59；各输出阶段受控停顿、实际三端、物理挂起和移动矩阵仍保持原要求。

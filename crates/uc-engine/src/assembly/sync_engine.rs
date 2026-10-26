@@ -35,7 +35,8 @@ use uc_application::deps::{
     GroupUpdateLocalWorkPort, GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort,
     IdleRetentionPolicy, MembershipHistoryReceiver, MembershipHistoryTransport,
     PeerIdentityDirectoryPort, PeerReachabilityTransport, PeerReachabilityTransportPorts,
-    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters, TransferProgressNetwork,
+    ProgressWirePort, SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
+    TransferProgressNetwork,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::membership::{GroupUpdateDispatchPort, PeerAdmissionPort};
@@ -557,11 +558,15 @@ pub async fn prepare_sync_session(
         &space_setup.iroh_blob_store_dir,
         progress_backend,
     );
+    let progress_wire: Arc<dyn ProgressWirePort> = Arc::new(TransferProgressWire);
+    #[cfg(all(test, feature = "dev-tools"))]
+    let progress_wire =
+        receive_exports::decorate_progress_wire(&space_setup.iroh_blob_store_dir, progress_wire);
     let application_network = application.assemble_network(ApplicationNetworkAdapters {
         transfer_progress: TransferProgressNetwork {
             backend: progress_backend,
             admission: progress_connectivity.admission,
-            wire: Arc::new(TransferProgressWire),
+            wire: progress_wire,
             snapshot_wire: Arc::new(TransferProgressWire),
             inbound: Box::new(|receiver, legacy, queries| {
                 Arc::new(TransferProgressInboundAdapter::new(
