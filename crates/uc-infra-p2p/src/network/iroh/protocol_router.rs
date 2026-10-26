@@ -11,6 +11,7 @@ use uc_observability_contract::uc_info;
 
 use super::PEER_REACHABILITY_ALPN;
 use uc_sync_protocol::clipboard::MULTIPLEXED_CLIPBOARD_ALPN;
+use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
 
 pub(super) struct ProtocolRouterBuilder {
     inner: RouterBuilder,
@@ -39,11 +40,13 @@ impl ProtocolRouterBuilder {
     }
 
     pub(super) fn spawn(mut self) -> Router {
-        // Router 默认按字典排序；TLS 使用服务端偏好，显式优先 presence 当前版与 clipboard 多流版。
+        // TLS使用服务端偏好；由Router统一保证当前版本优先，调用方不承担handler注册顺序。
         self.alpns.sort_by_key(|alpn| {
             if alpn.as_slice() == PEER_REACHABILITY_ALPN {
                 0
-            } else if alpn.as_slice() == MULTIPLEXED_CLIPBOARD_ALPN {
+            } else if alpn.as_slice() == MULTIPLEXED_CLIPBOARD_ALPN
+                || alpn.as_slice() == TRANSFER_PROGRESS_ALPN
+            {
                 1
             } else {
                 2
@@ -126,6 +129,72 @@ mod tests {
         async fn shutdown(&self) {
             self.shutdowns.fetch_add(1, AtomicOrdering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn progress_negotiation_chooses_current_regardless_of_registration_or_offer_order(
+    ) -> anyhow::Result<()> {
+        use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
+
+        let client = Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await?;
+        for registered in [
+            vec![LEGACY_TRANSFER_PROGRESS_ALPN, TRANSFER_PROGRESS_ALPN],
+            vec![TRANSFER_PROGRESS_ALPN, LEGACY_TRANSFER_PROGRESS_ALPN],
+            vec![LEGACY_TRANSFER_PROGRESS_ALPN],
+            vec![TRANSFER_PROGRESS_ALPN],
+        ] {
+            let server = Endpoint::builder(iroh::endpoint::presets::N0)
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await?;
+            let mut builder = ProtocolRouterBuilder::new(server);
+            for alpn in &registered {
+                builder = builder.accept(alpn, Hold);
+            }
+            let router = builder.spawn();
+            for offered in [
+                vec![TRANSFER_PROGRESS_ALPN, LEGACY_TRANSFER_PROGRESS_ALPN],
+                vec![LEGACY_TRANSFER_PROGRESS_ALPN, TRANSFER_PROGRESS_ALPN],
+                vec![LEGACY_TRANSFER_PROGRESS_ALPN],
+                vec![TRANSFER_PROGRESS_ALPN],
+            ] {
+                let expected = [TRANSFER_PROGRESS_ALPN, LEGACY_TRANSFER_PROGRESS_ALPN]
+                    .into_iter()
+                    .find(|alpn| registered.contains(alpn) && offered.contains(alpn));
+                let connecting = async {
+                    anyhow::Ok(
+                        client
+                            .connect_with_opts(
+                                router.endpoint().addr(),
+                                offered[0],
+                                ConnectOptions::new().with_additional_alpns(
+                                    offered[1..].iter().map(|alpn| alpn.to_vec()).collect(),
+                                ),
+                            )
+                            .await?
+                            .await?,
+                    )
+                };
+                let connected =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), connecting).await?;
+                match expected {
+                    Some(alpn) => {
+                        let connection = connected?;
+                        assert_eq!(connection.alpn(), alpn);
+                        connection.close(0u32.into(), b"test_complete");
+                    }
+                    None => assert!(connected.is_err(), "no common protocol must fail"),
+                }
+            }
+            router.shutdown().await?;
+        }
+        client.close().await;
+        Ok(())
     }
 
     #[tokio::test]

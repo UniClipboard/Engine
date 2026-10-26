@@ -4,6 +4,7 @@ use super::super::{
 };
 use super::progress_probe::UnusedSnapshotProvider;
 use crate::network::iroh::admitted_connections::AdmittedConnections;
+use crate::network::iroh::protocol_router::ProtocolRouterBuilder;
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -205,7 +206,7 @@ async fn real_backend_progress_profile_adopts_terminal_and_reuses_current_retain
         );
         let inbound = manager(server.clone(), directory, AdmittedConnections::default());
         let (tx, mut rx) = mpsc::channel(8);
-        let router = Router::builder((*server).clone())
+        let router = ProtocolRouterBuilder::new((*server).clone())
             .accept(
                 TRANSFER_PROGRESS_ALPN,
                 Capture {
@@ -213,7 +214,7 @@ async fn real_backend_progress_profile_adopts_terminal_and_reuses_current_retain
                     events: tx.clone(),
                 },
             )
-            // TLS按服务端注册顺序选择；必须先/2再/1。
+            // 使用生产Router验证版本优先，不能依赖fixture的注册顺序。
             .accept(
                 LEGACY_TRANSFER_PROGRESS_ALPN,
                 Capture {
@@ -331,7 +332,7 @@ impl ProfilePair {
         );
         let inbound = manager(server.clone(), directory, AdmittedConnections::default());
         let (tx, mut rx) = mpsc::channel(4);
-        let router = Router::builder((*server).clone())
+        let router = ProtocolRouterBuilder::new((*server).clone())
             .accept(
                 TRANSFER_PROGRESS_ALPN,
                 Capture {

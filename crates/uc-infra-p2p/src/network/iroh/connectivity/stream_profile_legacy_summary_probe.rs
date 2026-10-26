@@ -1,6 +1,7 @@
 //! 只支持旧ALPN的真实对端读取完整批次旧帧；FIN不能变成新版业务采用ACK。
 use super::super::progress_probe::progress_budget;
 use super::{endpoint, manager, AdmittedConnections, Capture, Directory, Incoming, BUDGET, SOURCE};
+use crate::network::iroh::protocol_router::ProtocolRouterBuilder;
 use crate::network::iroh::transfer_progress_v2::TransferProgressWire;
 use async_trait::async_trait;
 use iroh::protocol::Router;
@@ -53,7 +54,7 @@ impl LegacyPair {
         );
         let inbound = manager(server.clone(), directory, AdmittedConnections::default());
         let (tx, incoming) = mpsc::channel(2);
-        let router = Router::builder((*server).clone())
+        let router = ProtocolRouterBuilder::new((*server).clone())
             .accept(
                 LEGACY_TRANSFER_PROGRESS_ALPN,
                 Capture {
