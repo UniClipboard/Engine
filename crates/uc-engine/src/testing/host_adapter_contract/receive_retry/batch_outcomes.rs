@@ -1,6 +1,7 @@
 //! 原SQLite逐项保存失败必须完整到达源端，末项成功不能覆盖前项失败。
 mod directory;
 mod mixed;
+mod retry;
 use super::ReceiveCase;
 use crate::{
     Operation, OperationResult, OutboundProgressBatchState, OutboundProgressFreshness,

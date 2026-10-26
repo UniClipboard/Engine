@@ -484,3 +484,6 @@ mod live_probe;
 
 #[path = "stream_projection_probe.rs"]
 mod projection_probe;
+
+#[path = "stream_retry_fence_probe.rs"]
+mod retry_fence_probe;
