@@ -562,13 +562,18 @@ pub async fn prepare_sync_session(
     #[cfg(all(test, feature = "dev-tools"))]
     let progress_wire =
         receive_exports::decorate_progress_wire(&space_setup.iroh_blob_store_dir, progress_wire);
+    #[cfg(all(test, feature = "dev-tools"))]
+    let progress_probe_path = space_setup.iroh_blob_store_dir.clone();
     let application_network = application.assemble_network(ApplicationNetworkAdapters {
         transfer_progress: TransferProgressNetwork {
             backend: progress_backend,
             admission: progress_connectivity.admission,
             wire: progress_wire,
             snapshot_wire: Arc::new(TransferProgressWire),
-            inbound: Box::new(|receiver, legacy, queries| {
+            inbound: Box::new(move |receiver, legacy, queries| {
+                #[cfg(all(test, feature = "dev-tools"))]
+                let queries =
+                    receive_exports::decorate_progress_queries(&progress_probe_path, queries);
                 Arc::new(TransferProgressInboundAdapter::new(
                     receiver, legacy, queries,
                 ))

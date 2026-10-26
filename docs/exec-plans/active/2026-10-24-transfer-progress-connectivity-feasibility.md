@@ -1047,3 +1047,23 @@ Linux 原资源监督同时记录实际 Blob 句柄从初始 `[0, 0]` 到累计�
 [固定资源入口](../../../scripts/testing/run-blob-lifecycle-resources.sh)现在保留原 8 项并强制加入容量场景，共 9 项；实际运行全部通过，含编译总 362.621 秒，新容量场景通过 33.194 秒。严格校验 7 个生命周期场景及 8 份报告（删除仍按两种调度各一份），SDK store 关闭前临时标签、原生句柄、FD／线程／任务、连续两份 1GiB 的精确读回及 ACK、原下载并发 4／2 和等待 64／16 均通过，原所有资源断言保持。[报告校验](../../../scripts/testing/verify-blob-lifecycle-resources.py)仅增加必需场景身份；[7 项反例检查](../../../scripts/testing/verify-blob-lifecycle-resources.test.py)包含缺少容量场景、缺少第二次删除、等量重复替换、未知身份、额外重复，以及逐报告逐资源字段的失败拒绝。新增缺场景检查在原校验器先失败，修正后通过；本次实际原 8 项产物也被新校验器明确拒绝，不能沿用旧覆盖冒充新入口通过。
 
 当前候选完整 Engine 接收范围共 53 项通过：其余 46 项、固定入口中原 6 项生命周期及新容量 1 项，重复执行不叠加计数；Application 进度 78 项通过，Collector 专属项仍跳过。可复现入口为 `just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked -E 'test(receive_retry::)'`、`just cargo test -p uc-application --lib transfer::progress:: --locked` 和上述固定资源脚本。移动设备与物理挂起等未执行项目仍保持原限制。
+
+
+## 查询快照与最终准入竞争验证
+
+核对只提供已观察的事实；重发仍由原 `ResendEntry` 执行，实际接收、重试 CAS 和清理由原接收／History 负责人决定。本项仅在测试组合中装饰既有完整 `ProgressSnapshotProviderPort`：原 owner 生成真实页后暂缓返回，不修改内容；必要时暂缓新尝试的通知登记，使旧快照真正进入重发路径，而非提前在发送侧返回 Superseded。没有新远端下载／取消动作、公开阶段入口、协议字段、持久格式或预算变化。
+
+| 真实双 Engine 交错 | 原负责人给出的结果与证据 |
+| --- | --- |
+| 取得旧快照后，接收端先接受新重试，再恢复旧快照触发显式重发 | 发送端确实采用旧 Settled 快照并请求投递；当前接收持有原内容身份锁，重发记录保持 Pending。释放真实输出后，等待第二次同内容入站完成及最终 ACK 落入 Delivered／Duplicate；接收仍为该新尝试，既有两成功路径保持，总获取／导出均仅四次，最终三项成功。 |
+| 取得旧快照后，接收端删除完成，再返回旧快照 | 默认再次发送只核对，旧结果仍可作为真实历史事实显示；旧本机重试输入返回 SourceUnavailable，条目 NotFound、接收状态 None，后续网络核对 NotRetained，没有重新获取、导出或复活已删条目。 |
+| 实际远端查询已取快照但尚未返回时，发送端删除源条目，再完成显式重发等待 | 原意图已经退休，返回 Superseded、current None；明确确认也不发起投递。源条目、查询及列表不复活，后续重发返回 EntryNotFound；远端已有两份文件及接收尝试保持。 |
+
+三例在 Nextest ci profile 分别通过 8.030／4.025／3.014 秒。第一例必须从持久 Pending 走到真实后续入站和 ACK，不能仅凭前台等待超时证明接收端最终检查。第二例不禁止删除完成后用户明确创建的全新传输；它验证旧查询和旧重试输入不构成恢复权限。
+
+原 Application 手动重试组 30 项通过，覆盖准备后尝试／成员／身份变化、旧动作未结算、晚到清理及关闭围栏；这些受控 port 测试与真实主机交错分开陈述。原 SQLite 重试组 8 项通过，实际验证旧／活动尝试不插入投影、事务失败回滚旧尝试及全部行、重开后结果保持，以及既有内容／目录信封。设备与物理挂起等既有未执行项继续保持原范围限制。
+
+
+当前源码的完整 Engine 接收范围共 56 项通过：新三例、其余 46 例，以及固定九项资源入口中的原七例接收场景，重复执行不叠加计数；Collector 专属项仍跳过。Application 进度组另 78 项通过。固定九项原生资源入口全部通过，含编译总 418.426 秒，严格核对 7 场景／8 报告、33 个 SDK 关闭前零临时标签样本，以及原生句柄、FD／线程／任务、连续两份 1GiB 的实际完成／ACK 和原下载 4／2、等待 64／16 配额。测试默认不启用新暂停信号，没有改变原资源入口、断言或期限。
+
+可复现三例：`just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked -E 'test(receive_retry::snapshot_cas::)'`。分层检查为 `just cargo test -p uc-application --lib apply_inbound::tests::manual_retry:: --locked` 与 `just cargo test -p uc-infra-storage --lib file_transfer_repo::retry::tests:: --locked`，完整接收、进度与固定资源入口沿用前节命令。

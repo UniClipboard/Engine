@@ -75,6 +75,14 @@ impl ProgressWirePort for ObservedWire {
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ProgressBound, ProgressReceiveError> {
+        if self.fixture.hold_registrations.load(Ordering::SeqCst) {
+            self.fixture.registration_held.notify_one();
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(ConnectivityError::Stopped.into()),
+                permit = self.fixture.registration_release.acquire() => permit.unwrap().forget(),
+            }
+        }
         self.inner
             .register(stream, connection, source, authority, deadline, cancel)
             .await
