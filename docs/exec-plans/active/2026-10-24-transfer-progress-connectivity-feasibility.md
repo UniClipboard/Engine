@@ -968,3 +968,35 @@ just cargo test -p uc-engine --features dev-tools --lib receive_retry:: --locked
 原`compressed_legacy_v3_content_remains_readable`改为读取该固定向量，经过既有UC3加密封装及实际TransferCipherAdapter解密／解压，
 避免用当前编码器生成的“旧”载荷自证兼容。
 此候选内容模块80项全部通过；Profile库测试249项通过／3项按原条件跳过（33.72秒），跳过项为需要显式现场资料的两项读取与一项大状态性能探针。完整Engine接收51项通过／1项按原Collector条件跳过（385.86秒）。另跑真实SQLite密文接收／文件与目录提交、资料升级及独立进程升级恢复共5组集成，60项通过；2项历史资料fixture未提供，子进程入口按原安排默认忽略但由父例实际启动，不据此替代原设备／完整网络矩阵。
+
+
+## 进度生命周期完整场景的验证预算
+
+原#305覆盖率[任务121568556606](https://github.com/UniClipboard/Engine/actions/runs/40321868739/job/121568556606)
+在`real_engine_receiver_session_retirement_does_not_leave_unretained_retry_running_on_sender`运行20.021秒时由nextest外层终止。
+该例包含接收端锁定／解锁和暂停／恢复两套真实双Engine流程；相邻
+`real_engine_sender_resume_and_profile_reopen_retire_unpersisted_progress_without_redownload`
+也包含源端暂停／恢复与同资料关闭重开两套流程。
+
+先保存原二进制及构建元数据，Rust源码与测试体保持；冻结二进制SHA-256为
+`5a417556898c83cf2266a22fa29e3de4c877552626056c7efb564115eb950821`。
+正常CPU原单项ci通过；限制本机CPU0后，原20秒配置单项在20.020秒复现TIMEOUT，
+同文件两项再次运行分别20.011／20.025秒被终止。
+仅在实验配置延长外层后，原二进制、同CPU、全部原断言分别20.024／22.562秒完整通过，
+表明原20秒外层会截断仍能正常完成的完整场景，不据此声称修复任何内层业务故障。
+
+实际配置只为上述两个完整函数名在default／ci设置120秒外层期限；
+遵循[Nextest单项设置覆盖规则](https://nexte.st/docs/configuration/per-test-overrides/)，
+原engine-host-contract串行组、各内层期限、原断言、其他测试20秒默认线及零重试保持。
+结构化比较确认其余全部配置相同，没有扩大包级测试预算。
+同一冻结二进制验证实际配置：单CPU ci两项通过（17.305／21.700秒），
+单CPU default两项通过（20.964／22.529秒），正常CPU ci两项也通过。
+
+复跑（本机允许CPU0时）：
+
+```bash
+taskset -c 0 just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib -E 'test(/receive_retry::outbound_progress::lifecycle::/)' --locked
+taskset -c 0 just cargo nextest run --profile default -p uc-engine --features dev-tools --lib -E 'test(/receive_retry::outbound_progress::lifecycle::/)' --locked
+```
+
+本任务只调整完整验证用例的外层预算，正式35/59保持；原成员撤销查询失败及设备／完整网络矩阵仍独立验收。
