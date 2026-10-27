@@ -1501,3 +1501,13 @@ AC05的全部默认预算逐项核对如下；计数来自原4927条PASS／JUnit
 本机只读预检：adb、hdc、xcrun、PowerShell／pwsh均不可用；idevice_id存在但枚举退出255，设备数量未知。该结果不证明外部没有设备；当前也没有产品宿主仓库／运行连接信息。此前已请求设备及产品宿主信息，未收到答复；不重复索取或自行修改系统电源／设备配置。
 
 物理证明仍使用[平台审计](#各平台经过时间审计与物理挂起入口)中的既有`node scripts/testing/run-progress-suspend-proof.mjs --physical`及平台验收宿主，操作方法和5／60／600秒证明边界只在原平台审计维护。仅编译、普通等待、SIGSTOP或可控时钟前进都不能填为物理通过；未执行行必须继续标跳过。获得环境后从本表缺口逐项补证，真实挂起及移动前后台必需项仍阻止整片归档。
+
+## iOS与Android探针的完整进度动作准备
+
+继续核对设备验收准备时发现，共享`uc-mobile-probe-core`没有出站查询／列表／核对命令，三个合法生产结果会落入`unsupported_development_result`。原网络host的进度入口不能代替移动宿主。这是验收入口缺口，不是Application或两个生产绑定缺少相应能力。
+
+新增四个接缝测试在原实现全部失败：真实JSON命令反序列化拒绝，合法缺失视图和核对结果被误判为开发结果。修复仍只调用既有Engine完整Operation：`query_outbound_progress`接收`entry_id`与`target_device_id`，`list_outbound_progress`无参数，`reconcile_outbound_progress`另可带`expected_attempt_id`。命令不创建任务、下载、投影或恢复循环；未启动及既有Engine失败仍走原固定错误结果。返回摘要保留未知／部分未知、各项计数、freshness与七种核对结果，revision以十进制字符串避免跨JSON宿主丢精度；不输出原条目／设备／attempt身份、内容、文件名或路径。iOS证据白名单同步保留这些安全字段；Android既有广播直接返回共同Rust摘要，不另建一套映射。
+
+使用既有`tests/hosts/ios/probe-command-device.sh`或`tests/hosts/android/probe-command.sh`传入上述JSON命令即可调用；源条目与目标身份取自原发送动作，不由探针推断。测试命令必须在已经启动并完成原会话准备的宿主上执行，不把`not_started`或核对完成当成文件完成。
+
+本项只准备iOS／Android共同探针。HarmonyOS使用独立NAPI验收宿主，仍按独立入口核对；不把此补齐登记为三平台或真机通过。当前本机无Swift／Java编译器、Xcode及移动设备工具，原生App编译和真实前后台／系统挂起未执行，继续跳过并阻止AC08和归档。Linux完整共享探针30项、既有宿主边界13项，共43项实际通过，其中4项新增用例由原失败转为通过；逐条PASS与原输出核对。零doc test另行记录，不算执行案例；不以这些测试代替设备结果。
