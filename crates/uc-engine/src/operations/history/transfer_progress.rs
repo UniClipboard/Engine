@@ -1,4 +1,5 @@
 //! 完整进度能力的合同映射；授权、核对与采用均由Application负责。
+use crate::assembly::observability::observe_progress_reconciliation;
 use crate::error_codes::{
     OUTBOUND_PROGRESS_ACCESS_DENIED_CODE, OUTBOUND_PROGRESS_INVALID_DATA_CODE,
     OUTBOUND_PROGRESS_INVALID_INPUT_CODE, OUTBOUND_PROGRESS_UNAVAILABLE_CODE,
@@ -49,15 +50,14 @@ pub(crate) async fn execute_reconcile_outbound_progress(
     facade: &AppFacade,
     input: ReconcileOutboundProgressInput,
 ) -> Result<OperationResult, EngineError> {
-    let value = facade
-        .reconcile_transfer_progress(
-            DeviceId::new(input.target_device_id),
-            &EntryId::from(input.entry_id),
-            input.expected_attempt_id.as_deref(),
-            &CancellationToken::new(),
-        )
-        .await
-        .map_err(map_error)?;
+    let value = observe_progress_reconciliation(Box::pin(facade.reconcile_transfer_progress(
+        DeviceId::new(input.target_device_id),
+        &EntryId::from(input.entry_id),
+        input.expected_attempt_id.as_deref(),
+        &CancellationToken::new(),
+    )))
+    .await
+    .map_err(map_error)?;
     Ok(OperationResult::OutboundProgressReconciliation(
         reconciliation(value),
     ))

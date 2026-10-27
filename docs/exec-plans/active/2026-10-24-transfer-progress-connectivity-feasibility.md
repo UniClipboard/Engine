@@ -1189,3 +1189,32 @@ just cargo test -p uc-infra-local --lib fs::atomic_publish::tests:: --locked
 ```
 
 其余原文件／授权／删除／单项重试及进程进度证据继承上一层 #321 已通过的56项接收回归；生产 Rust、依赖、原固定九项资源入口和门限均未修改，不冒充本轮重跑这些整组。原两轮1GiB、下载4／2、排队64／16及严格7场景／8报告／33个SDK关闭前样本仍见[连续资源验证](#大文件与连续进度核对及重连的资源验证)。本项闭合阶段5原接收专项；workspace／成员／升级全集、物理挂起、设备／产品宿主及 Collector 的其他验收仍按原未完成项执行，AC11整体不因此自动完成。
+
+
+## 用户完整核对的业务观测与保留连接结算
+
+完整业务仍归 Application 原接收、手动重试及进度核对负责人。Engine 只装饰原 `ReconcileOutboundProgress` 的完整 facade 调用，按其原返回结果生成独立 `clipboard.reconcile_progress` 业务记录；不读取内部阶段、身份或状态对象，不增加 port、持久字段、协议版本或通知 outbox。原返回值及错误 source chain 原样返回。普通 Query／List 不建业务根，内部再次发送的核对仍归原 resend 动作，heartbeat／ACK／补发不延长已经结束的接收或重试记录。
+
+最小真实 Engine 用例先红：完整核对已经正确返回，但原始 OTLP 中没有对应业务根。修复后通过两个实际 Engine、原生连接、SQLite 和真实文件取得七种结果：运行、两次结算、旧尝试、未保留、非法输入和成员拒绝。三文件原接收两项成功、一项失败，原失败项手动重试后 exports 从3到4且原成功文件保持；终态通知被原 wire 屏障实际持有时，接收 partial 与重试 ok 记录已经结束并可导出，核对计时不回挂旧动作。另六次普通读视图不产生业务根。
+
+首次最小绿例的原始记录包含49个 span、51条日志；七条完整核对各有唯一同 Trace／Span 的完成日志，使用固定结果名和分类。实际文件名、源／接收条目及目标设备标识的哨兵均不在原始 protobuf 中。观测合同68项、完整 runtime101项及 Collector 隐私5项通过；runtime 原30秒普查测试1项按原配置忽略，记为跳过。另一真实 HTTP 编码用例逐一覆盖全部12种固定结果，并拒收私有／伪造名称和错误角色。固定词表及计时结束规则只在[观测标准](../../design-docs/observability.md)维护；这些记录器证据不等于真实 Collector／Jaeger 或浏览器验收。
+
+原完整固定九项资源首次出现8通过、1失败，不能用隔离重跑成功覆盖。两轮1GiB内容交换已完成，但连续完整核对的强制重连报 Engine1417。保留原日志及报告后，以原64KiB完整采样入口复现，错误链定位为连接名额 Busy：原受管保留连接已报告失活，新 flight 先取方向名额，而原关闭监督及本地工作尚未共同退出。新最小 manager 合同0.005秒失败，分别控制真实关闭结束与本地 work 释放，证明不能提前拨号。
+
+修复由原 ConnectivityManager 独占：只保存受管保留出站连接原 lifetime 的完成通知接收端，不保活旧 record／lifetime，不另造许可权威。原 flight 在同一等待额度、取消与绝对期限内等实际结算，然后取额一次；完成通知已在首次取额失败后到达时也直接处理，避免返回过期 Busy。未保留连接仍沿原 Busy。首版等待修复触发原 Native 显式退休回归：调用者仍持 work 时应立即 Busy。进一步以同一 watch channel 精准撤下显式退休的通知，旧 lease 不能撤下新连接通知；原 Native 测试未改。三个 Application 合同覆盖关闭／本地工作两顺序、原截止／取消／会话封口和显式退休，方向、排队、下载及资源阈值均保持。
+
+
+最终候选重新执行 Application 连接及 Space 连接126项（0.420秒）、原生进度86项（62.869秒）、Application 进度82项（16.49秒）、Engine 接收57项（517.607秒）全部通过；不使用被中断的42／57日志作完整通过证据。真实观测用例在该完整 Engine 组中通过4.157秒，原始52个 span／54条日志，七条核对及原接收 partial／重试 ok 的断言保持，终态仍实际持有、exports4。总节点数受实际诊断活动影响，不作为业务完成判据。
+
+原固定资源九项最终整组通过424.642秒，严格校验7个生命周期场景、8份报告、33个SDK关闭前零临时标签样本。两轮真实1GiB用例93.004秒通过：精确文件与ACK、累计198次Update、24次查询、28次完整核对、4次真实重连，每批原生进度活跃句柄保持4，关闭后已观察14个句柄全部失效、活跃归零。每批实际收尾51–204毫秒，原内存／FD／线程／任务及4／2下载、64／16排队阈值保持。原67项超容量场景93.127秒通过，仍在原120秒外层预算内。64KiB原完整采样边界另通过32.563秒，不能用它代替上述原1GiB证据。
+
+复现新增观测及原资源入口：
+
+```bash
+just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked --no-tests fail -E 'test(real_engine_reconciliation_exports_its_result_without_extending_receive_or_retry)'
+just cargo test -p uc-observability-runtime --test progress_reconciliation --locked
+node tests/observability/collector/collector-privacy.test.mjs
+bash scripts/testing/run-blob-lifecycle-resources.sh
+```
+
+本项完成原完整接收／重试与明确用户核对的观测边界，以及验收中发现的保留连接关闭结算兼容修复。真实 Collector／Jaeger 列表和详情、物理挂起、跨平台候选CI与产品宿主仍按各自未完成项执行，不因原始OTLP或主机资源通过自动记为通过。

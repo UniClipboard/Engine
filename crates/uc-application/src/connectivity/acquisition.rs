@@ -44,7 +44,7 @@ impl Acquisition {
     ) -> Result<Arc<ConnectionRecord>, ConnectivityError> {
         // 只在任何负载写出前更新一次已确认失活的连接；仍由原 flight/deadline 约束。
         for refresh in 0..2 {
-            let lifetime = ConnectionLifetime::outbound(peer.clone())?;
+            let lifetime = ConnectionLifetime::outbound(peer.clone(), &self.cancel).await?;
             let record = self
                 .connect_once(target, peer.clone(), attempt.clone(), lifetime)
                 .await?;

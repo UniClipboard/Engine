@@ -3,6 +3,7 @@ use super::manager::PeerState;
 use super::ConnectivityError;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{watch, OwnedSemaphorePermit};
+use tokio_util::sync::CancellationToken;
 
 struct DirectionSlot {
     _peer: Arc<PeerState>,
@@ -43,9 +44,35 @@ impl ConnectionLifetime {
             settled: watch::channel(false).0,
         })
     }
-    pub fn outbound(peer: Arc<PeerState>) -> Result<Arc<Self>, ConnectivityError> {
+    pub async fn outbound(
+        peer: Arc<PeerState>,
+        cancel: &CancellationToken,
+    ) -> Result<Arc<Self>, ConnectivityError> {
         let lifetime = Arc::new(Self::default());
-        lifetime.reserve(peer, false)?;
+        if let Err(source) = lifetime.reserve(peer.clone(), false) {
+            if !matches!(source, ConnectivityError::Busy(_)) {
+                return Err(source);
+            }
+            let pending = peer
+                .retained_outbound_settlement
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let Some(mut settled) = pending else {
+                return Err(source);
+            };
+            // 原保留连接已不能复用；新 flight 仍受原等待额度、取消与绝对期限约束。
+            // 只有旧网络关闭和本地工作共同结算，原 lifetime 才归还方向名额并通知。
+            // 首次取额失败后可能已经结算；wait_for 同样处理已完成通知，再取额一次。
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
+                result = settled.wait_for(|finished| *finished) => {
+                    result.map_err(ConnectivityError::ResultClosed)?;
+                }
+            }
+            lifetime.reserve(peer, false)?;
+        }
         Ok(lifetime)
     }
     pub fn reserve(&self, peer: Arc<PeerState>, inbound: bool) -> Result<(), ConnectivityError> {

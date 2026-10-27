@@ -5,7 +5,7 @@ use crate::{
     Engine, Operation, OperationResult, OutboundProgressBatchState, OutboundProgressInput,
     OutboundProgressReconciliation, OutboundProgressSummary, ReconcileOutboundProgressInput,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -61,7 +61,9 @@ pub(super) async fn verify_round(
         entry_id: entry.into(),
         target_device_id: peer.into(),
     };
-    let expected = completed(source, &input).await?;
+    let expected = completed(source, &input)
+        .await
+        .context("resource progress initial local view")?;
     assert_eq!(expected.attempt_id.as_deref(), Some(attempt));
     receiver
         .matching_acks(
@@ -91,7 +93,7 @@ pub(super) async fn verify_round(
         );
     }
     for burst in 0..3 {
-        for _ in 0..4 {
+        for request in 0..4 {
             let reconciled = source
                 .execute(Operation::ReconcileOutboundProgress(
                     ReconcileOutboundProgressInput {
@@ -100,7 +102,10 @@ pub(super) async fn verify_round(
                         expected_attempt_id: Some(attempt.into()),
                     },
                 ))
-                .await?;
+                .await
+                .with_context(|| {
+                    format!("resource progress query burst {burst} request {request}")
+                })?;
             if !matches!(
                 reconciled,
                 OperationResult::OutboundProgressReconciliation(
@@ -112,7 +117,9 @@ pub(super) async fn verify_round(
                 ));
             }
             result.reconciliations += 1;
-            let current = completed(source, &input).await?;
+            let current = completed(source, &input).await.with_context(|| {
+                format!("resource progress local view burst {burst} request {request}")
+            })?;
             result.queries += 1;
             assert_eq!(current.attempt_id, expected.attempt_id);
             assert_eq!(current.items, expected.items);
@@ -174,7 +181,8 @@ pub(super) async fn verify_round(
                         expected_attempt_id: Some(attempt.into()),
                     },
                 ))
-                .await?;
+                .await
+                .with_context(|| format!("resource progress reconnect after burst {burst}"))?;
             assert!(matches!(
                 reconnected,
                 OperationResult::OutboundProgressReconciliation(

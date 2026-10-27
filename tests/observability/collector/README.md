@@ -5,7 +5,10 @@
 - [本地测试业务动作（默认）](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.record.kind%22%3A%22business%22%2C%22deployment.environment.name%22%3A%22test%22%7D)
 - [本地测试运行诊断](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.record.kind%22%3A%22diagnostic%22%2C%22deployment.environment.name%22%3A%22test%22%7D)
 - [本地测试全部失败（含业务内的失败）](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.outcome%22%3A%22error%22%2C%22deployment.environment.name%22%3A%22test%22%7D)
+- [本地测试用户状态核对](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.record.kind%22%3A%22business%22%2C%22deployment.environment.name%22%3A%22test%22%2C%22uc.operation%22%3A%22clipboard.reconcile_progress%22%7D)
 - [生产业务动作](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.record.kind%22%3A%22business%22%2C%22deployment.environment.name%22%3A%22production%22%7D)
+
+状态核对按 `uc.operation=clipboard.reconcile_progress` 筛选完整动作；名称后缀显示实际核对结果。`settled` 表示核对已完成，文件自身仍可能失败；`not_retained`、`unsupported` 和 `unreachable` 保留未知，不解释为交付失败。列表及详情的实际验收仍须另行执行，不以添加链接作为通过。
 
 这是项目约定的默认查询入口，不是修改 Jaeger 通用 Search 的默认行为。裸地址仍可以查询全部记录；旧记录不回写类别，必要时用原始搜索查看。
 链接使用现有 Jaeger 筛选能力，不修改 service.name，也不需要重启会丢失内存数据的 Jaeger。真实产品与测试按既有 environment 资源字段分开。
