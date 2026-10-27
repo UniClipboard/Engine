@@ -41,7 +41,7 @@ fn exchange_reason(error: &BlobExchangeError) -> FileTransferFailureReason {
             if error.source.chain().any(|source| {
                 matches!(
                     source.downcast_ref::<ConnectivityError>(),
-                    Some(ConnectivityError::Denied)
+                    Some(ConnectivityError::Denied | ConnectivityError::Invalidated)
                 )
             }) {
                 Reason::AccessDenied

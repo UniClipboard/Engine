@@ -269,3 +269,29 @@ async fn production_reachability_observer_consumes_original_retry_slots_without_
             .unwrap();
     }
 }
+
+/// 请求失效（撤销快照过期但成员权威未拒绝）按可恢复失败重试，经共享拨号结果返回时同样；
+/// 真实准入拒绝仍停止重试。
+#[test]
+fn invalidated_connection_retries_while_denial_stops() {
+    use crate::transfer::progress::delivery::retry::{retry_class, RetryClass};
+    let invalidated = || ConnectivityError::Invalidated;
+    for source in [
+        invalidated(),
+        ConnectivityError::Shared(Arc::new(invalidated())),
+    ] {
+        assert!(matches!(
+            retry_class(&ProgressReceiveError::Connection(source)),
+            RetryClass::Retry
+        ));
+    }
+    for source in [
+        ConnectivityError::Denied,
+        ConnectivityError::Shared(Arc::new(ConnectivityError::Denied)),
+    ] {
+        assert!(matches!(
+            retry_class(&ProgressReceiveError::Connection(source)),
+            RetryClass::Stop
+        ));
+    }
+}

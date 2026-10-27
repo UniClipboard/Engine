@@ -86,11 +86,20 @@ impl RetrySchedule {
         Some(target)
     }
 
-    /// 恢复轮次已向目标补发 `entry`、结果尚未通知：记下所等待的条目，保留已累计的轮数，
-    /// 以便随后的可恢复结果沿用当前间隔、已结算结果能清除该目标。目标没有退避状态时
-    /// （例如由上线事件触发的轮次）不新建状态，随后的可恢复结果会从首项开始排期。
+    /// 恢复轮次已向目标补发 `entry`、结果尚未通知：记下所等待的条目，以便随后的可恢复结果
+    /// 沿用当前间隔、已结算结果能清除该目标。只有等待的仍是同一条目（或此前尚无条目、轮数
+    /// 只来自未产生结果的失败轮次）时才保留已累计的轮数；改为等待另一条较新内容时退避从首项
+    /// 开始，不继承旧内容已增长的间隔。目标没有退避状态时（例如由上线事件触发的轮次）不新建
+    /// 状态，随后的可恢复结果会从首项开始排期。
     pub(super) fn await_result(&mut self, target: &DeviceId, entry: EntryId) {
         if let Some(retry) = self.targets.get_mut(target) {
+            if retry
+                .entry
+                .as_ref()
+                .is_some_and(|tracked| *tracked != entry)
+            {
+                retry.rounds = 0;
+            }
             retry.entry = Some(entry);
         }
     }
@@ -217,6 +226,48 @@ mod tests {
         schedule.await_result(&target(), entry.clone());
         schedule.record_recoverable(target(), Some(entry), now);
         assert_eq!(schedule.next_due(), Some(now + RETRY_BACKOFF[1]));
+    }
+
+    #[test]
+    fn awaiting_a_different_entry_restarts_the_backoff_from_the_first_interval() {
+        let start = Instant::now();
+        let mut schedule = RetrySchedule::default();
+        let old = EntryId::from("old");
+        let mut now = start;
+        for _ in 0..RETRY_BACKOFF.len() {
+            schedule.record_recoverable(target(), Some(old.clone()), now);
+            now = schedule.next_due().expect("scheduled");
+            assert_eq!(schedule.take_due(now), Some(target()));
+        }
+        schedule.record_recoverable(target(), Some(old.clone()), now);
+        assert_eq!(
+            schedule.next_due(),
+            Some(now + RETRY_BACKOFF[RETRY_BACKOFF.len() - 1])
+        );
+        now = schedule.next_due().expect("scheduled");
+        assert_eq!(schedule.take_due(now), Some(target()));
+
+        // 旧内容的计时器已被消费，恢复轮次随后改为等待较新的内容。
+        let new = EntryId::from("new");
+        schedule.await_result(&target(), new.clone());
+        schedule.record_recoverable(target(), Some(new), now);
+
+        assert_eq!(schedule.next_due(), Some(now + RETRY_BACKOFF[0]));
+    }
+
+    #[test]
+    fn awaiting_the_same_entry_keeps_its_grown_interval() {
+        let mut now = Instant::now();
+        let mut schedule = RetrySchedule::default();
+        let entry = EntryId::from("entry");
+        for _ in 0..2 {
+            schedule.record_recoverable(target(), Some(entry.clone()), now);
+            now = schedule.next_due().expect("scheduled");
+            assert_eq!(schedule.take_due(now), Some(target()));
+        }
+        schedule.await_result(&target(), entry.clone());
+        schedule.record_recoverable(target(), Some(entry), now);
+        assert_eq!(schedule.next_due(), Some(now + RETRY_BACKOFF[2]));
     }
 
     #[test]
