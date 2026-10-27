@@ -66,6 +66,51 @@ pub enum BindingError {
     UnexpectedResult,
 }
 
+/// 单 Engine 的释放结果；不包含进程观测与宿主自有文件。
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingResourceRelease {
+    Pending,
+    Released { error: Option<BindingError> },
+    Failed { error: BindingError },
+}
+
+impl BindingResourceRelease {
+    pub fn into_result(self) -> Result<(), BindingError> {
+        match self {
+            Self::Released { error: None } => Ok(()),
+            Self::Released { error: Some(error) } | Self::Failed { error } => Err(error),
+            Self::Pending => Err(BindingError::Engine {
+                code: 1002,
+                category: BindingErrorCategory::DeadlineExceeded,
+                retryable: true,
+            }),
+        }
+    }
+}
+
+impl From<uc_engine::ResourceReleaseOutcome> for BindingResourceRelease {
+    fn from(outcome: uc_engine::ResourceReleaseOutcome) -> Self {
+        match outcome {
+            uc_engine::ResourceReleaseOutcome::Pending => Self::Pending,
+            uc_engine::ResourceReleaseOutcome::Released { error } => Self::Released {
+                error: error.map(BindingError::from),
+            },
+            uc_engine::ResourceReleaseOutcome::Failed { error } => Self::Failed {
+                error: error.into(),
+            },
+        }
+    }
+}
+
+impl From<Result<(), BindingError>> for BindingResourceRelease {
+    fn from(result: Result<(), BindingError>) -> Self {
+        match result {
+            Ok(()) => Self::Released { error: None },
+            Err(error) => Self::Failed { error },
+        }
+    }
+}
+
 impl From<uc_engine::EngineError> for BindingError {
     fn from(error: uc_engine::EngineError) -> Self {
         Self::Engine {

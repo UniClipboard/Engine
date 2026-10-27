@@ -63,6 +63,11 @@ jobs:
       - name: Check repository ownership and release rules
         run: node scripts/architecture/check-engine-repository.mjs
 
+      - name: Install just
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+
       - name: Verify independent Engine Git consumer
         run: node scripts/architecture/check-engine-git-consumer.mjs
         env:
@@ -217,7 +222,7 @@ jobs:
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       # 所有测试组共用同一次全工作区构建，只编译一次。
       UC_TEST_BUILD_SCOPE: workspace

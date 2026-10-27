@@ -10,9 +10,9 @@ use async_trait::async_trait;
 
 use crate::contract::HostAnalyticsCapabilities;
 use crate::{
-    HostCapabilities, HostCapabilityError, HostClipboard, HostClipboardChange,
-    HostClipboardChangeStream, HostClipboardSnapshot, HostDirectories, HostFileAccess,
-    HostSecureStorage,
+    HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
+    HostClipboardChange, HostClipboardChangeStream, HostClipboardSnapshot, HostDirectories,
+    HostFileAccess, HostSecureStorage,
 };
 
 pub(crate) struct ReusableHost {
@@ -59,14 +59,39 @@ impl ReusableHost {
             let mut slot = self.clipboard.lock_stream();
             match std::mem::replace(&mut *slot, StreamSlot::Absent) {
                 StreamSlot::Idle(stream) => Some(stream),
-                other => {
-                    *slot = other;
-                    None
+                StreamSlot::NotTaken => {
+                    let taken = self
+                        .clipboard
+                        .inner
+                        .write()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take_change_stream();
+                    match taken {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            *slot = StreamSlot::NotTaken;
+                            return Err(error);
+                        }
+                    }
                 }
+                StreamSlot::Lent => {
+                    *slot = StreamSlot::Lent;
+                    return Err(HostCapabilityError::new(
+                        HostCapabilityErrorCategory::Unavailable,
+                        "host change stream remains borrowed",
+                    ));
+                }
+                StreamSlot::Absent => None,
             }
         };
         match idle {
-            Some(mut stream) => stream.shutdown().await,
+            Some(mut stream) => match stream.shutdown().await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.clipboard.give_back(stream);
+                    Err(error)
+                }
+            },
             None => Ok(()),
         }
     }

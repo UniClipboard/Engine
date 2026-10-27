@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::future::{pending, Future};
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -34,7 +34,7 @@ use crate::{
     BindingClipboardSnapshot, BindingConfig, BindingEngineState, BindingError,
     BindingErrorCategory, BindingEvent, BindingFailure, BindingFileMetadata, BindingHost,
     BindingLifecycleAction, BindingOperationTerminal, BindingRePairingScope, BindingRefreshReason,
-    BindingTransferDirection, HostBindingError,
+    BindingResourceRelease, BindingTransferDirection, HostBindingError,
 };
 use uc_engine::observability::{io_error_kind, log_vocab_debug, uc_warn};
 
@@ -42,11 +42,15 @@ const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
 #[cfg(test)]
 mod event_recorder;
 mod lifecycle;
+#[cfg(test)]
+mod release_tests;
 mod shutdown;
+mod shutdown_wait;
 mod startup_lifecycle;
 mod worker_join;
 mod worker_lifecycle;
 mod worker_shutdown;
+use shutdown_wait::ShutdownWait;
 pub use startup_lifecycle::MobileStartupLifecycle;
 use worker_join::WorkerJoin;
 use worker_lifecycle::LifecycleCommand;
@@ -769,6 +773,7 @@ pub struct MobileEngine {
     commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WorkerCommand>>>,
     lifecycle_commands: Mutex<Option<tokio::sync::mpsc::UnboundedSender<LifecycleCommand>>>,
     shutdown_pending: AtomicBool,
+    shutdown_wait: Mutex<Option<Arc<ShutdownWait>>>,
     events: Arc<EventQueue>,
     worker: WorkerJoin,
 }
@@ -1050,6 +1055,7 @@ impl MobileEngine {
                 commands: Mutex::new(Some(commands)),
                 lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
                 shutdown_pending: AtomicBool::new(false),
+                shutdown_wait: Mutex::new(None),
                 events,
                 worker: WorkerJoin::new(worker),
             })),
@@ -1573,6 +1579,29 @@ impl MobileEngine {
 
     pub fn shutdown(&self, deadline_ms: u64) -> Result<(), BindingError> {
         self.shutdown_inner(Duration::from_millis(deadline_ms), true)
+            .into_result()
+    }
+
+    pub fn shutdown_with_outcome(&self, deadline_ms: u64) -> BindingResourceRelease {
+        self.shutdown_inner(Duration::from_millis(deadline_ms), true)
+    }
+
+    pub fn suspend_with_outcome(&self, deadline_ms: u64) -> BindingResourceRelease {
+        if lock(&self.commands).is_none()
+            || self.shutdown_pending.load(Ordering::Acquire)
+            || lock(&self.events.state).closed
+            || lock(&self.lifecycle_commands).is_none()
+        {
+            return self.shutdown_inner(Duration::from_millis(deadline_ms), true);
+        }
+        match self.suspend_inner(Duration::from_millis(deadline_ms)) {
+            Ok(()) => BindingResourceRelease::Released { error: None },
+            Err(BindingError::Engine {
+                category: BindingErrorCategory::DeadlineExceeded,
+                ..
+            }) => BindingResourceRelease::Pending,
+            Err(error) => BindingResourceRelease::Failed { error },
+        }
     }
 
     pub fn suspend(&self) -> Result<(), BindingError> {
@@ -1636,12 +1665,25 @@ impl MobileEngine {
 
 impl Drop for MobileEngine {
     fn drop(&mut self) {
-        if let Err(error) = self.shutdown_inner(Duration::from_secs(5), true) {
-            log_mobile_failure("drop_shutdown_failed", &error);
-            // 已无调用方可重试：worker 线程若仍在运行即被泄漏，这是唯一留痕的机会。
-            if let Err(error) = self.join_worker(Duration::ZERO) {
-                log_mobile_failure("drop_worker_leaked", &error);
+        let outcome = self.shutdown_inner(Duration::from_secs(5), true);
+        match &outcome {
+            BindingResourceRelease::Released { error: Some(error) }
+            | BindingResourceRelease::Failed { error } => {
+                log_mobile_failure("drop_shutdown_failed", error);
             }
+            BindingResourceRelease::Pending => {
+                log_mobile_failure("drop_shutdown_failed", &shutdown::wait_timeout())
+            }
+            BindingResourceRelease::Released { error: None } => {}
+        }
+        // 只有仍在等待的 worker 才记为未回收；操作错误不证明 worker 泄漏。
+        if !matches!(outcome, BindingResourceRelease::Released { .. })
+            && matches!(
+                self.worker.wait_outcome(Duration::ZERO),
+                BindingResourceRelease::Pending
+            )
+        {
+            log_mobile_failure("drop_worker_leaked", &shutdown::wait_timeout());
         }
     }
 }
@@ -1654,7 +1696,7 @@ fn run_worker(
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
     startup_lifecycle: Option<StartupLifecycleInput>,
-) -> Result<(), BindingError> {
+) -> BindingResourceRelease {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1663,7 +1705,9 @@ fn run_worker(
         Err(_) => {
             log_mobile_failure("runtime_build", &BindingError::RuntimeUnavailable);
             let _ = started.send(Err(BindingError::RuntimeUnavailable));
-            return Err(BindingError::RuntimeUnavailable);
+            return BindingResourceRelease::Failed {
+                error: BindingError::RuntimeUnavailable,
+            };
         }
     };
     runtime.block_on(run_worker_loop(
@@ -1685,7 +1729,7 @@ async fn run_worker_loop(
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
     startup_lifecycle: Option<StartupLifecycleInput>,
-) -> Result<(), BindingError> {
+) -> BindingResourceRelease {
     let result = match startup_lifecycle {
         Some(lifecycle) => {
             let (progress, _) = StartupProgress::channel();
@@ -1699,7 +1743,7 @@ async fn run_worker_loop(
             let error = BindingError::from(error);
             log_mobile_failure("engine_start", &error);
             let _ = started.send(Err(error.clone()));
-            return Err(error);
+            return BindingResourceRelease::Failed { error };
         }
     };
     let engine = Arc::new(engine);
@@ -1713,7 +1757,7 @@ async fn run_worker_loop(
     });
     if started.send(Ok(())).is_err() {
         return worker_shutdown::finish_shutdown(
-            engine.shutdown_until_complete(),
+            engine.shutdown_until_released(),
             event_task,
             events,
         )
@@ -1726,7 +1770,7 @@ async fn run_worker_loop(
     )
     .await;
     let result =
-        worker_shutdown::finish_shutdown(engine.shutdown_until_complete(), event_task, events)
+        worker_shutdown::finish_shutdown(engine.shutdown_until_released(), event_task, events)
             .await;
     for response in shutdown_response {
         let _ = response.send(result.clone());
@@ -3518,7 +3562,7 @@ mod tests {
                 lifecycle_requests.blocking_recv()
             {
                 std::thread::sleep(Duration::from_millis(200));
-                let _ = response.send(Ok(()));
+                let _ = response.send(Ok(()).into());
             }
             Ok(())
         });
@@ -3526,6 +3570,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             shutdown_pending: AtomicBool::new(false),
+            shutdown_wait: Mutex::new(None),
             events,
             worker: WorkerJoin::new(worker),
         };
@@ -3566,6 +3611,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             shutdown_pending: AtomicBool::new(false),
+            shutdown_wait: Mutex::new(None),
             events,
             worker: WorkerJoin::new(worker),
         });

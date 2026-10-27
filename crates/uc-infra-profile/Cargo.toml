@@ -104,7 +104,7 @@ base32 = "0.5"
 unicode-normalization = "0.1"
 unicode-segmentation = "1"
 url = "2"
-zstd = { version = "0.13", features = ["zstdmt"] }
+zstd = { version = "0.14.3", features = ["zstdmt"] }
 # SpoolManager 用 IndexMap 维护 insertion-ordered 条目，做 O(1) 容量计数 +
 # FIFO eviction。需要稳定的迭代顺序来表达 "evict 最旧未完成 staged" 语义，
 # 普通 HashMap 做不到。

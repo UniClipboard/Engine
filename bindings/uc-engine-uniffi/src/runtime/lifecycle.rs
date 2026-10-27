@@ -59,6 +59,7 @@ mod tests {
             commands: Mutex::new(Some(commands)),
             lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
             shutdown_pending: AtomicBool::new(false),
+            shutdown_wait: Mutex::new(None),
             events: Arc::new(EventQueue::new(1)),
             worker: WorkerJoin::new(worker),
         };
@@ -71,6 +72,6 @@ mod tests {
         ));
         assert!(deadline.recv_timeout(Duration::from_secs(1)).unwrap() <= Instant::now());
         release.send(()).unwrap();
-        engine.join_worker(Duration::from_secs(1)).unwrap();
+        engine.worker.wait(Duration::from_secs(1)).unwrap();
     }
 }
