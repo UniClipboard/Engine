@@ -237,5 +237,9 @@ bash scripts/testing/run-progress-legacy-baseline.sh
 - 当前权威与真实双端登记的组合已完成；Engine／SQLite profile 重开及生产 Router 的完整迁移仍未完成。
 - 输出后 Application 采用／ACK 的最小主机链路已有证据；生产接收输出／SQLite 结算交接、有限补发和状态核对尚未接线。
 - 最大负载、分页、终态淘汰、公平调度及新旧双角色 Direct／Relay 尚未执行。
-- Linux 当前头文件合同及 BOOTTIME syscall 已核对；真实系统挂起和其他平台尚未验证，不记跨平台经过时间证明通过。
+- 包含挂起的经过时间：`uc-core` 的 `ElapsedClockPort` 与 `ElapsedBudget` 固定预算不可重置、起点或当前读数不可用以及读数倒退一律按耗尽处理；
+  `uc-infra-local::SystemElapsedClock` 在 Linux／Android／HarmonyOS 读 `CLOCK_BOOTTIME`，macOS／iOS 读 `CLOCK_MONOTONIC`（手册规定睡眠期间继续递增），
+  Windows 读 `GetTickCount64`，其余平台不可用。预算用模拟挂起跳变的读数测试，Linux 真实时钟的非递减与睡眠推进已运行；
+  `x86_64-pc-windows-gnu` 与 `aarch64-unknown-linux-gnu` 仅通过编译检查。
+  真实系统挂起、Apple、Android、HarmonyOS 及 Windows 运行时尚未验证，不记通过。预算尚未接入等待超时与终态补发调度，该接线属后续任务。
 - 完整 workspace 行为回归、平台编译与设备矩阵仍按正式计划执行；本片尚未整体完成。
