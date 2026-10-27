@@ -2,12 +2,14 @@
 // 串行构建两个当前测试二进制，显式关联实际接收fixture与真实Iroh登记，禁止猜测旧产物路径。
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { createReadStream, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createReadStream, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 const root = resolve(import.meta.dirname, '../..')
 const report = resolve(root, process.env.UC_TEST_ARTIFACTS_DIR ?? 'target/test-artifacts/ci', 'progress-registration')
 mkdirSync(report, { recursive: true })
 rmSync(resolve(report, 'report.json'), { force: true })
+const capacityReport = resolve(report, 'snapshot-capacity.json')
+rmSync(capacityReport, { force: true })
 const prefix = 'network::iroh::connectivity::stream::authority_probe::'
 const required = [
   'current_receive_authority_binds_over_real_iroh_and_old_descriptors_cannot_roll_back',
@@ -15,6 +17,7 @@ const required = [
   'fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again',
   'explicit_legacy_is_unsupported_but_corrupt_current_frame_keeps_exchange_failure',
   'live_receive_attempt_reports_its_failed_materialization_through_the_complete_action',
+  'snapshot_probe::actual_maximum_v3_plan_survives_sixteen_real_snapshot_pages',
 ].map(name => prefix + name)
 function binary(packageName, targetName) {
   const built = spawnSync('just', ['cargo', 'test', '-p', packageName, '--lib', '--no-run', '--locked', '--message-format=json'], {
@@ -41,12 +44,21 @@ if (listed.status !== 0 || required.some(name => !listed.stdout.split('\n').incl
   throw new Error('mandatory current-authority proof cases are missing from the current binary')
 }
 const run = spawnSync(network, [prefix, '--ignored', '--nocapture'], {
-  cwd: root, env: { ...process.env, UC_APPLICATION_TEST_BINARY: application }, stdio: 'inherit',
+  cwd: root, env: { ...process.env, UC_APPLICATION_TEST_BINARY: application, UC_PROGRESS_SNAPSHOT_REPORT: capacityReport }, stdio: 'inherit',
 })
 async function sha(file) {
   const hash = createHash('sha256')
   for await (const chunk of createReadStream(file)) hash.update(chunk)
   return hash.digest('hex')
+}
+let capacity = null
+if (run.status === 0) {
+  capacity = JSON.parse(readFileSync(capacityReport, 'utf8'))
+  if (capacity.plan_items !== 1024 || capacity.snapshot_items !== 1024 || capacity.pages !== 16 ||
+      capacity.staged_capacity_items !== 1024 || capacity.page_item_limit !== 64 || capacity.frame_limit_bytes !== 65536 ||
+      !Number.isSafeInteger(capacity.largest_frame_bytes) || capacity.largest_frame_bytes <= 0 || capacity.largest_frame_bytes > capacity.frame_limit_bytes ||
+      !Number.isSafeInteger(capacity.staged_item_storage_bytes) || capacity.staged_item_storage_bytes <= 0 || capacity.plan_authority !== 'actual_application_cas_v3' ||
+      capacity.state_payload !== 'synthetic') throw new Error('maximum original-plan snapshot capacity proof is missing or invalid')
 }
 const provenance = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' })
 const state = spawnSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' })
@@ -54,7 +66,7 @@ if (provenance.status !== 0 || state.status !== 0) throw new Error('cannot recor
 writeFileSync(resolve(report, 'report.json'), JSON.stringify({
   source_commit: provenance.stdout.trim(), source_state: state.stdout.trim() ? 'modified' : 'clean',
   application_binary_sha256: await sha(application), network_binary_sha256: await sha(network),
-  required_cases: required, exit_code: run.status, signal: run.signal,
+  required_cases: required, snapshot_capacity: capacity, exit_code: run.status, signal: run.signal,
 }, null, 2) + '\n')
 if (run.error) throw run.error
 process.exit(run.status ?? 1)

@@ -148,6 +148,7 @@ fn registration_authority_worker() {
     use crate::clipboard::sync::payload_codec::{
         decode_v3_bytes_to_snapshot_and_blob_refs,
         encode_snapshot_with_blob_refs_and_file_set_to_v3_bytes,
+        encode_snapshot_with_blob_refs_to_v3_bytes,
     };
     use crate::transfer::receive::materialization::{InboundFileSetManifest, InboundFileSetMember};
     use serde_json::{json, Value};
@@ -192,6 +193,23 @@ fn registration_authority_worker() {
                     &manifest,
                 )
                 .unwrap();
+                input.plaintext = plaintext;
+                input.snapshot_hash = hash;
+            }
+            if request["directory"] != true {
+                let count = request["items"].as_u64().unwrap_or(1) as usize;
+                assert!((1..=1024).contains(&count));
+                let (snapshot, refs) =
+                    decode_v3_bytes_to_snapshot_and_blob_refs(&input.plaintext).unwrap();
+                let refs: Vec<_> = (0..count)
+                    .map(|index| {
+                        let mut reference = refs[0].clone();
+                        reference.filename = Some(format!("fixture-{index}.bin"));
+                        reference
+                    })
+                    .collect();
+                let (plaintext, hash) =
+                    encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &refs).unwrap();
                 input.plaintext = plaintext;
                 input.snapshot_hash = hash;
             }

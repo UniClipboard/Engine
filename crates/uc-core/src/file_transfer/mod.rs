@@ -40,3 +40,10 @@ pub use progress_terminal::{
     ProgressTerminal, ProgressTerminalEffect, ProgressTerminalOutcome, ProgressTerminalSettlement,
     MAX_PROGRESS_ITEMS,
 };
+
+mod progress_snapshot;
+pub use progress_snapshot::{
+    ProgressActive, ProgressItemState, ProgressPhase, ProgressSnapshotCoverage,
+    ProgressSnapshotEffect, ProgressSnapshotInput, ProgressSnapshotRefusal,
+    MAX_SNAPSHOT_PAGE_ITEMS,
+};

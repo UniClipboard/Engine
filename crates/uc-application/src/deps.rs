@@ -638,3 +638,9 @@ pub use crate::transfer::progress::{
     ProgressTerminalDelivery, ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressWirePort,
     TransferProgressProducer, TransferProgressReceiver,
 };
+
+pub use crate::transfer::progress::{
+    ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotPage,
+    ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotWirePort,
+    TransferProgressSnapshotReader,
+};
