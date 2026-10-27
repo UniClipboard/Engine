@@ -650,3 +650,8 @@ pub use crate::transfer::progress::ProgressQueryResult;
 pub use crate::transfer::progress::{ProgressLiveRoundPort, ProgressUpdateNotice};
 
 pub use crate::transfer::progress::ProgressContactNotice;
+
+pub use crate::transfer::progress::{
+    ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
+    ProgressProjectionRegistry, ProgressProjectionWorker,
+};

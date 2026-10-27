@@ -56,3 +56,9 @@ pub use progress_freshness::{
     ProgressFreshness, ProgressFreshnessEffect, ProgressFreshnessInput, ProgressFreshnessView,
     PROGRESS_CONTACT_GAP, PROGRESS_UNKNOWN_AFTER,
 };
+
+mod progress_capacity;
+pub use progress_capacity::{
+    ProgressProjectionCapacity, ProjectionCapacityInput, ProjectionRetention,
+    PROJECTION_GLOBAL_CAPACITY, PROJECTION_PEER_CAPACITY,
+};

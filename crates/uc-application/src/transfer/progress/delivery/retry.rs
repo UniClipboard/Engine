@@ -8,7 +8,7 @@ pub(super) enum RetryClass {
 pub(super) fn retry_class(source: &ProgressReceiveError) -> RetryClass {
     match source {
         ProgressReceiveError::Connection(source) => connection_retry(source),
-        ProgressReceiveError::Exchange(_) => RetryClass::Retry,
+        ProgressReceiveError::Exchange(_) | ProgressReceiveError::Busy => RetryClass::Retry,
         ProgressReceiveError::Snapshot(_)
         | ProgressReceiveError::Clock(_)
         | ProgressReceiveError::Unsupported

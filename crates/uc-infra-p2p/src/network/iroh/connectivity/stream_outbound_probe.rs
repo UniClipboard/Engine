@@ -556,3 +556,6 @@ async fn new_attempt_during_challenge_cannot_relabel_an_old_settled_result() -> 
 
 #[path = "stream_live_probe.rs"]
 mod live_probe;
+
+#[path = "stream_projection_probe.rs"]
+mod projection_probe;
