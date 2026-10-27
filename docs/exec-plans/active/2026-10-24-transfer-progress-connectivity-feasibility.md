@@ -1,9 +1,9 @@
-# 第八片阶段 0：受管流、线上合同与登记围栏证明
+# 第八片：受管进度迁移与验收证据
 
-状态：**阶段 0 结论已形成，经过时间实机证明仍有缺口，整体尚未完成**（2026-10-25）。
+状态：**生产受管接线与主机回归已有证据；经过时间实机、设备／产品宿主与最终候选CI仍未闭合，整片保持active**（2026-10-27）。
 需求见[实现规格](2026-10-24-transfer-progress-connectivity-spec.md)，推进见[执行计划](2026-10-24-transfer-progress-connectivity-plan.md)。
-开工基线为 `5cbca8fc24a278fa7b01ae611bf4b925914bef13`；本记录描述该基线上的候选变更，
-各节分别说明主机探针与固定旧端独立进程基线的证据，不将它们当作完整生产迁移或真机验收。
+开工基线为 `5cbca8fc24a278fa7b01ae611bf4b925914bef13`；各节保留对应候选当时的验证范围与未完成项。
+当前生产受管接线见[接线核对](#当前生产受管进度接线核对)，正式进度只在执行计划维护；早期原型段落中的“待迁移”表示当时边界，不能覆盖后续生产证据。主机、原型和固定旧端结果均不替代真机验收。
 
 ## 阶段 0 结论
 
@@ -1374,3 +1374,24 @@ UC_EXPECT_DIAGNOSTIC_STACK=available just cargo nextest run --profile ci --locke
 原`pr-check.yml`的Engine tests串行承担冷构建、完整workspace、登记权威、固定资源、testkit、成员smoke和必要网络步骤，60分钟外层预算已实际阻断完整执行。本次仅将该job上限调整到90分钟，保留所有原单项期限、测试负载、资源上限、选择器和执行顺序。复用现有统一构建与缓存，不拆成重复全量构建的另一套入口；其他job预算不变。
 
 原CI构建／打包配置检查18项通过，根六项metadata、workspace all-targets、fmt、Rust style、repository与diff全部通过。Rust及依赖相对#328未变化，使用已有运行证据，不重跑原4927项或固定网络／资源负载。本项是允许必需CI套件完整运行的配置修复，**同一候选的跨平台CI验收仍未完成**；90分钟预算下的实际线上结果待原工作流验证，不提前勾阶段6对应项。
+
+
+## 当前生产受管进度接线核对
+
+2026-10-27按阶段2首个未勾父项逐责任核对当前#329候选`d3e4527045ff26beef771c79a2332a2b7df35f4d`。完整负责人是Application的进度运行时：调用方只组装传输能力并注册一个完整入站端点；版本交换、投影、收发监督与实际关闭由同一对象图完成。成功以实际采用和协议结果结算，失败保留原来源；当前会话退休及关闭共同等待已开始的实际工作，重启按原接收／意图事实恢复，不恢复临时连接绑定。
+
+| 要求 | 当前生产责任链与实际证明 |
+| --- | --- |
+| 两种协议能力与专属profile | Application [ConnectionProtocol](../../../crates/uc-application/src/connectivity/backend.rs)区分V1／V2，Infra [ConnectivityProfile](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/backend.rs)为进度提供固定新旧协商集合；[原策略](../../../crates/uc-application/src/transfer/progress/connectivity.rs)集中定义额度、首流／入站预算及空闲保留 |
+| 同一manager与租约 | [Application组装](../../../crates/uc-application/src/transfer/progress/runtime/assembly.rs)由同一manager创建producer、snapshot reader和inbound；[单向租约](../../../crates/uc-application/src/connectivity/unidirectional.rs)的open／accept持有原额度与work lease并检查当前准入，[双向StreamLease](../../../crates/uc-application/src/connectivity/stream.rs)同样持有实际工作使用权 |
+| 完整入站负责人 | [TransferProgressTransport](../../../crates/uc-application/src/transfer/progress/inbound/owner.rs)固定首轮经过时间和连接世代，监督manager.accept及真实采用；[交换实现](../../../crates/uc-application/src/transfer/progress/inbound/exchange.rs)对旧单向／新双向使用同一lease及原期限，取消等待不取消已开始的本地结算 |
+| 节点与Engine生产安装 | [Engine组装](../../../crates/uc-engine/src/assembly/sync_engine.rs)选择专属profile，把能力交给Application，仅注册其完整endpoint；[节点安装](../../../crates/uc-infra-p2p/src/network/iroh/node.rs)以一个handler注册两个ALPN；[Iroh handler](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/progress_handler.rs)只交接连接和完整shutdown，没有独立业务发送／采用流程 |
+| Router真实版本选择 | [生产Router](../../../crates/uc-infra-p2p/src/network/iroh/protocol_router.rs)集中排序协议；`progress_negotiation_chooses_current_regardless_of_registration_or_offer_order`实际验证注册顺序及客户端offer顺序均不改变新版优先 |
+| 生命周期实际接线 | [Application启动](../../../crates/uc-application/src/application.rs)启动并持有ProgressRuntime，[顶层关闭](../../../crates/uc-application/src/application/shutdown/owners.rs)实际调用其shutdown；[运行时](../../../crates/uc-application/src/transfer/progress/runtime/owner.rs)共同等待worker和入站关闭，[入站owner](../../../crates/uc-application/src/transfer/progress/inbound/owner.rs)重复shutdown等待同一实际完成结果 |
+| 双版本实际收发 | [真实入站组合](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/stream_inbound_transport_probe.rs)断言登记／终态ACK／查询、旧绑定退休、旧单向保守采用与关闭、原准入经过时间、取消shutdown等待及成员撤销；[实际profile组合](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/stream_profile_probe.rs)断言受管连接复用；十四格生产网络另证明两个固定旧端与新端的双向Direct／Relay收发 |
+
+上述真实入站六项、profile复用一项和Router偏好一项，在[原完整回归](#当前候选完整回归与首次失败保留)的workspace中均有唯一PASS与JUnit通过项，已经核对实际断言而非仅测试名称。该回归的进度矩阵还保留20份方向记录：新版4份、旧版16份，实际Direct10份、Relay10份，逐份具有真实握手和路径观测；严格汇总要求完整14格、固定旧端SHA、二进制摘要、精确文件、原资料保留、清理与明文检查。
+
+对照该网络候选冻结的源码摘要，当前2134个Rust文件逐字节一致，唯一不同的Rust文件只补齐Linux测试模块条件，已有[两项原测试与根门禁证明](#本地根门禁与读流测试平台条件)。生产连接、Application流程、Engine装配、协议与依赖均未变化，复用已有完整证据；本轮不重新运行网络负载或以新模拟代替生产路径。早期[入站负责人](#阶段2完整入站连接负责人)仅到可安装能力的边界，现在已经由生产对象图、节点安装和实际生命周期接线闭合。
+
+本项仅关闭阶段2的受管生产接线父项。降级触发、逐次授权和会话围栏仍按各自父项核对；AC01整体、物理系统挂起、设备／产品宿主及最终同一head CI没有因此自动完成。原成员F2间歇失败及全部跳过项继续保留，整片仍为active。
