@@ -3,6 +3,7 @@
 //! 该 owner 创建进程内唯一的内容身份协调器与写入协调器，并集中构造
 //! capture、history、restore、resource 与 live-index 入口。Engine 只选择
 //! 平台/存储 adapter，不再逐项拼装 Clipboard use case。
+use crate::transfer::progress::{ProgressProjectionRegistry, ReconcileSentEntryPort};
 
 use crate::clipboard::active::transport::ActivePullPreparationPort;
 use crate::clipboard::inbound::ClipboardReceiverPort;
@@ -12,7 +13,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use uc_core::clipboard::ClipboardIntegrationMode;
-use uc_core::file_transfer::OutboundProgressReporterPort;
 use uc_core::ports::atomic_publish::AtomicPublishPort;
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::hidden_path::MarkHiddenPort;
@@ -118,6 +118,7 @@ pub(crate) struct ClipboardInboundAdapters {
 
 /// 单个网络 session 注入 Clipboard 的被动能力。
 pub(crate) struct ClipboardSessionDeps {
+    pub progress: Arc<dyn ReconcileSentEntryPort>,
     pub clipboard_sync: Arc<ClipboardSyncFacade>,
     pub blob_transfer: Arc<BlobTransferFacade>,
     pub receiver: Arc<dyn ClipboardReceiverPort>,
@@ -126,7 +127,7 @@ pub(crate) struct ClipboardSessionDeps {
     pub known_peers: Arc<dyn PeerAddressRepositoryPort>,
     pub deliveries: Arc<dyn EntryDeliveryRepositoryPort>,
     pub trusted_peers: Arc<dyn TrustedPeerRepositoryPort>,
-    pub outbound_progress_reporter: Arc<dyn OutboundProgressReporterPort>,
+
     pub inbound_adapters: ClipboardInboundAdapters,
     pub inbound_events: Arc<dyn ClipboardInboundEventPort>,
 }
@@ -272,6 +273,7 @@ impl ClipboardAssembly {
 
     pub fn start_session(&self, session: ClipboardSessionDeps) -> ClipboardSession {
         let outbound = Arc::new(ClipboardOutboundFacade::new(ClipboardOutboundDeps {
+            progress: session.progress,
             settings: Arc::clone(&self.deps.settings),
             clipboard_sync: Arc::clone(&session.clipboard_sync),
             blob_transfer: Arc::clone(&session.blob_transfer),
@@ -318,7 +320,7 @@ impl ClipboardAssembly {
                 provisional_receive: Arc::clone(
                     &self.deps.storage.file_transfer.finalize_provisional,
                 ),
-                outbound_progress_reporter: session.outbound_progress_reporter,
+
                 active_register: Arc::clone(&self.deps.clipboard.active_register),
                 mobile_consumability: self.deps.clipboard.mobile_consumability.clone(),
                 snapshot_deps: self.snapshot_deps(),
@@ -470,10 +472,12 @@ impl ClipboardAssembly {
     pub fn history(
         &self,
         blob_transfer: Option<Arc<dyn BlobTransferPort>>,
+        progress: ProgressProjectionRegistry,
     ) -> Arc<ClipboardHistoryFacade> {
         Arc::new(ClipboardHistoryFacade::new(ClipboardHistoryFacadeDeps {
             resource_snapshot: Arc::clone(&self.deps.clipboard.resource_snapshot),
             receive_work: self.file_transfer.receive_registry(),
+            progress,
             file_references: Arc::clone(&self.deps.clipboard.history_file_references),
             entry_ports: self.deps.clipboard.entry_ports.clone(),
             selection_repo: Arc::clone(&self.deps.clipboard.selection_repo),

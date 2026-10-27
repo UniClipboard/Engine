@@ -3,10 +3,12 @@ use super::{
     ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminalNotice,
     ProgressUpdateNotice,
 };
-use crate::connectivity::{ConnectionLease, StreamLease};
+use crate::connectivity::{ConnectionLease, PeerSendStream, StreamLease, UniStreamLease};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-use uc_core::file_transfer::{ProgressActive, ProgressIdentity, ProgressItem, ProgressTerminal};
+use uc_core::file_transfer::{
+    OutboundProgressSummary, ProgressActive, ProgressIdentity, ProgressItem, ProgressTerminal,
+};
 use uc_core::ids::DeviceId;
 
 /// 一次完整的当前任务确认；实现负责有界编解码、截止时间及请求结束检查。
@@ -51,18 +53,29 @@ pub trait ProgressReceiverPort: Send + Sync {
     ) -> Result<ProgressTerminalNotice, ProgressReceiveError>;
 }
 
+/// 缺少尝试关联的完整通知动作；只更新既有未确认意图，不采用字节或结果。
+/// 原意图、已确认任务及退休围栏由同一投影负责人统一核对。
+#[async_trait]
+pub trait ProgressUnattributedReceiverPort: Send + Sync {
+    async fn observe_unattributed(
+        &self,
+        peer: &DeviceId,
+        source: ProgressIdentity,
+    ) -> Result<(), ProgressReceiveError>;
+}
+
 /// 只查询已接受的当前接收尝试；原始计划在接受时已完整核验且同一描述下不可变。
 /// 每次新挑战都重新读取，不捕获旧任务快照。
 /// None只表示本运行期未保留可授权关联，不推断任务失败或文件缺失。
 pub trait ProgressTaskAuthorityPort: Send + Sync {
     fn current_task(&self, peer: &DeviceId, source: ProgressIdentity)
         -> Option<ProgressSourceTask>;
-    /// 原结算之后领取当前项的通知意图；同一当前尝试/项至多成功一次。
+    /// 原结算后按完整冻结描述原子领取；同一当前尝试/项至多成功一次。
+    /// producer、修订、源、attempt及计划范围任一变化都拒绝，不把旧结果重新标记为当前任务。
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal>;
 }
@@ -71,6 +84,16 @@ pub trait ProgressTaskAuthorityPort: Send + Sync {
 /// 借用流，原负责人持许可至后置权威检查及实际连接保留读取结束。
 #[async_trait]
 pub trait ProgressWirePort: Send + Sync {
+    /// 粗粒度通知经已准入单向流完整发送；传输结束不代表业务结果采用。
+    async fn summary(
+        &self,
+        stream: &mut UniStreamLease<Box<dyn PeerSendStream>>,
+        connection: &ConnectionLease,
+        source: ProgressIdentity,
+        summary: OutboundProgressSummary,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError>;
     async fn contact(
         &self,
         stream: &mut StreamLease,

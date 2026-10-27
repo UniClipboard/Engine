@@ -90,6 +90,7 @@ pub(super) struct PeerState {
     pub pending_inbound: Arc<Semaphore>,
     pub inbound_connections: Option<Arc<Semaphore>>,
     pub outbound_connections: Option<Arc<Semaphore>>,
+    pub retained_outbound_settlement: Mutex<Option<watch::Receiver<bool>>>,
 }
 struct FlightOutcome {
     mode: ConnectionMode,
@@ -207,6 +208,7 @@ impl ConnectivityManager {
             return peer;
         }
         let peer = Arc::new(PeerState {
+            retained_outbound_settlement: Mutex::new(None),
             inbound_connections: self
                 .inner
                 .policy
@@ -944,6 +946,22 @@ impl ConnectivityManager {
             retained.remove(&key);
             lease.close();
         }
+        if !lease.record.inbound_direction {
+            let original = lease.record._lifetime.settled();
+            let mut pending = lease
+                .record
+                .peer
+                .retained_outbound_settlement
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // 显式退休保留原 Busy；旧使用权不能清掉后来连接的完成通知。
+            if pending
+                .as_ref()
+                .is_some_and(|receipt| receipt.same_channel(&original))
+            {
+                pending.take();
+            }
+        }
     }
     /// 只有完整准入负责人授予当前资格后才持有强引用；返回 false 表示本次交换后释放。
     pub async fn retain(&self, lease: &ConnectionLease) -> Result<bool, ConnectivityError> {
@@ -1003,6 +1021,17 @@ impl ConnectivityManager {
             return Err(ConnectivityError::Stopped);
         }
         retained.insert(key, lease.record.clone());
+        if !lease.record.inbound_direction
+            && self.inner.policy.connections_per_peer_direction.is_some()
+        {
+            // 只保存原 lifetime 的完成通知，不持有名额或延长旧连接生命。
+            *lease
+                .record
+                .peer
+                .retained_outbound_settlement
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(lease.record._lifetime.settled());
+        }
         let record = lease.record.clone();
         let weak = Arc::downgrade(&self.inner);
         let stop = self.inner.stop.clone();

@@ -27,7 +27,7 @@ impl ProgressSnapshotWirePort for TransferProgressWire {
             .write(Message::Query {
                 challenge: WireId(request.challenge.bytes()),
                 source_entry: WireId(request.source.bytes()),
-                expected_attempt: Some(WireId(request.attempt.bytes())),
+                expected_attempt: request.attempt.map(|attempt| WireId(attempt.bytes())),
                 offset: request.offset,
                 snapshot_revision: request.revision,
             })

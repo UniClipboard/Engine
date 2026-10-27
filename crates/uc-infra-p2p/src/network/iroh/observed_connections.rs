@@ -14,6 +14,10 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 
+use uc_sync_protocol::transfer_progress::{
+    v2::TRANSFER_PROGRESS_ALPN, LEGACY_TRANSFER_PROGRESS_ALPN,
+};
+
 const MAX_OBSERVERS: usize = 4096;
 
 struct State {
@@ -132,6 +136,8 @@ impl EndpointHooks for ObservedConnections {
                 LEGACY_PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV1,
                 PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV2,
                 BLOBS_ALPN => NegotiatedProtocol::Blob,
+                LEGACY_TRANSFER_PROGRESS_ALPN => NegotiatedProtocol::TransferProgressV1,
+                TRANSFER_PROGRESS_ALPN => NegotiatedProtocol::TransferProgressV2,
                 _ => NegotiatedProtocol::Other,
             });
             if let Some(path) = selected {

@@ -1,4 +1,5 @@
 //! 实际 BAO 接收、文件导出、Application 采用与业务 ACK；生产接收交接仍另验。
+use super::progress_probe::UnusedSnapshotProvider;
 use super::progress_probe::{progress_budget, Fixture};
 use crate::network::iroh::blob_exchange::IrohBlobExchangeAdapter;
 use crate::network::iroh::transfer_progress_v2::TransferProgressInbound;
@@ -24,7 +25,7 @@ use uc_core::ports::blob::BlobDigest;
 use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::{
     read_frame, write_frame, Envelope, ItemKind, LogicalItem, Message, ProducerDescriptor,
-    TaskScope, TerminalOutcome, TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
+    RejectionReason, TaskScope, TerminalOutcome, TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
 };
 
 const BUDGET: Duration = Duration::from_secs(5);
@@ -155,7 +156,8 @@ async fn register(
             1,
             progress_budget(),
             &cancel,
-            owner
+            owner,
+            &UnusedSnapshotProvider,
         )
     );
     served?;
@@ -300,8 +302,16 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
     let budget = progress_budget();
     let deadline = budget.instant();
     let serving = tokio::spawn(async move {
-        TransferProgressInbound::serve(incoming, &connection, 1, budget, &stop_ack, pause.as_ref())
-            .await
+        TransferProgressInbound::serve(
+            incoming,
+            &connection,
+            1,
+            budget,
+            &stop_ack,
+            pause.as_ref(),
+            &UnusedSnapshotProvider,
+        )
+        .await
     });
     timeout(BUDGET, gate.entered.notified()).await?;
     let mut reading = Box::pin(read_frame(&mut sending.receive));
@@ -335,7 +345,8 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
             1,
             progress_budget(),
             &stop,
-            owner.as_ref()
+            owner.as_ref(),
+            &UnusedSnapshotProvider,
         ),
         read_frame(&mut duplicate.receive)
     );
@@ -364,11 +375,12 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
             1,
             progress_budget(),
             &stop,
-            owner.as_ref()
+            owner.as_ref(),
+            &UnusedSnapshotProvider,
         ),
         read_frame(&mut trailing.receive)
     );
-    assert!(matches!(served, Err(ProgressReceiveError::Exchange(_))));
+    assert!(matches!(served, Err(ProgressReceiveError::Malformed(_))));
     assert!(reply.is_err());
     assert_eq!(owner.snapshot().version, version);
     drop(trailing);
@@ -389,12 +401,15 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
             1,
             progress_budget(),
             &stop,
-            owner.as_ref()
+            owner.as_ref(),
+            &UnusedSnapshotProvider,
         ),
         read_frame(&mut rejected.receive)
     );
     assert!(matches!(served, Err(ProgressReceiveError::Conflict)));
-    assert!(reply.is_err());
+    assert!(
+        matches!(reply?.message, Message::Rejected { challenge, reason: RejectionReason::InvalidScope } if challenge.0 == bound.binding.bytes())
+    );
     assert_eq!(owner.snapshot().version, version);
     assert_eq!(tokio::fs::read(&output).await?, bytes);
     drop(rejected);

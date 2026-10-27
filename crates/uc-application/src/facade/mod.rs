@@ -178,3 +178,8 @@ pub use crate::space::{ConnectivityOpportunity, PeerConnectionError};
 pub use crate::transfer::receive::materialization::{
     FileCacheBlobMaterializer, InboundBlobFetcher,
 };
+
+pub use crate::transfer::progress::{TransferProgressQueryError, TransferProgressReconciliation};
+pub use uc_core::file_transfer::{
+    TransferProgressItemStatus, TransferProgressItemView, TransferProgressView,
+};

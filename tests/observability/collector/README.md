@@ -5,7 +5,10 @@
 - [本地测试业务动作（默认）](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.record.kind%22%3A%22business%22%2C%22deployment.environment.name%22%3A%22test%22%7D)
 - [本地测试运行诊断](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.record.kind%22%3A%22diagnostic%22%2C%22deployment.environment.name%22%3A%22test%22%7D)
 - [本地测试全部失败（含业务内的失败）](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.outcome%22%3A%22error%22%2C%22deployment.environment.name%22%3A%22test%22%7D)
+- [本地测试用户状态核对](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.record.kind%22%3A%22business%22%2C%22deployment.environment.name%22%3A%22test%22%2C%22uc.operation%22%3A%22clipboard.reconcile_progress%22%7D)
 - [生产业务动作](http://127.0.0.1:16686/search?service=uc-engine&lookback=1h&limit=100&tags=%7B%22uc.record.kind%22%3A%22business%22%2C%22deployment.environment.name%22%3A%22production%22%7D)
+
+状态核对按 `uc.operation=clipboard.reconcile_progress` 筛选完整动作；名称后缀显示实际核对结果。`settled` 表示核对已完成，文件自身仍可能失败；`not_retained`、`unsupported` 和 `unreachable` 保留未知，不解释为交付失败。本机列表／详情与发送前丢弃的实际边界见[切片8后端验收](../../../docs/exec-plans/active/2026-10-24-transfer-progress-connectivity-feasibility.md#真实-collector-与-jaeger-的业务验收)；添加链接本身不作为通过。
 
 这是项目约定的默认查询入口，不是修改 Jaeger 通用 Search 的默认行为。裸地址仍可以查询全部记录；旧记录不回写类别，必要时用原始搜索查看。
 链接使用现有 Jaeger 筛选能力，不修改 service.name，也不需要重启会丢失内存数据的 Jaeger。真实产品与测试按既有 environment 资源字段分开。
@@ -69,3 +72,35 @@ Jaeger 使用内存保存，实例重启或数据淘汰后样本可能失效，�
 运行 `node tests/observability/collector/collector-privacy.test.mjs` 校验两份配置的字段合同。
 查看默认入口时应能找到配对、复制/发送、实际升级与恢复，不应看到正常任务清理；查看运行诊断和失败入口时异常不能消失。
 测试数据须保持 test 环境，不为验证筛选而伪装成真实生产数据。
+
+
+## 文件进度场景复跑
+
+先在本任务独占的测试后端加载原严格配置。以下命令在仓库根目录执行；使用已有 Collector 时核对其接收地址，不重启或清空他人实例。未设置两个环境变量的普通测试不会默认安装远程输出。`--success-output immediate` 保留本地完成与健康记录，远端容量门丢弃时据此判断，不能将缺失样本按完整记录验收。
+
+```bash
+export UC_TEST_OTLP_TRACE_ENDPOINT=http://127.0.0.1:4318/v1/traces
+export UC_TEST_OTLP_LOG_ENDPOINT=http://127.0.0.1:4318/v1/logs
+just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked --run-ignored all --no-tests fail --success-output immediate -E 'test(=testing::host_adapter_contract::receive_retry::batch_outcomes::directory::real_engine_directory_batch_counts_only_one_complete_unit_after_commit) | test(=testing::host_adapter_contract::receive_retry::observation::real_engine_file_partial_retry_and_cancellation_export_actual_business_results)'
+export UC_PROGRESS_OBSERVATION_EVIDENCE_DIR="$(pwd)/target/test-artifacts/progress-collector-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+just cargo nextest run --profile ci -p uc-engine --features dev-tools --lib --locked --no-tests fail -E 'test(=testing::host_adapter_contract::receive_retry::observation::progress::real_engine_reconciliation_exports_its_result_without_extending_receive_or_retry)'
+```
+
+最后一个用例自行隔离进程，验证真实 Engine 产生的七次核对及原始字节；它使用记录器，需将本次空目录下的原始 protobuf 只投递一次才能验证真实后端：
+
+```bash
+python3 - <<'PYREPLAY'
+import os, urllib.request
+from pathlib import Path
+for source in sorted(Path(os.environ["UC_PROGRESS_OBSERVATION_EVIDENCE_DIR"]).glob("*.pb")):
+    signal = "LOG" if source.name.endswith("-logs.pb") else "TRACE"
+    endpoint = os.environ[f"UC_TEST_OTLP_{signal}_ENDPOINT"]
+    request = urllib.request.Request(endpoint, data=source.read_bytes(), headers={"Content-Type": "application/x-protobuf"}, method="POST")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 200
+PYREPLAY
+```
+
+HTTP200只证明接收请求。按本批 `summary.json` 中的确切 Trace／Span ID 对照 Jaeger 与 Collector 输出，不使用全局“最新一条”。分别筛选 `uc.operation`、`uc.outcome` 和 `deployment.environment.name=test`，从列表进入详情并展开 Tags／Process；接收或保存子节点筛选不加 business 根条件。检查原父树、同节点同 operation 的完成日志、时长及失败类别，再核对默认 test／production 入口。
+
+反例验收使用测试哨兵，不使用真实用户内容：私有名称、错误角色、额外内容字段、非法环境及日志正文均不得出现在后端。正向对照若重送同一真实 span，Jaeger memory 可能保存重复项，须与最终业务样本隔离，不能靠去重声称唯一记录。Collector 的测试入口不替代实际产品宿主或 PostHog 交付。

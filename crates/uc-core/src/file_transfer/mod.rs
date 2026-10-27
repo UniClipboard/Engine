@@ -6,7 +6,7 @@ pub use event::{
     FileTransferCancellationReason, FileTransferDirection, FileTransferEvent,
     FileTransferFailureReason, FileTransferProgress,
 };
-pub use outbound_progress::{OutboundProgressReporterPort, OutboundProgressStatus};
+pub use outbound_progress::OutboundProgressStatus;
 pub use ports::{FileTransferEventPublisherPort, FileTransferEventStorePort};
 
 mod receive_settlement;
@@ -43,9 +43,9 @@ pub use progress_terminal::{
 
 mod progress_snapshot;
 pub use progress_snapshot::{
-    ProgressActive, ProgressItemState, ProgressPhase, ProgressSnapshotCoverage,
-    ProgressSnapshotEffect, ProgressSnapshotInput, ProgressSnapshotRefusal,
-    MAX_SNAPSHOT_PAGE_ITEMS,
+    merge_progress_snapshot, ProgressActive, ProgressItemState, ProgressPhase,
+    ProgressSnapshotCoverage, ProgressSnapshotEffect, ProgressSnapshotInput, ProgressSnapshotMerge,
+    ProgressSnapshotRefusal, MAX_SNAPSHOT_PAGE_ITEMS,
 };
 
 mod progress_projection;
@@ -65,3 +65,14 @@ pub use progress_capacity::{
 
 mod progress_connections;
 pub use progress_connections::{PROGRESS_IDLE_RETENTION, PROGRESS_RETAINED_CONNECTIONS};
+
+mod progress_summary;
+pub use progress_summary::{
+    summarize_outbound_progress, summarize_progress, OutboundProgressSummary, ProgressBatchCounts,
+    ProgressBatchState, ProgressBatchSummary,
+};
+
+mod progress_view;
+pub use progress_view::{
+    TransferProgressItemStatus, TransferProgressItemView, TransferProgressView,
+};

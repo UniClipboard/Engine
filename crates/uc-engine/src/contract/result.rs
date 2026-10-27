@@ -7,7 +7,10 @@ use uc_application::facade::{
 };
 use uc_observability_contract::wire_enum;
 
-use super::{EngineError, ResendEntryOutcome, SendReportSummary};
+use super::{
+    EngineError, OutboundProgressReconciliation, OutboundProgressSummary, ResendEntryOutcome,
+    SendReportSummary,
+};
 use crate::{
     ConfigExportOutcome, ConfigImportPreviewOutcome, ConfigImportStageOutcome,
     CustomRelayMutationOutcome, CustomRelaySummary, DiagnosticLogsExportSummary,
@@ -702,6 +705,9 @@ pub enum OperationResult {
     EntryFileRead(EntryFileResourceSummary),
     EntryDelivery(EntryDeliveryViewSummary),
     HistoryCleared(HistoryClearSummary),
+    OutboundProgress(Option<OutboundProgressSummary>),
+    OutboundProgressList(Vec<OutboundProgressSummary>),
+    OutboundProgressReconciliation(OutboundProgressReconciliation),
     EntryReceiveProgress(Option<ReceiveProgressSummary>),
     EntryReceiveProgressList(Vec<ReceiveProgressSummary>),
     EntryReceiveCancellation(EntryReceiveCancellationOutcome),
@@ -1061,6 +1067,15 @@ impl fmt::Debug for OperationResult {
                 .field("kind", &"history_cleared")
                 .field("deleted_count", &result.deleted_count)
                 .field("failed_count", &result.failed_entry_ids.len()),
+            Self::OutboundProgress(progress) => debug
+                .field("kind", &"outbound_progress")
+                .field("has_progress", &progress.is_some()),
+            Self::OutboundProgressList(progress) => debug
+                .field("kind", &"outbound_progress_list")
+                .field("progress_count", &progress.len()),
+            Self::OutboundProgressReconciliation(outcome) => debug
+                .field("kind", &"outbound_progress_reconciliation")
+                .field("outcome", outcome),
             Self::EntryReceiveProgress(progress) => debug
                 .field("kind", &"entry_receive_progress")
                 .field("has_progress", &progress.is_some()),

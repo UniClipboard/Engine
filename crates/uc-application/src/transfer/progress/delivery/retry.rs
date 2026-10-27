@@ -13,10 +13,13 @@ pub(super) fn retry_class(source: &ProgressReceiveError) -> RetryClass {
         | ProgressReceiveError::Clock(_)
         | ProgressReceiveError::Unsupported
         | ProgressReceiveError::Protocol
+        | ProgressReceiveError::Malformed(_)
+        | ProgressReceiveError::AccessDenied(_)
         | ProgressReceiveError::UnknownTask
         | ProgressReceiveError::InvalidPlan
         | ProgressReceiveError::Stale
-        | ProgressReceiveError::Conflict => RetryClass::Stop,
+        | ProgressReceiveError::Conflict
+        | ProgressReceiveError::Settlement { .. } => RetryClass::Stop,
     }
 }
 fn connection_retry(source: &ConnectivityError) -> RetryClass {

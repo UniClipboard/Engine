@@ -5,6 +5,7 @@
 //! 查询、准入和 Infra 都只能经 Owner 改写成员记录。
 
 mod draft;
+mod retirement;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -29,6 +30,7 @@ use super::{
 use crate::space::lifecycle::{SpaceMembershipRebuildError, SpaceMembershipResetPort};
 
 pub(crate) use draft::MembershipDraft;
+pub(crate) use retirement::{MemberScopeRetirement, MemberScopeRetirementPort};
 use uc_observability_contract::uc_warn;
 pub(crate) use view::{pause_reason, MembershipView};
 
@@ -40,6 +42,7 @@ pub(crate) struct MembershipOwner {
     worker_wake: Arc<dyn WakeSpaceMembershipMaintenancePort>,
     /// 已发布状态及其所属数据库代号；代号与存储当前代号不同即视为失效。
     published: Mutex<Option<Published>>,
+    scope_retirement: Mutex<Option<Arc<dyn MemberScopeRetirementPort>>>,
     /// 新近确认了本机位置、尚未交给组密钥投递的对端。只用于提前投递；持久退避仍保证最终送达，
     /// 重启后丢失不影响正确性。
     reachable_peers: Mutex<BTreeSet<DeviceId>>,
@@ -73,9 +76,30 @@ impl MembershipOwner {
             host_events,
             worker_wake,
             published: Mutex::new(None),
+            scope_retirement: Mutex::new(None),
             reachable_peers: Mutex::new(BTreeSet::new()),
             operation: tokio::sync::Mutex::new(()),
             changes: tokio::sync::watch::channel(()).0,
+        }
+    }
+
+    /// 仅在生产对象图构造期间绑定；回调不做 IO、不重入 Owner。
+    pub(crate) fn bind_scope_retirement(&self, retirement: Arc<dyn MemberScopeRetirementPort>) {
+        let mut target = self
+            .scope_retirement
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *target = Some(retirement);
+    }
+
+    fn retire_scope(&self, retirement: MemberScopeRetirement) {
+        if let Some(target) = self
+            .scope_retirement
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            target.retire_membership(retirement);
         }
     }
 
@@ -240,7 +264,11 @@ impl MembershipOwner {
         generation: u64,
         view: Arc<MembershipView>,
     ) -> Result<(), MembershipLedgerError> {
-        *self.lock_published()? = Some(Published { generation, view });
+        let mut published = self.lock_published()?;
+        if let Some(retirement) = retirement::between(published.as_ref(), generation, &view) {
+            self.retire_scope(retirement);
+        }
+        *published = Some(Published { generation, view });
         Ok(())
     }
 
@@ -254,7 +282,9 @@ impl MembershipOwner {
     }
 
     fn forget(&self) -> Result<(), MembershipLedgerError> {
-        *self.lock_published()? = None;
+        let mut published = self.lock_published()?;
+        self.retire_scope(MemberScopeRetirement::All);
+        *published = None;
         Ok(())
     }
 }

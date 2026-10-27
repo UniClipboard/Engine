@@ -14,7 +14,9 @@ use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
 use uc_observability_contract::diagnostics::within_network_scope;
 use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
-use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+use uc_sync_protocol::clipboard::{
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
 use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
 use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
@@ -124,9 +126,11 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
                 "membership-history",
             ),
-            ConnectivityProfile::Clipboard => {
-                (MULTIPLEXED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, "clipboard")
-            }
+            ConnectivityProfile::Clipboard => (
+                ATTRIBUTED_CLIPBOARD_ALPN,
+                MULTIPLEXED_CLIPBOARD_ALPN,
+                "clipboard",
+            ),
             ConnectivityProfile::LegacyGroupUpdate => (
                 LEGACY_GROUP_UPDATE_ALPN,
                 LEGACY_GROUP_UPDATE_ALPN,
@@ -136,6 +140,10 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 (GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN, "group-update")
             }
         };
+        let mut additional = vec![fallback.to_vec()];
+        if matches!(self.profile, ConnectivityProfile::Clipboard) {
+            additional.push(CLIPBOARD_ALPN.to_vec());
+        }
         let result = if matches!(self.profile, ConnectivityProfile::Blob) {
             // blob 的每轮只发起一次原生建连；恢复次数与退避由完整接收负责人统一计算。
             tokio::select! {
@@ -148,7 +156,7 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 let connecting = within_network_scope(self.endpoint.connect_with_opts(
                     strip_relay_if_lan_only(address),
                     preferred,
-                    ConnectOptions::new().with_additional_alpns(vec![fallback.to_vec()]),
+                    ConnectOptions::new().with_additional_alpns(additional),
                 ))
                 .await
                 .map_err(|source| ConnectivityError::Backend(Box::new(source)))?;
@@ -165,7 +173,7 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 self.endpoint.clone(),
                 address,
                 preferred,
-                vec![fallback.to_vec()],
+                additional,
                 label,
                 AddressInputSource::Stored,
             );

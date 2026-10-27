@@ -3,7 +3,7 @@ use super::clock::{Clock, Sample};
 use super::{
     CurrentProgressTaskPort, ElapsedClockError, ElapsedClockPort, ProgressBound,
     ProgressContactNotice, ProgressProjectionSnapshot, ProgressReceiveError, ProgressReceiverPort,
-    ProgressTerminalNotice, ProgressUpdateNotice,
+    ProgressTaskDescriptor, ProgressTerminalNotice, ProgressUpdateNotice,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::Notify;
 use uc_core::file_transfer::{
-    valid_progress_plan, ProgressFreshness, ProgressFreshnessEffect, ProgressFreshnessInput,
-    ProgressFreshnessView, ProgressIdentity, ProgressItem, ProgressItemEffect, ProgressItemInput,
-    ProgressItemProjection, ProgressItemState, ProgressRegistration, RegistrationEffect,
-    RegistrationInput,
+    summarize_progress, valid_progress_plan, ProgressFreshness, ProgressFreshnessEffect,
+    ProgressFreshnessInput, ProgressFreshnessView, ProgressIdentity, ProgressItem,
+    ProgressItemEffect, ProgressItemInput, ProgressItemProjection, ProgressItemState,
+    ProgressRegistration, RegistrationEffect, RegistrationInput,
 };
 use uc_core::ids::DeviceId;
 use uuid::Uuid;
@@ -22,6 +22,7 @@ use uuid::Uuid;
 pub struct TransferProgressReceiver {
     peer: DeviceId,
     source: ProgressIdentity,
+    query_intent: ProgressIdentity,
     state: Mutex<State>,
     clock: Arc<Clock>,
 }
@@ -31,6 +32,9 @@ struct State {
     generation: u64,
     registration: ProgressRegistration<ProgressIdentity>,
     bound: Option<ProgressBound>,
+    queried_scope: Option<ProgressTaskDescriptor>,
+    snapshot_revision: Option<u64>,
+    snapshot_content: Option<Vec<ProgressItemState>>,
     items: HashMap<ProgressItem, ProgressItemProjection>,
     version: u64,
     freshness: ProgressFreshness,
@@ -61,12 +65,16 @@ impl TransferProgressReceiver {
             clock,
             peer,
             source,
+            query_intent: ProgressIdentity::new(*Uuid::new_v4().as_bytes()),
             state: Mutex::new(State {
                 plan,
                 closed: false,
                 generation: 0,
                 registration: ProgressRegistration::new(source),
                 bound: None,
+                queried_scope: None,
+                snapshot_revision: None,
+                snapshot_content: None,
                 items: HashMap::new(),
                 version: 0,
                 freshness,
@@ -88,6 +96,9 @@ impl TransferProgressReceiver {
         state.items.clear();
         state.items.shrink_to_fit();
         state.bound = None;
+        state.queried_scope = None;
+        state.snapshot_revision = None;
+        state.snapshot_content = None;
         state
             .freshness
             .apply(ProgressFreshnessInput::ContinuityLost);
@@ -116,23 +127,27 @@ impl TransferProgressReceiver {
                 None => Ok(view),
             }
         };
+        let items: Vec<_> = state
+            .plan
+            .iter()
+            .map(|item| {
+                (
+                    *item,
+                    state
+                        .items
+                        .get(item)
+                        .and_then(ProgressItemProjection::state),
+                )
+            })
+            .collect();
+        let summary = summarize_progress(items.iter().map(|(_, value)| *value), view);
         ProgressProjectionSnapshot {
             freshness,
+            summary,
             version: state.version,
             bound: state.bound,
-            items: state
-                .plan
-                .iter()
-                .map(|item| {
-                    (
-                        *item,
-                        state
-                            .items
-                            .get(item)
-                            .and_then(ProgressItemProjection::state),
-                    )
-                })
-                .collect(),
+            task: state.task_descriptor(),
+            items,
         }
     }
 }
@@ -276,6 +291,7 @@ impl ProgressReceiverPort for TransferProgressReceiver {
         if usize::from(descriptor.item_count) != state.plan.len() {
             return Err(ProgressReceiveError::InvalidPlan);
         }
+        let previous = state.task_descriptor();
         if state.registration.apply(RegistrationInput::Describe {
             generation,
             nonce,
@@ -285,20 +301,19 @@ impl ProgressReceiverPort for TransferProgressReceiver {
         {
             return Err(ProgressReceiveError::Stale);
         }
-        if state
-            .bound
-            .is_none_or(|previous| previous.descriptor.attempt != descriptor.attempt)
-        {
+        if previous != Some(descriptor) {
+            state.snapshot_revision = None;
+            state.snapshot_content = None;
+        }
+        if previous.is_none_or(|previous| previous.attempt != descriptor.attempt) {
             state.items.clear();
             state.freshness.apply(ProgressFreshnessInput::NewAttempt);
         }
-        if state
-            .bound
-            .is_some_and(|previous| previous.descriptor.producer != descriptor.producer)
-        {
+        if previous.is_some_and(|previous| previous.producer != descriptor.producer) {
             state.freshness.apply(ProgressFreshnessInput::NewProducer);
         }
         state.bound = Some(bound);
+        state.queried_scope = None;
         state.version = state.version.saturating_add(1);
         Ok(bound)
     }
@@ -394,3 +409,9 @@ fn refresh_view(clock: &Clock, state: &mut State) -> ProgressFreshnessView {
     }
     view
 }
+
+#[path = "receiver_snapshot.rs"]
+mod snapshot_adoption;
+
+#[path = "receiver_unattributed.rs"]
+mod unattributed;

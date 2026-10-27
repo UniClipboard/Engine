@@ -153,26 +153,6 @@ impl BlobError {
     }
 }
 
-/// 字节级进度上报通道。
-///
-/// adapter 在 fetch 过程中可以调用 sink 通知调用方"已经传输了多少字节"。
-/// adapter 自己负责做合理节流(字节阈值 + 时间窗),sink 实现端不应假设
-/// 调用频率,但也不应该在实现里再做长时间的同步阻塞操作 ——
-/// adapter 通常在网络循环里调用 sink。
-///
-/// `total_bytes` 由 adapter 透传:
-/// - 如果 adapter 知道总大小(例如 iroh-blobs 在 PartComplete 时知道 size),
-///   就传 `Some`;
-/// - 否则传 `None`,由 sink 实现层自己结合外部已知的大小处理。
-#[async_trait]
-pub trait BlobProgressSink: Send + Sync {
-    /// 上报当前累计已传输字节数。
-    ///
-    /// `bytes_transferred` 是单调递增的累计值(adapter 保证不回退);
-    /// `total_bytes` 在已知时透传,未知时为 `None`。
-    async fn report(&self, bytes_transferred: u64, total_bytes: Option<u64>);
-}
-
 /// 本地密文发布、凭据和引用管理；网络获取及停止归完整接收流程。
 ///
 /// 发布和引用规则见模块说明。

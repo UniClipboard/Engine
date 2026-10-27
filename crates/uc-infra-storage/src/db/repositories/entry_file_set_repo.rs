@@ -652,7 +652,7 @@ mod tests {
         }
     }
 
-    fn make_repo() -> (Repo, DieselSqliteExecutor, TempDir) {
+    pub(super) fn make_repo() -> (Repo, DieselSqliteExecutor, TempDir) {
         make_repo_with_subkey(Arc::new(FixedSubkey([7u8; 32])))
     }
 
@@ -672,7 +672,7 @@ mod tests {
         (repo, DieselSqliteExecutor::new(pool_for_seed), tempdir)
     }
 
-    fn seed_entry(executor: &DieselSqliteExecutor, entry_id: &str) {
+    pub(super) fn seed_entry(executor: &DieselSqliteExecutor, entry_id: &str) {
         let event_id = format!("ev-{entry_id}");
         let event_row = NewClipboardEventRow {
             event_id: event_id.clone(),
@@ -704,7 +704,7 @@ mod tests {
             .unwrap();
     }
 
-    fn sample_file_set() -> EntryFileSet {
+    pub(super) fn sample_file_set() -> EntryFileSet {
         EntryFileSet {
             lines: vec![
                 EntryFileSetLine {
@@ -1009,3 +1009,9 @@ mod tests {
         assert!(loaded.is_none(), "FK CASCADE 应清理 file-set 行");
     }
 }
+
+mod history;
+
+#[cfg(test)]
+#[path = "entry_file_set_repo/history_tests.rs"]
+mod history_tests;

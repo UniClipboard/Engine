@@ -2,7 +2,8 @@ use super::super::clock::Clock;
 use super::super::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
     ProgressLiveRoundPort, ProgressQueryResult, ProgressReceiveError, ProgressSnapshotRoundPort,
-    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTerminalRoundPort,
+    ProgressSnapshotTarget, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalRoundPort,
 };
 use super::model::{clock_failure, Key, QueryKey};
 use super::query::QUERY_LIMIT;
@@ -60,8 +61,7 @@ impl ProgressExchangeService {
     pub fn submit_settled(
         &self,
         peer: DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         result: ProgressTerminal,
     ) -> Result<ProgressSubmission, ProgressReceiveError> {
         if self
@@ -77,7 +77,7 @@ impl ProgressExchangeService {
         let current = match self
             .inner
             .authority
-            .claim_terminal(&peer, source, attempt, result.item)
+            .claim_terminal(&peer, expected, result.item)
         {
             Ok(current) => current,
             Err(reason) => return Ok(ProgressSubmission::Refused(reason)),
@@ -143,7 +143,8 @@ impl ProgressExchangeService {
     pub async fn read_snapshot(
         &self,
         peer: DeviceId,
-        expected: ProgressSourceTask,
+        target: ProgressSnapshotTarget,
+        intent: ProgressIdentity,
         cancel: &CancellationToken,
     ) -> ProgressQueryResult {
         if self
@@ -155,8 +156,11 @@ impl ProgressExchangeService {
         {
             return Arc::new(Err(ConnectivityError::Stopped.into()));
         }
-        if !valid_progress_plan(&expected.items)
-            || usize::from(expected.descriptor.item_count) != expected.items.len()
+        if !valid_progress_plan(&target.items)
+            || target.expected.is_some_and(|descriptor| {
+                descriptor.source != target.source
+                    || usize::from(descriptor.item_count) != target.items.len()
+            })
         {
             return Arc::new(Err(ProgressSnapshotRefusal::InvalidPlan.into()));
         }
@@ -177,27 +181,36 @@ impl ProgressExchangeService {
                 return clock_failure(Some(source));
             }
         };
+        // 每个观察者守住自己的原五秒；胜者把同一截止和取消交给尚未poll的完整读取。
+        let expires_at = match sample.now.checked_add(QUERY_LIMIT) {
+            Some(deadline) => deadline,
+            None => return Arc::new(Err(ConnectivityError::DeadlineExpired.into())),
+        };
+        let deadline = Arc::new(
+            match ProgressExchangeDeadline::new(self.inner.clock.lease(sample.epoch), expires_at) {
+                Ok(deadline) => deadline,
+                Err(source) => return Arc::new(Err(source)),
+            },
+        );
+        let round_cancel = CancellationToken::new();
+        // 能力构造在状态锁外冻结会话；去重或过载时直接丢弃未启动的future，不提前执行IO。
+        let round = self.inner.snapshot.clone().read_snapshot(
+            peer,
+            target.clone(),
+            deadline.clone(),
+            round_cancel.clone(),
+        );
         let mut receive = match self
             .inner
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .query(peer, expected, sample)
+            .query(peer, target, sample, intent, round_cancel, round)
         {
             Ok(receive) => receive,
             Err(reply) => return reply,
         };
         self.inner.wake.notify_one();
-        // 迟到的并发调用可能早于已入队请求采样；观察者也守住各自原五秒，不能借合并延长。
-        let expires_at = match sample.now.checked_add(QUERY_LIMIT) {
-            Some(deadline) => deadline,
-            None => return Arc::new(Err(ConnectivityError::DeadlineExpired.into())),
-        };
-        let deadline =
-            match ProgressExchangeDeadline::new(self.inner.clock.lease(sample.epoch), expires_at) {
-                Ok(deadline) => deadline,
-                Err(source) => return Arc::new(Err(source)),
-            };
         loop {
             if let Err(source) = deadline.check(cancel) {
                 return Arc::new(Err(source));
@@ -217,32 +230,15 @@ impl ProgressExchangeService {
 }
 
 impl ProgressExchangeService {
-    /// 只提交本地最新活动值；不等待网络或交换额度，终态封口后拒绝后续活动值。
-    pub fn submit_live(
+    /// 交接原负责人冻结的当前任务事实；None表示尚无中间值，重复交接不刷新原期限。
+    /// 描述与实际权威逐字段一致后才可入队，不把旧快照归入重建后的producer。
+    pub fn submit_activity(
         &self,
         peer: DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
-        value: ProgressActive,
-    ) -> Result<ProgressSubmission, ProgressReceiveError> {
-        self.submit_activity(peer, source, attempt, Some(value))
-    }
-    /// 当前接收尝试接受后跟踪等待状态；重复调用不刷新首次联系或预算。
-    pub fn track_current(
-        &self,
-        peer: DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
-    ) -> Result<ProgressSubmission, ProgressReceiveError> {
-        self.submit_activity(peer, source, attempt, None)
-    }
-    fn submit_activity(
-        &self,
-        peer: DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         value: Option<ProgressActive>,
     ) -> Result<ProgressSubmission, ProgressReceiveError> {
+        let source = expected.source;
         if self
             .inner
             .state
@@ -257,7 +253,7 @@ impl ProgressExchangeService {
                 ProgressClaimRefusal::NotRetained,
             ));
         };
-        if task.descriptor.source != source || task.descriptor.attempt != attempt {
+        if task.descriptor != expected {
             return Ok(ProgressSubmission::Refused(
                 ProgressClaimRefusal::Superseded,
             ));

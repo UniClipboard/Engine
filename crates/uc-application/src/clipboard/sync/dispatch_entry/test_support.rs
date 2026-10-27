@@ -255,6 +255,7 @@ pub(crate) fn dispatch_input() -> DispatchClipboardEntryInput {
 /// that the header is forwarded unchanged to the dispatch port.
 pub(crate) fn test_header() -> ClipboardHeader {
     ClipboardHeader {
+        source_entry: None,
         version: ClipboardHeader::CURRENT_VERSION,
         snapshot_hash: "0".repeat(64),
         captured_at_ms: 0,

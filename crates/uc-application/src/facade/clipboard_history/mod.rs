@@ -1,5 +1,6 @@
 pub use crate::clipboard::history::clear_history::HistoryDeletionTargetsPort;
 use crate::deps::ReadEntryResourceSnapshotPort;
+use crate::transfer::progress::ProgressProjectionRegistry;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,6 +63,7 @@ pub use crate::clipboard::history_tags::{
 pub struct ClipboardHistoryFacadeDeps {
     pub resource_snapshot: Arc<dyn ReadEntryResourceSnapshotPort>,
     pub(crate) receive_work: Arc<ReceiveWorkRegistry>,
+    pub(crate) progress: ProgressProjectionRegistry,
     pub file_references: Arc<dyn HistoryFileReferencePort>,
     pub entry_ports: ClipboardEntryPorts,
     pub selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
@@ -120,6 +122,7 @@ impl ClipboardHistoryFacade {
         let ClipboardHistoryFacadeDeps {
             resource_snapshot,
             receive_work,
+            progress,
             file_references,
             entry_ports,
             selection_repo,
@@ -202,6 +205,7 @@ impl ClipboardHistoryFacade {
             entry_delete_with_receive_state,
             rep_list_for_event.clone(),
             receive_work.clone(),
+            progress,
         );
         if let Some(dir) = file_cache_dir.clone() {
             delete_uc = delete_uc.with_file_cache_dir(dir);

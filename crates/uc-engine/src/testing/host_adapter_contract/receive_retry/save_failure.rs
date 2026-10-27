@@ -4,6 +4,7 @@ mod directory_settlement;
 mod preparation;
 mod terminal;
 mod unit_settlement;
+use super::batch_outcomes;
 use super::*;
 use diesel::sql_types::Nullable;
 
@@ -72,6 +73,7 @@ async fn assert_save_failure_at(index: usize) {
         Some(ReceiveItemFailureReason::StorageUnavailable)
     );
     assert_eq!(failed.items_completed, 2);
+    batch_outcomes::assert_file_failure(&case, &failed, index).await;
     let saved = saved_files(receiver, entry, case.receiver_root.path()).await;
     assert_eq!(saved.len(), 2);
     for (position, bytes) in CONTENTS.iter().enumerate() {

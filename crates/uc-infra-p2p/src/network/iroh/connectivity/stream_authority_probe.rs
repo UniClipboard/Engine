@@ -1,4 +1,5 @@
 //! 同一组合测试中读取实际接收use case进程的当前权威，再通过真实Iroh流登记。
+use super::progress_probe::UnusedSnapshotProvider;
 use super::progress_probe::{progress_budget, Fixture, UnusedLive};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use anyhow::ensure;
@@ -31,8 +32,8 @@ use uc_core::file_transfer::{
 use uc_core::ids::DeviceId;
 use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::{
-    read_frame, write_frame, Envelope, ItemKind, LogicalItem, Message, TaskScope, TerminalOutcome,
-    TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
+    read_frame, write_frame, Envelope, ItemKind, LogicalItem, Message, RejectionReason, TaskScope,
+    TerminalOutcome, TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
 };
 use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
@@ -178,16 +179,17 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let source = expected.source;
+        let attempt = expected.attempt;
         let kind = match item.kind {
             ProgressItemKind::File => "file",
             ProgressItemKind::Representation => "representation",
             ProgressItemKind::DirectoryUnit => "directory",
         };
-        let reply=self.request(json!({"op":"claim","peer":peer.as_str(),"source":source.bytes(),"attempt":attempt.bytes(),"kind":kind,"index":item.index})).unwrap();
+        let reply=self.request(json!({"op":"claim","peer":peer.as_str(),"source":source.bytes(),"attempt":attempt.bytes(),"producer":expected.producer.bytes(),"revision":expected.revision,"item_count":expected.item_count,"kind":kind,"index":item.index})).unwrap();
         if !reply["task"].is_null() {
             return Ok(decode_task(reply["task"].clone()).unwrap());
         }
@@ -286,6 +288,7 @@ fn producer(fixture: &Fixture, authority: Arc<Authority>) -> Arc<TransferProgres
         fixture.outbound.clone(),
         Arc::new(TransferProgressWire),
         authority,
+        Arc::new(UnusedSnapshotProvider),
         Arc::new(SystemElapsedClock),
     ))
 }
@@ -305,6 +308,7 @@ async fn registration(
             progress_budget(),
             &cancel,
             owner,
+            &UnusedSnapshotProvider,
         )
         .await
     };
@@ -358,7 +362,8 @@ async fn stale_terminal(
             generation,
             progress_budget(),
             &cancel,
-            owner
+            owner,
+            &UnusedSnapshotProvider,
         ),
         read_frame(&mut stream.receive)
     );
@@ -366,7 +371,16 @@ async fn stale_terminal(
         matches!(served, Err(ProgressReceiveError::Stale)),
         "old identity must be refused"
     );
-    ensure!(reply.is_err(), "stale terminal cannot ACK");
+    ensure!(
+        matches!(
+            reply?.message,
+            Message::Rejected {
+                challenge,
+                reason: RejectionReason::Stale,
+            } if challenge.0 == bound.binding.bytes()
+        ),
+        "stale terminal must return its correlated refusal without ACK"
+    );
     Ok(())
 }
 
@@ -413,6 +427,7 @@ async fn current_receive_authority_binds_over_real_iroh_and_old_descriptors_cann
                     progress_budget(),
                     &CancellationToken::new(),
                     held.as_ref(),
+                    &UnusedSnapshotProvider,
                 )
                 .await
             });
@@ -494,6 +509,7 @@ async fn actual_receiver_restart_new_connection_retires_old_producer_and_pending
                 progress_budget(),
                 &CancellationToken::new(),
                 held.as_ref(),
+                &UnusedSnapshotProvider,
             )
             .await
         });
@@ -583,7 +599,7 @@ async fn explicit_legacy_is_unsupported_but_corrupt_current_frame_keeps_exchange
         .err()
         .ok_or_else(|| anyhow::anyhow!("corrupt current frame must fail"))?;
     ensure!(
-        matches!(failure, ProgressReceiveError::Exchange(_)) && failure.source().is_some(),
+        matches!(failure, ProgressReceiveError::Malformed(_)) && failure.source().is_some(),
         "malformed current protocol is not unsupported or offline"
     );
     drop(incoming);
@@ -632,6 +648,7 @@ async fn fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again(
                     progress_budget(),
                     &CancellationToken::new(),
                     held.as_ref(),
+                    &UnusedSnapshotProvider,
                 )
                 .await
             });
@@ -721,6 +738,7 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
                     progress_budget(),
                     &stop,
                     &owner,
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
             }
@@ -741,7 +759,7 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
             Arc::new(UnusedLive),
         );
         assert_eq!(
-            delivery.submit_settled(peer, SOURCE, accepted.descriptor.attempt, result)?,
+            delivery.submit_settled(peer, accepted.descriptor, result)?,
             ProgressSubmission::Retained
         );
         let supervise_stop = CancellationToken::new();
@@ -749,7 +767,7 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
         let ((), served) = tokio::join!(acknowledged.notified(), receive);
         served?;
         assert_eq!(
-            delivery.submit_settled(peer, SOURCE, accepted.descriptor.attempt, result)?,
+            delivery.submit_settled(peer, accepted.descriptor, result)?,
             ProgressSubmission::Refused(ProgressClaimRefusal::AlreadyObserved)
         );
         supervise_stop.cancel();
@@ -767,3 +785,9 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
 
 #[path = "stream_snapshot_probe.rs"]
 mod snapshot_probe;
+
+#[path = "stream_query_provider_probe.rs"]
+mod query_provider_probe;
+
+#[path = "stream_legacy_authority_probe.rs"]
+mod legacy_probe;

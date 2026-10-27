@@ -61,7 +61,7 @@ fn query_includes_unstarted_items_and_requires_real_persistence_for_completed_do
             .register(&EntryId::from("receiver"), "attempt")
             .unwrap();
         action.accept_source(source());
-        action.batch.plan(3, 21);
+        action.batch.plan(3);
         action.batch.item_result(
             "receiver:attempt:attempt:member:0",
             7,
@@ -806,3 +806,5 @@ fn legacy_blob_identity_requires_one_unambiguous_source_and_never_guesses_by_has
         .is_some());
     second.finish(Ok(()));
 }
+
+mod query_snapshot;

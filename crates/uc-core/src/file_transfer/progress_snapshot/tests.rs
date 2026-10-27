@@ -175,3 +175,5 @@ fn sparse_representation_plan_and_directory_unit_follow_the_original_order() {
         );
     }
 }
+
+mod adoption;

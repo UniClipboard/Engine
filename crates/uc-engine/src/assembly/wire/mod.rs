@@ -677,20 +677,22 @@ pub async fn wire_dependencies_from_inputs(
     // per-session subkey derived from space access, so it is constructed here
     // (after space access + profile exist) rather than in `create_infra_layer`,
     // reusing the shared executor.
-    let entry_file_set_repo: Arc<dyn uc_core::ports::clipboard::EntryFileSetRepositoryPort> =
-        Arc::new(match &v3_content_protection {
-            Some(protection) => {
-                uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new_v3(
-                    infra.db_executor.clone(),
-                    Arc::clone(protection),
-                )
-            }
-            None => uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new(
+    let entry_file_set_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => {
+            uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new_v3(
                 infra.db_executor.clone(),
-                space_access_ports.derive_subkey.clone(),
-                platform.current_profile.clone(),
-            ),
-        });
+                Arc::clone(protection),
+            )
+        }
+        None => uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new(
+            infra.db_executor.clone(),
+            space_access_ports.derive_subkey.clone(),
+            platform.current_profile.clone(),
+        ),
+    });
+
+    let entry_file_set_repo: Arc<dyn uc_core::ports::clipboard::EntryFileSetRepositoryPort> =
+        entry_file_set_impl.clone();
 
     // 本机历史标签：名称以当前 profile 的内容保护密封；旧格式 profile 只能读取关联。
     let history_tag_repo = Arc::new(match &v3_content_protection {
@@ -960,6 +962,7 @@ pub async fn wire_dependencies_from_inputs(
         clipboard_background,
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
+        progress_history: entry_file_set_impl,
         clipboard: ClipboardPorts {
             resource_snapshot: Arc::new(DieselEntryResourceReader::new(
                 infra.db_executor.clone(),

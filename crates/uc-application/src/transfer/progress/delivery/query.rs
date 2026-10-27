@@ -1,6 +1,7 @@
 use super::super::clock::Sample;
 use super::super::{
-    ElapsedClockError, ProgressReceiveError, ProgressSnapshotRead, ProgressSourceTask,
+    ElapsedClockError, ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRound,
+    ProgressSnapshotTarget,
 };
 use super::model::{clock_failure, Action, Job, ProgressQueryResult, QueryKey, Work};
 use super::state::State;
@@ -9,16 +10,17 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use uc_core::file_transfer::{ExchangePriority, ExchangeRefusal};
+use uc_core::file_transfer::{ExchangePriority, ExchangeRefusal, ProgressIdentity};
 use uc_core::ids::DeviceId;
 
 const MAX_QUERY_OBSERVERS: usize = 16;
 pub(super) const QUERY_LIMIT: Duration = Duration::from_secs(5);
 pub(super) struct QueryRecord {
-    expected: ProgressSourceTask,
+    expected: ProgressSnapshotTarget,
     epoch: u64,
     deadline: Duration,
     cancel: CancellationToken,
+    round: Option<ProgressSnapshotRound>,
     reply: watch::Sender<Option<ProgressQueryResult>>,
     queued: bool,
     sealed: bool,
@@ -42,8 +44,11 @@ impl State {
     pub fn query(
         &mut self,
         peer: DeviceId,
-        expected: ProgressSourceTask,
+        expected: ProgressSnapshotTarget,
         sample: Sample,
+        intent: ProgressIdentity,
+        cancel: CancellationToken,
+        round: ProgressSnapshotRound,
     ) -> Result<watch::Receiver<Option<ProgressQueryResult>>, ProgressQueryResult> {
         if self.closed {
             return Err(stopped());
@@ -58,7 +63,7 @@ impl State {
             .checked_add(QUERY_LIMIT)
             .filter(|deadline| *deadline > current.now)
             .ok_or_else(expired)?;
-        let key = QueryKey::new(peer, expected.descriptor);
+        let key = QueryKey::query(peer, &expected, intent);
         if let Some(existing) = self.queries.get(&key) {
             if existing.expected.items != expected.items {
                 return Err(Arc::new(Err(ProgressReceiveError::InvalidPlan)));
@@ -87,7 +92,8 @@ impl State {
                 expected,
                 epoch: sample.epoch,
                 deadline,
-                cancel: CancellationToken::new(),
+                cancel,
+                round: Some(round),
                 reply,
                 queued: true,
                 sealed: false,
@@ -101,6 +107,7 @@ impl State {
             return None;
         }
         record.queued = false;
+        let round = record.round.take()?;
         let cancel = record.cancel.clone();
         self.active.insert(
             key.peer,
@@ -111,7 +118,7 @@ impl State {
             epoch: record.epoch,
             deadline: record.deadline,
             cancel,
-            action: Action::Snapshot(record.expected.clone()),
+            action: Action::Snapshot(round),
         })
     }
     pub fn query_interested(&self, key: QueryKey) -> bool {

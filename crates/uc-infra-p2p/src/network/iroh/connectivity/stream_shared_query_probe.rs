@@ -1,4 +1,5 @@
 //! 同一监督器的实际查询/终态交换；不可中断成员读取暂停后仍保留真实工作寿命。
+use super::progress_probe::UnusedSnapshotProvider;
 use super::progress_probe::{progress_budget, Fixture, UnusedLive};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
@@ -16,9 +17,10 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal,
     ProgressExchangeDeadline, ProgressExchangeService, ProgressReceiveError, ProgressSnapshotRead,
-    ProgressSnapshotRoundPort, ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort,
-    ProgressTaskDescriptor, ProgressTerminalRoundPort, TransferProgressProducer,
-    TransferProgressReceiver, TransferProgressSnapshotReader,
+    ProgressSnapshotRound, ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceTask,
+    ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalRoundPort, TransferProgressProducer, TransferProgressReceiver,
+    TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
@@ -76,14 +78,14 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let source = expected.source;
         let current = self
             .current_task(peer, source)
             .ok_or(ProgressClaimRefusal::NotRetained)?;
-        if current.descriptor.attempt != attempt {
+        if current.descriptor != expected {
             return Err(ProgressClaimRefusal::Superseded);
         }
         if !current.items.contains(&item) {
@@ -113,26 +115,28 @@ impl Counts {
     }
 }
 struct Snapshot {
-    reader: TransferProgressSnapshotReader,
+    reader: Arc<TransferProgressSnapshotReader>,
     counts: Arc<Counts>,
 }
-#[async_trait]
 impl ProgressSnapshotRoundPort for Snapshot {
-    async fn read_snapshot(
-        &self,
-        peer: &DeviceId,
-        expected: ProgressSourceTask,
-        deadline: &ProgressExchangeDeadline,
-        cancel: &CancellationToken,
-    ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
-        self.counts.enter(*peer);
-        self.counts.reads.fetch_add(1, Ordering::SeqCst);
-        let result = self
+    fn read_snapshot(
+        self: Arc<Self>,
+        peer: DeviceId,
+        expected: ProgressSnapshotTarget,
+        deadline: Arc<ProgressExchangeDeadline>,
+        cancel: CancellationToken,
+    ) -> ProgressSnapshotRound {
+        let round = self
             .reader
-            .read_snapshot(peer, expected, deadline, cancel)
-            .await;
-        self.counts.end(*peer);
-        result
+            .clone()
+            .read_snapshot(peer, expected, deadline, cancel);
+        Box::pin(async move {
+            self.counts.enter(peer);
+            self.counts.reads.fetch_add(1, Ordering::SeqCst);
+            let result = round.await;
+            self.counts.end(peer);
+            result
+        })
     }
 }
 struct Terminal {
@@ -204,15 +208,16 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
                 second.outbound.clone(),
                 Arc::new(TransferProgressWire),
                 authority,
+                Arc::new(UnusedSnapshotProvider),
                 clock.clone(),
             ),
             counts: counts.clone(),
         }),
         Arc::new(Snapshot {
-            reader: TransferProgressSnapshotReader::new(
+            reader: Arc::new(TransferProgressSnapshotReader::new(
                 first.outbound.clone(),
                 Arc::new(TransferProgressWire),
-            ),
+            )),
             counts: counts.clone(),
         }),
         Arc::new(UnusedLive),
@@ -229,7 +234,11 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
     let query = {
         let service = service.clone();
         let cancel = query_cancel.clone();
-        tokio::spawn(async move { service.read_snapshot(a, task(), &cancel).await })
+        tokio::spawn(async move {
+            service
+                .read_snapshot(a, task().into(), SOURCE, &cancel)
+                .await
+        })
     };
     let mut incoming = first.receiving.accept_bi().await?;
     let Message::Query {
@@ -327,7 +336,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
         assert!(counts.active.lock().unwrap().contains(&a));
         let repeated = timeout(
             Duration::from_secs(2),
-            service.read_snapshot(a, task(), &CancellationToken::new()),
+            service.read_snapshot(a, task().into(), SOURCE, &CancellationToken::new()),
         )
         .await?;
         assert!(matches!(&*repeated, Err(_)));
@@ -345,6 +354,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
                     progress_budget(),
                     &CancellationToken::new(),
                     owner.as_ref(),
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
             }
@@ -361,7 +371,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
         outcome: ProgressTerminalOutcome::Completed,
     };
     assert!(matches!(
-        service.submit_settled(b, SOURCE, descriptor.attempt, settled)?,
+        service.submit_settled(b, descriptor, settled)?,
         ProgressSubmission::Retained
     ));
     timeout(Duration::from_secs(2), counts.ack.notified()).await?;

@@ -100,6 +100,13 @@ Worker 只执行账本给出的已到期待办并把结果交回 Owner；`PeerAc
 | 在线状态 | reachability/presence adapter | 查询展示、拨号筛选 | 不能授予成员资格或历史接收权 |
 | 重新配对提示 | `RePairingState` | setup query、rebuild、AddDevice 最终激活 | 不能在安全效果完成前清除 |
 
+成员发布还负责会话内派生关联的退休。Application 装配必须向 `SpaceFacadeDeps` 注入
+`MemberScopeRetirementPort`，由 `MembershipOwner` 在新状态可见前同步通知；回调只清理
+派生关联，不做 IO、不重入 Owner，也不决定网络或文件取消结果。普通消费者仍使用统一 scope。
+比较依据是签名历史中的沿革、本机实例及对端实例／加入事件；同设备重新加入会退休旧关联，
+无关修订、关系暂停和离线不会。数据库世代切换、离组、本机资格失效或提交失败后失去可信缓存时，
+退休全部旧关联。该动作不依赖可被合并的 watch 提示，不增加持久记录或第二成员账本。
+
 ## Code Map
 
 ### 责任区

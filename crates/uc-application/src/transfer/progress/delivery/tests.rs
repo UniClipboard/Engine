@@ -5,9 +5,9 @@ use crate::transfer::progress::clock::Clock as SharedClock;
 use crate::transfer::progress::ProgressLiveRoundPort;
 use crate::transfer::progress::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
-    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSourceCatalog,
-    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
-    ProgressTerminalRoundPort,
+    ProgressReceiveError, ProgressSnapshotRead, ProgressSnapshotRound, ProgressSnapshotRoundPort,
+    ProgressSnapshotTarget, ProgressSourceCatalog, ProgressSourceTask, ProgressSubmission,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalRoundPort,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -17,7 +17,8 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::time::{timeout, Duration};
 use uc_core::file_transfer::ProgressActive;
 use uc_core::file_transfer::{
-    ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
+    ProgressIdentity, ProgressItem, ProgressItemKind, ProgressPhase, ProgressTerminal,
+    ProgressTerminalOutcome,
 };
 use uc_core::ids::EntryId;
 
@@ -46,14 +47,10 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
-        self.0
-            .lock()
-            .unwrap()
-            .claim_terminal(peer, source, attempt, item)
+        self.0.lock().unwrap().claim_terminal(peer, expected, item)
     }
 }
 fn id(n: u8) -> ProgressIdentity {
@@ -94,7 +91,16 @@ fn authority(plans: &[(u8, u16)]) -> Arc<Authority> {
 }
 fn submit(delivery: &ProgressExchangeService, p: u8, n: u16) -> ProgressSubmission {
     delivery
-        .submit_settled(peer(p), id(p), id(99), result(n))
+        .submit_settled(
+            peer(p),
+            delivery
+                .inner
+                .authority
+                .current_task(&peer(p), id(p))
+                .unwrap()
+                .descriptor,
+            result(n),
+        )
         .unwrap()
 }
 struct Offline(mpsc::Sender<DeviceId>);
@@ -563,16 +569,15 @@ async fn many_actual_eligible_peers_keep_exchange_queue_and_live_futures_bounded
 }
 
 struct UnusedSnapshot;
-#[async_trait]
 impl ProgressSnapshotRoundPort for UnusedSnapshot {
-    async fn read_snapshot(
-        &self,
-        _: &DeviceId,
-        _: ProgressSourceTask,
-        _: &ProgressExchangeDeadline,
-        _: &CancellationToken,
-    ) -> Result<ProgressSnapshotRead, ProgressReceiveError> {
-        panic!("terminal-only fixture cannot query")
+    fn read_snapshot(
+        self: Arc<Self>,
+        _: DeviceId,
+        _: ProgressSnapshotTarget,
+        _: Arc<ProgressExchangeDeadline>,
+        _: CancellationToken,
+    ) -> ProgressSnapshotRound {
+        Box::pin(async move { panic!("terminal-only fixture cannot query") })
     }
 }
 
@@ -601,5 +606,189 @@ impl ProgressLiveRoundPort for UnusedLive {
         _: &CancellationToken,
     ) -> Result<(), ProgressReceiveError> {
         panic!("terminal/query fixture cannot publish live progress")
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RoundFault {
+    Denied,
+    Malformed,
+    TemporaryIo,
+}
+struct FaultRound {
+    fault: RoundFault,
+    events: mpsc::Sender<DeviceId>,
+}
+#[async_trait]
+impl ProgressTerminalRoundPort for FaultRound {
+    async fn report_settled(
+        &self,
+        peer: &DeviceId,
+        _: ProgressTaskDescriptor,
+        _: ProgressTerminal,
+        _: &ProgressExchangeDeadline,
+        _: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        self.events.try_send(*peer).unwrap();
+        Err(match self.fault {
+            RoundFault::Denied => ProgressReceiveError::AccessDenied(Box::new(
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            )),
+            RoundFault::Malformed => ProgressReceiveError::Malformed(Box::new(
+                std::io::Error::from(std::io::ErrorKind::InvalidData),
+            )),
+            RoundFault::TemporaryIo => ProgressReceiveError::Exchange(Box::new(
+                std::io::Error::from(std::io::ErrorKind::TimedOut),
+            )),
+        })
+    }
+}
+#[tokio::test]
+async fn explicit_denial_and_malformed_reply_stop_actual_delivery_but_temporary_io_keeps_budget() {
+    for fault in [
+        RoundFault::Denied,
+        RoundFault::Malformed,
+        RoundFault::TemporaryIo,
+    ] {
+        let clock = Arc::new(Clock(AtomicU64::new(0)));
+        let (tx, mut rx) = mpsc::channel(8);
+        let (delivery, worker) = ProgressExchangeService::new(
+            clock.clone(),
+            authority(&[(1, 1)]),
+            Arc::new(FaultRound { fault, events: tx }),
+            Arc::new(UnusedSnapshot),
+            Arc::new(UnusedLive),
+        );
+        submit(&delivery, 1, 0);
+        let stop = CancellationToken::new();
+        let running = tokio::spawn(worker.run(stop.clone()));
+        assert_eq!(
+            timeout(Duration::from_secs(2), rx.recv()).await.unwrap(),
+            Some(peer(1))
+        );
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if delivery.inner.state.lock().unwrap().active.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let retained = delivery.inner.state.lock().unwrap().entries.len();
+        clock.0.store(2, Ordering::SeqCst);
+        delivery.network_recovered(None);
+        if matches!(fault, RoundFault::TemporaryIo) {
+            assert_eq!(retained, 1);
+            assert_eq!(
+                timeout(Duration::from_secs(2), rx.recv()).await.unwrap(),
+                Some(peer(1))
+            );
+        } else {
+            assert_eq!(retained, 0);
+            assert!(timeout(Duration::from_millis(30), rx.recv()).await.is_err());
+        }
+        stop.cancel();
+        timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[path = "retry_tests.rs"]
+mod retry_tests;
+
+#[test]
+fn receipt_from_retired_producer_cannot_claim_a_reopened_attempt_notification() {
+    let authority = authority(&[(1, 1)]);
+    let expected = authority.current_task(&peer(1), id(1)).unwrap().descriptor;
+    // 保留的结算回调来自旧producer；新会话可能重开同一持久attempt。
+    {
+        let mut catalog = authority.0.lock().unwrap();
+        catalog.retire();
+        catalog.accept(
+            &EntryId::from("local-1"),
+            peer(1),
+            id(1),
+            id(99),
+            vec![item(0)],
+        );
+    }
+    let current = authority.current_task(&peer(1), id(1)).unwrap();
+    assert!(current.descriptor.producer != expected.producer);
+    let (events, _) = mpsc::channel(1);
+    let (delivery, _worker) = ProgressExchangeService::new(
+        Arc::new(Clock(AtomicU64::new(0))),
+        authority.clone(),
+        Arc::new(Offline(events)),
+        Arc::new(UnusedSnapshot),
+        Arc::new(UnusedLive),
+    );
+    let submitted = delivery
+        .submit_settled(peer(1), expected, result(0))
+        .unwrap();
+    assert!(matches!(
+        submitted,
+        ProgressSubmission::Refused(ProgressClaimRefusal::Superseded)
+    ));
+    assert!(authority
+        .current_task(&peer(1), id(1))
+        .unwrap()
+        .notification_closed
+        .is_empty());
+    assert!(delivery.inner.state.lock().unwrap().entries.is_empty());
+}
+
+#[test]
+fn stale_activity_cannot_refresh_a_reopened_producer_or_revision() {
+    for retire in [false, true] {
+        for has_value in [false, true] {
+            let authority = authority(&[(1, 1)]);
+            let expected = authority.current_task(&peer(1), id(1)).unwrap().descriptor;
+            {
+                let mut catalog = authority.0.lock().unwrap();
+                if retire {
+                    catalog.retire();
+                } else {
+                    catalog.clear();
+                }
+                catalog.accept(
+                    &EntryId::from("local-1"),
+                    peer(1),
+                    id(1),
+                    id(99),
+                    vec![item(0)],
+                );
+            }
+            let (events, _) = mpsc::channel(1);
+            let (delivery, _worker) = ProgressExchangeService::new(
+                Arc::new(Clock(AtomicU64::new(0))),
+                authority.clone(),
+                Arc::new(Offline(events)),
+                Arc::new(UnusedSnapshot),
+                Arc::new(UnusedLive),
+            );
+            let value = has_value.then(|| ProgressActive {
+                item: item(0),
+                round: 0,
+                sequence: 1,
+                bytes: 1,
+                total: Some(10),
+                phase: ProgressPhase::Transferring,
+            });
+            assert!(matches!(
+                delivery.submit_activity(peer(1), expected, value).unwrap(),
+                ProgressSubmission::Refused(ProgressClaimRefusal::Superseded)
+            ));
+            let state = delivery.inner.state.lock().unwrap();
+            assert!(state.live.is_empty() && state.live_tasks.is_empty());
+            assert!(authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .notification_closed
+                .is_empty());
+        }
     }
 }

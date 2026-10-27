@@ -4,7 +4,10 @@ mod ports;
 mod reader;
 pub use model::{
     ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotPage,
-    ProgressSnapshotRead,
+    ProgressSnapshotQuery, ProgressSnapshotRead, ProgressSnapshotTarget,
 };
-pub use ports::{ProgressSnapshotRoundPort, ProgressSnapshotWirePort};
+pub use ports::{
+    ProgressSnapshotProviderPort, ProgressSnapshotRound, ProgressSnapshotRoundPort,
+    ProgressSnapshotWirePort,
+};
 pub use reader::TransferProgressSnapshotReader;

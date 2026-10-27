@@ -1,8 +1,11 @@
 use super::super::{
-    ElapsedClockPort, ProgressProjectionSnapshot, ProgressReceiveError, TransferProgressReceiver,
+    ElapsedClockPort, ProgressInboundWirePort, ProgressProjectionSnapshot, ProgressReceiveError,
+    TransferProgressReceiver, TransferProgressTransport,
 };
+use super::intent::{IntentLifetimes, IntentOwner, IntentPeers};
 use super::model::{ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey};
 use super::worker::ProgressProjectionWorker;
+use crate::connectivity::{ConnectivityError, ConnectivityManager};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{broadcast, Notify};
@@ -10,14 +13,17 @@ use uc_core::file_transfer::{
     valid_progress_plan, ExchangeQueue, ProgressIdentity, ProgressItem, ProgressProjectionCapacity,
     ProjectionCapacityInput, ProjectionRetention,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 
 pub(super) struct Slot {
+    pub owner: IntentOwner,
     pub receiver: Arc<TransferProgressReceiver>,
     pub published: u64,
 }
 #[derive(Default)]
 pub(super) struct State {
+    connection_generation: u64,
+    pub intents: IntentLifetimes,
     pub slots: HashMap<ProgressProjectionKey, Slot>,
     pub capacity: ProgressProjectionCapacity<DeviceId, ProgressProjectionKey>,
     pub registrations: ExchangeQueue<DeviceId, ()>,
@@ -49,9 +55,36 @@ impl ProgressProjectionRegistry {
             ProgressProjectionWorker { inner },
         )
     }
-    /// 仅由原完整发送负责人接受意图时调用；网络帧不得以此创建任务。
-    pub fn accept_intent(
+    /// 入站连接与同一投影共用世代命名空间；重建transport不能令旧关联重新获得资格。
+    pub fn inbound_transport(
         &self,
+        manager: ConnectivityManager,
+        wire: Arc<dyn ProgressInboundWirePort>,
+        clock: Arc<dyn ElapsedClockPort>,
+    ) -> Arc<TransferProgressTransport> {
+        TransferProgressTransport::new(manager, wire, clock, self.clone())
+    }
+    pub(crate) fn connection_generation(&self) -> Result<u64, ProgressReceiveError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.capacity.is_closed() {
+            return Err(ConnectivityError::Stopped.into());
+        }
+        let generation = state
+            .connection_generation
+            .checked_add(1)
+            .ok_or(ConnectivityError::Stopped)?;
+        state.connection_generation = generation;
+        Ok(generation)
+    }
+    /// 仅由原完整发送负责人接受意图时调用；网络帧不得以此创建任务。
+    pub(super) fn retain_intent(
+        &self,
+        owner: &IntentOwner,
+        peers: &IntentPeers,
         key: ProgressProjectionKey,
         plan: Vec<ProgressItem>,
     ) -> Result<ProgressProjectionAdmission, ProgressReceiveError> {
@@ -63,11 +96,11 @@ impl ProgressProjectionRegistry {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if state.capacity.is_closed() {
+        if state.capacity.is_closed() || owner.retired() || peers.blocks(key.peer) {
             return Ok(ProgressProjectionAdmission::Closed);
         }
         if let Some(slot) = state.slots.get(&key) {
-            return if slot.receiver.matches_plan(&plan) {
+            return if slot.receiver.matches_plan(&plan) && slot.owner.entry == owner.entry {
                 Ok(ProgressProjectionAdmission::Unchanged)
             } else {
                 Err(ProgressReceiveError::InvalidPlan)
@@ -90,6 +123,7 @@ impl ProgressProjectionRegistry {
                 state.slots.insert(
                     key,
                     Slot {
+                        owner: owner.clone(),
                         published: receiver.revision(),
                         receiver,
                     },
@@ -106,6 +140,17 @@ impl ProgressProjectionRegistry {
                 Err(ProgressReceiveError::Stale)
             }
         }
+    }
+    pub(crate) fn owned_keys(&self, peer: DeviceId, owner: &EntryId) -> Vec<ProgressProjectionKey> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .slots
+            .iter()
+            .filter(|(key, slot)| key.peer == peer && slot.owner.entry == *owner)
+            .map(|(key, _)| *key)
+            .collect()
     }
     pub fn subscribe(&self) -> broadcast::Receiver<ProgressProjectionEvent> {
         self.inner.events.subscribe()
@@ -145,7 +190,22 @@ impl ProgressProjectionRegistry {
     }
     /// 成员退出时一次退休该端全部关联，不推断文件实际取消结果。
     pub fn remove_peer(&self, peer: DeviceId) {
-        self.remove_matching(|key| key.peer == peer);
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.intents.retire_peer(peer);
+        let keys = state
+            .slots
+            .keys()
+            .filter(|key| key.peer == peer)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in keys {
+            remove_slot(&self.inner, &mut state, key);
+        }
+        self.inner.wake.notify_one();
     }
     fn remove_matching(&self, select: impl Fn(&ProgressProjectionKey) -> bool) {
         let mut state = self
@@ -178,6 +238,7 @@ impl ProgressProjectionRegistry {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        state.intents.retire_all();
         let input = if close {
             ProjectionCapacityInput::Close
         } else {
@@ -250,4 +311,9 @@ fn retire(inner: &Inner, state: &mut State, key: ProgressProjectionKey) {
         slot.receiver.retire();
         let _ = inner.events.send(ProgressProjectionEvent::Removed(key));
     }
+}
+
+pub(super) fn remove_slot(inner: &Inner, state: &mut State, key: ProgressProjectionKey) {
+    state.capacity.apply(ProjectionCapacityInput::Remove(key));
+    retire(inner, state, key);
 }

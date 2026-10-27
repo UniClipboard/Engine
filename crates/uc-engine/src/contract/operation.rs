@@ -2,7 +2,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{HostFileHandle, SecretString};
+use super::{
+    HostFileHandle, OutboundProgressInput, OutboundProgressReconciliation, OutboundProgressSummary,
+    ReconcileOutboundProgressInput, SecretString,
+};
 use crate::{
     AbortMobileFileUploadInput, AppendMobileFileUploadInput, ApplyMobileSyncDocumentInput,
     AuthenticateMobileRequestInput, BeginMobileFileUploadInput, CustomRelayMutation,
@@ -123,6 +126,9 @@ pub enum OperationKind {
     ReadEntryFile,
     QueryEntryDelivery,
     ClearHistory,
+    QueryOutboundProgress,
+    ListOutboundProgress,
+    ReconcileOutboundProgress,
     QueryEntryReceiveProgress,
     ListEntryReceiveProgress,
     CancelEntryReceive,
@@ -237,6 +243,9 @@ impl fmt::Display for OperationKind {
             Self::ReadEntryFile => "read_entry_file",
             Self::QueryEntryDelivery => "query_entry_delivery",
             Self::ClearHistory => "clear_history",
+            Self::QueryOutboundProgress => "query_outbound_progress",
+            Self::ListOutboundProgress => "list_outbound_progress",
+            Self::ReconcileOutboundProgress => "reconcile_outbound_progress",
             Self::QueryEntryReceiveProgress => "query_entry_receive_progress",
             Self::ListEntryReceiveProgress => "list_entry_receive_progress",
             Self::CancelEntryReceive => "cancel_entry_receive",
@@ -395,6 +404,9 @@ pub enum Operation {
     ReadEntryFile(HistoryEntryInput),
     QueryEntryDelivery(HistoryEntryInput),
     ClearHistory,
+    QueryOutboundProgress(OutboundProgressInput),
+    ListOutboundProgress,
+    ReconcileOutboundProgress(ReconcileOutboundProgressInput),
     QueryEntryReceiveProgress(EntryReceiveProgressInput),
     ListEntryReceiveProgress,
     CancelEntryReceive(CancelEntryReceiveInput),
@@ -511,6 +523,9 @@ impl Operation {
             Self::ReadEntryFile(_) => OperationKind::ReadEntryFile,
             Self::QueryEntryDelivery(_) => OperationKind::QueryEntryDelivery,
             Self::ClearHistory => OperationKind::ClearHistory,
+            Self::QueryOutboundProgress(_) => OperationKind::QueryOutboundProgress,
+            Self::ListOutboundProgress => OperationKind::ListOutboundProgress,
+            Self::ReconcileOutboundProgress(_) => OperationKind::ReconcileOutboundProgress,
             Self::QueryEntryReceiveProgress(_) => OperationKind::QueryEntryReceiveProgress,
             Self::ListEntryReceiveProgress => OperationKind::ListEntryReceiveProgress,
             Self::CancelEntryReceive(_) => OperationKind::CancelEntryReceive,
@@ -990,17 +1005,39 @@ pub struct ExportEntryInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResendEntryInput {
+    pub confirm_new_transfer: bool,
     pub entry_id: String,
     pub target_devices: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResendReportSummary {
+    pub reconciled: Vec<ResendTargetProgressSummary>,
     pub accepted: usize,
     pub duplicate: usize,
     pub offline: usize,
     pub errored: usize,
     pub pending: usize,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResendTargetProgressSummary {
+    pub target_device_id: String,
+    pub state: OutboundProgressReconciliation,
+    pub current: Option<OutboundProgressSummary>,
+    pub new_transfer_requested: bool,
+    pub duplicate_files_possible: bool,
+}
+
+impl fmt::Debug for ResendTargetProgressSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResendTargetProgressSummary")
+            .field("state", &self.state)
+            .field("new_transfer_requested", &self.new_transfer_requested)
+            .field("duplicate_files_possible", &self.duplicate_files_possible)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -3,6 +3,7 @@ use super::super::profile_probe::ProfilePair;
 use super::super::progress_probe::{progress_budget, Fixture};
 use super::{AuthorityProcess, SOURCE};
 use crate::network::iroh::transfer_progress_v2::TransferProgressWire;
+use anyhow::ensure;
 use std::error::Error;
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -15,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     ConnectionLease, ConnectivityError, ConnectivityManager, ElapsedClockError, ElapsedClockPort,
     ProgressExchangeDeadline, ProgressReceiveError, ProgressSnapshotRead,
-    ProgressSnapshotRoundPort, ProgressSourceTask, ProgressTaskDescriptor,
+    ProgressSnapshotRoundPort, ProgressSnapshotTarget, ProgressSourceTask, ProgressTaskDescriptor,
     TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::{
@@ -48,16 +49,26 @@ enum Mode {
     Unsupported,
     AccessDenied,
     Superseded,
+    SupersededRegressed,
+    SupersededConflict,
+    SupersededRestart,
+    SupersededChangedPlan,
     Busy,
     RejectedStale,
     RejectedUnknownTask,
     RejectedInvalidScope,
+    ForeignSource,
+    ForeignPlan,
 }
 impl Mode {
     fn count(self) -> usize {
         if matches!(
             self,
-            Self::RejectedStale | Self::RejectedUnknownTask | Self::RejectedInvalidScope
+            Self::RejectedStale
+                | Self::RejectedUnknownTask
+                | Self::RejectedInvalidScope
+                | Self::ForeignSource
+                | Self::ForeignPlan
         ) {
             return 1;
         }
@@ -69,6 +80,10 @@ impl Mode {
                 | Self::Unsupported
                 | Self::AccessDenied
                 | Self::Superseded
+                | Self::SupersededRegressed
+                | Self::SupersededConflict
+                | Self::SupersededRestart
+                | Self::SupersededChangedPlan
                 | Self::Busy
         ) {
             1
@@ -253,15 +268,25 @@ fn resident_bytes() -> Option<u64> {
 async fn exchange(
     expected: ProgressSourceTask,
     mode: Mode,
+    discover: bool,
 ) -> anyhow::Result<(Result<ProgressSnapshotRead, ProgressReceiveError>, Evidence)> {
     let rss_before = resident_bytes();
-    let fixture = if mode == Mode::Good {
+    let fixture = if matches!(
+        mode,
+        Mode::Good
+            | Mode::SupersededRegressed
+            | Mode::SupersededConflict
+            | Mode::SupersededRestart
+            | Mode::SupersededChangedPlan
+    ) {
         Network::Progress(ProfilePair::new().await?)
     } else {
         Network::Baseline(Fixture::new(1, 1, TRANSFER_PROGRESS_ALPN).await?)
     };
-    let reader =
-        TransferProgressSnapshotReader::new(fixture.outbound(), Arc::new(TransferProgressWire));
+    let reader = Arc::new(TransferProgressSnapshotReader::new(
+        fixture.outbound(),
+        Arc::new(TransferProgressWire),
+    ));
     let clock = Arc::new(Clock(AtomicU64::new(0)));
     let budget = if mode == Mode::Deadline {
         ProgressExchangeDeadline::new(clock.clone(), Duration::from_secs(5))?
@@ -293,7 +318,11 @@ async fn exchange(
             assert_eq!(source_entry.0, expected.descriptor.source.bytes());
             assert_eq!(
                 expected_attempt,
-                Some(WireId(expected.descriptor.attempt.bytes()))
+                if discover && number == 0 {
+                    None
+                } else {
+                    Some(WireId(expected.descriptor.attempt.bytes()))
+                }
             );
             assert_eq!(usize::from(offset), number * 64);
             assert_eq!(snapshot_revision, if number == 0 { None } else { Some(9) });
@@ -302,6 +331,15 @@ async fn exchange(
                 continue;
             }
             let mut current = descriptor(expected.descriptor);
+            if mode == Mode::ForeignSource {
+                current.scope.source_entry = WireId([9; 16]);
+            }
+            if mode == Mode::ForeignPlan {
+                current.item_count = 1023;
+            }
+            if mode == Mode::SupersededChangedPlan {
+                current.item_count = 128;
+            }
             let mut page_offset = offset;
             if number == 1 {
                 match mode {
@@ -324,15 +362,29 @@ async fn exchange(
                     9
                 },
                 offset: page_offset,
-                total: 1024,
+                total: current.item_count,
                 items,
             };
             let result = match mode {
                 Mode::NotRetained => QueryResult::NotRetained,
                 Mode::Unsupported => QueryResult::Unsupported,
                 Mode::AccessDenied => QueryResult::AccessDenied,
-                Mode::Superseded => {
+                Mode::Superseded
+                | Mode::SupersededRegressed
+                | Mode::SupersededConflict
+                | Mode::SupersededRestart
+                | Mode::SupersededChangedPlan => {
                     current.scope.attempt = WireId([8; 16]);
+                    current.owner_revision = match mode {
+                        Mode::SupersededRegressed | Mode::SupersededRestart => {
+                            current.owner_revision - 1
+                        }
+                        Mode::SupersededConflict => current.owner_revision,
+                        _ => current.owner_revision + 1,
+                    };
+                    if mode == Mode::SupersededRestart {
+                        current.producer = WireId([7; 16]);
+                    }
                     QueryResult::Superseded {
                         descriptor: current,
                         page,
@@ -391,7 +443,16 @@ async fn exchange(
     };
     let peer = fixture.peer();
     let (outcome, served) = tokio::join!(
-        reader.read_snapshot(&peer, expected.clone(), &budget, &stop),
+        reader.read_snapshot(
+            peer,
+            ProgressSnapshotTarget {
+                source: expected.descriptor.source,
+                expected: (!discover).then_some(expected.descriptor),
+                items: expected.items.clone()
+            },
+            Arc::new(budget),
+            stop.clone()
+        ),
         serve
     );
     served?;
@@ -422,7 +483,7 @@ async fn actual_maximum_v3_plan_survives_sixteen_real_snapshot_pages() -> anyhow
                 }
             );
         }
-        let (outcome, evidence) = exchange(expected.clone(), Mode::Good).await?;
+        let (outcome, evidence) = exchange(expected.clone(), Mode::Good, false).await?;
         let ProgressSnapshotRead::Complete(snapshot) = outcome? else {
             panic!("all real pages must complete");
         };
@@ -469,7 +530,7 @@ async fn real_pagination_faults_never_return_partial_or_falsely_complete_snapsho
             ),
             (Mode::DuplicateItem, ProgressSnapshotRefusal::WrongItem),
         ] {
-            let (outcome, evidence) = exchange(task(), mode).await?;
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
             assert!(
                 matches!(outcome,Err(ProgressReceiveError::Snapshot(actual)) if actual==reason),
                 "{mode:?}"
@@ -483,7 +544,7 @@ async fn real_pagination_faults_never_return_partial_or_falsely_complete_snapsho
             Mode::WrongChallenge,
             Mode::Deadline,
         ] {
-            let (outcome, evidence) = exchange(task(), mode).await?;
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
             let error = match outcome {
                 Err(error) => error,
                 Ok(_) => panic!("{mode:?} cannot return a view or absence"),
@@ -498,6 +559,7 @@ async fn real_pagination_faults_never_return_partial_or_falsely_complete_snapsho
                     error.source().unwrap().downcast_ref::<WireError>(),
                     Some(WireError::Frame(FrameRefusal::Length))
                 )),
+                Mode::Trailing => assert!(matches!(error, ProgressReceiveError::Malformed(_))),
                 _ => assert!(matches!(error, ProgressReceiveError::Exchange(_))),
             }
             assert_eq!(evidence.requests, 2);
@@ -507,6 +569,51 @@ async fn real_pagination_faults_never_return_partial_or_falsely_complete_snapsho
     .await??;
     Ok(())
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn superseded_current_scope_cannot_regress_or_conflict_with_the_known_producer_revision(
+) -> anyhow::Result<()> {
+    timeout(Duration::from_secs(30), async {
+        for mode in [Mode::SupersededRegressed, Mode::SupersededConflict] {
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
+            assert!(
+                matches!(outcome, Err(ProgressReceiveError::Stale)),
+                "{mode:?}"
+            );
+            assert_eq!(evidence.profile, "transfer_progress");
+            assert_eq!(evidence.requests, 1);
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn superseded_current_scope_allows_a_new_plan_and_never_orders_cross_producer_revisions(
+) -> anyhow::Result<()> {
+    timeout(Duration::from_secs(30), async {
+        for mode in [Mode::SupersededRestart, Mode::SupersededChangedPlan] {
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
+            let ProgressSnapshotRead::Superseded(current) = outcome? else {
+                panic!("expected a current association without adopting the new plan");
+            };
+            assert_eq!(current.attempt, ProgressIdentity::new([8; 16]));
+            if mode == Mode::SupersededRestart {
+                assert_eq!(current.producer, ProgressIdentity::new([7; 16]));
+                assert_eq!(current.revision, 3);
+            } else {
+                assert_eq!(current.item_count, 128);
+                assert_eq!(current.revision, 5);
+            }
+            assert_eq!(evidence.profile, "transfer_progress");
+            assert_eq!(evidence.requests, 1);
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_remote_query_outcomes_remain_separate_from_exchange_failures(
 ) -> anyhow::Result<()> {
@@ -518,7 +625,7 @@ async fn explicit_remote_query_outcomes_remain_separate_from_exchange_failures(
             Mode::Superseded,
             Mode::Busy,
         ] {
-            let (outcome, evidence) = exchange(task(), mode).await?;
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
             match (mode, outcome?) {
                 (Mode::NotRetained, ProgressSnapshotRead::NotRetained)
                 | (Mode::Unsupported, ProgressSnapshotRead::Unsupported)
@@ -536,7 +643,7 @@ async fn explicit_remote_query_outcomes_remain_separate_from_exchange_failures(
             Mode::RejectedUnknownTask,
             Mode::RejectedInvalidScope,
         ] {
-            let (outcome, evidence) = exchange(task(), mode).await?;
+            let (outcome, evidence) = exchange(task(), mode, false).await?;
             assert!(matches!(
                 (mode, outcome),
                 (Mode::RejectedStale, Err(ProgressReceiveError::Stale))
@@ -550,6 +657,40 @@ async fn explicit_remote_query_outcomes_remain_separate_from_exchange_failures(
                     )
             ));
             assert_eq!(evidence.requests, 1);
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_discovery_rejects_foreign_source_plan_and_mixed_second_page_without_partial_adoption(
+) -> anyhow::Result<()> {
+    timeout(Duration::from_secs(30), async {
+        for (mode, refusal) in [
+            (
+                Mode::ForeignSource,
+                ProgressSnapshotRefusal::DescriptorChanged,
+            ),
+            (
+                Mode::ForeignPlan,
+                ProgressSnapshotRefusal::DescriptorChanged,
+            ),
+            (
+                Mode::MixedAttempt,
+                ProgressSnapshotRefusal::DescriptorChanged,
+            ),
+            (
+                Mode::MixedRevision,
+                ProgressSnapshotRefusal::RevisionChanged,
+            ),
+        ] {
+            let (outcome, _) = exchange(task(), mode, true).await?;
+            ensure!(
+                matches!(outcome,Err(ProgressReceiveError::Snapshot(reason)) if reason==refusal),
+                "initial query must reject a scope outside the original plan"
+            );
         }
         anyhow::Ok(())
     })

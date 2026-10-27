@@ -541,6 +541,8 @@ pub struct ApplicationDeps {
     pub trusted_peer_repo: Arc<dyn uc_core::TrustedPeerRepositoryPort>,
     /// 记录剪贴板条目向各 peer 投递状态的仓储端口。
     pub entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
+    /// 既有发送归属与清单的有界只读能力。
+    pub progress_history: Arc<dyn ReadProgressHistoryPort>,
     /// 剪贴板领域端口。
     pub clipboard: ClipboardPorts,
     /// 安全领域端口。
@@ -636,14 +638,15 @@ pub use crate::transfer::progress::{
     ProgressExchangeService, ProgressExchangeWorker, ProgressProjectionSnapshot,
     ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask, ProgressSubmission,
     ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, ProgressWirePort, TransferProgressProducer,
-    TransferProgressReceiver,
+    ProgressTerminalRoundPort, ProgressUnattributedReceiverPort, ProgressWirePort,
+    TransferProgressProducer, TransferProgressReceiver,
 };
 
 pub use crate::transfer::progress::{
     ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotPage,
-    ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotWirePort,
-    TransferProgressSnapshotReader,
+    ProgressSnapshotProviderPort, ProgressSnapshotQuery, ProgressSnapshotRead,
+    ProgressSnapshotRound, ProgressSnapshotRoundPort, ProgressSnapshotTarget,
+    ProgressSnapshotWirePort, TransferProgressSnapshotReader,
 };
 
 pub use crate::transfer::progress::ProgressQueryResult;
@@ -654,7 +657,16 @@ pub use crate::transfer::progress::ProgressContactNotice;
 
 pub use crate::transfer::progress::{
     ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
-    ProgressProjectionRegistry, ProgressProjectionWorker,
+    ProgressProjectionRegistry, ProgressProjectionWorker, TransferProgressReconciler,
 };
 
 pub use crate::transfer::progress::transfer_progress_connectivity_policy;
+
+pub use crate::transfer::progress::{ProgressInboundWirePort, TransferProgressTransport};
+
+pub use crate::transfer::progress::{ProgressInboundFactory, TransferProgressNetwork};
+
+pub use crate::transfer::progress::{
+    ProgressHistoryEvidence, ProgressHistoryReadError, ProgressHistoryRepresentation,
+    ReadProgressHistoryPort,
+};

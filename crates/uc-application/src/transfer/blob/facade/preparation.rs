@@ -1,12 +1,10 @@
 //! 下载取得原许可后才准备本地 lifecycle；等待方退出不丢弃已开始的准备。
-use super::{
-    BlobTransferError, BlobTransferFacade, FetchTransferContext, InflightFetch,
-    OutboundReportContext,
-};
+use super::{BlobTransferError, BlobTransferFacade, FetchTransferContext, InflightFetch};
 use crate::transfer::blob::transport::{
     BlobDownloadPreparation, BlobExchangeError, BlobExchangeFailure, BlobPreparationStop,
     DownloadTask,
 };
+use crate::transfer::blob::BlobProgressSink;
 use crate::transfer::file::session::ReceiverTransferHandle;
 use crate::transfer::file::FileTransferApplicationError;
 use futures::future::BoxFuture;
@@ -14,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{FileTransferCancellationReason, FileTransferFailureReason};
-use uc_core::ports::blob::BlobProgressSink;
 use uc_observability_contract::diagnostics::ObservationContext;
 
 #[derive(Default)]
@@ -31,7 +28,6 @@ impl BlobTransferFacade {
         &self,
         context: Option<FetchTransferContext>,
         cached_path: BoxFuture<'static, Result<String, BlobExchangeError>>,
-        outbound: Option<OutboundReportContext>,
         cancel: CancellationToken,
         state: Arc<FetchPreparationState>,
     ) -> BlobDownloadPreparation {
@@ -87,7 +83,7 @@ impl BlobTransferFacade {
             };
             *state.session.lock().unwrap_or_else(PoisonError::into_inner) = session.clone();
             let sink = owner
-                .build_progress_sink(context.as_ref(), session.clone(), outbound)
+                .build_progress_sink(context.as_ref(), session.clone())
                 .await;
             *state
                 .progress

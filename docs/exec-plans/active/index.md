@@ -2,7 +2,6 @@
 
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
-- [Issue #34 第八切片：反向进度与发送侧状态投影](2026-10-24-transfer-progress-connectivity-plan.md)（阶段 0 进行中，受管单向流、登记围栏及输出后采用／ACK 已取得主机证明；[实现规格](2026-10-24-transfer-progress-connectivity-spec.md)）
 
 
 

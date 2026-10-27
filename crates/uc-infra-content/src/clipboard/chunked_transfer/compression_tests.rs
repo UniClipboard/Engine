@@ -38,10 +38,11 @@ async fn compressed_legacy_v3_content_remains_readable() {
     let (session, root) = ready_session();
     let adapter = TransferCipherAdapter::new(session);
     let plaintext = b"legacy compressed clipboard content\n".repeat(40_000);
-    let compressed = zstd::bulk::compress(&plaintext, 3).expect("legacy zstd payload");
+    // 旧锁图实际生成的固定压缩字节，防止以当前编码器自证旧格式兼容。
+    let compressed = include_bytes!("fixtures/zstd-0.13.3-legacy-v3.zst");
     let mut legacy = Vec::new();
     ChunkedEncoder::encode_to(
-        &mut legacy, &root, Uuid::nil().as_bytes(), &compressed, 1,
+        &mut legacy, &root, Uuid::nil().as_bytes(), compressed, 1,
         u32::try_from(plaintext.len()).expect("bounded fixture"),
     ).expect("encode legacy transfer");
 

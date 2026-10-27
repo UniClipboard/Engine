@@ -1,11 +1,17 @@
 //! 全局发送投影从原意图建立，再由真实已认证流登记和采用。
+use super::super::progress_probe::UnusedSnapshotProvider;
 use super::*;
+use anyhow::bail;
 use uc_application::deps::{
     ProgressLiveRoundPort, ProgressProjectionAdmission, ProgressProjectionKey,
     ProgressProjectionRegistry,
 };
 use uc_core::file_transfer::{ProgressActive, ProgressFreshnessView, ProgressPhase};
-use uc_sync_protocol::transfer_progress::v2::{ProducerDescriptor, TaskScope, WireId};
+use uc_core::ids::EntryId;
+use uc_sync_protocol::transfer_progress::v2::{
+    write_frame, Envelope, Message, ProducerDescriptor, RejectionReason, TaskScope, WireId,
+};
+use uuid::Uuid;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_intent_authorizes_real_updates_and_terminal_in_the_global_registry(
@@ -27,7 +33,11 @@ async fn accepted_intent_authorizes_real_updates_and_terminal_in_the_global_regi
             .descriptor;
         assert!(registry.snapshot(key).is_none());
         assert_eq!(
-            registry.accept_intent(key, vec![item()])?,
+            registry
+                .begin_intent(EntryId::from(
+                    Uuid::from_bytes((key).source.bytes()).to_string()
+                ))
+                .accept(key, vec![item()])?,
             ProgressProjectionAdmission::Retained
         );
         let initial = registry.snapshot(key).unwrap();
@@ -43,6 +53,7 @@ async fn accepted_intent_authorizes_real_updates_and_terminal_in_the_global_regi
                     progress_budget(),
                     &stop,
                     &registry,
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
                 TransferProgressInbound::serve(
@@ -52,6 +63,7 @@ async fn accepted_intent_authorizes_real_updates_and_terminal_in_the_global_regi
                     progress_budget(),
                     &stop,
                     &registry,
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
             }
@@ -102,6 +114,7 @@ async fn accepted_intent_authorizes_real_updates_and_terminal_in_the_global_regi
                 progress_budget(),
                 &stop,
                 &registry,
+                &UnusedSnapshotProvider,
             )
             .await
             .map_err(anyhow::Error::from)
@@ -137,7 +150,11 @@ async fn delayed_real_challenge_cannot_repopulate_a_replaced_or_closed_intent() 
                 peer: fixture.receiving.peer(),
                 source: SOURCE,
             };
-            registry.accept_intent(key, vec![item()])?;
+            registry
+                .begin_intent(EntryId::from(
+                    Uuid::from_bytes((key).source.bytes()).to_string(),
+                ))
+                .accept(key, vec![item()])?;
             let stop = CancellationToken::new();
             let mut running = tokio::spawn(worker.run(stop.clone()));
             let mut client = fixture.sending.open_bi(Instant::now() + BUDGET).await?;
@@ -163,6 +180,7 @@ async fn delayed_real_challenge_cannot_repopulate_a_replaced_or_closed_intent() 
                     progress_budget(),
                     &server_stop,
                     &owner,
+                    &UnusedSnapshotProvider,
                 )
                 .await
             });
@@ -177,7 +195,11 @@ async fn delayed_real_challenge_cannot_repopulate_a_replaced_or_closed_intent() 
                     .is_err());
             } else {
                 registry.remove(key);
-                registry.accept_intent(key, vec![item()])?;
+                registry
+                    .begin_intent(EntryId::from(
+                        Uuid::from_bytes((key).source.bytes()).to_string(),
+                    ))
+                    .accept(key, vec![item()])?;
                 assert!(registry.snapshot(key).unwrap().bound.is_none());
             }
             write_frame(
@@ -204,7 +226,13 @@ async fn delayed_real_challenge_cannot_repopulate_a_replaced_or_closed_intent() 
                 serving.await?,
                 Err(ProgressReceiveError::UnknownTask)
             ));
-            assert!(read_frame(&mut client.receive).await.is_err());
+            assert!(matches!(
+                read_frame(&mut client.receive).await?.message,
+                Message::Rejected {
+                    challenge,
+                    reason: RejectionReason::UnknownTask,
+                } if challenge == nonce
+            ));
             if closing {
                 timeout(Duration::from_secs(2), &mut running).await??;
                 assert!(registry.snapshot(key).is_none());

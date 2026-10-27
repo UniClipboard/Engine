@@ -1,4 +1,6 @@
 //! 关闭动作与实际关闭完成分开，证明名额不会仅因 record 或网络流释放而归还。
+#[path = "lifetime_tests/retained.rs"]
+mod retained;
 use super::{Admission, TestConnection};
 use crate::connectivity::{
     ConnectionMode, ConnectionProtocol, ConnectivityBackend, ConnectivityError,

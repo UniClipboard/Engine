@@ -1,6 +1,6 @@
 use super::super::{
     ElapsedClockError, ElapsedClockRefusal, ProgressReceiveError, ProgressSnapshotRead,
-    ProgressSourceTask, ProgressTaskDescriptor,
+    ProgressSnapshotRound, ProgressSnapshotTarget, ProgressTaskDescriptor,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,20 +55,37 @@ pub(super) struct Entry {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct QueryKey {
     pub peer: DeviceId,
+    intent: Option<ProgressIdentity>,
     source: ProgressIdentity,
-    attempt: ProgressIdentity,
-    producer: ProgressIdentity,
-    revision: u64,
+    attempt: Option<ProgressIdentity>,
+    producer: Option<ProgressIdentity>,
+    revision: Option<u64>,
     count: u16,
 }
 impl QueryKey {
+    pub fn query(
+        peer: DeviceId,
+        target: &ProgressSnapshotTarget,
+        intent: ProgressIdentity,
+    ) -> Self {
+        Self {
+            peer,
+            intent: Some(intent),
+            source: target.source,
+            attempt: target.expected.map(|task| task.attempt),
+            producer: target.expected.map(|task| task.producer),
+            revision: target.expected.map(|task| task.revision),
+            count: target.items.len() as u16,
+        }
+    }
     pub fn new(peer: DeviceId, task: ProgressTaskDescriptor) -> Self {
         Self {
             peer,
+            intent: None,
             source: task.source,
-            attempt: task.attempt,
-            producer: task.producer,
-            revision: task.revision,
+            attempt: Some(task.attempt),
+            producer: Some(task.producer),
+            revision: Some(task.revision),
             count: task.item_count,
         }
     }
@@ -101,7 +118,7 @@ pub(super) enum Action {
         descriptor: ProgressTaskDescriptor,
         result: ProgressTerminal,
     },
-    Snapshot(ProgressSourceTask),
+    Snapshot(ProgressSnapshotRound),
 }
 pub(super) struct Job {
     pub work: Work,

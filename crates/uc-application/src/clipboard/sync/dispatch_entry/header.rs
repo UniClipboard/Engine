@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{ClipboardHeader, ClockPort, LocalIdentityPort, SettingsPort};
 use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
@@ -36,9 +36,11 @@ impl OutboundHeaderFactory {
         &self,
         input: &DispatchClipboardEntryInput,
         local_device: &DeviceId,
+        source_entry: Option<EntryId>,
     ) -> ClipboardHeader {
         let origin_device_name = self.load_origin_device_name().await;
         ClipboardHeader {
+            source_entry,
             version: input.wire_version,
             snapshot_hash: input.snapshot_hash.clone(),
             captured_at_ms: self.clock.now_ms(),
@@ -105,7 +107,7 @@ mod tests {
 
         let factory = factory(settings, local_identity);
         let input = dispatch_input();
-        let header = factory.build(&input, &dev("self-device")).await;
+        let header = factory.build(&input, &dev("self-device"), None).await;
 
         assert_eq!(header.version, ClipboardHeader::CURRENT_VERSION);
         assert_eq!(header.snapshot_hash, input.snapshot_hash);
@@ -125,7 +127,7 @@ mod tests {
         let mut input = dispatch_input();
         input.wire_version = ClipboardHeader::DIRECTORY_VERSION;
 
-        let header = factory.build(&input, &dev("self-device")).await;
+        let header = factory.build(&input, &dev("self-device"), None).await;
 
         assert_eq!(header.version, ClipboardHeader::DIRECTORY_VERSION);
     }
@@ -142,7 +144,9 @@ mod tests {
             .returning(|| Ok(Some(fp(7))));
 
         let factory = factory(settings, local_identity);
-        let header = factory.build(&dispatch_input(), &dev("self-device")).await;
+        let header = factory
+            .build(&dispatch_input(), &dev("self-device"), None)
+            .await;
 
         assert_eq!(header.origin_device_name, fp(7).as_display().to_string());
     }
@@ -161,7 +165,9 @@ mod tests {
             .returning(|| Ok(Some(fp(7))));
 
         let factory = factory(settings, local_identity);
-        let header = factory.build(&dispatch_input(), &dev("self-device")).await;
+        let header = factory
+            .build(&dispatch_input(), &dev("self-device"), None)
+            .await;
 
         assert_eq!(header.origin_device_name, fp(7).as_display().to_string());
     }
@@ -180,7 +186,9 @@ mod tests {
             .returning(|| Ok(Some(fp(3))));
 
         let factory = factory(settings, local_identity);
-        let header = factory.build(&dispatch_input(), &dev("self-device")).await;
+        let header = factory
+            .build(&dispatch_input(), &dev("self-device"), None)
+            .await;
 
         assert_eq!(header.origin_device_name, fp(3).as_display().to_string());
     }
@@ -197,7 +205,9 @@ mod tests {
             .returning(|| Ok(None));
 
         let factory = factory(settings, local_identity);
-        let header = factory.build(&dispatch_input(), &dev("self-device")).await;
+        let header = factory
+            .build(&dispatch_input(), &dev("self-device"), None)
+            .await;
 
         assert_eq!(header.origin_device_name, "unknown-device");
     }

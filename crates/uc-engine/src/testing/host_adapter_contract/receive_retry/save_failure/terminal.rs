@@ -1,4 +1,5 @@
 //! 真实网络失败已经发生，但原网络终态的SQLite提交仍被拒绝时必须继续修复。
+use super::super::settlement_boundaries;
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -54,6 +55,7 @@ async fn assert_terminal_repair(completed: bool) {
         .load::<Transfer>(&mut connection).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "transferring");
+    settlement_boundaries::assert_processing(&case, &case.first, 1).await;
     let closing = case
         .receiver
         .shutdown(Duration::from_millis(100))

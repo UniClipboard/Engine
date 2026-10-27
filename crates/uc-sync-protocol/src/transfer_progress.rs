@@ -4,7 +4,7 @@
 //!
 //! 接收端 fetch blob 时,沿反向 P2P 通道把字节级进度推送回数据来源端
 //! (sender)。`uc-application` 的 fetch sink 旁路调用
-//! [`OutboundProgressReporterPort`](uc_core::file_transfer::OutboundProgressReporterPort),
+//! [`OutboundProgressStatus`](uc_core::file_transfer::OutboundProgressStatus),
 //! 适配器把每次调用打成一帧,通过专用 ALPN 单向流写到 sender。
 //!
 //! ## Frame layout

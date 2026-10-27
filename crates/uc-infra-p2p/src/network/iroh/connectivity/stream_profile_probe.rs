@@ -2,7 +2,9 @@
 use super::super::{
     ConnectivityProfile, IrohConnectionAdmission, IrohConnectivityBackend, IrohPeerConnection,
 };
+use super::progress_probe::UnusedSnapshotProvider;
 use crate::network::iroh::admitted_connections::AdmittedConnections;
+use crate::network::iroh::protocol_router::ProtocolRouterBuilder;
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
 use iroh::endpoint::Connection;
@@ -26,7 +28,7 @@ use uc_core::file_transfer::{
     ProgressFreshnessView, ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal,
     ProgressTerminalOutcome,
 };
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::ports::{PeerAddressError, PeerAddressRecord, PeerAddressRepositoryPort};
@@ -34,6 +36,7 @@ use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
 use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
+use uuid::Uuid;
 
 const BUDGET: Duration = Duration::from_secs(5);
 const SOURCE: ProgressIdentity = ProgressIdentity::new([1; 16]);
@@ -171,8 +174,7 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         _: &DeviceId,
-        _: ProgressIdentity,
-        _: ProgressIdentity,
+        _: ProgressTaskDescriptor,
         _: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
         panic!("one round fixture does not submit a new intent")
@@ -204,7 +206,7 @@ async fn real_backend_progress_profile_adopts_terminal_and_reuses_current_retain
         );
         let inbound = manager(server.clone(), directory, AdmittedConnections::default());
         let (tx, mut rx) = mpsc::channel(8);
-        let router = Router::builder((*server).clone())
+        let router = ProtocolRouterBuilder::new((*server).clone())
             .accept(
                 TRANSFER_PROGRESS_ALPN,
                 Capture {
@@ -212,7 +214,7 @@ async fn real_backend_progress_profile_adopts_terminal_and_reuses_current_retain
                     events: tx.clone(),
                 },
             )
-            // TLS按服务端注册顺序选择；必须先/2再/1。
+            // 使用生产Router验证版本优先，不能依赖fixture的注册顺序。
             .accept(
                 LEGACY_TRANSFER_PROGRESS_ALPN,
                 Capture {
@@ -226,13 +228,18 @@ async fn real_backend_progress_profile_adopts_terminal_and_reuses_current_retain
             peer: sender,
             source: SOURCE,
         };
-        registry.accept_intent(key, vec![item()])?;
+        registry
+            .begin_intent(EntryId::from(
+                Uuid::from_bytes((key).source.bytes()).to_string(),
+            ))
+            .accept(key, vec![item()])?;
         let stop = CancellationToken::new();
         let running = tokio::spawn(worker.run(stop.clone()));
         let producer = TransferProgressProducer::new(
             outbound.clone(),
             Arc::new(TransferProgressWire),
             Arc::new(Authority),
+            Arc::new(UnusedSnapshotProvider),
             Arc::new(SystemElapsedClock),
         );
         let result = ProgressTerminal {
@@ -255,6 +262,7 @@ async fn real_backend_progress_profile_adopts_terminal_and_reuses_current_retain
                     budget(),
                     &stop,
                     &registry,
+                    &UnusedSnapshotProvider,
                 )
                 .await?;
             }
@@ -328,7 +336,7 @@ impl ProfilePair {
         );
         let inbound = manager(server.clone(), directory, AdmittedConnections::default());
         let (tx, mut rx) = mpsc::channel(4);
-        let router = Router::builder((*server).clone())
+        let router = ProtocolRouterBuilder::new((*server).clone())
             .accept(
                 TRANSFER_PROGRESS_ALPN,
                 Capture {
@@ -363,3 +371,11 @@ impl ProfilePair {
         Ok(())
     }
 }
+
+#[path = "stream_profile_legacy_summary_probe.rs"]
+mod legacy_summary_probe;
+
+pub(super) use legacy_summary_probe::LegacyPair;
+
+#[path = "stream_inbound_transport_probe.rs"]
+mod inbound_transport_probe;

@@ -1,4 +1,6 @@
-//! 真实目录探测后强杀；改变当前保存目录不能丢失旧暂存区恢复责任。
+//! 真实目录探测／发布回滚失败后强杀；旧保存目录的恢复责任不能丢失。
+#[path = "directory_probe/publication.rs"]
+mod publication;
 use super::super::super::{
     mount_engine_rendezvous, next_engine_event_matching, persistent_engine_host, EmptyHostFiles,
     MemoryHostSecureStorage, ENGINE_TEST_LOCK,
@@ -41,6 +43,7 @@ struct ChildInput {
     checkpoint: SocketAddr,
     old_save: PathBuf,
     new_save: PathBuf,
+    publication_failure: bool,
 }
 
 struct Clipboard(Arc<Mutex<HostClipboardSnapshot>>);
@@ -116,7 +119,7 @@ async fn receiver_child_process() {
     assert!(matches!(std::env::var(CHILD_ENV).as_deref(), Ok("1")));
     // 模拟钥匙串只经私有管道移交，不写入磁盘或输出。
     let input: ChildInput = serde_json::from_reader(std::io::stdin().lock()).unwrap();
-    let fixture = DirectoryProbe::install(&input.old_save);
+    let fixture = DirectoryProbe::install(&input.old_save, input.publication_failure);
     let storage = MemoryHostSecureStorage {
         values: Arc::new(Mutex::new(input.secure_storage)),
     };
@@ -138,19 +141,30 @@ async fn receiver_child_process() {
     else {
         panic!("directory receive must start")
     };
-    timeout(Duration::from_secs(20), fixture.entered.notified())
-        .await
-        .unwrap();
-    assert!(
-        fixture.supported.load(Ordering::SeqCst),
-        "the real filesystem must support no-replace publication"
-    );
-    assert!(fixture
-        .area
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|area| area.is_dir()));
+    if input.publication_failure {
+        publication::wait_for_failed_rollback(
+            &engine,
+            &input.root,
+            &input.old_save,
+            &pending.entry_id,
+            &fixture,
+        )
+        .await;
+    } else {
+        timeout(Duration::from_secs(20), fixture.entered.notified())
+            .await
+            .unwrap();
+        assert!(
+            fixture.supported.load(Ordering::SeqCst),
+            "the real filesystem must support no-replace publication"
+        );
+        assert!(fixture
+            .area
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|area| area.is_dir()));
+    }
     settings(&engine, Some(&input.new_save)).await;
     let OperationResult::Settings(current) =
         engine.execute(Operation::QuerySettings).await.unwrap()
@@ -167,6 +181,15 @@ async fn receiver_child_process() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn interrupted_directory_probe_recovers_the_previous_save_directory() {
+    assert_directory_crash(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupted_directory_rollback_recovers_visible_root_and_preserves_reused_name() {
+    assert_directory_crash(true).await;
+}
+
+async fn assert_directory_crash(publication_failure: bool) {
     let _lock = ENGINE_TEST_LOCK.lock().await;
     let server = MockServer::start().await;
     mount_engine_rendezvous(&server).await;
@@ -255,10 +278,11 @@ async fn interrupted_directory_probe_recovers_the_previous_save_directory() {
         checkpoint: checkpoint.local_addr().unwrap(),
         old_save: old_save.clone(),
         new_save: new_save.clone(),
+        publication_failure,
     };
     let mut child = OwnedChild(
         Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", CHILD_TEST, "--ignored", "--quiet"])
+            .args(["--exact", CHILD_TEST, "--ignored", "--quiet", "--nocapture"])
             .env(CHILD_ENV, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -277,15 +301,23 @@ async fn interrupted_directory_probe_recovers_the_previous_save_directory() {
     std::fs::create_dir(&directory).unwrap();
     std::fs::write(directory.join("a.bin"), vec![0x61; 96 * 1024]).unwrap();
     std::fs::write(directory.join("b.bin"), vec![0x62; 96 * 1024]).unwrap();
+    let mut roots = vec![Url::from_directory_path(&directory).unwrap().to_string()];
+    if publication_failure {
+        let second = source_root.path().join("directory-other");
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(second.join("c.bin"), vec![0x63; 96 * 1024]).unwrap();
+        roots.push(Url::from_directory_path(second).unwrap().to_string());
+        let third = source_root.path().join("directory-last");
+        std::fs::create_dir(&third).unwrap();
+        std::fs::write(third.join("d.bin"), vec![0x64; 96 * 1024]).unwrap();
+        roots.push(Url::from_directory_path(third).unwrap().to_string());
+    }
     *clipboard.lock().unwrap() = HostClipboardSnapshot {
         observed_at_ms: 1_700_000_100_000,
         representations: vec![HostClipboardRepresentation::Inline {
             format: "files".into(),
             mime_type: Some("text/uri-list".into()),
-            bytes: Url::from_directory_path(&directory)
-                .unwrap()
-                .to_string()
-                .into_bytes(),
+            bytes: roots.join("\r\n").into_bytes(),
         }],
     };
     let sending = tokio::spawn({
@@ -323,8 +355,19 @@ async fn interrupted_directory_probe_recovers_the_previous_save_directory() {
         "原观察动作只能成功或返回异步目录尚无同步报告"
     );
     source.shutdown_until_complete().await.unwrap();
-    // 探测尚未开始发布：计划目标即使被用户重用，也不属于恢复任务。
-    let user_root = old_save.join("directory-source");
+    // 已撤回的第二根保留私有staging证明；用户复用原目标不能被重启恢复删除。
+    let user_root = old_save.join(if publication_failure {
+        "directory-other"
+    } else {
+        "directory-source"
+    });
+    if publication_failure {
+        assert_eq!(
+            std::fs::read(old_save.join("directory-source/a.bin")).unwrap(),
+            vec![0x61; 96 * 1024]
+        );
+        publication::assert_journal(&input.root, &entry_id, false);
+    }
     std::fs::create_dir(&user_root).unwrap();
     std::fs::write(user_root.join("user.bin"), b"keep reused target").unwrap();
     let (restarted, _events) = Engine::start(
@@ -353,7 +396,9 @@ async fn interrupted_directory_probe_recovers_the_previous_save_directory() {
     assert!(current.file_sync.auto_save_dir.as_deref() == new_save.to_str());
     let progress = restarted
         .execute(Operation::QueryEntryReceiveProgress(
-            EntryReceiveProgressInput { entry_id },
+            EntryReceiveProgressInput {
+                entry_id: entry_id.clone(),
+            },
         ))
         .await
         .unwrap();
@@ -361,6 +406,13 @@ async fn interrupted_directory_probe_recovers_the_previous_save_directory() {
     let unrelated_kept =
         std::fs::read(old_save.join("unrelated.bin")).unwrap() == b"keep unrelated";
     let reused_kept = std::fs::read(user_root.join("user.bin")).unwrap() == b"keep reused target";
+    if publication_failure {
+        assert!(
+            !old_save.join("directory-source").exists(),
+            "restart must withdraw the actually published root"
+        );
+        publication::assert_journal(&input.root, &entry_id, true);
+    }
     restarted.shutdown_until_complete().await.unwrap();
     assert!(
         matches!(progress, OperationResult::EntryReceiveProgress(Some(progress)) if progress.state == "failed")

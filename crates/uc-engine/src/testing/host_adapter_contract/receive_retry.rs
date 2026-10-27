@@ -1,9 +1,16 @@
 //! 稳定Engine操作驱动真实网络、SQLite与文件成果；测试控制本地导出或保存故障。
+mod backpressure;
+mod batch_outcomes;
 mod database;
 mod lifecycle;
 mod observation;
+mod outbound_progress;
+mod process_restart;
 mod redelivery;
+mod result_chain;
 mod save_failure;
+mod settlement_boundaries;
+mod snapshot_cas;
 #[cfg(target_os = "linux")]
 mod stream_isolation;
 #[cfg(target_os = "linux")]
@@ -19,14 +26,16 @@ use crate::{
     EntryReceiveProgressInput, EntryReceiveRetryOutcome, EventStream, HistoryEntryInput,
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
     HostClipboardSnapshot, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
-    JoinSpaceInput, Operation, OperationResult, OperationTerminal, QueryHistoryInput,
-    ReceiveItemFailureReason, ReceiveProgressSummary, ReceiveRetryUnavailableReason,
-    RemoveMemberInput, RetryEntryReceiveInput, SecretString, SendFilesInput, SendTextInput,
-    SettingsPatch, SyncSettingsPatch,
+    JoinSpaceInput, Operation, OperationResult, OperationTerminal, OutboundProgressReconciliation,
+    QueryHistoryInput, ReceiveItemFailureReason, ReceiveProgressSummary,
+    ReceiveRetryUnavailableReason, ReconcileOutboundProgressInput, RemoveMemberInput,
+    RetryEntryReceiveInput, SecretString, SendFilesInput, SendTextInput, SettingsPatch,
+    SyncSettingsPatch,
 };
 use database::open_control_connection;
 use diesel::sql_types::{Binary, Text};
 use diesel::{QueryableByName, RunQueryDsl, SqliteConnection};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -46,10 +55,17 @@ fn unavailable() -> HostCapabilityError {
         "test file unavailable",
     )
 }
+// 保留原三个固定内容，额外数字handle提供互不相同的冷缓存文件，避免以缓存命中冒充下载。
+fn file_bytes(handle: &HostFileHandle) -> Result<Cow<'static, [u8]>, HostCapabilityError> {
+    let index: usize = handle.as_str().parse().map_err(|_| unavailable())?;
+    Ok(match CONTENTS.get(index) {
+        Some(bytes) => Cow::Borrowed(*bytes),
+        None => Cow::Owned(format!("capacity-probe-file-{index}\n").into_bytes()),
+    })
+}
 impl HostFileAccess for Files {
     fn metadata(&self, handle: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {
-        let index: usize = handle.as_str().parse().map_err(|_| unavailable())?;
-        let bytes = CONTENTS.get(index).ok_or_else(unavailable)?;
+        let bytes = file_bytes(handle)?;
         Ok(HostFileMetadata {
             display_name: NAME.into(),
             size_bytes: bytes.len() as u64,
@@ -62,8 +78,7 @@ impl HostFileAccess for Files {
         offset: u64,
         max_bytes: u32,
     ) -> Result<Vec<u8>, HostCapabilityError> {
-        let index: usize = handle.as_str().parse().map_err(|_| unavailable())?;
-        let bytes = CONTENTS.get(index).ok_or_else(unavailable)?;
+        let bytes = file_bytes(handle)?;
         let start = usize::try_from(offset)
             .map_err(|_| unavailable())?
             .min(bytes.len());
@@ -186,6 +201,8 @@ struct ReceiveCase {
     #[cfg(target_os = "linux")]
     resource_baseline: Option<ReceiveResourceBaseline>,
     source: Engine,
+    source_events: EventStream,
+    source_storage: MemoryHostSecureStorage,
     receiver: Engine,
     source_id: String,
     receiver_root: TempDir,
@@ -249,6 +266,7 @@ async fn receive_case_with_progress(
         observed_at_ms: 0,
         representations: Vec::new(),
     }));
+    let source_storage = MemoryHostSecureStorage::default();
     let host = HostCapabilities::new(
         HostDirectories::new(
             source_root.path().join("private"),
@@ -256,14 +274,14 @@ async fn receive_case_with_progress(
             source_root.path().join("temporary"),
             source_root.path().join("logs"),
         ),
-        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(source_storage.clone()),
         Box::new(ReceiveClipboard(clipboard.clone())),
         Box::new(Files),
     );
     let config = EngineConfig::new("1.2.3")
         .with_rendezvous_base_url(server.uri())
         .with_test_relay_fallback(false);
-    let (source, _source_events) = Engine::start(config.clone(), host).await.unwrap();
+    let (source, source_events) = Engine::start(config.clone(), host).await.unwrap();
     let receiver_storage = MemoryHostSecureStorage::default();
     let (receiver, mut events) = Engine::start(
         config,
@@ -368,6 +386,7 @@ async fn receive_case_with_progress(
         );
         assert!(committed.contains_key(CONTENTS[0]));
         assert_eq!(exports.exports.lock().unwrap().len(), 3);
+        result_chain::assert_chain(&source, &report.entry_id, &receiving, &exports, false).await;
         exports.release.add_permits(1);
     }
     let (first, saved) = if pause_first {
@@ -406,10 +425,15 @@ async fn receive_case_with_progress(
         assert!(saved.contains_key(CONTENTS[0]) && saved.contains_key(CONTENTS[2]));
         (first, saved)
     };
+    if prove_progress {
+        result_chain::assert_chain(&source, &report.entry_id, &first, &exports, true).await;
+    }
     ReceiveCase {
         #[cfg(target_os = "linux")]
         resource_baseline,
         source,
+        source_events,
+        source_storage,
         receiver,
         source_id,
         receiver_root,
@@ -628,84 +652,133 @@ async fn real_engine_cancelled_retry_waits_for_export_and_keeps_previous_success
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_abandoned_deletion_stops_retry_and_removes_all_receive_state() {
     let _lock = ENGINE_TEST_LOCK.lock().await;
-    let mut case = receive_case(false).await;
-    let _release = ReleaseOnDrop(case.exports.clone());
-    let receiver = &case.receiver;
-    assert!(matches!(
-        receiver
-            .execute(Operation::RetryEntryReceive(case.retry_input()))
+    for start_delay in [Duration::ZERO, Duration::from_millis(75)] {
+        let mut case = receive_case(false).await;
+        let _release = ReleaseOnDrop(case.exports.clone());
+        let receiver = &case.receiver;
+        assert!(matches!(
+            receiver
+                .execute(Operation::RetryEntryReceive(case.retry_input()))
+                .await
+                .unwrap(),
+            OperationResult::EntryReceiveRetry(EntryReceiveRetryOutcome::Accepted { .. })
+        ));
+        timeout(Duration::from_secs(20), case.exports.paused.notified())
             .await
-            .unwrap(),
-        OperationResult::EntryReceiveRetry(EntryReceiveRetryOutcome::Accepted { .. })
-    ));
-    timeout(Duration::from_secs(20), case.exports.paused.notified())
-        .await
-        .unwrap();
-    let output = case.exports.paths.lock().unwrap()[3].clone();
-    assert!(output.is_file());
-    assert!(timeout(
-        Duration::from_millis(50),
-        receiver.execute(Operation::DeleteHistoryEntry(HistoryEntryInput {
-            entry_id: case.first.entry_id.clone(),
-        }))
-    )
-    .await
-    .is_err());
-    // 等待者已经离开；受管导出未结算时，删除不能越过停止屏障。
-    assert_eq!(
-        saved_files(receiver, &case.first.entry_id, case.receiver_root.path()).await,
-        case.saved
-    );
-    case.exports.release.add_permits(1);
-    timeout(Duration::from_secs(20), async {
-        loop {
-            let deleted = matches!(receiver.execute(Operation::GetHistoryEntry(HistoryEntryInput {
-                entry_id: case.first.entry_id.clone(),
-            })).await, Err(error) if error.category() == EngineErrorCategory::NotFound);
-            let no_receive = receiver
-                .execute(Operation::QueryEntryReceiveProgress(
-                    EntryReceiveProgressInput {
-                        entry_id: case.first.entry_id.clone(),
-                    },
+            .unwrap();
+        let output = case.exports.paths.lock().unwrap()[3].clone();
+        assert!(output.is_file());
+        let OperationResult::OutboundProgressList(views) = case
+            .source
+            .execute(Operation::ListOutboundProgress)
+            .await
+            .unwrap()
+        else {
+            panic!("source progress")
+        };
+        let source_view = views
+            .into_iter()
+            .find(|view| view.items_total == 3)
+            .unwrap();
+        // 先确认当前接收来源存在；后续NotRetained才证明本次删除已经封住该来源。
+        assert!(matches!(
+            case.source
+                .execute(Operation::ReconcileOutboundProgress(
+                    ReconcileOutboundProgressInput {
+                        entry_id: source_view.entry_id.clone(),
+                        target_device_id: source_view.target_device_id.clone(),
+                        expected_attempt_id: None,
+                    }
                 ))
                 .await
-                .unwrap()
-                == OperationResult::EntryReceiveProgress(None);
-            if deleted
-                && no_receive
-                && !output.exists()
-                && case.saved.values().all(|path| !path.exists())
-            {
-                break;
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    // 数据消失早于搜索清理及删除scope退出。本例只丢弃了这一项操作的等待；
-    // 等它的Cancelled完成事件后再断言重复删除，避免与仍持有封口的原操作竞争。
-    next_engine_event_matching(&mut case.events, |event| {
-        matches!(
-            event,
-            EngineEvent::OperationFinished {
-                terminal: OperationTerminal::Cancelled,
-                ..
-            }
-        )
-    })
-    .await;
-    assert_eq!(
-        receiver
-            .execute(Operation::DeleteHistoryEntry(HistoryEntryInput {
+                .unwrap(),
+            OperationResult::OutboundProgressReconciliation(
+                OutboundProgressReconciliation::Running
+                    | OutboundProgressReconciliation::Superseded
+            )
+        ));
+        while let Ok(Some(_)) = timeout(Duration::from_millis(1), case.events.next()).await {}
+        {
+            let deleting = receiver.execute(Operation::DeleteHistoryEntry(HistoryEntryInput {
                 entry_id: case.first.entry_id.clone(),
-            }))
-            .await
-            .unwrap_err()
-            .category(),
-        EngineErrorCategory::NotFound
-    );
-    case.shutdown().await;
+            }));
+            tokio::pin!(deleting);
+            // 同时覆盖即时轮询与等待者首次调度延后，不能把单纯的等待到期当作业务已经开始。
+            sleep(start_delay).await;
+            let retired = async {
+                loop {
+                    let state = case
+                        .source
+                        .execute(Operation::ReconcileOutboundProgress(
+                            ReconcileOutboundProgressInput {
+                                entry_id: source_view.entry_id.clone(),
+                                target_device_id: source_view.target_device_id.clone(),
+                                expected_attempt_id: None,
+                            },
+                        ))
+                        .await
+                        .unwrap();
+                    if state
+                        == OperationResult::OutboundProgressReconciliation(
+                            OutboundProgressReconciliation::NotRetained,
+                        )
+                    {
+                        break;
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::select! {
+                result = &mut deleting => panic!("deletion finished while real export was still held: {result:?}"),
+                result = timeout(Duration::from_secs(20), retired) => result.expect("original receive source retires before abandoning deletion"),
+            }
+            assert!(timeout(Duration::from_millis(50), deleting).await.is_err());
+        }
+        // 等待者已经离开；受管导出未结算时，删除不能越过停止屏障。
+        assert_eq!(
+            saved_files(receiver, &case.first.entry_id, case.receiver_root.path()).await,
+            case.saved
+        );
+        case.exports.release.add_permits(1);
+        timeout(Duration::from_secs(20), async {
+            loop {
+                let entry = receiver.execute(Operation::GetHistoryEntry(HistoryEntryInput {
+                    entry_id: case.first.entry_id.clone(),
+                })).await;
+                let deleted = matches!(entry, Err(error) if error.category() == EngineErrorCategory::NotFound);
+                let no_receive = receiver.execute(Operation::QueryEntryReceiveProgress(
+                    EntryReceiveProgressInput { entry_id: case.first.entry_id.clone() },
+                )).await.unwrap() == OperationResult::EntryReceiveProgress(None);
+                if deleted && no_receive && !output.exists() && case.saved.values().all(|path| !path.exists()) {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        // 数据消失早于搜索清理及删除scope退出。本例只丢弃了这一项操作的等待；
+        // 等它的Cancelled完成事件后再断言重复删除，避免与仍持有封口的原操作竞争。
+        next_engine_event_matching(&mut case.events, |event| {
+            matches!(
+                event,
+                EngineEvent::OperationFinished {
+                    terminal: OperationTerminal::Cancelled,
+                    ..
+                }
+            )
+        })
+        .await;
+        assert_eq!(
+            receiver
+                .execute(Operation::DeleteHistoryEntry(HistoryEntryInput {
+                    entry_id: case.first.entry_id.clone(),
+                }))
+                .await
+                .unwrap_err()
+                .category(),
+            EngineErrorCategory::NotFound
+        );
+        case.shutdown().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -7,6 +7,8 @@ mod deadline;
 mod error;
 pub use deadline::ProgressExchangeDeadline;
 mod model;
+mod plan;
+pub(crate) use plan::ProgressOriginalPlan;
 mod ports;
 mod producer;
 mod receiver;
@@ -19,7 +21,7 @@ pub use model::{
 };
 pub use ports::{
     CurrentProgressTaskPort, ProgressReceiverPort, ProgressTaskAuthorityPort,
-    ProgressTerminalRoundPort, ProgressWirePort,
+    ProgressTerminalRoundPort, ProgressUnattributedReceiverPort, ProgressWirePort,
 };
 pub use receiver::TransferProgressReceiver;
 pub(crate) use source::ProgressSourceCatalog;
@@ -36,8 +38,9 @@ mod deadline_tests;
 mod snapshot;
 pub use snapshot::{
     ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotPage,
-    ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotWirePort,
-    TransferProgressSnapshotReader,
+    ProgressSnapshotProviderPort, ProgressSnapshotQuery, ProgressSnapshotRead,
+    ProgressSnapshotRound, ProgressSnapshotRoundPort, ProgressSnapshotTarget,
+    ProgressSnapshotWirePort, TransferProgressSnapshotReader,
 };
 
 pub use model::ProgressUpdateNotice;
@@ -47,9 +50,27 @@ pub use model::ProgressContactNotice;
 
 mod projection;
 pub use projection::{
-    ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
-    ProgressProjectionRegistry, ProgressProjectionWorker,
+    ProgressIntent, ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
+    ProgressProjectionRegistry, ProgressProjectionWorker, TransferProgressReconciler,
 };
 
 mod connectivity;
 pub use connectivity::transfer_progress_connectivity_policy;
+
+mod inbound;
+pub use inbound::{ProgressInboundWirePort, TransferProgressTransport};
+
+mod runtime;
+pub use runtime::{ProgressInboundFactory, TransferProgressNetwork};
+pub(crate) use runtime::{ProgressRuntime, ProgressRuntimeAssembly};
+
+mod view;
+pub use view::SentEntryReconciliation;
+pub(crate) use view::{ProgressViewOwner, ReconcileSentEntryPort};
+pub use view::{TransferProgressQueryError, TransferProgressReconciliation};
+
+mod history;
+pub use history::{
+    ProgressHistoryEvidence, ProgressHistoryReadError, ProgressHistoryRepresentation,
+    ReadProgressHistoryPort,
+};

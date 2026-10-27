@@ -26,7 +26,7 @@ members = [
   "tests/uc-testkit",
   "tests/upgrade-matrix",
 ]
-exclude = ["third_party/iroh", "third_party/swarm-discovery", "third_party/iroh-mdns-address-lookup"]
+exclude = ["third_party/opaque-ke", "third_party/voprf", "third_party/iroh", "third_party/swarm-discovery", "third_party/iroh-mdns-address-lookup"]
 resolver = "2"
 
 [workspace.package]
@@ -35,6 +35,7 @@ license = "Apache-2.0"
 
 # 生产与验证共用不可变上游密码依赖；下游消费 Engine 时同样生效。
 [workspace.dependencies]
+opaque-ke = { path = "third_party/opaque-ke", version = "=4.0.1", features = ["argon2", "ristretto255"] }
 # 网络栈以真实路径依赖传递给宿主；来源由 submodule gitlink 固定。
 iroh = { path = "third_party/iroh/iroh", version = "1.3.0" }
 iroh-relay = { path = "third_party/iroh/iroh-relay", version = "=1.3.0" }

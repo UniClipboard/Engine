@@ -1,4 +1,5 @@
 //! Blob获取与发布的模块内测试；逻辑模块与原测试路径保持。
+mod contact_budget;
 mod preparation;
 use std::collections::HashMap;
 use std::future::ready;
@@ -7,7 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use uc_core::ids::EntryId;
+use uc_core::file_transfer::ProgressIdentity;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::blob::{
     BlobDigest, BlobError, BlobReferenceError, BlobReferenceRepositoryPort, BlobTicket,
     BlobTransferPort, PlaintextHash, TagReason,
@@ -15,6 +17,7 @@ use uc_core::ports::blob::{
 use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
 use uc_core::ports::ContentHashPort;
 use uc_core::{ContentHash, HashAlgorithm};
+use uuid::Uuid;
 
 use super::test_support::retained;
 use super::transport::{BlobExchangeError, BlobExchangeFailure, BlobReadStorePort, BlobReceived};
@@ -111,11 +114,12 @@ async fn first_data_deadline_includes_identity_lookup_and_keeps_capacity_until_i
         },
         |result, _| ready(result),
     ));
+    let source_identity = ProgressIdentity::new([1; 16]);
     let second = tokio::spawn(usecase.execute(
         FetchBlobInput {
             settlement: Default::default(),
             ticket: ticket.clone(),
-            entry_id: EntryId::new(),
+            entry_id: EntryId::from(Uuid::from_bytes(source_identity.bytes()).to_string()),
             cancel: second_cancel.clone(),
             preparation: super::transport::BlobDownloadPreparation {
                 work: Box::pin(async { Ok(None) }),
@@ -130,12 +134,19 @@ async fn first_data_deadline_includes_identity_lookup_and_keeps_capacity_until_i
         .await
         .expect("two active lookups")
         .forget();
-    tokio::time::advance(Duration::from_secs(30)).await;
+    let contacts = contact_budget::ContactProbe::new(DeviceId::new("peer"), source_identity).await;
+    for sequence in 1..=3 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        contacts.pulse(sequence).await;
+    }
     first_cancel.cancel();
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }
-    tokio::time::advance(Duration::from_secs(30)).await;
+    for sequence in 4..=6 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        contacts.pulse(sequence).await;
+    }
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }

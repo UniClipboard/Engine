@@ -89,6 +89,12 @@ jobs:
         with:
           tool: cargo-audit@0.22.2
 
+      - name: Check pinned OPAQUE sources
+        run: node scripts/architecture/check-opaque-dependency-source.mjs
+
+      - name: Verify fixed-old OPAQUE compatibility
+        run: node scripts/testing/run-opaque-dependency-compat.mjs
+
       - name: Audit locked dependencies
         run: cargo audit --deny unsound
 
@@ -98,6 +104,9 @@ jobs:
           scripts/architecture/check-direct-log-macros.test.mjs
           scripts/testing/relay-recovery-support.test.mjs
           scripts/testing/connection-recovery-session.test.mjs
+          scripts/testing/clipboard-delivery-evidence.test.mjs
+          scripts/testing/transfer-progress-evidence.test.mjs
+          scripts/testing/verify-progress-connectivity.test.mjs
 
       - name: Check snapshot-only cache boundaries
         run: |
@@ -124,6 +133,14 @@ jobs:
           endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
+      - name: Retain OPAQUE compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opaque-compatibility-${{ runner.os }}
+          path: target/test-reports/opaque-compat
+          if-no-files-found: warn
 
       - name: Retain MBX compiler evidence
         if: always()
@@ -228,7 +245,9 @@ jobs:
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
-    timeout-minutes: 75
+    # 完整 workspace 与原固定资源负载共用构建；冷构建时曾在资源阶段触及60分钟上限。
+    # 仅增加整组CI预算，各场景的原期限、负载和资源阈值保持不变。
+    timeout-minutes: 90
     env:
       # 所有测试组共用同一次全工作区构建，只编译一次。
       UC_TEST_BUILD_SCOPE: workspace
@@ -433,8 +452,8 @@ jobs:
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
         with:
           tool: just
-      - name: Run fixed legacy progress content baselines
-        run: bash scripts/testing/run-progress-legacy-baseline.sh
+      - name: Run required progress and fixed legacy matrix
+        run: bash scripts/testing/run-progress-connectivity.sh
       - name: Run complete mandatory blob matrix
         run: bash scripts/testing/run-blob-connectivity.sh
       - name: Retain sanitized blob evidence
@@ -447,6 +466,9 @@ jobs:
             target/blob-connectivity-evidence/runs/**/*.txt
             target/blob-connectivity-evidence/runs/**/*.log
             target/blob-connectivity-evidence/frozen-main/*.txt
+            target/progress-connectivity-evidence/runs/**/*.json
+            target/progress-connectivity-evidence/runs/**/*.txt
+            target/progress-connectivity-evidence/runs/**/*.log
             target/progress-legacy-evidence/runs/**/*.json
             target/progress-legacy-evidence/runs/**/*.txt
             target/progress-legacy-evidence/runs/**/*.log
@@ -496,6 +518,15 @@ jobs:
       - name: Build iOS binding
         if: matrix.platform == 'ios'
         run: bash bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
+      - name: Build iOS probe core
+        if: matrix.platform == 'ios'
+        run: |
+          source scripts/build-cache/env.sh
+          export IPHONEOS_DEPLOYMENT_TARGET=17.0
+          # 探针与生产绑定共用已安装目标、dev配置和编译缓存；编译不表示真机验收通过。
+          for probe_target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+            cargo build -p uc-mobile-probe-core --lib --profile dev --target "$probe_target" --locked
+          done
       - name: Install Android targets and helper
         if: matrix.platform == 'android'
         run: |
@@ -505,6 +536,12 @@ jobs:
       - name: Build Android binding
         if: matrix.platform == 'android'
         run: bash bindings/uc-engine-uniffi/scripts/build-android-aar.sh
+      - name: Build Android probe core
+        if: matrix.platform == 'android'
+        run: |
+          source scripts/build-cache/env.sh
+          # 复用原arm64目标和cargo-ndk，不生成第二套JNI打包目录。
+          cargo ndk -t arm64-v8a build -p uc-mobile-probe-core --lib --profile dev --locked
 
       - name: Publish scenario CAS snapshot
         if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')

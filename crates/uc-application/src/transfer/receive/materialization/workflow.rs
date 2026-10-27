@@ -459,8 +459,8 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
             .map(|(index, _)| original_blob_indices[index])
             .collect::<Vec<_>>();
         let mut completed = Vec::new();
-        let (count, total) = receive_member_totals(&blob_refs, file_set_manifest.as_ref());
-        batch.plan(count, total);
+        let (count, _) = receive_member_totals(&blob_refs, file_set_manifest.as_ref());
+        batch.plan(count);
         if blob_refs.is_empty() && file_set_manifest.is_none() {
             return Ok(MaterializeResult::complete(snapshot));
         }
@@ -1484,6 +1484,14 @@ impl FileCacheBlobMaterializer {
             }
         }
 
+        if manifest.members.iter().any(|member| {
+            member.kind == FileSetMemberKind::EmptyDirectory
+                && member.relative_path == "."
+                && root_member_counts.get(&member.root_index) != Some(&1)
+        }) {
+            return Err(anyhow!("empty root marker cannot contain other members"));
+        }
+
         let staging_name = staging_dir_name(receiver_entry_id);
         let mut candidates = Vec::with_capacity(2);
         if let Some(resolver) = &self.save_dir_resolver {
@@ -1699,7 +1707,10 @@ impl FileCacheBlobMaterializer {
                 return Err(BlobTransferError::Cancelled.into());
             }
             let root = staging_root(staging_base, member.root_index, &member.root_name);
-            let target = if member.root_is_file {
+            // 捕获端以精确的`.`表示选中根本身为空；只在空目录语义下落到已验证根。
+            let empty_root =
+                member.kind == FileSetMemberKind::EmptyDirectory && member.relative_path == ".";
+            let target = if member.root_is_file || empty_root {
                 root.clone()
             } else {
                 join_relative_path(&root, &member.relative_path)?
@@ -2004,8 +2015,6 @@ fn directory_member_transfer_context(
         peer_id: from_device.as_str().to_owned(),
         total_bytes: Some(blob_ref.size_bytes),
         filename: blob_ref.filename.clone().unwrap_or_default(),
-        outbound_transfer_id: Some(blob_ref.entry_id.as_ref().to_owned()),
-        outbound_target: Some(*from_device),
         batch_position,
         individual_lifecycle: true,
     }
@@ -2032,8 +2041,6 @@ fn directory_representation_transfer_context(
         peer_id: from_device.as_str().to_owned(),
         total_bytes: Some(blob_ref.size_bytes),
         filename: String::new(),
-        outbound_transfer_id: Some(blob_ref.entry_id.as_ref().to_owned()),
-        outbound_target: Some(*from_device),
         batch_position,
         individual_lifecycle: true,
     }

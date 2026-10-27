@@ -28,6 +28,12 @@ const NETWORK_STACK_CONSUMERS = {
   'uc-connectivity-relay': ['iroh-relay'],
 }
 const VENDORED_THIRD_PARTY_PACKAGES = ['iroh-mdns-address-lookup', 'swarm-discovery']
+// 密码兼容来源的路径依赖必须传递给独立Engine消费者，禁止依赖根patch。
+const OPAQUE_COMPAT_CONSUMERS = {
+  'uc-infra-crypto': ['opaque-ke'],
+  'uc-infra-profile': ['opaque-ke'],
+}
+
 
 const EXPECTED_PACKAGES = [
   'openmls-validation',
@@ -363,6 +369,13 @@ function checkLocalDependencies(metadata) {
       if (networkPackages.includes(dependency.name)) {
         if (!dependency.path || resolve(dependency.path) !== join(REPOSITORY_ROOT, 'third_party', 'iroh', dependency.name)) {
           addProblem(problems, 'network stack', `${packageMetadata.name} must use the vendored ${dependency.name}`)
+        }
+        continue
+      }
+      const opaquePackages = OPAQUE_COMPAT_CONSUMERS[packageMetadata.name] ?? []
+      if (opaquePackages.includes(dependency.name)) {
+        if (!dependency.path || resolve(dependency.path) !== join(REPOSITORY_ROOT, 'third_party', dependency.name)) {
+          addProblem(problems, 'OPAQUE compatibility source', `${packageMetadata.name} must use the pinned ${dependency.name} source`)
         }
         continue
       }
@@ -2276,7 +2289,7 @@ function repositorySources() {
       'membership_branch_recovery_adapter.rs',
       'membership_history_exchange_adapter.rs',
       'peer_reachability_adapter.rs',
-      'transfer_progress_adapter.rs',
+      'connectivity/progress_handler.rs',
     ].map(path => read(`crates/uc-infra-p2p/src/network/iroh/${path}`)).join('\n'),
     presenceTransport: productionSources('crates/uc-application/src/space/connectivity/peer_connections/transport'),
     presenceBridge: read('crates/uc-infra-p2p/src/network/iroh/connectivity/presence_handler.rs'),
@@ -2455,6 +2468,15 @@ function expectRejected(name, mutate, metadata, sources) {
 }
 
 function runNegativeFixtures(metadata, sources) {
+  for (const [consumer, names] of Object.entries(OPAQUE_COMPAT_CONSUMERS)) {
+    for (const name of names) {
+      expectRejected(`${consumer} registry OPAQUE dependency ${name}`, changed => {
+        const dependency = packageByName(changed, consumer).dependencies.find(dep => dep.name === name)
+        delete dependency.path
+        dependency.source = 'registry+https://github.com/rust-lang/crates.io-index'
+      }, metadata, sources)
+    }
+  }
   for (const [consumer, names] of Object.entries(NETWORK_STACK_CONSUMERS)) {
     for (const name of names) {
       expectRejected(`${consumer} registry network dependency ${name}`, changed => {

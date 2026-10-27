@@ -1,8 +1,8 @@
 //! Application一次完整终态动作：真实接收/输出后发送，错误ACK和旧attempt不得成功。
+use super::progress_probe::UnusedSnapshotProvider;
 use super::progress_probe::{progress_budget, Fixture};
 use crate::network::iroh::blob_exchange::IrohBlobExchangeAdapter;
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
-use anyhow::{bail, ensure};
 use async_trait::async_trait;
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::ALPN as BLOBS_ALPN;
@@ -10,27 +10,28 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangePort, BlobReadStorePort, BlobValidatedProgress, ConnectionLease,
-    ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressBound, ProgressClaimRefusal,
-    ProgressContactNotice, ProgressExchangeDeadline, ProgressReceiveError, ProgressReceiverPort,
-    ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, ProgressUpdateNotice, ProgressWirePort, StreamLease,
-    TransferProgressProducer, TransferProgressReceiver,
+    ConnectivityError, ElapsedClockError, ElapsedClockPort, PeerSendStream, ProgressBound,
+    ProgressClaimRefusal, ProgressContactNotice, ProgressExchangeDeadline, ProgressReceiveError,
+    ProgressReceiverPort, ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressUpdateNotice, ProgressWirePort,
+    StreamLease, TransferProgressProducer, TransferProgressReceiver, UniStreamLease,
 };
 use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
-    ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
+    OutboundProgressSummary, ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal,
+    ProgressTerminalOutcome,
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::blob::BlobDigest;
 use uc_infra_local::SystemElapsedClock;
-use uc_sync_protocol::transfer_progress::v2::{
-    read_frame, write_frame, Envelope, Message, TRANSFER_PROGRESS_ALPN,
-};
+use uc_sync_protocol::transfer_progress::v2::{read_frame, TRANSFER_PROGRESS_ALPN};
+
+#[path = "stream_outbound_ack_probe.rs"]
+mod ack_probe;
 
 const SOURCE: ProgressIdentity = ProgressIdentity::new([1; 16]);
 const ATTEMPT: ProgressIdentity = ProgressIdentity::new([3; 16]);
@@ -75,14 +76,15 @@ impl ProgressTaskAuthorityPort for Authority {
     fn claim_terminal(
         &self,
         peer: &DeviceId,
-        source: ProgressIdentity,
-        attempt: ProgressIdentity,
+        expected: ProgressTaskDescriptor,
         item: ProgressItem,
     ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let source = expected.source;
+        let attempt = expected.attempt;
         let task = self
             .current_task(peer, source)
             .ok_or(ProgressClaimRefusal::NotRetained)?;
-        if task.descriptor.attempt != attempt {
+        if task.descriptor != expected {
             return Err(ProgressClaimRefusal::Superseded);
         }
         if !task.items.contains(&item) {
@@ -116,6 +118,7 @@ fn producer(fixture: &Fixture) -> TransferProgressProducer {
         fixture.outbound.clone(),
         Arc::new(TransferProgressWire),
         Arc::new(Authority::default()),
+        Arc::new(UnusedSnapshotProvider),
         Arc::new(SystemElapsedClock),
     )
 }
@@ -139,6 +142,7 @@ async fn serve_registration(
         progress_budget(),
         cancel,
         owner,
+        &UnusedSnapshotProvider,
     )
     .await?;
     Ok(())
@@ -206,6 +210,7 @@ async fn settled_file_single_action_registers_sends_and_observes_exact_adopted_a
                 progress_budget(),
                 &stop,
                 &owner,
+                &UnusedSnapshotProvider,
             )
             .await?;
             anyhow::Ok(())
@@ -275,100 +280,6 @@ async fn old_attempt_is_refused_before_any_registration_stream() -> anyhow::Resu
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn changed_ack_or_trailing_bytes_do_not_report_success() -> anyhow::Result<()> {
-    for trailing in [false, true] {
-        let fixture = Fixture::new(4, 4, TRANSFER_PROGRESS_ALPN).await?;
-        let owner = owner(&fixture)?;
-        let producer = producer(&fixture);
-        let stop = CancellationToken::new();
-        let peer = fixture.sending.peer();
-        let budget = progress_budget();
-        let serve = async {
-            serve_registration(&fixture, &owner, &stop).await?;
-            let mut stream = fixture.receiving.accept_bi().await?;
-            let Message::Terminal {
-                binding,
-                scope,
-                owner_revision,
-                mut result,
-            } = read_frame(&mut stream.receive).await?.message
-            else {
-                bail!("expected terminal")
-            };
-            let adopted = owner
-                .adopt_terminal(
-                    &fixture.receiving.peer(),
-                    1,
-                    ProgressTerminalNotice {
-                        binding: ProgressIdentity::new(binding.0),
-                        source: ProgressIdentity::new(scope.source_entry.0),
-                        attempt: ProgressIdentity::new(scope.attempt.0),
-                        revision: owner_revision,
-                        result: terminal(10),
-                    },
-                )
-                .await?;
-            ensure!(
-                adopted.result.bytes == result.bytes,
-                "actual terminal adopted"
-            );
-            if !trailing {
-                result.result_revision += 1;
-            }
-            write_frame(
-                &mut stream.send,
-                &Envelope {
-                    message: Message::TerminalAck {
-                        binding,
-                        scope,
-                        owner_revision,
-                        result,
-                    },
-                    trace_context: None,
-                },
-            )
-            .await?;
-            if trailing {
-                stream.send.write_all(&[0]).await?;
-            }
-            stream.send.finish()?;
-            anyhow::Ok(())
-        };
-        let (reported, served) = timeout(Duration::from_secs(15), async {
-            tokio::join!(
-                producer.report_settled(
-                    &peer,
-                    ProgressTaskDescriptor {
-                        attempt: ATTEMPT,
-                        ..Authority::default()
-                            .current_task(&peer, SOURCE)
-                            .unwrap()
-                            .descriptor
-                    },
-                    terminal(10),
-                    &budget,
-                    &stop
-                ),
-                serve
-            )
-        })
-        .await?;
-        served?;
-        if trailing {
-            assert!(matches!(reported, Err(ProgressReceiveError::Exchange(_))));
-        } else {
-            assert!(matches!(reported, Err(ProgressReceiveError::Conflict)));
-        }
-        assert_eq!(
-            owner.snapshot().items[0].1,
-            Some(ProgressItemState::Terminal(terminal(10)))
-        );
-        fixture.close().await?;
-    }
-    Ok(())
-}
-
 struct Clock(AtomicU64);
 impl ElapsedClockPort for Clock {
     fn elapsed(&self) -> Result<Duration, ElapsedClockError> {
@@ -380,6 +291,17 @@ struct ConsumedBudget {
 }
 #[async_trait]
 impl ProgressWirePort for ConsumedBudget {
+    async fn summary(
+        &self,
+        _: &mut UniStreamLease<Box<dyn PeerSendStream>>,
+        _: &ConnectionLease,
+        _: ProgressIdentity,
+        _: OutboundProgressSummary,
+        _: &ProgressExchangeDeadline,
+        _: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        panic!("the current-protocol budget test cannot send a legacy summary");
+    }
     async fn contact(
         &self,
         stream: &mut StreamLease,
@@ -445,6 +367,7 @@ async fn registration_and_terminal_share_original_elapsed_budget() -> anyhow::Re
             clock: clock.clone(),
         }),
         Arc::new(Authority::default()),
+        Arc::new(UnusedSnapshotProvider),
         clock.clone(),
     );
     let deadline = ProgressExchangeDeadline::new(clock.clone(), BUDGET)?;
@@ -498,6 +421,7 @@ async fn new_attempt_during_challenge_cannot_relabel_an_old_settled_result() -> 
         fixture.outbound.clone(),
         Arc::new(TransferProgressWire),
         authority.clone(),
+        Arc::new(UnusedSnapshotProvider),
         Arc::new(SystemElapsedClock),
     );
     let stop = CancellationToken::new();
@@ -514,6 +438,7 @@ async fn new_attempt_during_challenge_cannot_relabel_an_old_settled_result() -> 
             progress_budget(),
             &stop,
             &owner,
+            &UnusedSnapshotProvider,
         )
         .await?;
         anyhow::Ok(())
@@ -559,3 +484,6 @@ mod live_probe;
 
 #[path = "stream_projection_probe.rs"]
 mod projection_probe;
+
+#[path = "stream_retry_fence_probe.rs"]
+mod retry_fence_probe;

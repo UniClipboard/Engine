@@ -102,7 +102,7 @@ fn terminal_intent_claim_is_once_across_duplicate_handoff_and_new_attempt_is_sep
     owner.accept(&local, peer, id(1), id(2), items());
     let before = owner.current(&peer, id(1)).unwrap();
     assert!(owner
-        .claim_terminal(&peer, id(1), id(2), items()[0])
+        .claim_terminal(&peer, before.descriptor, items()[0])
         .is_ok());
     assert!(before.notification_closed.is_empty());
     assert!(owner
@@ -112,7 +112,7 @@ fn terminal_intent_claim_is_once_across_duplicate_handoff_and_new_attempt_is_sep
         .contains(&items()[0]));
     owner.accept(&local, peer, id(1), id(2), items());
     assert!(matches!(
-        owner.claim_terminal(&peer, id(1), id(2), items()[0]),
+        owner.claim_terminal(&peer, before.descriptor, items()[0]),
         Err(ProgressClaimRefusal::AlreadyObserved)
     ));
     owner.accept(&local, peer, id(1), id(3), items());
@@ -122,10 +122,14 @@ fn terminal_intent_claim_is_once_across_duplicate_handoff_and_new_attempt_is_sep
         .notification_closed
         .is_empty());
     assert!(matches!(
-        owner.claim_terminal(&peer, id(1), id(2), items()[0]),
+        owner.claim_terminal(&peer, before.descriptor, items()[0]),
         Err(ProgressClaimRefusal::Superseded)
     ));
     assert!(owner
-        .claim_terminal(&peer, id(1), id(3), items()[0])
+        .claim_terminal(
+            &peer,
+            owner.current(&peer, id(1)).unwrap().descriptor,
+            items()[0]
+        )
         .is_ok());
 }

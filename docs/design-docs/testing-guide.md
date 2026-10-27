@@ -94,7 +94,22 @@ async fn run_scenario() {
 - `run_child_process` 在显式预算内 wait；超时后 kill 并再次 wait，资源 cleanup 写入报告。非零退出码由业务场景决定属于产品失败还是预期故障注入。
 - 外部资源只有调用方确实拥有其生命周期时才用 `record_external_resource` 登记结果。
 
+涉及等待者退出的用例，先通过既有完整查询或受控能力的开始屏障确认业务动作已进入负责人，再触发等待超时或取消。
+固定睡眠、future创建或等待期限到达本身不能证明动作已开始；调度延后可能让Engine在调用业务入口前就完成取消。
+只在确认开始后验证已启动工作继续受监督，并保持原清理、资源及期限断言；不要为测试扩大稳定Engine的业务步骤接口。
+
 nextest 仍是测试进程的最终超时负责人。场景预算应短于 nextest override，给 JSON/摘要写入和清理留出时间。
+
+进度连接的真实空闲回收用例 `actual_work_leases_survive_thirty_seconds_then_real_idle_timer_closes_the_connection`
+必须先保留实际工作31秒，再等待原30秒空闲回收；默认20秒终止线无法完成该证明。
+`.config/nextest.toml` 为该精确用例在 `default`／`ci` 配置120秒外层期限，并归入 `real-network` 组。
+测试自身90秒截止、产品30秒策略、实际等待断言和零重试均保持不变；不能把这个外层预算泛化到其他用例。
+
+独立进程的`startup_overlapping_a_closing_host_is_never_reported_as_corrupt`连续12轮执行创建、关闭和重启，
+覆盖六种重叠延迟。固定原二进制单CPU直接执行26.42秒完成，而原nextest在20.006秒终止；
+因此该精确用例在`default`／`ci`使用120秒外层预算以覆盖完整流程及coverage开销。
+单次宿主应答30秒、原操作期限、12轮、损坏分类断言及零重试保持，不扩大同文件其他测试的预算。
+这是外层测试预算修正；CI同名超时仍须由候选CI验证，不据此推断所有启动失败的原因。
 
 ## 6. 分组与本地运行
 
@@ -115,6 +130,10 @@ Engine，使用真实 SQLite、MLS 与本机回环 Iroh QUIC，配对 rendezvous
 内施加，使用真实时钟。该文件只在 `dev-tools` feature 下编译，因此 `cargo test -p uc-engine --locked` 不运行
 其中任何场景。nextest 为每个场景单独起进程，并按 `.config/nextest.toml` 的 `membership-e2e` 测试组限制并发、
 放宽慢测试期限；`cargo test` 会在一个进程中顺序运行全部场景，耗时约为前者的数倍且时序失真，只作为兼容入口保留。
+`RejectNewConnections` 的协议选择必须覆盖对应能力的全部当前版本；剪贴板协议新增能力版本时，
+同时更新 dev-tools 的内容拨号选择。真实故障测试必须核对实际拒绝计数，不能只启用开关就假定
+目标交换已经受影响；已有连接的复用与新拨号拒绝分别验收。
+
 场景按类别放在 `crates/uc-engine/tests/space_membership_auto_pairing_e2e/` 的模块中（`admission`、`topology`、
 `removal_convergence`、`space_switch`、`membership_history`、`automatic_connections` 等），共享测试台位于其
 `harness/`。`topology::` 下的多节点拓扑另属 `membership-topology` 测试组，并发更低。每个场景第一行是

@@ -2,11 +2,18 @@
 //! The complete inbound receive lifecycle is owned separately by
 //! `ClipboardInboundRuntime`.
 
+#[cfg(test)]
+use crate::connectivity::{ElapsedClockError, ElapsedClockPort};
+use crate::transfer::progress::ProgressProjectionRegistry;
+#[cfg(test)]
+use crate::transfer::progress::ProgressProjectionWorker;
 use crate::transfer::receive::query::ReceiveProgressQuery;
 use crate::transfer::receive::retry::{
     RetryEntryReceiveError, RetryEntryReceiveOutcome, RetryEntryReceiveUseCase,
 };
 use std::sync::Arc;
+#[cfg(test)]
+use std::time::Duration;
 
 use bytes::Bytes;
 use tracing::instrument;
@@ -49,6 +56,7 @@ use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
 /// Clipboard 领域内部构造输入，不进入公开 facade 白名单。
 pub(crate) struct ClipboardSyncDeps {
+    pub progress: ProgressProjectionRegistry,
     pub peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
     pub member_repo: Arc<dyn MemberRepositoryPort>,
     pub peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
@@ -202,7 +210,7 @@ impl ClipboardSyncFacade {
     }
 
     pub(crate) fn new(deps: ClipboardSyncDeps) -> Self {
-        let dispatch_uc = Arc::new(DispatchClipboardEntryUseCase::new_with_scope(
+        let dispatch_uc = Arc::new(DispatchClipboardEntryUseCase::new(
             Arc::clone(&deps.peer_addr_repo),
             Arc::clone(&deps.member_repo),
             Arc::clone(&deps.peer_reachability),
@@ -217,6 +225,7 @@ impl ClipboardSyncFacade {
             Arc::clone(&deps.entry_delivery_repo),
             Arc::clone(&deps.host_event_bus),
             Arc::clone(&deps.peer_scope),
+            deps.progress,
         ));
         let view_uc = Arc::new(GetEntryDeliveryViewUseCase::new(
             Arc::clone(&deps.entry_repo),
@@ -824,6 +833,11 @@ mod tests {
     }
 
     struct FixedClock(i64);
+    impl ElapsedClockPort for FixedClock {
+        fn elapsed(&self) -> Result<Duration, ElapsedClockError> {
+            Ok(Duration::ZERO)
+        }
+    }
     impl ClockPort for FixedClock {
         fn now_ms(&self) -> i64 {
             self.0
@@ -916,8 +930,10 @@ mod tests {
         device_identity: MockDeviceId_,
         local_identity: MockLocalIdentity,
         settings: MockSettings_,
-    ) -> ClipboardSyncFacade {
-        ClipboardSyncFacade::new(ClipboardSyncDeps {
+    ) -> (ClipboardSyncFacade, ProgressProjectionWorker) {
+        let (progress, worker) = ProgressProjectionRegistry::new(Arc::new(FixedClock(0)));
+        let facade = ClipboardSyncFacade::new(ClipboardSyncDeps {
+            progress,
             peer_addr_repo: Arc::new(peer_addr_repo),
             member_repo: Arc::new(make_member_repo_all_enabled()),
             peer_scope: Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
@@ -936,7 +952,8 @@ mod tests {
             trusted_peer_repo: Arc::new(make_noop_trusted_peer_repo()),
             mobile_device_repo: Arc::new(make_noop_mobile_device_repo()),
             host_event_bus: Arc::new(crate::facade::host_event::HostEventBus::new()),
-        })
+        });
+        (facade, worker)
     }
 
     // ── verdicts ────────────────────────────────────────────────────────
@@ -968,7 +985,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
 
-        let facade = build_facade(
+        let (facade, _progress_worker) = build_facade(
             repo,
             peer_reachability,
             cipher,
@@ -1020,7 +1037,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _| dispatch_report(Ok(DispatchAck::Accepted)));
 
-        let facade = build_facade(
+        let (facade, _progress_worker) = build_facade(
             repo,
             peer_reachability,
             cipher,

@@ -5,15 +5,25 @@ use super::{
     MockEntryRepo, NoopReceiveArtifactCleanup, RecordingLiveIndex, StoreOnlyPullDeps,
 };
 use crate::clipboard::entry_identity::EntryIdentityCoordinator;
-use crate::transfer::progress::ProgressTaskAuthorityPort;
+use crate::clipboard::inbound::{InboundClipboardApplyInput, InboundClipboardApplyPort};
+use crate::clipboard::sync::payload_codec::{
+    decode_v3_bytes_to_snapshot_and_blob_refs, encode_snapshot_with_blob_refs_to_v3_bytes,
+};
+use crate::transfer::progress::{
+    ProgressPageReply, ProgressSnapshotProviderPort, ProgressSnapshotQuery,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+};
 use crate::transfer::receive::reconciliation::ReceiveReadinessCoordinator;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use async_trait::async_trait;
 use std::io;
 use std::sync::{atomic::AtomicUsize, Arc};
 use tokio::sync::{Notify, Semaphore};
-use uc_core::file_transfer::ProgressIdentity;
-use uc_core::ids::EntryId;
+use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
+use uc_core::file_transfer::{ProgressIdentity, ProgressItemState, ProgressTerminalOutcome};
+use uc_core::ids::{DeviceId, EntryId};
+use uc_core::ports::blob::BlobTicket;
 use uc_core::ports::{AttemptError, BeginReceiveAttemptPort, BeginReceiveOutcome};
 use uuid::Uuid;
 
@@ -58,7 +68,7 @@ impl BeginReceiveAttemptPort for HeldAcceptance {
 
 #[tokio::test]
 async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization() {
-    for reject in [false, true] {
+    for (source_hint, reject) in [(false, false), (false, true), (true, false), (true, true)] {
         let work = Arc::new(ReceiveWorkRegistry::default());
         let attempts = AttemptGate::empty();
         let acceptance = Arc::new(HeldAcceptance {
@@ -70,7 +80,39 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
         let mut input = file_blob_input();
         let source = EntryId::from("00000000-0000-4000-8000-000000000001");
         let id = ProgressIdentity::new(*Uuid::parse_str(source.as_ref()).unwrap().as_bytes());
-        input.source_entry = Some(source);
+        let blob_source = EntryId::from("00000000-0000-4000-8000-000000000002");
+        let provider_roles = [DeviceId::new("provider-b"), DeviceId::new("provider-c")];
+        let (snapshot, original) =
+            decode_v3_bytes_to_snapshot_and_blob_refs(&input.plaintext).unwrap();
+        // Application不解析ticket定位信息；受控材料化port把三份opaque能力映射到两个provider角色。
+        let capabilities = (0..3)
+            .map(|index| {
+                (
+                    BlobTicket::from_bytes(vec![200 + index, 42]),
+                    provider_roles[index as usize % 2],
+                )
+            })
+            .collect::<Vec<_>>();
+        let references = capabilities
+            .iter()
+            .enumerate()
+            .map(|(index, (ticket, _))| {
+                let mut reference = original[0].clone();
+                reference.ticket = ticket.clone();
+                reference.entry_id = if source_hint {
+                    blob_source.clone()
+                } else {
+                    source.clone()
+                };
+                reference.filename = Some(format!("handoff-{index}.bin"));
+                reference
+            })
+            .collect::<Vec<_>>();
+        let (plaintext, hash) =
+            encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &references).unwrap();
+        input.plaintext = plaintext;
+        input.snapshot_hash = hash;
+        input.source_entry = source_hint.then_some(source.clone());
         let peer = input.from_device;
         let mut repo = MockEntryRepo::new();
         repo.expect_find_entry_id_by_snapshot_hash()
@@ -83,7 +125,21 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
             materializer
                 .expect_materialize_plan()
                 .times(1)
-                .returning(move |_| {
+                .returning(move |plan| {
+                    let (from_device, local_entry, _, blobs, directory, attempt, _, _, _) =
+                        plan.into_parts();
+                    assert_eq!(from_device, peer);
+                    assert_ne!(local_entry, source);
+                    assert!(directory.is_none());
+                    assert_eq!(blobs, references);
+                    for blob in &blobs {
+                        let (_, provider) = capabilities
+                            .iter()
+                            .find(|(ticket, _)| ticket == &blob.ticket)
+                            .expect("original provider capability");
+                        assert_ne!(*provider, from_device);
+                        assert!(registry.current_task(provider, id).is_none());
+                    }
                     let accepted = registry
                         .current_task(&peer, id)
                         .expect("authoritative before download");
@@ -92,7 +148,13 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
                         accepted.descriptor.attempt.bytes(),
                         *Uuid::parse_str(&current).unwrap().as_bytes()
                     );
-                    assert_eq!(accepted.descriptor.item_count, 1);
+                    assert_eq!(attempt.as_deref(), Some(current.as_str()));
+                    assert_eq!(accepted.descriptor.item_count, 3);
+                    assert!(accepted
+                        .items
+                        .iter()
+                        .enumerate()
+                        .all(|(index, item)| item.index == index as u16));
                     Err(io::Error::new(
                         io::ErrorKind::ConnectionAborted,
                         "fixture ends after accepted handoff",
@@ -131,12 +193,91 @@ async fn real_receive_handoffs_only_after_cas_begun_and_before_materialization()
             },
         ));
         let owner = receiver.clone();
-        let applying = tokio::spawn(async move { owner.execute(input).await });
+        let applying = tokio::spawn(async move {
+            owner
+                .apply(InboundClipboardApplyInput {
+                    source_entry: input.source_entry,
+                    from_device: input.from_device.as_str().to_owned(),
+                    snapshot_hash: input.snapshot_hash,
+                    plaintext: input.plaintext,
+                    provisional: None,
+                    resurface_intent: input.resurface_intent,
+                    activation_owner: input.activation_owner,
+                })
+                .await
+        });
         acceptance.entered.notified().await;
         assert!(work.current_task(&peer, id).is_none());
+        let observation = CancellationToken::new();
+        assert!(timeout(
+            Duration::from_millis(10),
+            work.next_progress_changes(&observation)
+        )
+        .await
+        .is_err());
         acceptance.release.add_permits(1);
         assert!(applying.await.unwrap().is_err());
         assert_eq!(work.current_task(&peer, id).is_none(), reject);
+        if !reject {
+            let changes = timeout(
+                Duration::from_secs(1),
+                work.next_progress_changes(&observation),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].peer, peer);
+            let snapshot = changes[0].snapshot.as_ref().unwrap();
+            assert!(snapshot.descriptor == work.current_task(&peer, id).unwrap().descriptor);
+            assert_eq!(snapshot.items.len(), 3);
+            assert!(snapshot.items.iter().all(|item| matches!(item, ProgressItemState::Terminal(value) if matches!(value.outcome, ProgressTerminalOutcome::Failed(_)))));
+            let current = work
+                .snapshot_page(
+                    &peer,
+                    ProgressSnapshotQuery {
+                        source: id,
+                        attempt: Some(snapshot.descriptor.attempt),
+                        offset: 0,
+                        revision: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(current, ProgressPageReply::Current(page) if page.descriptor == snapshot.descriptor && page.items == snapshot.items)
+            );
+            for provider in provider_roles {
+                assert!(work.current_task(&provider, id).is_none());
+                assert!(matches!(
+                    work.snapshot_page(
+                        &provider,
+                        ProgressSnapshotQuery {
+                            source: id,
+                            attempt: None,
+                            offset: 0,
+                            revision: None
+                        }
+                    )
+                    .await
+                    .unwrap(),
+                    ProgressPageReply::NotRetained
+                ));
+            }
+            if source_hint {
+                let blob_id = ProgressIdentity::new(
+                    *Uuid::parse_str(blob_source.as_ref()).unwrap().as_bytes(),
+                );
+                assert!(work.current_task(&peer, blob_id).is_none());
+            }
+        }
+        // 观察真实事实不再制造一次变化；拒绝的CAS也不能生成通知资格。
+        assert!(timeout(
+            Duration::from_millis(10),
+            work.next_progress_changes(&observation)
+        )
+        .await
+        .is_err());
         receiver.shutdown().await.unwrap();
     }
 }
@@ -182,7 +323,7 @@ fn registration_authority_worker() {
                         root_index: 0,
                         root_name: "folder".into(),
                         root_is_file: false,
-                        relative_path: String::new(),
+                        relative_path: ".".into(),
                         kind: FileSetMemberKind::EmptyDirectory,
                         blob_ref_index: None,
                     }],
@@ -261,7 +402,44 @@ fn registration_authority_worker() {
                 "items":task.items.iter().map(|item| json!({"kind":match item.kind { ProgressItemKind::File=>"file",ProgressItemKind::Representation=>"representation",ProgressItemKind::DirectoryUnit=>"directory" },"index":item.index})).collect::<Vec<_>>()
             })
         };
-        let response = if request["op"] == "claim" {
+        let response = if request["op"] == "snapshot" {
+            use crate::transfer::progress::{
+                ProgressPageReply, ProgressSnapshotProviderPort, ProgressSnapshotQuery,
+            };
+            use uc_core::file_transfer::{ProgressItemState, ProgressTerminalOutcome};
+            let peer = DeviceId::new(request["peer"].as_str().unwrap());
+            let source =
+                ProgressIdentity::new(serde_json::from_value(request["source"].clone()).unwrap());
+            let query = ProgressSnapshotQuery {
+                source,
+                attempt: request["attempt"].as_array().map(|_| {
+                    ProgressIdentity::new(
+                        serde_json::from_value(request["attempt"].clone()).unwrap(),
+                    )
+                }),
+                offset: request["offset"].as_u64().unwrap() as u16,
+                revision: request["revision"].as_u64(),
+            };
+            match runtime.block_on(registry.snapshot_page(&peer, query)) {
+                Ok(ProgressPageReply::Current(page) | ProgressPageReply::Superseded(page)) => {
+                    json!({
+                        "task": encode(registry.current_task(&peer, source).unwrap()),
+                        "revision": page.revision, "offset": page.offset, "total":page.total,
+                        "items": page.items.into_iter().map(|state| match state {
+                            ProgressItemState::Terminal(value) => json!({
+                                "kind":match value.item.kind { ProgressItemKind::File=>"file",ProgressItemKind::Representation=>"representation",ProgressItemKind::DirectoryUnit=>"directory" },
+                                "index":value.item.index,"round":value.round,"sequence":value.sequence,
+                                "result_revision":value.result_revision,"bytes":value.bytes,"total":value.total,
+                                "failed":match value.outcome { ProgressTerminalOutcome::Failed(reason)=>Some(format!("{reason:?}")), _=>None },
+                            }),
+                            ProgressItemState::Active(_) => json!({"active":true}),
+                        }).collect::<Vec<_>>()
+                    })
+                }
+                Ok(ProgressPageReply::NotRetained) => json!({"not_retained":true}),
+                _ => panic!("settled query fixture must retain its actual result"),
+            }
+        } else if request["op"] == "claim" {
             let peer = DeviceId::new(request["peer"].as_str().unwrap());
             let source =
                 ProgressIdentity::new(serde_json::from_value(request["source"].clone()).unwrap());
@@ -276,7 +454,16 @@ fn registration_authority_worker() {
                 },
                 index: request["index"].as_u64().unwrap() as u16,
             };
-            match registry.claim_terminal(&peer, source, attempt, item) {
+            let expected = ProgressTaskDescriptor {
+                producer: ProgressIdentity::new(
+                    serde_json::from_value(request["producer"].clone()).unwrap(),
+                ),
+                revision: request["revision"].as_u64().unwrap(),
+                source,
+                attempt,
+                item_count: u16::try_from(request["item_count"].as_u64().unwrap()).unwrap(),
+            };
+            match registry.claim_terminal(&peer, expected, item) {
                 Ok(task) => json!({"task":encode(task)}),
                 Err(reason) => json!({"refusal":format!("{reason:?}")}),
             }

@@ -1,4 +1,6 @@
 //! 显式独占进程，将真实文件业务导出到严格Collector；不替换网络、SQLite或业务结果。
+#[path = "observation/progress.rs"]
+mod progress;
 use super::*;
 use crate::{flush_test_tracing, init_test_tracing_with_otlp};
 

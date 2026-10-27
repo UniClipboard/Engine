@@ -71,14 +71,36 @@ async fn waiting_contact_uses_ten_seconds_without_overlap_or_renewal_by_duplicat
         rounds,
     );
     assert_eq!(
-        service.track_current(peer(1), id(1), id(99)).unwrap(),
+        service
+            .submit_activity(
+                peer(1),
+                service
+                    .inner
+                    .authority
+                    .current_task(&peer(1), id(1))
+                    .unwrap()
+                    .descriptor,
+                None
+            )
+            .unwrap(),
         ProgressSubmission::Retained
     );
     let stop = CancellationToken::new();
     let running = tokio::spawn(worker.run(stop.clone()));
     clock.0.store(9000, Ordering::SeqCst);
     assert_eq!(
-        service.track_current(peer(1), id(1), id(99)).unwrap(),
+        service
+            .submit_activity(
+                peer(1),
+                service
+                    .inner
+                    .authority
+                    .current_task(&peer(1), id(1))
+                    .unwrap()
+                    .descriptor,
+                None
+            )
+            .unwrap(),
         ProgressSubmission::Unchanged
     );
     clock.0.store(9999, Ordering::SeqCst);
@@ -102,8 +124,12 @@ async fn waiting_contact_uses_ten_seconds_without_overlap_or_renewal_by_duplicat
     service
         .submit_settled(
             peer(1),
-            id(1),
-            id(99),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
             ProgressTerminal {
                 item: value(0, 1).item,
                 round: 0,
@@ -141,21 +167,57 @@ async fn old_live_epoch_completion_cannot_remove_activity_submitted_after_clock_
         rounds,
     );
     service
-        .submit_live(peer(1), id(1), id(99), value(0, 1))
+        .submit_activity(
+            peer(1),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
+            Some(value(0, 1)),
+        )
         .unwrap();
     let stop = CancellationToken::new();
     let running = tokio::spawn(worker.run(stop.clone()));
     assert_eq!(next(&mut rx).await, (false, 1));
     clock.0.store(1000, Ordering::SeqCst);
     service
-        .submit_live(peer(1), id(1), id(99), value(0, 2))
+        .submit_activity(
+            peer(1),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
+            Some(value(0, 2)),
+        )
         .unwrap();
     clock.0.store(500, Ordering::SeqCst);
     assert!(service
-        .submit_live(peer(1), id(1), id(99), value(0, 3))
+        .submit_activity(
+            peer(1),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
+            Some(value(0, 3))
+        )
         .is_err());
     service
-        .submit_live(peer(1), id(1), id(99), value(0, 3))
+        .submit_activity(
+            peer(1),
+            service
+                .inner
+                .authority
+                .current_task(&peer(1), id(1))
+                .unwrap()
+                .descriptor,
+            Some(value(0, 3)),
+        )
         .unwrap();
     gate.add_permits(1);
     until(|| service.inner.state.lock().unwrap().active.is_empty()).await;

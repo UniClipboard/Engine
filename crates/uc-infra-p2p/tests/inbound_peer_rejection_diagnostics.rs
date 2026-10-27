@@ -236,6 +236,7 @@ async fn clipboard(dialer: &Endpoint, members: Members, admission: Arc<Admission
     clipboard_wire::write_frame(
         &mut send,
         &ClipboardHeader {
+            source_entry: None,
             version: ClipboardHeader::CURRENT_VERSION,
             snapshot_hash: "private-hash-sentinel".into(),
             captured_at_ms: 1,

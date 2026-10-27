@@ -22,6 +22,7 @@ fn version(protocol: ConnectionProtocol) -> Result<GroupUpdateVersion, Connectiv
         ConnectionProtocol::ActiveClipboardState
         | ConnectionProtocol::ActiveClipboardPull
         | ConnectionProtocol::Clipboard
+        | ConnectionProtocol::AttributedClipboard
         | ConnectionProtocol::MultiplexedClipboard
         | ConnectionProtocol::MembershipHistory
         | ConnectionProtocol::MultiplexedMembershipHistory

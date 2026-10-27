@@ -16,11 +16,7 @@ use uc_observability_contract::uc_info;
 use uc_observability_contract::uc_warn;
 
 impl ProductionSession {
-    pub(super) async fn shutdown(
-        self,
-        transfer_reason: FileTransferCancellationReason,
-        deadline: Option<Instant>,
-    ) -> Result<(), LifecycleError> {
+    pub(super) async fn shutdown(self, deadline: Option<Instant>) -> Result<(), LifecycleError> {
         let task_deadline =
             deadline.or_else(|| Instant::now().checked_add(Duration::from_millis(500)));
         let mut errors = Vec::new();
@@ -54,17 +50,6 @@ impl ProductionSession {
             errors.push(error.into());
         }
         uc_info!("Engine session Application runtime 已停止");
-        let stopping = LocalWorkObservation::begin(LocalWorkStep::SessionStopNetwork);
-        let network_shutdown = self.sync_session.shutdown(transfer_reason, deadline).await;
-        stopping.finish(if network_shutdown.is_ok() {
-            LocalWorkOutcome::Ok
-        } else {
-            LocalWorkOutcome::Error
-        });
-        if let Err(error) = network_shutdown {
-            errors.push(error.into());
-        }
-        uc_info!("Engine session 网络会话任务已停止");
         LifecycleError::from_errors(errors)
     }
 }

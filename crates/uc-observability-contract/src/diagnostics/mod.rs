@@ -18,12 +18,14 @@ pub mod connectivity;
 mod membership_recovery;
 mod network_scope;
 mod profile_upgrade_backup;
+mod progress_reconciliation;
 pub use membership_recovery::{
     describe_membership_conflict, scope_membership_recovery_trigger, MembershipRecoveryObservation,
     MembershipRecoveryOutcome, MembershipRecoveryTrigger,
 };
 pub use network_scope::{within_network_scope, NETWORK_SCOPE_TARGET};
 pub use profile_upgrade_backup::{record_profile_upgrade_backup_failure, LOCAL_DIAGNOSTIC_TARGET};
+pub use progress_reconciliation::ProgressReconciliationOutcome;
 
 tokio::task_local! {
     static CONTINUATION: opentelemetry::Context;
@@ -274,6 +276,9 @@ pub fn describe_admission_connection(span: &tracing::Span, resumed: bool) {
 /// 展示名称与筛选分类分别校验，只接受固定的动作、角色组合。
 pub fn approved_operation_name(operation: &str, role: &str, name: &str) -> bool {
     match (operation, role) {
+        ("clipboard.reconcile_progress", "local") => {
+            ProgressReconciliationOutcome::approved_name(name)
+        }
         ("session_lifecycle", "local") => name == "runtime.transition_session",
         ("membership_recovery", "local") => matches!(
             name,
@@ -500,6 +505,7 @@ wire_enum! {
         TaskShutdown => "runtime.shutdown_tasks",
         SessionRecovery => "runtime.recover_session",
         ClipboardRetryReceive => "clipboard.retry_receive",
+        ClipboardReconcileProgress => "clipboard.reconcile_progress",
         ClipboardExportFile => "clipboard.export_file",
     }
 }
