@@ -956,17 +956,36 @@ impl MembershipTopology {
                             device.membership == uc_engine::DeviceMembershipSummary::Active
                         })
                         .count();
-                    let observation = format!(
-                        "active={active_members}, issues={}, revision={}",
-                        summary.issues.len(),
-                        summary.revision
-                    );
                     if active_members == expected_active_members
                         && summary.issues.len() == expected_pending_choices
                     {
                         return;
                     }
-                    observation
+                    // 仅保留候选标识与规则事实，失败快照不包含设备名或用户内容。
+                    let issues = summary
+                        .issues
+                        .iter()
+                        .map(|issue| {
+                            let choices = issue
+                                .choices
+                                .iter()
+                                .map(|choice| {
+                                    (
+                                        &choice.choice_id,
+                                        choice.is_current_group,
+                                        choice.members_complete,
+                                        choice.member_device_ids.len(),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            (&issue.issue_id, issue.reason.kind, choices)
+                        })
+                        .collect::<Vec<_>>();
+                    format!(
+                        "active={active_members}, issues={}, revision={}, candidates={issues:?}",
+                        summary.issues.len(),
+                        summary.revision
+                    )
                 }
                 Ok(_) => "unexpected result".to_owned(),
                 Err(error) => format!("error={error}"),

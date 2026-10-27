@@ -1311,3 +1311,33 @@ node scripts/testing/run-progress-registration-proof.mjs
 实际清单另保留27个原ignore记录和293个表达式排除项，不把它们当作已执行。八项登记证明已由上述driver显式运行；fixture子进程只由所属完整场景驱动。物理挂起、外部／受保护relay、外部旧资料探针、性能／元数据审查工具及30秒启动普查等未独立执行，继续如实跳过。需要真实Collector的独占用例沿用 #325 的相同Rust源码及实际后端证据，不冒充本轮重新启动后端。
 
 绑定与移动宿主结果仅为当前Linux arm64主机上的Rust合同，不代表iOS／Android／HarmonyOS设备、跨平台候选CI或产品采用。本项只闭合阶段6定向合同；完整回归、原必需网络／资源及实机未完成项保持原状态。
+
+
+## 当前候选完整回归与首次失败保留
+
+2026-10-27完成阶段6第二项的七个原入口。基线为#326的`4c73cf1db28084c90e3d8863e23e2062d0a97bf6`：workspace在干净树执行；随后唯一代码差异为成员验收`assert_snapshot`失败快照，增加问题类型、候选标识、是否当前组、名单完整性和成员数，不输出设备名或用户内容。生产代码、依赖、协议、断言与等待预算均未改。该差异在后续入口中如实标记为modified，逐组校验同一补丁摘要；3412文件快照在测试前后保持`a8478fcaf7ded53e6f10e147a58f4a9c579ce4ad7f50a36815cf831e8cd9d001`。
+
+| 原入口 | 实际结果 | 入口耗时，含构建 |
+| --- | --- | --- |
+| workspace | 131个binary，4927通过，42原跳过；4927条唯一PASS与JUnit4927项无失败核对 | 1673.514秒 |
+| membership-e2e全集 | 56通过，14原跳过；完整重跑PASS与JUnit56项核对 | 1157.023秒 |
+| upgrade-matrix --smoke | a13到当前源码5个维度符合原登记：3通过、1明确拒绝、1已知不兼容；其余64项未执行，JUnit5项无失败 | 877.781秒 |
+| 原Blob网络矩阵 | 10格全部通过；双向文件精确读回、实际握手、清理与明文检查完整 | 292.980秒 |
+| 进度网络矩阵 | 新新／混合10格＋冻结旧旧4格，共14格，无跳过；精确文件、进度ALPN／路径与旧端保守视图通过 | 375.060秒 |
+| 原生命周期资源入口 | 固定9项通过，PASS与JUnit9项核对；原严格报告通过 | 1036.787秒 |
+| 原可达性网络矩阵 | 11类全部通过，包含20次新新Relay、固定main双向三轮恢复、a07双向恢复及旧版拒绝；逐份JSON无失败且清理／明文检查通过 | 1204.961秒 |
+
+资源入口继续使用两个1GiB文件，双文件场景92.291秒、终态容量溢出92.328秒。原采样与校验确认7类生命周期、8份报告、33次SDK关闭前观测，以及FD／线程／运行时任务、下载配额、SDK标签与原生连接数；没有以workspace中的同名场景代替独立资源入口。冻结Blob main仍为`a461b89444efd60081c7ef63f927946f9dfc072d`，进度main为`5cbca8fc24a278fa7b01ae611bf4b925914bef13`，可达性main为`b6fa0ce6b2efd1c1764e76c0a76537bdeead4e1b`，历史a07仍为`f6f305d9689e4e79e7ab6d0e4921061f9416e4a6`；不替换旧版本制造通过。a13为`5e8d3d4322ca4eb83113f342068d4cb3297ea5eb`，升级smoke的预期拒绝和已知不兼容不改写为功能互通。
+
+### 原完整失败及复现边界
+
+- 首次workspace为4926通过／1失败，真实执行1616.058秒：地址读取诊断默认要求captured，但Linux两个类别实际unresolved。原Linux CI已经使用`UC_EXPECT_DIAGNOSTIC_STACK=available`，macOS另执行captured严格验收。用同一个二进制对照，captured失败、available通过；实际7类仍验证分类、三层source chain与隐私，5类captured，locked／unknown为unresolved空栈。没有改白名单、测试断言或生产采集逻辑。对齐既有Linux CI参数后重新执行原完整4927项，原失败日志和JUnit另存，不用单项绿覆盖全组。
+- 首次成员全集为55通过／1失败，611.054秒：`topology::f2_concurrent_leaf_removals_resolve_to_selected_branch`在heal之后、选择分支之前，节点C为active=4、issues=2、revision=36，预期issues=1。原工件分类product_timeout。精确单项一次及原stress-count五轮均通过；仅增强测试失败快照后，原56项全集重跑全部通过，其中F2为40.632秒。**间歇失败根因尚未确定，不能宣称已修复，也不能把六次孤立绿当作原全组结果。**原失败、孤立诊断和完整重跑分别保留；后续再次出现时用候选事实定位，不放宽数量或超时断言。
+
+复跑沿用计划中的七个原命令。Linux按既有CI为测试组设置`UC_EXPECT_DIAGNOSTIC_STACK=available`，并用`UC_TEST_BUILD_SCOPE=workspace`保持统一构建图；隔离网络本轮使用原`UC_NETWORK_UNPRIVILEGED=1`路径，实际user／mount／net namespace预检通过，没有修改主机权限。构建串行复用共享target和MBX，固定旧源码临时目录已自动回收，未新增worktree或临时target。原始日志／JUnit／JSON和摘要仅保存在本地忽略的验收工件中，不提交原始输出。
+
+### CI与未执行项
+
+只读核对#326已结束的[CI run](https://github.com/UniClipboard/Engine/actions/runs/40442754299)：iOS、Android、HarmonyOS绑定、原网络矩阵、连接恢复、升级smoke和coverage通过；macOS仓库检查在workspace all-targets编译失败，Engine tests在资源步骤被取消，不能登记整条CI通过。macOS原错误为`peer_isolation`测试引用仅Linux启用的`testing::receive_streams`，条件边界修复及同一交付head的CI核对进入后续任务。本轮不以旧head或本地Linux结果替代跨平台验收。
+
+当前仅闭合完整回归入口，未登记整片完成。物理挂起、真机切网／前后台、Desktop／移动产品采用继续未验收；当前主机没有adb／hdc／Xcode，iOS设备枚举也未成功，不推断设备已经不存在。原ignore、筛选排除项、升级非smoke维度和未运行设备均不记为通过。
