@@ -121,7 +121,7 @@
 
 目标：完成 AC01–AC13 的逐项审计，再归档。
 
-* [ ] 当前候选定向协议、Core、Application、Infra、Engine、SQLite 和绑定检查全部通过。
+* [x] 当前候选定向协议、Core、Application、Infra、Engine、SQLite 和绑定检查全部通过。 固定#325干净源码，协议／Core／App1844、独占诊断1、实际登记权威8及13包1736项全部通过；清单与每条PASS／JUnit精确一致，共3589项。六个SQLite合同与Engine64／UniFFI86／NAPI51／宿主39均实际执行，见[当前候选定向核验](2026-10-24-transfer-progress-connectivity-feasibility.md#当前候选跨层定向合同核验)。原ignore及物理／跨平台未测项如实保留，不替代下一项全量回归。
 * [ ] workspace、成员全集、升级 smoke、前六片与第七片必需网络及资源回归通过；不以隔离重跑成功覆盖原全量失败。
 * [ ] 本地根门禁全部通过，源码／依赖未变化后不无理由重复构建；单负责人、共享 target、保留编译缓存。
 * [ ] 将本片必需网络／资源用例接入原 CI；对同一交付 head 核对 Linux／macOS／Windows、iOS／Android／HarmonyOS 必需编译与线上检查。

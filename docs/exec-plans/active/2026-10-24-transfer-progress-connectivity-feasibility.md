@@ -1250,3 +1250,64 @@ Chromium 使用独立临时 profile，通过真实列表链接进入详情，展
 这是[既有非阻塞容量门合同](../../design-docs/observability.md#分层责任)允许的发送前丢弃：争用立即丢弃并计数，不能把远端记录当耐久交付依据。本项不将容量门改成阻塞、不补通知 outbox、不重放业务来伪造缺失记录。查询和文件成果仍由原 Application 权威决定；缺日志样本不能仅凭剩余节点判定完整。实际丢弃和选定完整样本分别保留，未宣称全量零丢弃或系统日志可靠交付。
 
 复跑入口、原始核对的投递步骤及浏览器筛选见[本地观测入口](../../../tests/observability/collector/README.md#文件进度场景复跑)。原始 protobuf、系统及 Collector 输出、JSON报告与截图按仓库规则保存于本地忽略目录；正式结论不依赖临时 trace 地址长期存活。全部本任务后端、记录器及隔离浏览器已退出，端口回收，下载工具与临时浏览器 profile 已清理；共享 Cargo target 与缓存保持。物理设备、真实产品宿主及跨平台候选CI仍按各自未完成项执行。
+
+
+## 当前候选跨层定向合同核验
+
+本轮固定候选为 `fc7578e5f8582f4605a8aa26f0044b48d8ca3718`（#325），工作区干净。3412份源码／依赖及文档文件与 #325 交付快照一致，整个测试期间指纹保持 `39e294355d44cb76841e6945a7912ceda610a66868a60e55597e0e5d70049102`，没有修改生产代码、测试断言、阈值、重试、feature实现或持久格式。
+
+协议／Core／Application lib共1844项通过（73.263秒）；原独占维护诊断另精确运行1项通过。原 `run-progress-registration-proof.mjs` 驱动当前 Application worker 与真实 Iroh，8项通过0.72秒，分别记录两个当前二进制SHA、clean来源、1024项实际准入计划、16页／每页64项、65536字节帧上限。状态payload明确为synthetic，不能冒充1024份真实文件传输或物理资源证明。
+
+其余13个包统一构建后先生成 Nextest 实际清单，再执行1736项（812.456秒），全部通过。每条实际PASS与清单的binary／test完整身份及JUnit逐一比对，相同1736项，没有只以汇总绿标志代替覆盖。合计3589个测试案例通过：
+
+| 验证面 | 通过项 | 本轮实际范围 |
+| --- | --- | --- |
+| uc-sync-protocol | 42 | 消息头／进度帧与固定协议合同 |
+| uc-core | 400 | 状态转换、身份、逐项结果与聚合规则 |
+| uc-application | 1402＋1 | 完整流程lib及独占维护诊断；注册worker另由原组合驱动 |
+| 实际登记权威组合 | 8 | 真实Application CAS＋Iroh、1024项／16页与旧关联退休 |
+| uc-engine | 64 | 接收／重试／核对、来源授权、稳定DTO及事件 |
+| uc-engine-uniffi | 86 | lib、公开合同、生命周期及平台边界的Linux主机测试 |
+| uc-infra-content | 80 | 内容处理及密文接收提交 |
+| uc-infra-crypto | 41 | 加密能力原合同 |
+| uc-infra-local | 84 | 实际文件发布／清理及经过时间主机测试 |
+| uc-infra-p2p | 413 | 全部lib及两个入站诊断integration binary |
+| uc-infra-profile | 301 | 全部lib及六个SQLite接收／产物／目录合同binary |
+| uc-infra-security | 122 | 内容保护、密文及安全边界 |
+| uc-infra-storage | 270 | SQLite、文件传输／重试、搜索和持久字段合同 |
+| uc-mobile-probe-core | 39 | 宿主lib及host_boundary，不能作实机验收 |
+| uc-observability-contract | 84 | 固定字段、名称和结果合同 |
+| uc-observability-runtime | 101 | 真实编码／导出及有界运行时合同 |
+| uc-ohos-napi | 51 | lib及公开、工程与workspace合同的Linux主机测试 |
+
+六个SQLite integration binary为 `entry_receive_attempt_contract`、`inbound_receive_commit_contract`、`encrypting_inbound_receive_commit`、`receive_artifact_log_contract`、`directory_publish_log_contract` 和 `directory_receive_commit_contract`。Engine64项包含原接收／进度及来源授权和稳定合同；明确排除固定资源九项，不能把本轮定向结果替代下一项的原资源脚本、完整workspace、成员全集、升级smoke或网络矩阵。
+
+首次调度的 `test(contract::)` 是子串，会误命中整个 `host_adapter_contract::`。该调度在构建阶段终止143，尚未执行任何测试，原日志保留；不是测试失败后缩小失败集。修正为 `test(/^contract::/)` 后，实际清单确认固定资源九项未被意外纳入，已完成的编译产物直接复用。以下为本轮13包统一定向命令，模式锚点不得去掉：
+
+```bash
+candidate_filter='(package(uc-infra-p2p) & (kind(lib) | binary(=clipboard_receive_diagnostic_file) | binary(=inbound_peer_rejection_diagnostics))) |
+(package(uc-infra-profile) & (kind(lib) | binary(=entry_receive_attempt_contract) | binary(=inbound_receive_commit_contract) | binary(=encrypting_inbound_receive_commit) | binary(=receive_artifact_log_contract) | binary(=directory_publish_log_contract) | binary(=directory_receive_commit_contract))) |
+((package(uc-infra-storage) | package(uc-infra-local) | package(uc-infra-content) | package(uc-infra-security) | package(uc-infra-crypto)) & kind(lib)) |
+(package(uc-observability-contract) | package(uc-observability-runtime) | package(uc-engine-uniffi) | package(uc-ohos-napi) | package(uc-mobile-probe-core)) |
+(package(uc-engine) & kind(lib) & ((test(receive_retry::) & not(test(real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup)) & not(test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/))) | (test(blob_source_authorization::) & not(test(quota::))) | test(outbound_progress) | test(transfer_progress) | test(/^contract::/)))'
+just cargo nextest run --profile ci --locked --lib --tests \
+  --features uc-engine/dev-tools,uc-infra-p2p/test-util,uc-infra-profile/test-util,uc-application/test-support,uc-infra-storage/test-util \
+  -p uc-infra-p2p -p uc-infra-profile -p uc-infra-storage \
+  -p uc-infra-local -p uc-infra-content -p uc-infra-security \
+  -p uc-infra-crypto -p uc-observability-contract -p uc-observability-runtime \
+  -p uc-engine -p uc-engine-uniffi -p uc-ohos-napi \
+  -p uc-mobile-probe-core \
+  --no-tests fail -E "$candidate_filter"
+```
+
+此前1844项和两个显式驱动入口分别为：
+
+```bash
+just cargo nextest run --profile ci --locked -p uc-sync-protocol -p uc-core -p uc-application --lib --no-tests fail
+just cargo nextest run --profile ci --locked -p uc-application --lib --run-ignored only --no-tests fail -E 'test(=space::membership::maintenance::diagnostic_tests::blocked_updates_explain_queue_wait_and_coalesced_wakes_without_changing_order)'
+node scripts/testing/run-progress-registration-proof.mjs
+```
+
+实际清单另保留27个原ignore记录和293个表达式排除项，不把它们当作已执行。八项登记证明已由上述driver显式运行；fixture子进程只由所属完整场景驱动。物理挂起、外部／受保护relay、外部旧资料探针、性能／元数据审查工具及30秒启动普查等未独立执行，继续如实跳过。需要真实Collector的独占用例沿用 #325 的相同Rust源码及实际后端证据，不冒充本轮重新启动后端。
+
+绑定与移动宿主结果仅为当前Linux arm64主机上的Rust合同，不代表iOS／Android／HarmonyOS设备、跨平台候选CI或产品采用。本项只闭合阶段6定向合同；完整回归、原必需网络／资源及实机未完成项保持原状态。
