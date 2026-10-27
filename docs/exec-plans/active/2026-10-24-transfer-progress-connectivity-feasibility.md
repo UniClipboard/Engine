@@ -1395,3 +1395,24 @@ UC_EXPECT_DIAGNOSTIC_STACK=available just cargo nextest run --profile ci --locke
 对照该网络候选冻结的源码摘要，当前2134个Rust文件逐字节一致，唯一不同的Rust文件只补齐Linux测试模块条件，已有[两项原测试与根门禁证明](#本地根门禁与读流测试平台条件)。生产连接、Application流程、Engine装配、协议与依赖均未变化，复用已有完整证据；本轮不重新运行网络负载或以新模拟代替生产路径。早期[入站负责人](#阶段2完整入站连接负责人)仅到可安装能力的边界，现在已经由生产对象图、节点安装和实际生命周期接线闭合。
 
 本项仅关闭阶段2的受管生产接线父项。降级触发、逐次授权和会话围栏仍按各自父项核对；AC01整体、物理系统挂起、设备／产品宿主及最终同一head CI没有因此自动完成。原成员F2间歇失败及全部跳过项继续保留，整片仍为active。
+
+
+## 生产版本选择与旧协议保守语义核对
+
+2026-10-27基于#330的`fbfaae24bc634af899b37e164e3e065488479aa1`，独立核对阶段2降级父项。当前Application／P2P／协议／Cargo清单及锁文件相对原登记组合候选`fc7578e5f8582f4605a8aa26f0044b48d8ca3718`没有差异；本轮只核对并更新文档，不调整协议、失败类别或测试条件。
+
+| 要求 | 当前实现与原实跑证据 |
+| --- | --- |
+| 只由实际协议能力选择旧版 | [进度专属backend](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/backend.rs)在唯一`connect_with_opts`握手同时提供新旧ALPN，握手失败直接返回带source的Backend错误；[producer](../../../crates/uc-application/src/transfer/progress/producer.rs)只在成功连接的实际协议为V1时进入旧汇总分支，没有错误后改选V1或新建旧协议影子连接的分支。生产Router与十四格矩阵的实际新旧握手见[接线核对](#当前生产受管进度接线核对) |
+| 坏新版帧不变成旧能力 | 原实际登记组合的`explicit_legacy_is_unsupported_but_corrupt_current_frame_keeps_exchange_failure`分别断言真实旧连接返回Unsupported、真实新版坏帧返回Malformed且保留source；它默认ignore，**由原driver显式执行，不计入普通workspace通过数** |
+| 拒绝与错误关联不降级 | [真实入站组合](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/stream_inbound_transport_probe.rs)断言成员拒绝后零采用且投影不变；[拒绝码组合](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/stream_rejection_probe.rs)断言五种拒绝在各响应位置保留类别，错误关联／尾随字节不能作为有效拒绝采用。所有错误沿原结果返回，不改变连接已协商协议 |
+| 完整旧批次事实 | [旧汇总](../../../crates/uc-application/src/transfer/progress/producer/legacy.rs)从原authority和snapshot分页取得同一descriptor的完整批次，逐页检查覆盖、当前授权与期限；原6项汇总组合分别断言最后成功但先前失败、Processing、兄弟活动、全部完成、Contact及Update均使用全量事实。原实际CAS组合另断言1024项真实失败事实形成一个Failed旧帧且完整读取16页 |
+| FIN不作业务ACK | [旧wire发送](../../../crates/uc-infra-p2p/src/network/iroh/transfer_progress_v2/outbound.rs)等待FIN数据结算；producer的旧终态分支在完整发送后仍返回Unsupported。原实际CAS组合同时验证准确旧帧和没有业务ACK；不得把发送成功改写成对方采用 |
+| 入站旧状态不能覆盖新版事实 | [旧入站](../../../crates/uc-infra-p2p/src/network/iroh/transfer_progress_v2/legacy.rs)仅接受实际V1，完整帧与FIN核验后交原owner；[无关联采用](../../../crates/uc-application/src/transfer/progress/receiver_unattributed.rs)仅标记现有原意图Unconfirmed。四类旧状态不产生attempt／单项终态，实际V2连接不能降为旧采用，另一peer同source不得采用，坏magic／status／截断／尾随字节在采用前拒绝 |
+| 原期限与失败来源保持 | [旧来源组合](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/stream_profile_legacy_source_probe.rs)对原期限、取消、旧会话、旧尝试和底层读取失败，断言实际读取被监督至结束且未打开新单向流，失败保留source；[旧入站组合](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/stream_profile_legacy_inbound_probe.rs)另覆盖FIN期间期限／取消／退休及删除边界 |
+
+原完整workspace中`legacy_summary_probe`的21项逐条PASS与JUnit核对：10项旧入站、6项完整汇总、5项来源结算。上述新版坏帧和1024项旧汇总属于[原登记权威driver](../../../scripts/testing/run-progress-registration-proof.mjs)显式运行的8项组合，原日志分别为ok、总计8通过／0忽略，报告保留来源clean与两个实际二进制SHA；不能只凭required_cases清单或默认ignore的测试名称当作执行。该组合的容量状态payload明确为synthetic，实际CAS和Iroh能力仍照实记录，不当作1GiB或独立产品宿主负载。
+
+十四格生产网络另有16份真实V1方向：新发送端对旧接收端维持Unsupported／未确认，未伪造旧attempt、字节或轮次；旧发送端对新接收端只验证实际本地成果，不凭入站内容虚构出站意图。原旧旧4格与新版4份V2方向保持各自边界。原字节、旧端来源、实际文件和资料保留沿用同一严格矩阵与冻结摘要，未以其他版本替换。
+
+本项关闭阶段2“真实能力才使用旧协议”父项，不自动关闭下一项逐次授权／会话围栏或AC01整体验收。原F2间歇失败、物理挂起、设备／产品宿主和最终候选CI继续按原未完成状态维护。
