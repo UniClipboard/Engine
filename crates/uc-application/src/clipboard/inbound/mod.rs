@@ -2,7 +2,7 @@ use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
 use async_trait::async_trait;
 use bytes::Bytes;
 use thiserror::Error;
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 
 use crate::clipboard::sync::apply_inbound::{
     ApplyInboundClipboardUseCase, ApplyInboundError, ApplyInboundInput, ApplyOutcome,
@@ -56,6 +56,8 @@ pub trait InboundClipboardApplyPort: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundClipboardApplyInput {
+    /// 由已认证的完整入站动作交接；旧bulk消息没有该资料时保持None。
+    pub source_entry: Option<EntryId>,
     pub from_device: String,
     pub snapshot_hash: String,
     pub plaintext: Bytes,
@@ -82,6 +84,7 @@ impl InboundClipboardApplyPort for ApplyInboundClipboardUseCase {
     ) -> Result<InboundClipboardApplyOutcome, InboundClipboardApplyError> {
         let provisional = input.provisional;
         let input = ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new(input.from_device),
             snapshot_hash: input.snapshot_hash,
             plaintext: input.plaintext,

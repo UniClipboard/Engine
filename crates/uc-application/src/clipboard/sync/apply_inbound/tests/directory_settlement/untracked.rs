@@ -40,6 +40,7 @@ async fn directory_without_attempt_tracking_retains_failed_and_empty_capture_rol
         let (plaintext, snapshot_hash) = two_root_wire_payload();
         let outcome = receiver
             .execute(ApplyInboundInput {
+                source_entry: None,
                 from_device: DeviceId::new("source"),
                 snapshot_hash,
                 plaintext,

@@ -116,6 +116,7 @@ pub(crate) trait InboundPulledContentStore: Send + Sync {
         &self,
         from_device: &DeviceId,
         snapshot_hash: &str,
+        source_entry: &EntryId,
         transfer_envelope: Vec<u8>,
         receive_permit: &MemberReceivePermit,
     ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError>;
@@ -366,7 +367,12 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 //    Any pull/store failure leaves the register untouched (no
                 //    advance, no re-broadcast, no retry).
                 match self
-                    .pull_and_store(&peer, &incoming.snapshot_hash, &receive_permit)
+                    .pull_and_store(
+                        &peer,
+                        &incoming.snapshot_hash,
+                        &incoming.entry_id,
+                        &receive_permit,
+                    )
                     .await
                 {
                     Some(id) => id,
@@ -421,6 +427,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         &self,
         peer: &DeviceId,
         snapshot_hash: &str,
+        source_entry: &EntryId,
         receive_permit: &MemberReceivePermit,
     ) -> Option<EntryId> {
         let (Some(pull_client), Some(store)) = (
@@ -460,7 +467,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         // Decrypt + validate receive policy + persist. A store failure or a
         // policy rejection leaves the register untouched.
         match store
-            .store(peer, snapshot_hash, envelope, receive_permit)
+            .store(peer, snapshot_hash, source_entry, envelope, receive_permit)
             .await
         {
             Ok(InboundPulledContentStoreOutcome::Stored(entry_id)) => {
@@ -1138,6 +1145,7 @@ mod tests {
     struct StoreSpy {
         entry_id: EntryId,
         seen_envelope: Mutex<Option<Vec<u8>>>,
+        seen_source: Mutex<Option<EntryId>>,
     }
     #[async_trait]
     impl InboundPulledContentStore for StoreSpy {
@@ -1145,9 +1153,11 @@ mod tests {
             &self,
             _from_device: &DeviceId,
             _snapshot_hash: &str,
+            source_entry: &EntryId,
             transfer_envelope: Vec<u8>,
             _receive_permit: &MemberReceivePermit,
         ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
+            *self.seen_source.lock().unwrap() = Some(source_entry.clone());
             *self.seen_envelope.lock().unwrap() = Some(transfer_envelope);
             Ok(InboundPulledContentStoreOutcome::Stored(
                 self.entry_id.clone(),
@@ -1163,6 +1173,7 @@ mod tests {
             &self,
             _from_device: &DeviceId,
             _snapshot_hash: &str,
+            _source_entry: &EntryId,
             _transfer_envelope: Vec<u8>,
             _receive_permit: &MemberReceivePermit,
         ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
@@ -1177,6 +1188,7 @@ mod tests {
             &self,
             _from_device: &DeviceId,
             _snapshot_hash: &str,
+            _source_entry: &EntryId,
             _transfer_envelope: Vec<u8>,
             _receive_permit: &MemberReceivePermit,
         ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
@@ -1502,6 +1514,7 @@ mod tests {
         let store = Arc::new(StoreSpy {
             entry_id: stored_entry_id.clone(),
             seen_envelope: Mutex::new(None),
+            seen_source: Mutex::new(None),
         });
         // A reachable peer distinct from the activator → fan-out re-broadcasts.
         let h = pull_harness_with_peers(
@@ -1533,6 +1546,10 @@ mod tests {
             Some(b"transfer-envelope".as_slice()),
             "store must receive the pulled transfer envelope"
         );
+        assert_eq!(
+            *store.seen_source.lock().unwrap(),
+            Some(EntryId::from("sender-entry"))
+        );
         // The same-key re-broadcast fires through the shared fan-out to the
         // (send-allowed) peer — the core invariant's third clause.
         assert_eq!(
@@ -1552,6 +1569,7 @@ mod tests {
         let store = Arc::new(StoreSpy {
             entry_id: stored_entry_id.clone(),
             seen_envelope: Mutex::new(None),
+            seen_source: Mutex::new(None),
         });
         let h = pull_harness_with_peers(
             Some(Arc::clone(&pull_client) as _),

@@ -103,6 +103,7 @@ async fn representation_persistence_failure_retains_original_protection_and_both
                 encode_snapshot_with_blob_refs_to_v3_bytes(&snapshot, &refs).unwrap();
             let error = receiver
                 .execute(ApplyInboundInput {
+                    source_entry: None,
                     from_device: DeviceId::new("peer"),
                     snapshot_hash,
                     plaintext,

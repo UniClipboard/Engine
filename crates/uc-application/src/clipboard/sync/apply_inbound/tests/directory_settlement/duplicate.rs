@@ -96,6 +96,7 @@ async fn assert_directory_replacement(sender_reuses_local_uri: bool) {
     let old_hash = snapshot_hash.clone();
     let first = receiver
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("source"),
             snapshot_hash,
             plaintext,
@@ -128,6 +129,7 @@ async fn assert_directory_replacement(sender_reuses_local_uri: bool) {
     );
     let second = receiver
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("source"),
             snapshot_hash,
             plaintext,

@@ -179,6 +179,7 @@ impl InboundProcessor {
         let result = self
             .apply
             .apply(InboundClipboardApplyInput {
+                source_entry: None,
                 from_device: prepared.from_device.as_str().to_owned(),
                 snapshot_hash: prepared.snapshot_hash.clone(),
                 plaintext: prepared.plaintext.clone(),
