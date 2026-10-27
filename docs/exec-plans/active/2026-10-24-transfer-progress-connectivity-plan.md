@@ -125,7 +125,7 @@
 * [x] workspace、成员全集、升级 smoke、前六片与第七片必需网络及资源回归通过；不以隔离重跑成功覆盖原全量失败。 原完整workspace4927、成员56、升级smoke5维、Blob10格、进度14格、资源9项和可达性11类均完成；首次workspace平台配置失败与成员F2间歇失败分别保留，后者根因未定、不称已修复，见[完整回归与首次失败保留](2026-10-24-transfer-progress-connectivity-feasibility.md#当前候选完整回归与首次失败保留)。
 * [x] 本地根门禁全部通过，源码／依赖未变化后不无理由重复构建；单负责人、共享 target、保留编译缓存。 对齐原读流隔离测试与Linux屏障装配条件，两项原隔离用例及根六项全部通过；不以本地结果宣称macOS／Windows候选已绿，见[平台条件与本地门禁](2026-10-24-transfer-progress-connectivity-feasibility.md#本地根门禁与读流测试平台条件)。
 * [ ] 将本片必需网络／资源用例接入原 CI；对同一交付 head 核对 Linux／macOS／Windows、iOS／Android／HarmonyOS 必需编译与线上检查。
-* [ ] 真机切网、睡眠／前后台和 Desktop／移动产品宿主采用分别标明通过／失败／跳过，主机／模拟器结果不得冒充真机。
+* [x] 真机切网、睡眠／前后台和 Desktop／移动产品宿主采用分别标明通过／失败／跳过，主机／模拟器结果不得冒充真机。见[平台与设备状态矩阵](2026-10-24-transfer-progress-connectivity-feasibility.md#平台真机与产品宿主状态矩阵)；此项只完成逐项登记，物理挂起／后台与产品采用仍跳过，不能据此完成整片。
 * [x] 按 spec AC01–AC13 核对唯一证据映射和全部跳过项，存在任何必需未执行项不能登记整片完成。见[唯一证据映射](2026-10-24-transfer-progress-connectivity-feasibility.md#ac01ac13唯一证据映射)，当前10项已验证，AC08／AC11／AC13保持未完成。
 * [ ] 稳定结论回写所属 Design Doc／必要 ADR，更新入口；实际完成后将 spec／plan 一起移入 completed，不关闭整个 #34。
 
@@ -162,8 +162,8 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 
 ## 当前状态与下一个动作
 
-- 当前正式任务54/59，余5；spec验收10/13，AC08／AC11／AC13未完成。生产双版本进度、兼容源身份头、完整接收成果／逐项通知／采用与ACK、稳定查询／绑定、原再次发起核对、删除／成员退休和保守重启视图已经接线；新新及两个冻结旧端的14格网络矩阵、原Blob10格，以及本项三端归属验证已取得主机证据。各项证据以对应复选框和[可行性记录](2026-10-24-transfer-progress-connectivity-feasibility.md)为准。
-- 下一个实施动作：定位最新#332旧旧Relay基线的peer_rejected／apply_failed，保留原失败；随后分别登记真机／产品宿主状态，并继续核对同一交付head CI及物理时间缺口。原必需网络／资源均已接入原工作流；Engine job实测触及60分钟外层上限，已调整为90分钟，所有单项期限／负载／阈值不变。显式触发stack未自动运行的原Windows门禁，分别核对Linux／macOS／Windows与三端绑定。保留成员F2间歇失败未定位状态；旧head CI与本地主机绿不替代最终交付head的检查。
+- 当前正式任务55/59，余4；spec验收10/13，AC08／AC11／AC13未完成。生产双版本进度、兼容源身份头、完整接收成果／逐项通知／采用与ACK、稳定查询／绑定、原再次发起核对、删除／成员退休和保守重启视图已经接线；新新及两个冻结旧端的14格网络矩阵、原Blob10格，以及本项三端归属验证已取得主机证据。各项证据以对应复选框和[可行性记录](2026-10-24-transfer-progress-connectivity-feasibility.md)为准。
+- 下一个实施动作：定位最新#332旧旧Relay基线的peer_rejected／apply_failed，保留原失败；本机原独立12轮均未复现，不能称修复；设备／产品宿主状态已逐项登记，继续核对同一交付head CI及物理时间缺口。原必需网络／资源均已接入原工作流；Engine job实测触及60分钟外层上限，已调整为90分钟，所有单项期限／负载／阈值不变。显式触发stack未自动运行的原Windows门禁，分别核对Linux／macOS／Windows与三端绑定。保留成员F2间歇失败未定位状态；旧head CI与本地主机绿不替代最终交付head的检查。
 - 阶段0实机挂起及设备／产品宿主、当前候选跨平台CI和最终文档交付仍待完成；AC唯一映射已经完成。Collector已完成正常与退化证据核对，真实日志丢弃边界保留。主机和普通计时结果不替代物理挂起，未执行项不记为通过；本片继续active，不合入或发布当前stack。
 - 按用户指示，每个完整任务通过本地交付检查后创建未合并stack PR，触发一次CI并直接继续下一项，不等待前层CI。
 
