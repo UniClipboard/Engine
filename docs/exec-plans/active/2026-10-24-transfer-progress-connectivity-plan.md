@@ -127,7 +127,7 @@
 * [ ] 将本片必需网络／资源用例接入原 CI；对同一交付 head 核对 Linux／macOS／Windows、iOS／Android／HarmonyOS 必需编译与线上检查。
 * [x] 真机切网、睡眠／前后台和 Desktop／移动产品宿主采用分别标明通过／失败／跳过，主机／模拟器结果不得冒充真机。见[平台与设备状态矩阵](2026-10-24-transfer-progress-connectivity-feasibility.md#平台真机与产品宿主状态矩阵)；此项只完成逐项登记，物理挂起／后台与产品采用仍跳过，不能据此完成整片。
 * [x] 按 spec AC01–AC13 核对唯一证据映射和全部跳过项，存在任何必需未执行项不能登记整片完成。见[唯一证据映射](2026-10-24-transfer-progress-connectivity-feasibility.md#ac01ac13唯一证据映射)，当前10项已验证，AC08／AC11／AC13保持未完成。
-* [ ] 稳定结论回写所属 Design Doc／必要 ADR，更新入口；实际完成后将 spec／plan 一起移入 completed，不关闭整个 #34。
+* [ ] 稳定结论回写所属 Design Doc／必要 ADR，更新入口；实际完成后将 spec／plan 一起移入 completed，不关闭整个 #34。已在[稳定协议合同](../../design-docs/transfer-progress-protocol.md#模块所有权与调用边界)纠正早期待接线描述，明确当前运行期负责人及关闭监督；物理验收、AC11失败复核和最终候选CI仍未闭合，本项继续未完成，不提前归档。
 
 ## 验证入口
 

@@ -29,6 +29,7 @@ Application [模块入口](../../crates/uc-application/src/transfer/progress/mod
 | 统一交换监督 | [delivery](../../crates/uc-application/src/transfer/progress/delivery/mod.rs)统一通知与查询的额度、补发、取消和实际关闭；[producer](../../crates/uc-application/src/transfer/progress/producer.rs)执行一轮完整登记／发送／精确结果核对，不向调用方转交网络阶段编排。 |
 | 完整入站连接 | [入站负责人](../../crates/uc-application/src/transfer/progress/inbound/owner.rs)统一连接准入、版本选择、单流采用、保留及取消安全的实际关闭；[专属wire port](../../crates/uc-application/src/transfer/progress/inbound/ports.rs)只交接一条完整交换，原生handler不编排业务阶段。 |
 | 实际接收事实 | 原`transfer/receive`继续独占下载、重试、输出、结算及清理；[查询提供端](../../crates/uc-application/src/transfer/receive/work/catalog/progress_snapshot.rs)在原目录锁内关联原计划与保存事实，`progress/source`不形成第二套业务结算权威。 |
+| 运行期组装与关闭 | Application [assembly](../../crates/uc-application/src/transfer/progress/runtime/assembly.rs)将同一受管manager、投影、producer、reader和原接收目录交给[运行期负责人](../../crates/uc-application/src/transfer/progress/runtime/owner.rs)；该负责人监督投影、交换、接收事实、恢复机会和宿主变化提示，关闭先封口再等待入站及全部实际工作结算。Engine只注册完整入站端点并映射稳定结果。 |
 
 测试放在所属规则、采用、投影、调度和真实流fixture内，预算交叉验收仍只使用测试依赖。
 上述模块边界、生产Router／通知hook、稳定宿主映射和Engine装配已接同一对象图；模块组织不代替完整验收。
@@ -202,7 +203,7 @@ Infra `transfer_progress_v2` 有界入站适配取得真实连接对端身份，
 恢复机会只使用剩余时点，挂起后不追补过去轮次。每轮子取消令牌与保留项令牌分开，
 单轮五秒耗尽可在原剩余预算内继续补发。淘汰、过期或关闭仅禁止后续网络，
 已开始的本机工作仍由同一 worker 等到真实结束；活动额度和关闭完成均不得提前归还。
-调用方须持有并等待 worker 的运行 future，后续生产组装不得将其遗弃。
+生产`ProgressRuntime`通过同一`JoinSet`持有并监督worker；关闭等待入站和全部worker实际返回，宿主不持有或拼接内部运行future。
 
 单轮由 `ProgressTerminalRoundPort::report_settled` 接收冻结描述和原绝对截止，
 `TransferProgressProducer` 预检与登记后都核对同一描述，不能把迟到结果重新贴到新绑定。
@@ -306,7 +307,7 @@ Core `ProgressItemProjection` 统一活动及终态规则：同round序号前进
 `TransferProgressProducer` 在原五秒内完成当前登记和Update发送，并在本机连接保留读取后复核当前授权。
 入站按认证设备、连接世代、binding和当前描述核验完整帧及结束后交给同一采用负责人。
 Update不产生业务ACK；流结束仅说明本轮传输结束，不证明文件输出或业务完成。
-Contact及失联判断见下节；生产接收回调和宿主视图接线仍由后续任务完成。
+Contact及失联判断见下节。[生产接收观察者](../../crates/uc-application/src/transfer/progress/runtime/receive.rs)读取原接收目录的完整快照并提交活动／终态，下载和本地结算不等待该观察者。宿主变化事件只提示重读同一Application完整视图，Engine和绑定不另建业务投影。
 
 
 ## 任务联系与结果未确认
