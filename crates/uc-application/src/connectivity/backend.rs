@@ -20,6 +20,7 @@ pub enum ConnectionProtocol {
     Unsupported,
     Blob,
     TransferProgressV1,
+    TransferProgressV2,
     PeerReachabilityV1,
     PeerReachabilityV2,
     ActiveClipboardState,

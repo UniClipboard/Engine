@@ -110,3 +110,7 @@ mod blob_probe;
 #[cfg(test)]
 #[path = "stream_progress_probe.rs"]
 mod progress_probe;
+
+#[cfg(test)]
+#[path = "stream_registration_probe.rs"]
+mod registration_probe;
