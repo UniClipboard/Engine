@@ -48,5 +48,8 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
 uc-testkit = { path = "../../tests/uc-testkit" }
 
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_WindowsProgramming"] }
+
 [lints]
 workspace = true
