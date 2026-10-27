@@ -1,11 +1,10 @@
 use super::{
-    ElapsedClockError, ProgressBound, ProgressClaimRefusal, ProgressContactNotice,
-    ProgressExchangeDeadline, ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor,
-    ProgressTerminalNotice, ProgressUpdateNotice,
+    ProgressBound, ProgressClaimRefusal, ProgressContactNotice, ProgressExchangeDeadline,
+    ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressUpdateNotice,
 };
 use crate::connectivity::{ConnectionLease, StreamLease};
 use async_trait::async_trait;
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{ProgressActive, ProgressIdentity, ProgressItem, ProgressTerminal};
 use uc_core::ids::DeviceId;
@@ -106,11 +105,6 @@ pub trait ProgressWirePort: Send + Sync {
         deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ProgressTerminalNotice, ProgressReceiveError>;
-}
-
-/// 包含系统挂起时间的单调读数，实际消费及失败处理由progress负责人统一承担。
-pub trait ElapsedClockPort: Send + Sync {
-    fn elapsed(&self) -> Result<Duration, ElapsedClockError>;
 }
 
 /// 一轮完整终态通知；原绝对截止由完整监督负责人创建，不得在实现里重建五秒。

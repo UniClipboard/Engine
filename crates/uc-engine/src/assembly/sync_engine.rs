@@ -223,6 +223,7 @@ pub async fn prepare_sync_session(
             task_kind: DiagnosticTaskKind::MembershipHistoryConnectivityWorker,
             accepted_stream_timeout: Some(Duration::from_secs(10)),
             idle_retention: Some(IdleRetentionPolicy {
+                elapsed_clock: None,
                 timeout: Duration::from_secs(30),
                 capacity: 16,
             }),

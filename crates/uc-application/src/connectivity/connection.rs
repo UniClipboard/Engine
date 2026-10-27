@@ -62,7 +62,7 @@ impl ConnectionLease {
         record: Arc<ConnectionRecord>,
         request: Arc<dyn AdmissionAttempt>,
     ) -> Result<Self, ConnectivityError> {
-        let activity = record.activity.acquire()?;
+        let activity = record.activity.acquire(record.connection.as_ref())?;
         Ok(Self {
             record,
             request: Some(request),
@@ -289,7 +289,10 @@ impl ConnectionLease {
         let mut pending = self.record.pending.lock().await;
         if pending.is_none() {
             let pair = self.record.connection.accept_bi().await?;
-            let activity = self.record.activity.acquire()?;
+            let activity = self
+                .record
+                .activity
+                .acquire(self.record.connection.as_ref())?;
             *pending = Some(AcceptedStream {
                 pair,
                 activity,

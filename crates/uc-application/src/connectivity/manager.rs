@@ -13,6 +13,7 @@ use super::{
 };
 use futures::future::{ready, Either};
 use std::collections::HashMap;
+use std::error::Error;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -25,10 +26,12 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::instrument::WithSubscriber;
 use tracing::{Instrument, Span};
+use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
+use uc_observability_contract::uc_debug;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ConnectivityPolicy {
     /// presence 首流准入与长期保留采用独立生命周期，其他协议保持默认策略。
     pub presence_retention: bool,
@@ -74,7 +77,7 @@ impl Default for ConnectivityPolicy {
     }
 }
 impl ConnectivityPolicy {
-    pub(super) fn wait_for_local_work(self) -> bool {
+    pub(super) fn wait_for_local_work(&self) -> bool {
         self.presence_retention
             || self.supervise_local_work
             || self.inbound_admission.is_some()
@@ -169,7 +172,7 @@ impl ConnectivityManager {
             inner: Arc::new(Inner {
                 backend,
                 admission,
-                policy,
+                policy: policy.clone(),
                 state: Mutex::new(State::default()),
                 retained: Mutex::new(HashMap::new()),
                 tasks: Mutex::new(JoinSet::new()),
@@ -281,7 +284,22 @@ impl ConnectivityManager {
             state.active.retain(|_, record| record.strong_count() > 0);
             if let Some(record) = state.active.get(&target).and_then(Weak::upgrade) {
                 if !record.connection.is_closed() && !record.cache_cancel.is_cancelled() {
-                    return ConnectionLease::outbound(record, attempt.clone());
+                    match ConnectionLease::outbound(record.clone(), attempt.clone()) {
+                        Ok(lease) => return Ok(lease),
+                        Err(source) => {
+                            self.inner
+                                .retained
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .remove(&(target, false));
+                            if !matches!(
+                                source,
+                                ConnectivityError::DeadlineExpired | ConnectivityError::Stopped
+                            ) {
+                                return Err(source);
+                            }
+                        }
+                    }
                 }
             }
             let (flight, launch) = match state.flights.get(&target) {
@@ -547,7 +565,7 @@ impl ConnectivityManager {
             owner: Arc::downgrade(&self.inner),
             backend: self.inner.backend.clone(),
             address_hint: None,
-            policy: self.inner.policy,
+            policy: self.inner.policy.clone(),
             inbound: self.inner.inbound.clone(),
             waiting: self.inner.waiting.clone(),
             stop: self.stop_token(),
@@ -592,8 +610,8 @@ impl ConnectivityManager {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
-    pub(super) fn policy(&self) -> ConnectivityPolicy {
-        self.inner.policy
+    pub(super) fn policy(&self) -> &ConnectivityPolicy {
+        &self.inner.policy
     }
     pub(super) fn inbound_capacity(&self) -> Arc<Semaphore> {
         self.inner.inbound.clone()
@@ -730,6 +748,7 @@ impl ConnectivityManager {
                 let first_stream_deadline = manager
                     .policy()
                     .idle_retention
+                    .as_ref()
                     .zip(pending.started_at)
                     .map_or(deadline, |(idle, start)| deadline.min(start + idle.timeout));
                 let accepted = tokio::select! {
@@ -774,14 +793,18 @@ impl ConnectivityManager {
                 return Err(pending.failed(cause));
             }
             let peer = manager.peer(grant.peer());
-            let activity = Arc::new(ConnectionActivity::default());
+            let activity = Arc::new(ConnectionActivity::new(
+                manager.policy().idle_retention.as_ref(),
+            ));
             let first = match first {
                 Some(pair) => Some(AcceptedStream {
                     pair,
-                    activity: activity.acquire().map_err(|cause| InboundConnectionError {
-                        cause,
-                        _capacity: None,
-                    })?,
+                    activity: activity
+                        .acquire(pending.raw.raw.as_ref())
+                        .map_err(|cause| InboundConnectionError {
+                            cause,
+                            _capacity: None,
+                        })?,
                     accepted_at: pending.started_at.unwrap_or_else(Instant::now),
                 }),
                 None => None,
@@ -924,7 +947,7 @@ impl ConnectivityManager {
     }
     /// 只有完整准入负责人授予当前资格后才持有强引用；返回 false 表示本次交换后释放。
     pub async fn retain(&self, lease: &ConnectionLease) -> Result<bool, ConnectivityError> {
-        let Some(policy) = self.inner.policy.idle_retention else {
+        let Some(policy) = self.inner.policy.idle_retention.clone() else {
             return Ok(false);
         };
         if lease.mode() != ConnectionMode::Multiplexed || lease.record.cache_cancel.is_cancelled() {
@@ -935,6 +958,13 @@ impl ConnectivityManager {
             return Ok(false);
         }
         lease.check_current().await?;
+        if let Err(source) = lease.record.activity.idle_remaining() {
+            lease.record.activity.expire_if_idle(&lease.record);
+            return Err(ConnectivityError::Clock(source));
+        }
+        if lease.record.activity.expire_if_idle(&lease.record) {
+            return Ok(false);
+        }
         let key = (lease.peer(), lease.record.inbound_direction);
         let mut tasks = self
             .inner
@@ -976,30 +1006,65 @@ impl ConnectivityManager {
         let record = lease.record.clone();
         let weak = Arc::downgrade(&self.inner);
         let stop = self.inner.stop.clone();
-        tasks.spawn(async move {
-            loop {
-                let changed = record.activity.changed.notified();
-                let deadline = record.activity.idle_since().map(|since| since + policy.timeout);
-                tokio::select! {
-                    _ = stop.cancelled() => break,
-                    _ = record.cache_cancel.cancelled() => break,
-                    _ = record.connection.closed() => break,
-                    _ = changed => continue,
-                    _ = async {
-                        match deadline {
-                            Some(deadline) => tokio::time::sleep_until(deadline).await,
-                            None => std::future::pending().await,
+        tasks.spawn(
+            async move {
+                loop {
+                    let changed = record.activity.changed.notified();
+                    let remaining = match record.activity.idle_remaining() {
+                        Ok(remaining) => remaining,
+                        Err(source) => {
+                            uc_debug!(
+                                error_class = source.class(),
+                                error = source.as_ref() as &dyn Error,
+                                "idle connection retention clock unavailable"
+                            );
+                            if record.activity.expire_if_idle(&record) {
+                                break;
+                            }
+                            continue;
                         }
-                    } => {
-                        if record.activity.retire_if_idle(&record, Instant::now() - policy.timeout) { break; }
+                    };
+                    if remaining.is_some_and(|left| left.is_zero())
+                        && record.activity.expire_if_idle(&record)
+                    {
+                        break;
+                    }
+                    let wait = remaining.map(|left| {
+                        if policy.elapsed_clock.is_some() {
+                            left.min(Duration::from_millis(100))
+                        } else {
+                            left
+                        }
+                    });
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        _ = record.cache_cancel.cancelled() => break,
+                        _ = record.connection.closed() => break,
+                        _ = changed => continue,
+                        _ = async {
+                            match wait {
+                                Some(wait) => tokio::time::sleep(wait).await,
+                                None => std::future::pending().await,
+                            }
+                        } => {}
+                    }
+                }
+                if let Some(inner) = weak.upgrade() {
+                    let mut retained = inner
+                        .retained
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if retained
+                        .get(&key)
+                        .is_some_and(|entry| Arc::ptr_eq(entry, &record))
+                    {
+                        retained.remove(&key);
                     }
                 }
             }
-            if let Some(inner) = weak.upgrade() {
-                let mut retained = inner.retained.lock().unwrap_or_else(PoisonError::into_inner);
-                if retained.get(&key).is_some_and(|entry| Arc::ptr_eq(entry, &record)) { retained.remove(&key); }
-            }
-        }.instrument(Span::none()).with_current_subscriber());
+            .instrument(Span::none())
+            .with_current_subscriber(),
+        );
         Ok(true)
     }
     pub(super) fn track(&self, record: &Arc<ConnectionRecord>) -> Result<(), ConnectivityError> {

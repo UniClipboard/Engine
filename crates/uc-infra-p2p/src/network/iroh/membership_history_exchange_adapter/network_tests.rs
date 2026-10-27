@@ -121,6 +121,7 @@ fn directory(endpoint: &Endpoint, peer: DeviceId) -> Arc<Directory> {
 fn policy() -> ConnectivityPolicy {
     ConnectivityPolicy {
         idle_retention: Some(IdleRetentionPolicy {
+            elapsed_clock: None,
             timeout: Duration::from_secs(30),
             capacity: 16,
         }),
