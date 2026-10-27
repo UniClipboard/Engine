@@ -1,8 +1,8 @@
 # 反向传输进度的线上合同
 
-当前 `/2` 已接入生产收发的同一Application对象图，尚未发布；完整设备及生命周期验收仍按执行计划推进。
+当前 `/2` 已接入生产收发的同一Application对象图，尚未发布；本片实施记录已归档，实际验证、用户批准跳过及未执行边界以归档记录为准。
 业务准入、任务登记顺序、结果采用及恢复由 Application 完整负责人承担；实施与验收见
-[第八片规格](../exec-plans/active/2026-10-24-transfer-progress-connectivity-spec.md)。
+[第八片规格](../exec-plans/completed/2026-10-24-transfer-progress-connectivity-spec.md)。
 
 ## 版本及事实来源
 
@@ -123,7 +123,7 @@ ACK 必须保留 binding、源条目、attempt、owner 修订、逻辑项种类�
 
 专属 progress profile 的真实 Iroh 组合在 Application 采用后覆盖21个回执字段／边界场景，
 并对当前14种完整结果原因逐一核对线上值。错误回执不回滚接收事实，原完整动作的正确重试仍可获得精确ACK；
-[字段证据与验收范围](../exec-plans/active/2026-10-24-transfer-progress-connectivity-feasibility.md#阶段1身份与精确ack校验)
+[字段证据与验收范围](../exec-plans/completed/2026-10-24-transfer-progress-connectivity-feasibility.md#阶段1身份与精确ack校验)
 分别列出纯规则、Application和真实连接证据，不把本项等同生产迁移。
 
 ### 明确拒绝与错误来源
@@ -177,7 +177,7 @@ Core 的 `ProgressRegistration` 现在提供单个已授权设备／源条目的
 Producer在完整登记或通知动作入口、读取本地权威之前冻结原连接请求，连接阶段只消费该请求。
 本地读取跨过会话退休时，旧动作不能在返回后重新取得新会话的拨号资格；原单轮截止和取消责任保持。
 
-真实双端登记原型和未覆盖边界见[阶段 0 证明](../exec-plans/active/2026-10-24-transfer-progress-connectivity-feasibility.md)。
+真实双端登记原型和未覆盖边界见[阶段 0 证明](../exec-plans/completed/2026-10-24-transfer-progress-connectivity-feasibility.md)。
 Application `transfer/progress` 现在提供从原始发送意图授权的单任务登记及终态采用能力。
 Infra `transfer_progress_v2` 有界入站适配取得真实连接对端身份，等待完整描述／终态采用成功后才写 Bound／TerminalAck；
 帧结束、传输 FIN 或事件排队均不能代替采用。精确重复终态可再次确认，冲突不得覆盖已有结果。
@@ -395,7 +395,7 @@ Application `transfer_progress_connectivity_policy` 是组装所用策略入口�
 单轮可中断网络等待除每次poll前检查原生经过时间外，还以100毫秒有界唤醒重新检查同一预算。
 恢复后即使socket没有新事件，也能观察已过期的原五秒截止；检查到期后不再次poll网络工作。
 原生时钟读取失败或回退仍按既有规则永久退休旧预算。该检查不包装不可安全中断的本机读取／采用，不提前释放实际工作额度。
-系统挂起期间不承诺执行任务；物理平台证明及通用连接空闲计时边界见[平台审计](../exec-plans/active/2026-10-24-transfer-progress-connectivity-feasibility.md#各平台经过时间审计与物理挂起入口)。
+系统挂起期间不承诺执行任务；物理平台证明及通用连接空闲计时边界见[平台审计](../exec-plans/completed/2026-10-24-transfer-progress-connectivity-feasibility.md#各平台经过时间审计与物理挂起入口)。
 
 
 ### 进度连接空闲期限与原子复用
@@ -517,7 +517,7 @@ Storage 在同一只读事务中读取来源、投递归属、原文件清单及
 
 每个目标沿用统一交换的预算和并发额度，核对不复原本地 payload，也不刷新旧补发期限。
 返回时再次检查可采用的当前视图，缓存退休或尝试替换不能冒充原任务的已结算结果。
-完整决策与稳定字段见[规格§5.7](../exec-plans/active/2026-10-24-transfer-progress-connectivity-spec.md#57-原任务核对再次发起与持久化边界)。
+完整决策与稳定字段见[规格§5.7](../exec-plans/completed/2026-10-24-transfer-progress-connectivity-spec.md#57-原任务核对再次发起与持久化边界)。
 
 只有明确新传输意图和允许的核对结果才进入 `ExistingLocalEntryDelivery`；该能力继续服务自动内容重投，
 不植入手动核对策略。接收端仍由原 `prepare_redelivery`／`accept_retry` 对活动、成功项、清理和

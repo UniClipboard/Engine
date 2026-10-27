@@ -1,6 +1,6 @@
 # Issue #34 第八切片：反向进度与发送侧状态投影执行计划
 
-状态：**生产实现与主机验证已完成；用户2026-10-27明确跳过物理挂起／设备后台验证，当前候选同head CI已核验通过，继续最终文档归档，逐任务创建未合并stack PR**。
+状态：**实施与验收结算完成，59/59项已处理并归档；物理挂起／设备后台验证按用户要求跳过，不计通过，stack未合并或发布**（2026-10-27）。
 唯一需求、预算和验收正文见[实现规格](2026-10-24-transfer-progress-connectivity-spec.md)。
 前置代码已合入 `5cbca8fc24a278fa7b01ae611bf4b925914bef13`（PR #230）；开工前冻结实际 main、依赖和旧端来源。
 复选框表示任务已处理；按用户要求跳过的验证必须明示“跳过”，不计为通过。当前跳过范围及交付影响见[用户跳过决定](2026-10-24-transfer-progress-connectivity-feasibility.md#用户批准跳过物理挂起与设备后台验证)。文档检查通过不代表行为、平台或交付通过。
@@ -124,10 +124,10 @@
 * [x] 当前候选定向协议、Core、Application、Infra、Engine、SQLite 和绑定检查全部通过。 固定#325干净源码，协议／Core／App1844、独占诊断1、实际登记权威8及13包1736项全部通过；清单与每条PASS／JUnit精确一致，共3589项。六个SQLite合同与Engine64／UniFFI86／NAPI51／宿主39均实际执行，见[当前候选定向核验](2026-10-24-transfer-progress-connectivity-feasibility.md#当前候选跨层定向合同核验)。原ignore及物理／跨平台未测项如实保留，不替代下一项全量回归。
 * [x] workspace、成员全集、升级 smoke、前六片与第七片必需网络及资源回归通过；不以隔离重跑成功覆盖原全量失败。 原完整workspace4927、成员56、升级smoke5维、Blob10格、进度14格、资源9项和可达性11类均完成；首次workspace平台配置失败与成员F2间歇失败分别保留，后者根因未定、不称已修复，见[完整回归与首次失败保留](2026-10-24-transfer-progress-connectivity-feasibility.md#当前候选完整回归与首次失败保留)。
 * [x] 本地根门禁全部通过，源码／依赖未变化后不无理由重复构建；单负责人、共享 target、保留编译缓存。 对齐原读流隔离测试与Linux屏障装配条件，两项原隔离用例及根六项全部通过；不以本地结果宣称macOS／Windows候选已绿，见[平台条件与本地门禁](2026-10-24-transfer-progress-connectivity-feasibility.md#本地根门禁与读流测试平台条件)。
-* [x] 将本片必需网络／资源用例接入原 CI；对同一交付 head 核对 Linux／macOS／Windows、iOS／Android／HarmonyOS 必需编译与线上检查。#340同一head主CI13job及Windows双架构全部通过，原始工件及逐step范围见[当前核验](2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)。
+* [x] 将本片必需网络／资源用例接入原 CI；对同一交付 head 核对 Linux／macOS／Windows、iOS／Android／HarmonyOS 必需编译与线上检查。#340同一head的13个主job及Windows双架构全部成功，原始工件及逐step范围见[最终核验](2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)。
 * [x] 真机切网、睡眠／前后台和 Desktop／移动产品宿主采用分别标明通过／失败／跳过，主机／模拟器结果不得冒充真机。见[平台与设备状态矩阵](2026-10-24-transfer-progress-connectivity-feasibility.md#平台真机与产品宿主状态矩阵)；此项只完成逐项登记；物理挂起／后台按用户要求跳过，产品采用仍未执行，不据此声称任何实机或产品通过。
-* [x] 按 spec AC01–AC13 核对唯一证据映射和全部跳过项，存在未经用户明确允许跳过的必需未执行项时，不能登记整片完成。见[唯一证据映射](2026-10-24-transfer-progress-connectivity-feasibility.md#ac01ac13唯一证据映射)，当前11项已验证、AC08实机部分按用户要求跳过，AC13尚待文档交付。
-* [ ] 稳定结论回写所属 Design Doc／必要 ADR，更新入口；实际完成后将 spec／plan 一起移入 completed，不关闭整个 #34。已在[稳定协议合同](../../design-docs/transfer-progress-protocol.md#模块所有权与调用边界)纠正早期待接线描述，明确当前运行期负责人及关闭监督；物理验收已按用户要求跳过；当前同head CI及AC11原回归已复核；本项尚待稳定入口同步和实际归档，继续保持未完成。
+* [x] 按 spec AC01–AC13 核对唯一证据映射和全部跳过项，存在未经用户明确允许跳过的必需未执行项时，不能登记整片完成。见[唯一证据映射](2026-10-24-transfer-progress-connectivity-feasibility.md#ac01ac13唯一证据映射)，当前12项已验证、AC08实机部分按用户要求跳过，不计通过；历史失败及未执行范围按原证据保留。
+* [x] 稳定结论回写所属 Design Doc／必要 ADR，更新入口；实际完成后将 spec／plan 一起移入 completed，不关闭整个 #34。[稳定协议合同](../../design-docs/transfer-progress-protocol.md#模块所有权与调用边界)维护当前负责人、流程与关闭监督；spec／plan／证据一同归档，索引及稳定文档链接同步。当前同head CI与AC11回归已结算，物理验证按授权跳过，历史间歇失败转技术债；归档PR继续原门禁，不合并发布。
 
 ## 验证入口
 
@@ -160,12 +160,12 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 网络矩阵需要 Linux 隔离网络权限；使用现有网络和 relay host，不另建只用合成地址的替代框架。
 文档交付单独核对相对链接、索引、11 节结构、行为覆盖和 diff 格式；不等于上述行为回归已运行。
 
-## 当前状态与下一个动作
+## 最终状态与交付边界
 
-- 当前正式任务58/59已处理，余最后的文档归档；spec有11项已验证、AC08实机部分按用户要求跳过，AC13的平台检查已完成、文档交付未完成。物理跳过不计通过。
-- 当前验收基线#340同一head主CI13job及Windows双架构全部通过。原workspace／coverage各4931、固定资源9、实际权威8、testkit18、成员smoke16及原14＋10网络格按原入口通过，工件摘要和证明边界见[当前核验](2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)。成员全集56项仍按原本机证据，不外推CI smoke。
-- 历史旧旧a07 Relay及成员F2首次失败继续保留，当前完整通过不证明根因已修复；Collector远端丢弃、设备／产品宿主和其他未执行边界不变。
-- 下一任务同步稳定入口、索引和归档路径，完成后创建下一层stack PR并执行原交付检查；不合并发布、不关闭整个#34。
+- 正式任务59/59已处理；spec的12项已验证，AC08实机部分按用户要求跳过、不计通过。生产双版本进度、兼容源身份头、实际接收成果／逐项通知／采用与ACK、完整查询／绑定、原再次发起核对、删除／成员退休及保守重启视图已接线并按各自证据验收。
+- 归档验收基线#340的同一head主CI13项及Windows双架构全部通过；原14格进度／10格Blob／11类可达性／固定资源9及workspace、coverage的原入口保持。根门禁、字节断言、单项预算和资源阈值未放宽，详见[最终结论](2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)。
+- 物理挂起／设备后台按用户要求跳过，产品宿主等未执行范围和Collector真实远端丢弃边界保留。历史旧旧a07 Relay及成员F2间歇失败继续跟踪，当前完整通过不证明历史根因已修复。
+- spec／plan／证据归档，稳定合同与索引同步；归档PR继续原门禁。每个完整任务创建未合并stack PR，本片不自动合并／发布，也不关闭整个#34。
 
 
 ### 2026-10-26：生产会话与稳定发送侧视图任务

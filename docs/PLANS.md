@@ -20,7 +20,7 @@
 
 ## 当前专项计划
 
-- Issue #34 第八切片：[反向进度与发送侧状态投影执行计划](exec-plans/active/2026-10-24-transfer-progress-connectivity-plan.md)，对应[实现规格](exec-plans/active/2026-10-24-transfer-progress-connectivity-spec.md)。状态为阶段 0 进行中；受管单向流、登记围栏及实际输出后 Application 采用／ACK 已取得主机证明，接收 CAS 后权威交接与 Application 进程寿命已验证，当前权威与真实登记组合已通过，完整单轮终态通知已接入原预算，两个固定旧端的旧旧 Direct／Relay 文件基线已通过，平台经过时间／极限负载等前置仍待完成，见[可行性记录](exec-plans/active/2026-10-24-transfer-progress-connectivity-feasibility.md)。范围包含尝试／轮次隔离、Application 投影、终态 ACK／有限补发、原任务核对及新旧受管协议；沿用第七片实际收发与结算，不新增远程强制下载／取消或跨重启可靠补发。
+- Issue #34 第八切片：[反向进度与发送侧状态投影执行计划](exec-plans/completed/2026-10-24-transfer-progress-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-24-transfer-progress-connectivity-spec.md)及[验收结论](exec-plans/completed/2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)。实施与验收结算完成，同head主CI13项及Windows双架构通过；物理挂起／设备后台按用户要求跳过，历史旧端Relay／成员F2间歇失败与远端日志丢弃边界保留。未合并或发布stack，不关闭整个#34。
 
 - Issue #34 第七切片：[文件／blob 受管传输执行计划](exec-plans/active/2026-10-21-blob-connectivity-plan.md)，对应[实现规格](exec-plans/active/2026-10-21-blob-connectivity-spec.md)。状态为阶段 0 前置证明完成、阶段 1／2 完整结算与阶段 3 手动选择重试验收推进：公开底层 SDK／Uni、原始重试材料、当前授权、两个冻结旧端 Direct／Relay 资料矩阵及协议资源基线通过，见[复现与方案](exec-plans/active/2026-10-21-blob-connectivity-feasibility.md)。目标包含单任务取消隔离、有限调度与重试、独立文件部分失败及手动重试，保持文件夹完整发布和旧版文件互通。SDK 接入及原始项重试材料须先通过阶段 0，反向进度完整迁移留在第八片。
 
