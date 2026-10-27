@@ -275,7 +275,7 @@ async fn production_reachability_observer_consumes_original_retry_slots_without_
 #[test]
 fn invalidated_connection_retries_while_denial_stops() {
     use crate::transfer::progress::delivery::retry::{retry_class, RetryClass};
-    let invalidated = || ConnectivityError::Invalidated;
+    let invalidated = || ConnectivityError::Invalidated(None);
     for source in [
         invalidated(),
         ConnectivityError::Shared(Arc::new(invalidated())),

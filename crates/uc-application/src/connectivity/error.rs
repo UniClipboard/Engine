@@ -33,8 +33,10 @@ pub enum ConnectivityError {
     Denied,
     /// 请求的撤销快照已失效（例如锁定准备暂停全部连接），但成员权威未确认拒绝。旧请求仍被
     /// 围栏拒绝；只有新请求才会重新读取当前成员权威。
+    ///
+    /// 撤销快照失效后读取成员权威失败时保留该来源；确认仍准入时没有来源。
     #[error("peer admission request invalidated")]
-    Invalidated,
+    Invalidated(#[source] Option<Box<dyn Error + Send + Sync>>),
     #[error("connection operation deadline expired")]
     DeadlineExpired,
     #[error("connection operation timed out")]
@@ -100,7 +102,7 @@ impl ConnectivityError {
             | Self::AddressMissing
             | Self::Backend(_)
             | Self::Denied
-            | Self::Invalidated => true,
+            | Self::Invalidated(_) => true,
             Self::Shared(error) => error.is_unavailable(),
             _ => false,
         }
@@ -146,7 +148,7 @@ impl ErrorClass for ConnectivityError {
             Self::ExchangeAlreadyUsed => "connection_exchange_already_used",
             Self::Capability(_) => "connection_stream_capability_unavailable",
             Self::Denied => "connection_admission_denied",
-            Self::Invalidated => "connection_admission_invalidated",
+            Self::Invalidated(_) => "connection_admission_invalidated",
             Self::DeadlineExpired | Self::TimedOut(_) => "connection_timeout",
             Self::AdmissionTimedOut(_) | Self::AdmissionDeadlineExpired => {
                 "connection_admission_timeout"
@@ -227,7 +229,7 @@ mod tests {
         }
         for error in [
             ConnectivityError::Denied,
-            ConnectivityError::Invalidated,
+            ConnectivityError::Invalidated(None),
             ConnectivityError::Stopped,
             ConnectivityError::Offline,
             ConnectivityError::AddressMissing,
@@ -238,6 +240,19 @@ mod tests {
         ] {
             assert!(!error.is_transient(), "{}", error.class());
         }
+    }
+
+    /// 撤销快照失效后读取成员权威失败：保留来源链，同时仍按请求失效分类（可恢复、非拒绝）。
+    #[test]
+    fn invalidation_keeps_the_admission_read_source() {
+        let error = ConnectivityError::Invalidated(Some(Box::new(std::io::Error::other(
+            "membership read failed",
+        ))));
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(error.is_unavailable());
+        assert!(!error.is_denied());
+        assert!(!error.is_transient());
+        assert!(std::error::Error::source(&ConnectivityError::Invalidated(None)).is_none());
     }
 
     /// 授权拒绝可穿过共享拨号结果识别；请求失效不是拒绝。两者都不改变既有不可用判断。
@@ -251,8 +266,8 @@ mod tests {
         for error in [
             ConnectivityError::Offline,
             ConnectivityError::AddressMissing,
-            ConnectivityError::Invalidated,
-            ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Invalidated)),
+            ConnectivityError::Invalidated(None),
+            ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Invalidated(None))),
             ConnectivityError::Backend(Box::new(std::io::Error::other("unreachable"))),
             ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Offline)),
         ] {

@@ -970,7 +970,7 @@ async fn acquisition_denial_is_a_terminal_failure_while_unreachable_stays_offlin
             self.connects.fetch_add(1, Ordering::SeqCst);
             Err(match self.failure {
                 Failure::Denied => ConnectivityError::Denied,
-                Failure::Invalidated => ConnectivityError::Invalidated,
+                Failure::Invalidated => ConnectivityError::Invalidated(None),
                 Failure::Unreachable => ConnectivityError::Backend(Box::new(std::io::Error::from(
                     std::io::ErrorKind::HostUnreachable,
                 ))),
