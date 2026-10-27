@@ -1,14 +1,15 @@
 //! 新挑战到达后才从当前接收负责人取得描述；只做有界交换和精确回显检查。
 use super::io::{invalid, Exchange};
 use super::mapping::{
-    descriptor, identity, outgoing_terminal, outgoing_update, terminal, wire_descriptor,
+    descriptor, identity, outgoing_contact, outgoing_terminal, outgoing_update, terminal,
+    wire_descriptor,
 };
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    ConnectionLease, ProgressBound, ProgressExchangeDeadline, ProgressReceiveError,
-    ProgressTaskAuthorityPort, ProgressTerminalNotice, ProgressUpdateNotice, ProgressWirePort,
-    StreamLease,
+    ConnectionLease, ProgressBound, ProgressContactNotice, ProgressExchangeDeadline,
+    ProgressReceiveError, ProgressTaskAuthorityPort, ProgressTerminalNotice, ProgressUpdateNotice,
+    ProgressWirePort, StreamLease,
 };
 use uc_core::file_transfer::ProgressIdentity;
 use uc_sync_protocol::transfer_progress::v2::{Message, WireId};
@@ -16,6 +17,21 @@ use uc_sync_protocol::transfer_progress::v2::{Message, WireId};
 pub struct TransferProgressWire;
 #[async_trait]
 impl ProgressWirePort for TransferProgressWire {
+    async fn contact(
+        &self,
+        stream: &mut StreamLease,
+        connection: &ConnectionLease,
+        notice: ProgressContactNotice,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        let mut exchange = Exchange::new(stream, connection, deadline, cancel);
+        exchange.write(outgoing_contact(notice)).await?;
+        exchange.finish_send().await?;
+        exchange.end_request().await?;
+        Ok(())
+    }
+
     async fn update(
         &self,
         stream: &mut StreamLease,

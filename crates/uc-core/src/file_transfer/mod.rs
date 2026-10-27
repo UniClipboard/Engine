@@ -50,3 +50,9 @@ pub use progress_snapshot::{
 
 mod progress_projection;
 pub use progress_projection::{ProgressItemEffect, ProgressItemInput, ProgressItemProjection};
+
+mod progress_freshness;
+pub use progress_freshness::{
+    ProgressFreshness, ProgressFreshnessEffect, ProgressFreshnessInput, ProgressFreshnessView,
+    PROGRESS_CONTACT_GAP, PROGRESS_UNKNOWN_AFTER,
+};

@@ -1,5 +1,6 @@
 use uc_application::deps::{
-    ProgressBound, ProgressTaskDescriptor, ProgressTerminalNotice, ProgressUpdateNotice,
+    ProgressBound, ProgressContactNotice, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressUpdateNotice,
 };
 use uc_core::file_transfer::{
     FileTransferCancellationReason as Cancel, ProgressActive, ProgressFailureReason as Failure,
@@ -276,5 +277,31 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+pub(super) fn contact(
+    binding: WireId,
+    scope: TaskScope,
+    revision: u64,
+    sequence: u64,
+) -> ProgressContactNotice {
+    ProgressContactNotice {
+        binding: identity(binding),
+        source: identity(scope.source_entry),
+        attempt: identity(scope.attempt),
+        revision,
+        sequence,
+    }
+}
+pub(super) fn outgoing_contact(notice: ProgressContactNotice) -> Message {
+    Message::Contact {
+        binding: WireId(notice.binding.bytes()),
+        scope: TaskScope {
+            source_entry: WireId(notice.source.bytes()),
+            attempt: WireId(notice.attempt.bytes()),
+        },
+        owner_revision: notice.revision,
+        sequence: notice.sequence,
     }
 }

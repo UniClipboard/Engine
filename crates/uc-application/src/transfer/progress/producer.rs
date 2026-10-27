@@ -1,7 +1,7 @@
 //! 一次完整通知；当前登记、活动发送或终态精确ACK共用原预算。
 use super::{
-    ElapsedClockPort, ProgressBound, ProgressExchangeDeadline, ProgressLiveRoundPort,
-    ProgressReceiveError, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ElapsedClockPort, ProgressBound, ProgressContactNotice, ProgressExchangeDeadline,
+    ProgressLiveRoundPort, ProgressReceiveError, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
     ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressUpdateNotice, ProgressWirePort,
 };
 use crate::connectivity::{ConnectionLease, ConnectionProtocol, ConnectivityManager};
@@ -170,6 +170,61 @@ impl ProgressTerminalRoundPort for TransferProgressProducer {
 
 #[async_trait]
 impl ProgressLiveRoundPort for TransferProgressProducer {
+    async fn report_contact(
+        &self,
+        peer: &DeviceId,
+        expected: ProgressTaskDescriptor,
+        sequence: u64,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        let check = || -> Result<(), ProgressReceiveError> {
+            let current = self
+                .authority
+                .current_task(peer, expected.source)
+                .ok_or(ProgressReceiveError::UnknownTask)?;
+            if current.descriptor != expected
+                || current
+                    .items
+                    .iter()
+                    .all(|item| current.notification_closed.contains(item))
+            {
+                return Err(ProgressReceiveError::Stale);
+            }
+            deadline.check(cancel)
+        };
+        check()?;
+        let connection = self.connect(peer, deadline, cancel).await?;
+        let bound = self
+            .register_on(&connection, expected.source, deadline, cancel)
+            .await?;
+        if bound.descriptor != expected {
+            return Err(ProgressReceiveError::Stale);
+        }
+        let mut stream = connection
+            .open_bi_with_cancel(deadline.instant(), cancel)
+            .await?;
+        check()?;
+        self.wire
+            .contact(
+                &mut stream,
+                &connection,
+                ProgressContactNotice {
+                    binding: bound.binding,
+                    source: expected.source,
+                    attempt: expected.attempt,
+                    revision: expected.revision,
+                    sequence,
+                },
+                deadline,
+                cancel,
+            )
+            .await?;
+        self.manager.retain(&connection).await?;
+        check()?;
+        Ok(())
+    }
+
     async fn report_live(
         &self,
         peer: &DeviceId,

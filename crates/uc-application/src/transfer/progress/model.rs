@@ -1,8 +1,9 @@
+use super::ElapsedClockError;
 use std::collections::HashSet;
 use std::sync::Arc;
 use uc_core::file_transfer::{
-    ProgressActive, ProgressIdentity, ProgressItem, ProgressItemState, ProgressTerminal,
-    RegistrationDescriptor,
+    ProgressActive, ProgressFreshnessView, ProgressIdentity, ProgressItem, ProgressItemState,
+    ProgressTerminal, RegistrationDescriptor,
 };
 
 pub type ProgressTaskDescriptor = RegistrationDescriptor<ProgressIdentity>;
@@ -22,6 +23,8 @@ pub struct ProgressTerminalNotice {
 }
 /// 完整快照用于事件丢失后的重读；缺失项保持未知，不推断失败。
 pub struct ProgressProjectionSnapshot {
+    /// 时钟故障保留完整来源；已有真实结果仍由items返回。
+    pub freshness: Result<ProgressFreshnessView, Arc<ElapsedClockError>>,
     pub version: u64,
     pub bound: Option<ProgressBound>,
     pub items: Vec<(ProgressItem, Option<ProgressItemState>)>,
@@ -62,4 +65,13 @@ pub struct ProgressUpdateNotice {
     pub attempt: ProgressIdentity,
     pub revision: u64,
     pub update: ProgressActive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressContactNotice {
+    pub binding: ProgressIdentity,
+    pub source: ProgressIdentity,
+    pub attempt: ProgressIdentity,
+    pub revision: u64,
+    pub sequence: u64,
 }

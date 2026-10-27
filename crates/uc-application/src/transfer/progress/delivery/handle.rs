@@ -1,9 +1,9 @@
+use super::super::clock::Clock;
 use super::super::{
     ElapsedClockError, ElapsedClockPort, ProgressClaimRefusal, ProgressExchangeDeadline,
     ProgressLiveRoundPort, ProgressQueryResult, ProgressReceiveError, ProgressSnapshotRoundPort,
     ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTerminalRoundPort,
 };
-use super::clock::Clock;
 use super::model::{clock_failure, Key, QueryKey};
 use super::query::QUERY_LIMIT;
 use super::state::State;
@@ -225,6 +225,24 @@ impl ProgressExchangeService {
         attempt: ProgressIdentity,
         value: ProgressActive,
     ) -> Result<ProgressSubmission, ProgressReceiveError> {
+        self.submit_activity(peer, source, attempt, Some(value))
+    }
+    /// 当前接收尝试接受后跟踪等待状态；重复调用不刷新首次联系或预算。
+    pub fn track_current(
+        &self,
+        peer: DeviceId,
+        source: ProgressIdentity,
+        attempt: ProgressIdentity,
+    ) -> Result<ProgressSubmission, ProgressReceiveError> {
+        self.submit_activity(peer, source, attempt, None)
+    }
+    fn submit_activity(
+        &self,
+        peer: DeviceId,
+        source: ProgressIdentity,
+        attempt: ProgressIdentity,
+        value: Option<ProgressActive>,
+    ) -> Result<ProgressSubmission, ProgressReceiveError> {
         if self
             .inner
             .state
@@ -250,12 +268,19 @@ impl ProgressExchangeService {
         {
             return Err(ProgressReceiveError::InvalidPlan);
         }
-        if !task.items.contains(&value.item) {
+        if value.is_some_and(|value| !task.items.contains(&value.item)) {
             return Ok(ProgressSubmission::Refused(
                 ProgressClaimRefusal::InvalidItem,
             ));
         }
-        if task.notification_closed.contains(&value.item) {
+        if value.map_or_else(
+            || {
+                task.items
+                    .iter()
+                    .all(|item| task.notification_closed.contains(item))
+            },
+            |value| task.notification_closed.contains(&value.item),
+        ) {
             return Ok(ProgressSubmission::Refused(
                 ProgressClaimRefusal::AlreadyObserved,
             ));
@@ -301,7 +326,21 @@ impl ProgressExchangeService {
             .unwrap_or_else(PoisonError::into_inner);
         state.prune_live_tasks(&obsolete);
         state.refresh(Some(sample));
-        let submitted = state.admit_live(peer, task.descriptor, value, sample);
+        let submitted = match value {
+            Some(value) => state.admit_live(peer, task.descriptor, value, sample),
+            None => {
+                let known = state
+                    .live_tasks
+                    .contains_key(&QueryKey::new(peer, task.descriptor));
+                if !state.track_live(peer, task.descriptor, sample) {
+                    ProgressSubmission::NotRetained
+                } else if known {
+                    ProgressSubmission::Unchanged
+                } else {
+                    ProgressSubmission::Retained
+                }
+            }
+        };
         self.inner.wake.notify_one();
         Ok(submitted)
     }

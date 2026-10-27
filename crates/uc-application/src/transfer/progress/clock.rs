@@ -1,5 +1,5 @@
 //! 连续性故障只退休旧预算；各轮租约不得跨故障世代继续发送。
-use super::super::{ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal};
+use super::{ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::Notify;

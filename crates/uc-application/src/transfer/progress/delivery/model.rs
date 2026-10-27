@@ -77,17 +77,22 @@ impl QueryKey {
 pub(super) enum Work {
     Terminal(Key),
     Live(Key),
+    Contact(QueryKey),
     Snapshot(QueryKey),
 }
 impl Work {
     pub fn peer(self) -> DeviceId {
         match self {
             Self::Terminal(key) | Self::Live(key) => key.peer,
-            Self::Snapshot(key) => key.peer,
+            Self::Snapshot(key) | Self::Contact(key) => key.peer,
         }
     }
 }
 pub(super) enum Action {
+    Contact {
+        descriptor: ProgressTaskDescriptor,
+        sequence: u64,
+    },
     Live {
         descriptor: ProgressTaskDescriptor,
         value: ProgressActive,
@@ -106,7 +111,8 @@ pub(super) struct Job {
     pub action: Action,
 }
 pub(super) enum Completion {
-    Live(ProgressActive, Result<(), ProgressReceiveError>),
+    Contact(u64, Result<(), ProgressReceiveError>),
+    Live(u64, ProgressActive, Result<(), ProgressReceiveError>),
     Terminal(Result<(), ProgressReceiveError>),
     Snapshot(Result<ProgressSnapshotRead, ProgressReceiveError>),
 }

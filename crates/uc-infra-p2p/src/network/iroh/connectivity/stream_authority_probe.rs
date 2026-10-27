@@ -17,11 +17,11 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline,
-    ProgressExchangeService, ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask,
-    ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, ProgressUpdateNotice, TransferProgressProducer,
-    TransferProgressReceiver, TransferProgressSnapshotReader,
+    CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal, ProgressContactNotice,
+    ProgressExchangeDeadline, ProgressExchangeService, ProgressReceiveError, ProgressReceiverPort,
+    ProgressSourceTask, ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressUpdateNotice,
+    TransferProgressProducer, TransferProgressReceiver, TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
@@ -231,6 +231,14 @@ impl CurrentProgressTaskPort for HeldDescriptor<'_> {
 }
 #[async_trait]
 impl ProgressReceiverPort for Gate {
+    async fn adopt_contact(
+        &self,
+        peer: &DeviceId,
+        generation: u64,
+        notice: ProgressContactNotice,
+    ) -> Result<(), ProgressReceiveError> {
+        self.owner.adopt_contact(peer, generation, notice).await
+    }
     async fn adopt_update(
         &self,
         peer: &DeviceId,
@@ -376,6 +384,7 @@ async fn current_receive_authority_binds_over_real_iroh_and_old_descriptors_cann
                 fixture.receiving.peer(),
                 SOURCE,
                 first.items.to_vec(),
+                Arc::new(SystemElapsedClock),
             )?);
             let gate = Arc::new(Gate {
                 before: false,
@@ -456,6 +465,7 @@ async fn actual_receiver_restart_new_connection_retires_old_producer_and_pending
             original.receiving.peer(),
             SOURCE,
             first.items.to_vec(),
+            Arc::new(SystemElapsedClock),
         )?);
         let gate = Arc::new(Gate {
             before: false,
@@ -595,6 +605,7 @@ async fn fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again(
                 fixture.receiving.peer(),
                 SOURCE,
                 first.items.to_vec(),
+                Arc::new(SystemElapsedClock),
             )?);
             let gate = Arc::new(Gate {
                 before,
@@ -688,6 +699,7 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
             fixture.receiving.peer(),
             SOURCE,
             accepted.items.to_vec(),
+            Arc::new(SystemElapsedClock),
         )?;
         let result = ProgressTerminal {
             item: accepted.items[0],
