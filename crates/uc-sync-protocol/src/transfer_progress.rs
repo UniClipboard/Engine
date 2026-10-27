@@ -49,6 +49,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
 
+pub mod v2;
+
 /// Sentinel byte distinguishing transfer-progress frames from any other
 /// stream the receiver might mis-route here. Must NOT collide with
 /// `clipboard_wire::CLIPBOARD_MAGIC` (0xC1).

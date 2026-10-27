@@ -22,6 +22,7 @@
 - [Engine 测试架构](testing-architecture.md)：测试分层、testkit、nextest 分组、结构化报告与迁移边界。
 - [Engine 测试使用指南](testing-guide.md)：首次新增测试时的层级选择、testkit 采用、分组、CI、失败查看与复现。
 - [当前成员运行范围](current-member-runtime-scope.md)：成员资格与普通能力的统一范围。
+- [反向进度线上合同](transfer-progress-protocol.md)：旧 `/1` 与未发布 `/2` 的帧边界、有界消息及固定向量；生产迁移状态见第八片计划。
 - [Space Application](space-application.md)：Space 领域的入口、负责人、恢复路径与测试地图。
 
 ## 分层规范
