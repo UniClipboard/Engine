@@ -1365,3 +1365,12 @@ UC_EXPECT_DIAGNOSTIC_STACK=available just cargo nextest run --profile ci --locke
 ```
 
 本地门禁证明Linux原隔离测试仍实际运行，macOS／Windows实际编译以同一交付head的原CI为准，当前未登记跨平台通过。Windows已有独立`windows-build.yml`，含windows-2025 x64和windows-11-arm原生检查；它的PR触发仅匹配main或migration目标，当前stack需要显式workflow_dispatch。后续使用原工作流核对，不另建重复Windows门禁。原成员F2间歇失败仍未定位，真机请求与未执行项保持原状态。
+
+
+## 必需套件的整组CI预算修复
+
+2026-10-27核对[原#326 Engine job](https://github.com/UniClipboard/Engine/actions/runs/40442754299/job/121986716097)的原始时间与check注释：03:11:19Z启动、04:11:49Z完成，结论cancelled，注释明确为超过1h0m0s的job上限。原workspace在04:05:35Z完成4927项全绿，耗时1770.029秒；04:05:41Z启动原资源九项，其中7项通过后在04:11:41Z被取消。该次资源入口及之后未执行步骤不能记为通过，也不是业务场景超时已修复的证据。
+
+原`pr-check.yml`的Engine tests串行承担冷构建、完整workspace、登记权威、固定资源、testkit、成员smoke和必要网络步骤，60分钟外层预算已实际阻断完整执行。本次仅将该job上限调整到90分钟，保留所有原单项期限、测试负载、资源上限、选择器和执行顺序。复用现有统一构建与缓存，不拆成重复全量构建的另一套入口；其他job预算不变。
+
+原CI构建／打包配置检查18项通过，根六项metadata、workspace all-targets、fmt、Rust style、repository与diff全部通过。Rust及依赖相对#328未变化，使用已有运行证据，不重跑原4927项或固定网络／资源负载。本项是允许必需CI套件完整运行的配置修复，**同一候选的跨平台CI验收仍未完成**；90分钟预算下的实际线上结果待原工作流验证，不提前勾阶段6对应项。

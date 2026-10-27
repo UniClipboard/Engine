@@ -245,7 +245,9 @@ jobs:
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
-    timeout-minutes: 75
+    # 完整 workspace 与原固定资源负载共用构建；冷构建时曾在资源阶段触及60分钟上限。
+    # 仅增加整组CI预算，各场景的原期限、负载和资源阈值保持不变。
+    timeout-minutes: 90
     env:
       # 所有测试组共用同一次全工作区构建，只编译一次。
       UC_TEST_BUILD_SCOPE: workspace
