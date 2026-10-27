@@ -27,7 +27,7 @@
 
 * [x] 核对最近 AGENTS、架构、协议、错误、安全及业务观测标准；确认源码工作区没有切片 7 撤销差异，冻结实际开工来源。
 * [x] 盘点旧 reporter、通知邮箱、Engine 投影、Router、生命周期、逐项查询、绑定和网络 harness 的全部消费者。
-* [ ] 冻结旧 `/1` 编解码向量和两种旧端：开工前 main、既有受支持历史锚点；先验证旧旧实际内容基线，记录精确 SHA／产物来源，不用可移动分支名作为证据。
+* [x] 冻结旧 `/1` 全部状态及总量形式的18条编解码向量，以及开工前 main／既有受支持历史锚点；两种旧端各自旧旧 Direct／强制 Relay 四格实际资料重开与文件读回通过。精确 SHA、产物来源及复跑入口见[旧端基线](2026-10-24-transfer-progress-connectivity-feasibility.md#固定旧端旧旧文件与旧进度向量)，不以移动分支代替证据。
 * [x] 定义新 `/2` 登记／更新／终态 ACK／核对的精确字节、限制、分页及 golden 向量；保留旧 `/1` 字节和 blob／V3 格式。见[线上合同](../../design-docs/transfer-progress-protocol.md)；仅 codec，不据此勾选真实登记或 ACK 采用证明。
 * [x] 用真实双端及可控消息延迟证明源条目→接收逻辑项／attempt 的关联，新旧 producer／登记乱序不能回退；连接重建不重置修订，进程重启退休旧关联。普通文件／空目录、挑战前后替换、迟到 Bound、真实接收 fixture kill／relaunch 与新 QUIC 连接组合通过；受控存储 port 的边界见[组合证明](2026-10-24-transfer-progress-connectivity-feasibility.md#实际当前权威与真实登记的组合)，不冒充后续 Engine／SQLite 或设备矩阵。
 * [x] 用真实 Uni 双向流完成一个输出后的终态采用与 ACK，证明 FIN 仅为传输事实，不是 Application 采用。实际 BAO 接收／文件导出、采用前暂停、精确重复／冲突、取消／期限到达及尾随字节证据见[输出后采用证明](2026-10-24-transfer-progress-connectivity-feasibility.md#真实输出后的-application-采用与-ack)；生产接收 attempt／SQLite 交接及完整阶段 3 尚未完成。
@@ -162,4 +162,4 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 - 当前已完成受管单向流最小接缝及主机证明、新版有界字节合同与向量；旧 reporter／生产 Router 尚未迁移，新版登记围栏已取得真实双端原型证据；输出后 Application 采用／ACK 的最小主机链路已完成；接收 CAS 后权威交接及 Application 进程寿命已验证；当前权威与真实协议组合已完成，完整通知调度、状态核对及其他阶段 0 项尚未完成。
 - 2026-10-24 文档交付：相对链接、结构与决定覆盖检查，以及 metadata、workspace 全目标 check、fmt、Rust style、repository 和 diff 根门禁通过；不据此勾选上述实施验收。
 - 产品行为与默认预算已确认；技术前置状态按 spec §11 和阶段 0 记录维护，不把主机证明泛化为完整生产或平台矩阵。
-- 下一个实施动作：阶段 0 的两个固定旧端旧旧基线、经过时间能力及极限负载证明；保持当前单向接缝已验证的容量和取消合同。
+- 下一个实施动作：阶段 0 的经过时间能力及极限负载证明；两个固定旧端旧旧基线已通过，保持当前单向接缝已验证的容量和取消合同。

@@ -433,6 +433,8 @@ jobs:
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
         with:
           tool: just
+      - name: Run fixed legacy progress content baselines
+        run: bash scripts/testing/run-progress-legacy-baseline.sh
       - name: Run complete mandatory blob matrix
         run: bash scripts/testing/run-blob-connectivity.sh
       - name: Retain sanitized blob evidence
@@ -445,6 +447,9 @@ jobs:
             target/blob-connectivity-evidence/runs/**/*.txt
             target/blob-connectivity-evidence/runs/**/*.log
             target/blob-connectivity-evidence/frozen-main/*.txt
+            target/progress-legacy-evidence/runs/**/*.json
+            target/progress-legacy-evidence/runs/**/*.txt
+            target/progress-legacy-evidence/runs/**/*.log
             target/upgrade-anchors/*/host.json
           if-no-files-found: error
 
