@@ -518,6 +518,15 @@ jobs:
       - name: Build iOS binding
         if: matrix.platform == 'ios'
         run: bash bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
+      - name: Build iOS probe core
+        if: matrix.platform == 'ios'
+        run: |
+          source scripts/build-cache/env.sh
+          export IPHONEOS_DEPLOYMENT_TARGET=17.0
+          # 探针与生产绑定共用已安装目标、dev配置和编译缓存；编译不表示真机验收通过。
+          for probe_target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+            cargo build -p uc-mobile-probe-core --lib --profile dev --target "$probe_target" --locked
+          done
       - name: Install Android targets and helper
         if: matrix.platform == 'android'
         run: |
@@ -527,6 +536,12 @@ jobs:
       - name: Build Android binding
         if: matrix.platform == 'android'
         run: bash bindings/uc-engine-uniffi/scripts/build-android-aar.sh
+      - name: Build Android probe core
+        if: matrix.platform == 'android'
+        run: |
+          source scripts/build-cache/env.sh
+          # 复用原arm64目标和cargo-ndk，不生成第二套JNI打包目录。
+          cargo ndk -t arm64-v8a build -p uc-mobile-probe-core --lib --profile dev --locked
 
       - name: Publish scenario CAS snapshot
         if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')

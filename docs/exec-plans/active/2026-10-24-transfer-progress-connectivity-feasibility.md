@@ -1511,3 +1511,5 @@ AC05的全部默认预算逐项核对如下；计数来自原4927条PASS／JUnit
 使用既有`tests/hosts/ios/probe-command-device.sh`或`tests/hosts/android/probe-command.sh`传入上述JSON命令即可调用；源条目与目标身份取自原发送动作，不由探针推断。测试命令必须在已经启动并完成原会话准备的宿主上执行，不把`not_started`或核对完成当成文件完成。
 
 本项只准备iOS／Android共同探针。HarmonyOS使用独立NAPI验收宿主，仍按独立入口核对；不把此补齐登记为三平台或真机通过。当前本机无Swift／Java编译器、Xcode及移动设备工具，原生App编译和真实前后台／系统挂起未执行，继续跳过并阻止AC08和归档。Linux完整共享探针30项、既有宿主边界13项，共43项实际通过，其中4项新增用例由原失败转为通过；逐条PASS与原输出核对。零doc test另行记录，不算执行案例；不以这些测试代替设备结果。
+
+后续核对发现原移动CI只构建`uc-engine-uniffi`，不能验证共同探针的Apple／Android条件编译。原`mobile-bindings`作业现各增加探针原生库构建：iOS设备arm64及两种模拟器目标，Android沿原arm64与固定cargo-ndk；均复用原SDK、共享target、MBX和dev／locked配置，不新增工作流，也不改生产绑定步骤或原60分钟预算。该配置补齐只建立后续候选的实际编译门禁；本地主机没有对应SDK，原生库构建结果须以该候选线上步骤为准，尚未取得时保持未验证。它不构建Swift／Java App，不运行设备，也不替代物理挂起证明。
