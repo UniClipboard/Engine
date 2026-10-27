@@ -6,9 +6,9 @@ const fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
-fn started(poll: RetransmitPoll) -> Duration {
+fn started(poll: RetransmitEffect) -> Duration {
     match poll {
-        RetransmitPoll::Start { deadline } => deadline,
+        RetransmitEffect::Start { deadline } => deadline,
         other => panic!("expected start, got {other:?}"),
     }
 }
@@ -16,49 +16,64 @@ fn started(poll: RetransmitPoll) -> Duration {
 #[test]
 fn retransmit_follows_default_slots_and_never_overlaps_a_round() {
     let mut state = TerminalRetransmit::new(Some(secs(100)));
-    assert_eq!(started(state.poll(Some(secs(100)))), secs(105));
-    // 前次 5 秒内仍在途：第 2 秒时点到期也不新开一轮。
-    assert_eq!(state.poll(Some(secs(102))), RetransmitPoll::Busy);
-    state.finish_round();
-    // 本轮结束于 104.9 秒，已到期的 2 秒时点合并为一次资格。
-    assert_eq!(started(state.poll(Some(secs(105)))), secs(110));
-    state.finish_round();
     assert_eq!(
-        state.poll(Some(secs(106))),
-        RetransmitPoll::WaitUntil(secs(110))
+        started(state.apply(RetransmitInput::Poll(Some(secs(100))))),
+        secs(105)
+    );
+    // 前次 5 秒内仍在途：第 2 秒时点到期也不新开一轮。
+    assert_eq!(
+        state.apply(RetransmitInput::Poll(Some(secs(102)))),
+        RetransmitEffect::Busy
+    );
+    state.apply(RetransmitInput::RoundFinished);
+    // 本轮结束于 104.9 秒，已到期的 2 秒时点合并为一次资格。
+    assert_eq!(
+        started(state.apply(RetransmitInput::Poll(Some(secs(105))))),
+        secs(110)
+    );
+    state.apply(RetransmitInput::RoundFinished);
+    assert_eq!(
+        state.apply(RetransmitInput::Poll(Some(secs(106)))),
+        RetransmitEffect::WaitUntil(secs(110))
     );
 }
 
 #[test]
 fn suspend_merges_missed_slots_into_one_round_and_never_extends_retention() {
     let mut state = TerminalRetransmit::new(Some(secs(0)));
-    started(state.poll(Some(secs(0))));
-    state.finish_round();
+    started(state.apply(RetransmitInput::Poll(Some(secs(0)))));
+    state.apply(RetransmitInput::RoundFinished);
     // 挂起到第 130 秒：2／10／30／60／120 时点合并为一轮，不追补五轮。
-    assert_eq!(started(state.poll(Some(secs(130)))), secs(135));
-    state.finish_round();
     assert_eq!(
-        state.poll(Some(secs(131))),
-        RetransmitPoll::WaitUntil(secs(300))
+        started(state.apply(RetransmitInput::Poll(Some(secs(130))))),
+        secs(135)
+    );
+    state.apply(RetransmitInput::RoundFinished);
+    assert_eq!(
+        state.apply(RetransmitInput::Poll(Some(secs(131)))),
+        RetransmitEffect::WaitUntil(secs(300))
     );
     // 恢复时已越过 10 分钟：直接停止，不再发送。
     assert_eq!(
-        state.poll(Some(secs(10_000))),
-        RetransmitPoll::Stopped(RetransmitStop::Expired)
+        state.apply(RetransmitInput::Poll(Some(secs(10_000)))),
+        RetransmitEffect::Stopped(RetransmitStop::Expired)
     );
 }
 
 #[test]
 fn deadline_is_clamped_and_exact_expiry_stops() {
     let mut state = TerminalRetransmit::new(Some(secs(0)));
-    started(state.poll(Some(secs(0))));
-    state.finish_round();
+    started(state.apply(RetransmitInput::Poll(Some(secs(0)))));
+    state.apply(RetransmitInput::RoundFinished);
     // 540 秒时点启动的一轮截止为 min(545, 600)；595 秒启动则被保留期截断。
-    assert_eq!(started(state.poll(Some(secs(595)))), secs(600));
-    state.finish_round();
     assert_eq!(
-        state.poll(Some(secs(600))),
-        RetransmitPoll::Stopped(RetransmitStop::Expired)
+        started(state.apply(RetransmitInput::Poll(Some(secs(595))))),
+        secs(600)
+    );
+    state.apply(RetransmitInput::RoundFinished);
+    assert_eq!(
+        state.apply(RetransmitInput::Poll(Some(secs(600)))),
+        RetransmitEffect::Stopped(RetransmitStop::Expired)
     );
 }
 
@@ -67,67 +82,95 @@ fn eight_starts_exhaust_the_budget() {
     let mut state = TerminalRetransmit::new(Some(secs(0)));
     let mut starts = 0;
     for at in [0, 2, 10, 30, 60, 120, 300, 540] {
-        started(state.poll(Some(secs(at))));
-        state.finish_round();
+        started(state.apply(RetransmitInput::Poll(Some(secs(at)))));
+        state.apply(RetransmitInput::RoundFinished);
         starts += 1;
     }
     assert_eq!(starts, 8);
     assert_eq!(
-        state.poll(Some(secs(560))),
-        RetransmitPoll::Stopped(RetransmitStop::Exhausted)
+        state.apply(RetransmitInput::Poll(Some(secs(560)))),
+        RetransmitEffect::Stopped(RetransmitStop::Exhausted)
     );
 }
 
 #[test]
 fn network_recovery_consumes_one_future_slot_after_the_minimum_gap() {
     let mut state = TerminalRetransmit::new(Some(secs(0)));
-    started(state.poll(Some(secs(0))));
-    state.finish_round();
+    started(state.apply(RetransmitInput::Poll(Some(secs(0)))));
+    state.apply(RetransmitInput::RoundFinished);
     // 第 1 秒前次刚结束：恢复机会不能立即启动。
-    state.network_recovered();
-    state.network_recovered();
+    state.apply(RetransmitInput::NetworkRecovered);
+    state.apply(RetransmitInput::NetworkRecovered);
     assert_eq!(
-        state.poll(Some(secs(1))),
-        RetransmitPoll::WaitUntil(secs(2))
+        state.apply(RetransmitInput::Poll(Some(secs(1)))),
+        RetransmitEffect::WaitUntil(secs(2))
     );
     // 距前次启动 2 秒后提前消费最近一个时点（此处恰与 2 秒时点重合）。
-    started(state.poll(Some(secs(2))));
-    state.finish_round();
+    started(state.apply(RetransmitInput::Poll(Some(secs(2)))));
+    state.apply(RetransmitInput::RoundFinished);
     // 重复恢复机会合并成一次，提前消费 10 秒时点；其后 30 秒时点仍在。
-    state.network_recovered();
-    state.network_recovered();
-    started(state.poll(Some(secs(4))));
-    state.finish_round();
+    state.apply(RetransmitInput::NetworkRecovered);
+    state.apply(RetransmitInput::NetworkRecovered);
+    started(state.apply(RetransmitInput::Poll(Some(secs(4)))));
+    state.apply(RetransmitInput::RoundFinished);
     assert_eq!(
-        state.poll(Some(secs(5))),
-        RetransmitPoll::WaitUntil(secs(30))
+        state.apply(RetransmitInput::Poll(Some(secs(5)))),
+        RetransmitEffect::WaitUntil(secs(30))
     );
 }
 
 #[test]
 fn ack_and_unreadable_or_regressing_clock_stop_retransmission() {
     let mut acked = TerminalRetransmit::new(Some(secs(0)));
-    started(acked.poll(Some(secs(0))));
-    acked.acknowledge();
+    started(acked.apply(RetransmitInput::Poll(Some(secs(0)))));
+    acked.apply(RetransmitInput::Acknowledged);
     assert_eq!(
-        acked.poll(Some(secs(1))),
-        RetransmitPoll::Stopped(RetransmitStop::Acknowledged)
+        acked.apply(RetransmitInput::Poll(Some(secs(1)))),
+        RetransmitEffect::Stopped(RetransmitStop::Acknowledged)
     );
     for mut state in [
         TerminalRetransmit::new(None),
         TerminalRetransmit::new(Some(secs(0))),
     ] {
         assert_eq!(
-            state.poll(None),
-            RetransmitPoll::Stopped(RetransmitStop::Expired)
+            state.apply(RetransmitInput::Poll(None)),
+            RetransmitEffect::Stopped(RetransmitStop::Expired)
         );
     }
     let mut regressed = TerminalRetransmit::new(Some(secs(10)));
-    started(regressed.poll(Some(secs(50))));
-    regressed.finish_round();
+    started(regressed.apply(RetransmitInput::Poll(Some(secs(50)))));
+    regressed.apply(RetransmitInput::RoundFinished);
     assert_eq!(
-        regressed.poll(Some(secs(40))),
-        RetransmitPoll::Stopped(RetransmitStop::Expired)
+        regressed.apply(RetransmitInput::Poll(Some(secs(40)))),
+        RetransmitEffect::Stopped(RetransmitStop::Expired)
+    );
+}
+
+#[test]
+fn clock_regression_while_waiting_retires_the_terminal() {
+    let mut state = TerminalRetransmit::new(Some(secs(0)));
+    started(state.apply(RetransmitInput::Poll(Some(secs(20)))));
+    state.apply(RetransmitInput::RoundFinished);
+    assert_eq!(
+        state.apply(RetransmitInput::Poll(Some(secs(29)))),
+        RetransmitEffect::WaitUntil(secs(30))
+    );
+    assert_eq!(
+        state.apply(RetransmitInput::Poll(Some(secs(28)))),
+        RetransmitEffect::Stopped(RetransmitStop::Expired)
+    );
+    assert_eq!(
+        state.apply(RetransmitInput::Poll(Some(secs(30)))),
+        RetransmitEffect::Stopped(RetransmitStop::Expired)
+    );
+}
+
+#[test]
+fn unrepresentable_deadline_is_expired_without_starting_an_exchange() {
+    let mut state = TerminalRetransmit::new(Some(Duration::MAX));
+    assert_eq!(
+        state.apply(RetransmitInput::Poll(Some(Duration::MAX))),
+        RetransmitEffect::Stopped(RetransmitStop::Expired)
     );
 }
 

@@ -1,49 +1,75 @@
+use std::error::Error;
+use std::fmt;
 use std::time::Duration;
 
+use crate::error_class::ErrorClass;
+
 /// 包含系统挂起时间的单调经过时间来源。
-///
-/// 返回值是相对同一进程内固定但不透明起点的读数，同一实现的读数不得因系统挂起而停走。
-/// 它不是墙钟，不能换算为日期；读不到或平台不能保证包含挂起时返回 `None`。
+/// 读数不能换算成日期；读取失败保留原始来源，不借用墙钟延长期限。
 pub trait ElapsedClockPort: Send + Sync {
-    fn elapsed(&self) -> Option<Duration>;
+    fn elapsed(&self) -> Result<Duration, ElapsedClockError>;
+}
+
+#[derive(thiserror::Error)]
+#[error("elapsed clock unavailable")]
+pub struct ElapsedClockError {
+    #[source]
+    pub source: Box<dyn Error + Send + Sync>,
+}
+impl fmt::Debug for ElapsedClockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+impl ErrorClass for ElapsedClockError {
+    fn class(&self) -> &'static str {
+        "elapsed_clock_unavailable"
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ElapsedClockRefusal {
+    #[error("platform has no suspend-inclusive clock")]
+    UnsupportedPlatform,
+    #[error("native elapsed clock count is invalid")]
+    InvalidNativeCount,
 }
 
 /// 期限预算的当前判定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetStatus {
-    /// 预算尚有剩余。
     Remaining(Duration),
-    /// 预算已耗尽，或因读数不可信按耗尽处理。
     Expired,
 }
 
-/// 从固定起点开始、不可重置的经过时间预算。
+/// 固定绝对截止；任一次不可读、回退或到期后永久退休本预算。
 ///
-/// 判定只依赖调用方传入的两次读数：起点读数不可用、当前读数不可用或读数倒退时，
-/// 无法证明预算仍有剩余，一律保守按耗尽处理，调用方据此显示未确认或停止补发，
-/// 不得用其他时钟延长期限。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 调用方传入读数，不在规则中读取时钟。恢复可用读数只能创建新意图的预算，
+/// 不能复活旧预算；同时防止晚于起点、但早于上次观察的回退延长期限。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElapsedBudget {
-    origin: Option<Duration>,
-    total: Duration,
+    deadline: Option<Duration>,
+    observed: Option<Duration>,
 }
-
 impl ElapsedBudget {
     pub fn start(origin: Option<Duration>, total: Duration) -> Self {
-        Self { origin, total }
+        Self {
+            deadline: origin.and_then(|origin| origin.checked_add(total)),
+            observed: origin,
+        }
     }
 
-    pub fn status(&self, now: Option<Duration>) -> BudgetStatus {
-        let (Some(origin), Some(now)) = (self.origin, now) else {
-            return BudgetStatus::Expired;
-        };
-        let Some(spent) = now.checked_sub(origin) else {
-            return BudgetStatus::Expired;
-        };
-        match self.total.checked_sub(spent) {
-            Some(left) if !left.is_zero() => BudgetStatus::Remaining(left),
-            _ => BudgetStatus::Expired,
+    pub fn apply(&mut self, now: Option<Duration>) -> BudgetStatus {
+        if let (Some(deadline), Some(previous), Some(now)) = (self.deadline, self.observed, now) {
+            if now >= previous {
+                if let Some(left) = deadline.checked_sub(now).filter(|left| !left.is_zero()) {
+                    self.observed = Some(now);
+                    return BudgetStatus::Remaining(left);
+                }
+            }
         }
+        self.deadline = None;
+        BudgetStatus::Expired
     }
 }
 
@@ -57,39 +83,64 @@ mod tests {
 
     #[test]
     fn remaining_shrinks_with_elapsed_time() {
-        let budget = ElapsedBudget::start(Some(secs(100)), secs(600));
+        let mut budget = ElapsedBudget::start(Some(secs(100)), secs(600));
         assert_eq!(
-            budget.status(Some(secs(130))),
+            budget.apply(Some(secs(130))),
             BudgetStatus::Remaining(secs(570))
         );
     }
 
     #[test]
     fn suspend_jump_consumes_budget_without_resetting_it() {
-        let budget = ElapsedBudget::start(Some(secs(10)), secs(600));
+        let mut budget = ElapsedBudget::start(Some(secs(10)), secs(600));
         // 挂起 400 秒后恢复：剩余按原期限计算，不是重新得到 600 秒。
         assert_eq!(
-            budget.status(Some(secs(410))),
+            budget.apply(Some(secs(410))),
             BudgetStatus::Remaining(secs(200))
         );
         // 恢复时已越过期限，直接过期而不是补发历史时刻。
-        assert_eq!(budget.status(Some(secs(10_000))), BudgetStatus::Expired);
+        assert_eq!(budget.apply(Some(secs(10_000))), BudgetStatus::Expired);
     }
 
     #[test]
     fn exact_deadline_is_expired() {
-        let budget = ElapsedBudget::start(Some(secs(0)), secs(5));
-        assert_eq!(budget.status(Some(secs(5))), BudgetStatus::Expired);
+        let mut budget = ElapsedBudget::start(Some(secs(0)), secs(5));
+        assert_eq!(budget.apply(Some(secs(5))), BudgetStatus::Expired);
     }
 
     #[test]
     fn unreadable_or_regressing_clock_is_expired() {
         assert_eq!(
-            ElapsedBudget::start(None, secs(5)).status(Some(secs(1))),
+            ElapsedBudget::start(None, secs(5)).apply(Some(secs(1))),
             BudgetStatus::Expired
         );
-        let budget = ElapsedBudget::start(Some(secs(50)), secs(600));
-        assert_eq!(budget.status(None), BudgetStatus::Expired);
-        assert_eq!(budget.status(Some(secs(49))), BudgetStatus::Expired);
+        let mut budget = ElapsedBudget::start(Some(secs(50)), secs(600));
+        assert_eq!(budget.apply(None), BudgetStatus::Expired);
+        assert_eq!(budget.apply(Some(secs(49))), BudgetStatus::Expired);
+    }
+
+    #[test]
+    fn unavailable_sample_permanently_retires_the_original_budget() {
+        let mut budget = ElapsedBudget::start(Some(secs(100)), secs(600));
+        assert_eq!(budget.apply(None), BudgetStatus::Expired);
+        assert_eq!(budget.apply(Some(secs(101))), BudgetStatus::Expired);
+    }
+
+    #[test]
+    fn every_observed_sample_must_be_nondecreasing() {
+        let mut budget = ElapsedBudget::start(Some(secs(100)), secs(600));
+        assert_eq!(
+            budget.apply(Some(secs(500))),
+            BudgetStatus::Remaining(secs(200))
+        );
+        assert_eq!(budget.apply(Some(secs(499))), BudgetStatus::Expired);
+        assert_eq!(budget.apply(Some(secs(501))), BudgetStatus::Expired);
+    }
+
+    #[test]
+    fn expiry_cannot_be_reversed_by_a_later_clock_reading() {
+        let mut budget = ElapsedBudget::start(Some(secs(100)), secs(600));
+        assert_eq!(budget.apply(Some(secs(700))), BudgetStatus::Expired);
+        assert_eq!(budget.apply(Some(secs(699))), BudgetStatus::Expired);
     }
 }

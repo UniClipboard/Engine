@@ -57,7 +57,9 @@ pub use app_version::{AppVersionStateError, AppVersionStatePort};
 pub use cache_fs::{CacheFsPort, DirEntry as CacheFsDirEntry};
 pub use clipboard_event::*;
 pub use clock::*;
-pub use elapsed_clock::{BudgetStatus, ElapsedBudget, ElapsedClockPort};
+pub use elapsed_clock::{
+    BudgetStatus, ElapsedBudget, ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal,
+};
 pub use engine_version::{EngineVersionStateError, EngineVersionStatePort};
 pub use first_sync_state::{FirstSyncStateError, FirstSyncStatePort};
 pub use hash::*;
