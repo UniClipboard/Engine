@@ -88,6 +88,25 @@ impl<P: Clone + Eq + Hash, W> ExchangeQueue<P, W> {
         None
     }
 
+    /// 只移除未启动的候选；活动额度仍待真实完成。
+    pub fn remove_queued(&mut self, peer: &P, work: &W) -> bool
+    where
+        W: PartialEq,
+    {
+        let Some(queue) = self.queues.get_mut(peer) else {
+            return false;
+        };
+        let Some(index) = queue.iter().position(|candidate| candidate == work) else {
+            return false;
+        };
+        queue.remove(index);
+        self.queued -= 1;
+        if queue.is_empty() {
+            self.queues.remove(peer);
+            self.ring.retain(|candidate| candidate != peer);
+        }
+        true
+    }
     /// 该对端的在途交换真实结束后归还额度。
     pub fn complete(&mut self, peer: &P) {
         self.active.remove(peer);

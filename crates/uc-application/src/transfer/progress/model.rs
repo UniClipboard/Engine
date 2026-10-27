@@ -31,3 +31,19 @@ pub struct ProgressSourceTask {
     pub descriptor: ProgressTaskDescriptor,
     pub items: Arc<[ProgressItem]>,
 }
+
+/// 一次性通知资格的业务拒绝，不推断实际下载失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressClaimRefusal {
+    NotRetained,
+    Superseded,
+    InvalidItem,
+    AlreadyObserved,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressSubmission {
+    Retained,
+    NotRetained,
+    Refused(ProgressClaimRefusal),
+    Closed,
+}

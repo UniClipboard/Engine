@@ -18,15 +18,20 @@ pub struct ProgressExchangeDeadline {
 impl ProgressExchangeDeadline {
     pub fn new(
         clock: Arc<dyn ElapsedClockPort>,
-        limit: Duration,
+        expires_at: Duration,
     ) -> Result<Self, ProgressReceiveError> {
-        let instant = Instant::now()
-            .checked_add(limit)
-            .ok_or(ConnectivityError::DeadlineExpired)?;
+        let started = Instant::now();
         let origin = clock.elapsed()?;
+        let remaining = expires_at
+            .checked_sub(origin)
+            .filter(|left| !left.is_zero())
+            .ok_or(ConnectivityError::DeadlineExpired)?;
+        let instant = started
+            .checked_add(remaining)
+            .ok_or(ConnectivityError::DeadlineExpired)?;
         Ok(Self {
             clock,
-            budget: Mutex::new(ElapsedBudget::start(Some(origin), limit)),
+            budget: Mutex::new(ElapsedBudget::start(Some(origin), remaining)),
             instant,
         })
     }

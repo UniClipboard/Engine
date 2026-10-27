@@ -92,3 +92,28 @@ fn clearing_preserves_revision_but_session_retirement_creates_new_producer() {
         first.descriptor.producer
     );
 }
+
+#[test]
+fn terminal_intent_claim_is_once_across_duplicate_handoff_and_new_attempt_is_separate() {
+    use super::ProgressClaimRefusal;
+    let mut owner = ProgressSourceCatalog::default();
+    let local = EntryId::from("entry");
+    let peer = DeviceId::new("source");
+    owner.accept(&local, peer, id(1), id(2), items());
+    assert!(owner
+        .claim_terminal(&peer, id(1), id(2), items()[0])
+        .is_ok());
+    owner.accept(&local, peer, id(1), id(2), items());
+    assert!(matches!(
+        owner.claim_terminal(&peer, id(1), id(2), items()[0]),
+        Err(ProgressClaimRefusal::AlreadyObserved)
+    ));
+    owner.accept(&local, peer, id(1), id(3), items());
+    assert!(matches!(
+        owner.claim_terminal(&peer, id(1), id(2), items()[0]),
+        Err(ProgressClaimRefusal::Superseded)
+    ));
+    assert!(owner
+        .claim_terminal(&peer, id(1), id(3), items()[0])
+        .is_ok());
+}

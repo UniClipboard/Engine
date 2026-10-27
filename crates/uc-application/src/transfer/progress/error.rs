@@ -65,6 +65,10 @@ impl ErrorClass for ElapsedClockError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ElapsedClockRefusal {
+    #[error("elapsed clock continuity lost")]
+    ContinuityLost,
+    #[error("elapsed clock reading regressed")]
+    NonMonotonicReading,
     #[error("platform has no suspend-inclusive clock")]
     UnsupportedPlatform,
     #[error("native elapsed clock count is invalid")]

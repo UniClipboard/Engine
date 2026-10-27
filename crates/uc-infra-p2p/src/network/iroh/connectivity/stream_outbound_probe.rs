@@ -6,18 +6,20 @@ use anyhow::{bail, ensure};
 use async_trait::async_trait;
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::ALPN as BLOBS_ALPN;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangePort, BlobReadStorePort, BlobValidatedProgress, ConnectionLease,
-    ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressBound,
+    ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressBound, ProgressClaimRefusal,
     ProgressExchangeDeadline, ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask,
-    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice, ProgressWirePort,
-    StreamLease, TransferProgressProducer, TransferProgressReceiver,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressTerminalRoundPort, ProgressWirePort, StreamLease, TransferProgressProducer,
+    TransferProgressReceiver,
 };
 use uc_core::file_transfer::{
     ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
@@ -32,10 +34,10 @@ use uc_sync_protocol::transfer_progress::v2::{
 const SOURCE: ProgressIdentity = ProgressIdentity::new([1; 16]);
 const ATTEMPT: ProgressIdentity = ProgressIdentity::new([3; 16]);
 const BUDGET: Duration = Duration::from_secs(5);
-struct Authority(AtomicU64);
+struct Authority(AtomicU64, Mutex<HashSet<(ProgressIdentity, ProgressItem)>>);
 impl Default for Authority {
     fn default() -> Self {
-        Self(AtomicU64::new(1))
+        Self(AtomicU64::new(1), Mutex::new(HashSet::new()))
     }
 }
 impl ProgressTaskAuthorityPort for Authority {
@@ -54,6 +56,27 @@ impl ProgressTaskAuthorityPort for Authority {
             },
             items: Arc::from([item()]),
         })
+    }
+    fn claim_terminal(
+        &self,
+        peer: &DeviceId,
+        source: ProgressIdentity,
+        attempt: ProgressIdentity,
+        item: ProgressItem,
+    ) -> Result<ProgressSourceTask, ProgressClaimRefusal> {
+        let task = self
+            .current_task(peer, source)
+            .ok_or(ProgressClaimRefusal::NotRetained)?;
+        if task.descriptor.attempt != attempt {
+            return Err(ProgressClaimRefusal::Superseded);
+        }
+        if !task.items.contains(&item) {
+            return Err(ProgressClaimRefusal::InvalidItem);
+        }
+        if !self.1.lock().unwrap().insert((attempt, item)) {
+            return Err(ProgressClaimRefusal::AlreadyObserved);
+        }
+        Ok(task)
     }
 }
 fn item() -> ProgressItem {
@@ -157,6 +180,7 @@ async fn settled_file_single_action_registers_sends_and_observes_exact_adopted_a
         let owner = owner(&fixture)?;
         let producer = producer(&fixture);
         let peer = fixture.sending.peer();
+        let budget = progress_budget();
         let serve = async {
             serve_registration(&fixture, &owner, &stop).await?;
             TransferProgressInbound::serve(
@@ -171,11 +195,23 @@ async fn settled_file_single_action_registers_sends_and_observes_exact_adopted_a
             anyhow::Ok(())
         };
         let (reported, served) = tokio::join!(
-            producer.report_settled(&peer, SOURCE, ATTEMPT, terminal(exported), &stop),
+            producer.report_settled(
+                &peer,
+                ProgressTaskDescriptor {
+                    attempt: ATTEMPT,
+                    ..Authority::default()
+                        .current_task(&peer, SOURCE)
+                        .unwrap()
+                        .descriptor
+                },
+                terminal(exported),
+                &budget,
+                &stop
+            ),
             serve
         );
         served?;
-        assert_eq!(reported?.result, terminal(exported));
+        reported?;
         assert_eq!(owner.snapshot().items[0].1, Some(terminal(exported)));
         assert_eq!(tokio::fs::read(&output).await?, bytes);
         drop(received);
@@ -194,12 +230,19 @@ async fn settled_file_single_action_registers_sends_and_observes_exact_adopted_a
 async fn old_attempt_is_refused_before_any_registration_stream() -> anyhow::Result<()> {
     let fixture = Fixture::new(4, 4, TRANSFER_PROGRESS_ALPN).await?;
     let producer = producer(&fixture);
+    let budget = progress_budget();
     let result = producer
         .report_settled(
             &fixture.sending.peer(),
-            SOURCE,
-            ProgressIdentity::new([9; 16]),
+            ProgressTaskDescriptor {
+                attempt: ProgressIdentity::new([9; 16]),
+                ..Authority::default()
+                    .current_task(&fixture.sending.peer(), SOURCE)
+                    .unwrap()
+                    .descriptor
+            },
             terminal(10),
+            &budget,
             &CancellationToken::new(),
         )
         .await;
@@ -221,6 +264,7 @@ async fn changed_ack_or_trailing_bytes_do_not_report_success() -> anyhow::Result
         let producer = producer(&fixture);
         let stop = CancellationToken::new();
         let peer = fixture.sending.peer();
+        let budget = progress_budget();
         let serve = async {
             serve_registration(&fixture, &owner, &stop).await?;
             let mut stream = fixture.receiving.accept_bi().await?;
@@ -274,7 +318,19 @@ async fn changed_ack_or_trailing_bytes_do_not_report_success() -> anyhow::Result
         };
         let (reported, served) = timeout(Duration::from_secs(15), async {
             tokio::join!(
-                producer.report_settled(&peer, SOURCE, ATTEMPT, terminal(10), &stop),
+                producer.report_settled(
+                    &peer,
+                    ProgressTaskDescriptor {
+                        attempt: ATTEMPT,
+                        ..Authority::default()
+                            .current_task(&peer, SOURCE)
+                            .unwrap()
+                            .descriptor
+                    },
+                    terminal(10),
+                    &budget,
+                    &stop
+                ),
                 serve
             )
         })
@@ -343,13 +399,26 @@ async fn registration_and_terminal_share_original_elapsed_budget() -> anyhow::Re
             clock: clock.clone(),
         }),
         Arc::new(Authority::default()),
-        clock,
+        clock.clone(),
     );
+    let deadline = ProgressExchangeDeadline::new(clock.clone(), BUDGET)?;
     let stop = CancellationToken::new();
     let peer = fixture.sending.peer();
     let (reported, served) = timeout(Duration::from_secs(15), async {
         tokio::join!(
-            producer.report_settled(&peer, SOURCE, ATTEMPT, terminal(10), &stop),
+            producer.report_settled(
+                &peer,
+                ProgressTaskDescriptor {
+                    attempt: ATTEMPT,
+                    ..Authority::default()
+                        .current_task(&peer, SOURCE)
+                        .unwrap()
+                        .descriptor
+                },
+                terminal(10),
+                &deadline,
+                &stop
+            ),
             serve_registration(&fixture, &owner, &stop)
         )
     })
@@ -387,6 +456,7 @@ async fn new_attempt_during_challenge_cannot_relabel_an_old_settled_result() -> 
     );
     let stop = CancellationToken::new();
     let peer = fixture.sending.peer();
+    let budget = progress_budget();
     let serving = async {
         let incoming = fixture.receiving.accept_bi().await?;
         // 原动作预检已经发生；Challenge读取后来接受的尝试。
@@ -404,7 +474,19 @@ async fn new_attempt_during_challenge_cannot_relabel_an_old_settled_result() -> 
     };
     let (reported, served) = timeout(Duration::from_secs(15), async {
         tokio::join!(
-            producer.report_settled(&peer, SOURCE, ATTEMPT, terminal(10), &stop),
+            producer.report_settled(
+                &peer,
+                ProgressTaskDescriptor {
+                    attempt: ATTEMPT,
+                    ..Authority::default()
+                        .current_task(&peer, SOURCE)
+                        .unwrap()
+                        .descriptor
+                },
+                terminal(10),
+                &budget,
+                &stop
+            ),
             serving
         )
     })
