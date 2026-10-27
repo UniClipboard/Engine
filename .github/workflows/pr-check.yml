@@ -267,6 +267,14 @@ jobs:
         if: always()
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/workspace.xml || true
 
+      - name: Install just for current-authority registration proof
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+
+      - name: Verify registration against actual receive authority
+        run: node scripts/testing/run-progress-registration-proof.mjs
+
       - name: Run mandatory blob lifecycle resources
         if: success() || failure()
         id: blob_lifecycle_resources

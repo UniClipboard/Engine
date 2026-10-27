@@ -2,7 +2,10 @@ use super::{
     ProgressBound, ProgressReceiveError, ProgressSourceTask, ProgressTaskDescriptor,
     ProgressTerminalNotice,
 };
+use crate::connectivity::{ConnectionLease, StreamLease};
 use async_trait::async_trait;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::ProgressIdentity;
 use uc_core::ids::DeviceId;
 
@@ -41,4 +44,19 @@ pub trait ProgressReceiverPort: Send + Sync {
 pub trait ProgressTaskAuthorityPort: Send + Sync {
     fn current_task(&self, peer: &DeviceId, source: ProgressIdentity)
         -> Option<ProgressSourceTask>;
+}
+
+/// 一次已准入连接上的完整登记交换；新挑战必须实时读取authority，不使用调用前捕获的attempt。
+/// 借用流，原负责人持许可至后置权威检查及实际连接保留读取结束。
+#[async_trait]
+pub trait ProgressRegistrationWirePort: Send + Sync {
+    async fn register(
+        &self,
+        stream: &mut StreamLease,
+        connection: &ConnectionLease,
+        source: ProgressIdentity,
+        authority: &dyn ProgressTaskAuthorityPort,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<ProgressBound, ProgressReceiveError>;
 }

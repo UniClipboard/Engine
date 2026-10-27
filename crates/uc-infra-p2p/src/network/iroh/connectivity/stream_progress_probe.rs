@@ -70,7 +70,7 @@ impl PeerAdmissionPort for Members {
 pub(super) struct Fixture {
     pub(super) client: Endpoint,
     pub(super) server: Endpoint,
-    outbound: ConnectivityManager,
+    pub(super) outbound: ConnectivityManager,
     inbound: ConnectivityManager,
     pub(super) sending: ConnectionLease,
     pub(super) receiving: ConnectionLease,

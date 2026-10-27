@@ -118,3 +118,7 @@ mod registration_probe;
 #[cfg(test)]
 #[path = "stream_terminal_probe.rs"]
 mod terminal_probe;
+
+#[cfg(test)]
+#[path = "stream_authority_probe.rs"]
+mod authority_probe;
