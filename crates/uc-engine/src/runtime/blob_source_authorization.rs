@@ -1,5 +1,6 @@
 //! 完整 facade 动作经生产装配发送真实 B 消息，引用实际 C 提供的内容。
 mod ownership;
+#[cfg(target_os = "linux")]
 mod peer_isolation;
 mod quota;
 use super::ProductionRuntime;
