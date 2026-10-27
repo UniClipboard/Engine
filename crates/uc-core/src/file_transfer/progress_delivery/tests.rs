@@ -213,15 +213,15 @@ fn stuck_peer_only_holds_its_own_slot_and_queue() {
     let mut queue = ExchangeQueue::<u8, u16>::default();
     // 对端 0 的第一轮交换永远不结束，并持续排入工作。
     for work in 0..16 {
-        assert!(queue.enqueue(0, work).is_ok());
+        assert!(queue.enqueue(0, work, ExchangePriority::Normal).is_ok());
     }
     assert_eq!(
-        queue.enqueue(0, 99),
+        queue.enqueue(0, 99, ExchangePriority::Normal),
         Err(ExchangeRefusal::PeerQueueFull(99))
     );
     for peer in 1..=3u8 {
         for work in 0..4 {
-            assert!(queue.enqueue(peer, work).is_ok());
+            assert!(queue.enqueue(peer, work, ExchangePriority::Normal).is_ok());
         }
     }
     let mut served = vec![0usize; 4];
@@ -246,12 +246,12 @@ fn global_active_and_queue_limits_hold_and_peers_rotate() {
     let mut queue = ExchangeQueue::<u8, u16>::default();
     for peer in 0..4u8 {
         for work in 0..16 {
-            assert!(queue.enqueue(peer, work).is_ok());
+            assert!(queue.enqueue(peer, work, ExchangePriority::Normal).is_ok());
         }
     }
     assert_eq!(queue.queued(), 64);
     assert_eq!(
-        queue.enqueue(9, 0),
+        queue.enqueue(9, 0, ExchangePriority::Normal),
         Err(ExchangeRefusal::GlobalQueueFull(0))
     );
     let first: Vec<u8> = (0..4)
@@ -283,4 +283,16 @@ fn readiness_checks_do_not_consume_retransmission_slots() {
         state.apply(RetransmitInput::Check(Some(secs(1)))),
         RetransmitEffect::WaitUntil(secs(2))
     );
+}
+
+#[test]
+fn terminal_priority_is_local_to_a_peer_and_preserves_other_peers_turns() {
+    let mut queue = ExchangeQueue::default();
+    queue.enqueue(1, 10, ExchangePriority::Normal).unwrap();
+    queue.enqueue(2, 20, ExchangePriority::Normal).unwrap();
+    queue.enqueue(1, 11, ExchangePriority::Terminal).unwrap();
+    assert_eq!(queue.next_ready(), Some((1, 11)));
+    queue.complete(&1);
+    assert_eq!(queue.next_ready(), Some((2, 20)));
+    assert_eq!(queue.next_ready(), Some((1, 10)));
 }

@@ -18,10 +18,10 @@ use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline,
-    ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask, ProgressSubmission,
-    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalDelivery,
-    ProgressTerminalNotice, ProgressTerminalRoundPort, TransferProgressProducer,
-    TransferProgressReceiver,
+    ProgressExchangeService, ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask,
+    ProgressSubmission, ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressTerminalRoundPort, TransferProgressProducer, TransferProgressReceiver,
+    TransferProgressSnapshotReader,
 };
 use uc_core::file_transfer::{
     ProgressFailureReason, ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal,
@@ -695,13 +695,17 @@ async fn live_receive_attempt_reports_its_failed_materialization_through_the_com
             anyhow::Ok(())
         };
         let acknowledged = Arc::new(Notify::new());
-        let (delivery, supervisor) = ProgressTerminalDelivery::new(
+        let (delivery, supervisor) = ProgressExchangeService::new(
             Arc::new(SystemElapsedClock),
             worker.authority.clone(),
             Arc::new(AcknowledgedRound {
                 producer: client,
                 acknowledged: acknowledged.clone(),
             }),
+            Arc::new(TransferProgressSnapshotReader::new(
+                fixture.outbound.clone(),
+                Arc::new(TransferProgressWire),
+            )),
         );
         assert_eq!(
             delivery.submit_settled(peer, SOURCE, accepted.descriptor.attempt, result)?,

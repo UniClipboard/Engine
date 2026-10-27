@@ -1,61 +1,27 @@
-use super::super::ProgressTaskDescriptor;
+use super::super::{ElapsedClockError, ProgressTaskDescriptor};
 use super::clock::Sample;
+use super::model::{Action, Entry, Job, Key, QueryKey, Work};
+use super::query::QueryRecord;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::{
-    ExchangeQueue, ProgressIdentity, ProgressItem, ProgressTerminal, RetransmitEffect,
-    RetransmitInput, TerminalLedger, TerminalRetransmit, EXCHANGE_GLOBAL_QUEUED,
+    ExchangePriority, ExchangeQueue, ProgressTerminal, RetransmitEffect, RetransmitInput,
+    TerminalLedger, TerminalRetransmit, EXCHANGE_GLOBAL_QUEUED,
 };
 use uc_core::ids::DeviceId;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct Key {
-    pub peer: DeviceId,
-    source: ProgressIdentity,
-    attempt: ProgressIdentity,
-    item: ProgressItem,
-    producer: ProgressIdentity,
-    revision: u64,
-}
-impl Key {
-    pub fn new(peer: DeviceId, task: ProgressTaskDescriptor, result: ProgressTerminal) -> Self {
-        Self {
-            peer,
-            source: task.source,
-            attempt: task.attempt,
-            item: result.item,
-            producer: task.producer,
-            revision: task.revision,
-        }
-    }
-}
-pub(super) struct Entry {
-    pub descriptor: ProgressTaskDescriptor,
-    pub result: ProgressTerminal,
-    pub generated: Duration,
-    pub epoch: u64,
-    pub cancel: CancellationToken,
-    retry: TerminalRetransmit,
-    queued: bool,
-}
-pub(super) struct Job {
-    pub key: Key,
-    pub descriptor: ProgressTaskDescriptor,
-    pub result: ProgressTerminal,
-    pub epoch: u64,
-    pub deadline: Duration,
-    pub cancel: CancellationToken,
-}
 #[derive(Default)]
 pub(super) struct State {
     pub closed: bool,
-    observed: Option<Sample>,
-    entries: HashMap<Key, Entry>,
-    ledger: TerminalLedger<DeviceId, Key>,
-    queue: ExchangeQueue<DeviceId, Key>,
-    peers: VecDeque<DeviceId>,
-    active: HashMap<DeviceId, (Key, CancellationToken, Duration, bool)>,
+    pub(super) observed: Option<Sample>,
+    pub(super) entries: HashMap<Key, Entry>,
+    pub(super) ledger: TerminalLedger<DeviceId, Key>,
+    pub(super) queue: ExchangeQueue<DeviceId, Work>,
+    pub(super) peers: VecDeque<DeviceId>,
+    pub(super) active: HashMap<DeviceId, (Work, CancellationToken, Duration, bool)>,
+    pub(super) queries: HashMap<QueryKey, QueryRecord>,
 }
 impl State {
     pub fn admit(
@@ -99,7 +65,7 @@ impl State {
         }
         self.entries.contains_key(&key)
     }
-    fn latest(&mut self, sample: Sample) -> Sample {
+    pub(super) fn latest(&mut self, sample: Sample) -> Sample {
         let latest = self
             .observed
             .filter(|current| {
@@ -110,7 +76,8 @@ impl State {
         self.observed = Some(latest);
         latest
     }
-    pub fn retire_before(&mut self, epoch: Option<u64>) {
+    pub fn retire_before(&mut self, epoch: Option<u64>, source: Option<Arc<ElapsedClockError>>) {
+        self.retire_queries(epoch, source);
         let keys: Vec<_> = self
             .entries
             .iter()
@@ -131,6 +98,7 @@ impl State {
                 }
             }
         }
+        self.refresh_queries(sample);
         let retired: Vec<_> = self
             .entries
             .iter_mut()
@@ -179,7 +147,11 @@ impl State {
                 .min_by_key(|(_, generated)| *generated)
                 .map(|(key, _)| key);
             if let Some(key) = candidate {
-                if self.queue.enqueue(peer, key).is_ok() {
+                if self
+                    .queue
+                    .enqueue(peer, Work::Terminal(key), ExchangePriority::Terminal)
+                    .is_ok()
+                {
                     if let Some(entry) = self.entries.get_mut(&key) {
                         entry.queued = true;
                     }
@@ -189,7 +161,18 @@ impl State {
             }
         }
         let mut jobs = Vec::new();
-        while let Some((peer, key)) = self.queue.next_ready() {
+        while let Some((peer, work)) = self.queue.next_ready() {
+            let key = match work {
+                Work::Terminal(key) => key,
+                Work::Snapshot(key) => {
+                    if let Some(job) = self.start_query(key) {
+                        jobs.push(job);
+                    } else {
+                        self.queue.complete(&peer);
+                    }
+                    continue;
+                }
+            };
             let Some(entry) = self.entries.get_mut(&key) else {
                 self.queue.complete(&peer);
                 continue;
@@ -199,11 +182,13 @@ impl State {
                 RetransmitEffect::Start { deadline } => {
                     let cancel = entry.cancel.child_token();
                     self.active
-                        .insert(peer, (key, cancel.clone(), deadline, false));
+                        .insert(peer, (work, cancel.clone(), deadline, false));
                     jobs.push(Job {
-                        key,
-                        descriptor: entry.descriptor,
-                        result: entry.result,
+                        work,
+                        action: Action::Terminal {
+                            descriptor: entry.descriptor,
+                            result: entry.result,
+                        },
                         epoch: entry.epoch,
                         deadline,
                         cancel,
@@ -218,7 +203,7 @@ impl State {
         if self
             .active
             .get(&key.peer)
-            .is_none_or(|(active, _, _, _)| *active != key)
+            .is_none_or(|(active, _, _, _)| *active != Work::Terminal(key))
         {
             return;
         }
@@ -248,6 +233,7 @@ impl State {
     }
     pub fn close(&mut self) {
         self.closed = true;
+        self.close_queries();
         let keys: Vec<_> = self.entries.keys().copied().collect();
         for key in keys {
             self.remove(key);
@@ -257,13 +243,13 @@ impl State {
         }
     }
     pub fn has_work(&self) -> bool {
-        !self.entries.is_empty() || !self.active.is_empty()
+        !self.entries.is_empty() || !self.active.is_empty() || !self.queries.is_empty()
     }
     fn remove(&mut self, key: Key) {
         if let Some(entry) = self.entries.remove(&key) {
             entry.cancel.cancel();
             if entry.queued {
-                self.queue.remove_queued(&key.peer, &key);
+                self.queue.remove_queued(&key.peer, &Work::Terminal(key));
             }
             self.ledger.release(&key.peer, &key);
             if !self

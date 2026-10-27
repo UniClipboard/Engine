@@ -1,6 +1,6 @@
 //! 反向进度的完整业务负责人；原始发送意图授权，登记及终态采用共享同一投影。
 mod delivery;
-pub use delivery::{ProgressDeliveryWorker, ProgressTerminalDelivery};
+pub use delivery::{ProgressExchangeService, ProgressExchangeWorker, ProgressQueryResult};
 mod deadline;
 mod error;
 pub use deadline::ProgressExchangeDeadline;
