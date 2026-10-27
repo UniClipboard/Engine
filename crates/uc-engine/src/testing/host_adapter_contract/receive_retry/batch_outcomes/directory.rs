@@ -5,9 +5,9 @@ use super::super::{
 };
 use super::reconciled_for_input;
 use crate::{
-    BlobResourceInput, EngineEvent, HistoryEntryInput, HostClipboardRepresentation,
-    HostClipboardSnapshot, ObserveClipboardChangeInput, Operation, OperationResult,
-    OutboundProgressBatchState, OutboundProgressFreshness, OutboundProgressInput,
+    flush_test_tracing, init_test_tracing, BlobResourceInput, EngineEvent, HistoryEntryInput,
+    HostClipboardRepresentation, HostClipboardSnapshot, ObserveClipboardChangeInput, Operation,
+    OperationResult, OutboundProgressBatchState, OutboundProgressFreshness, OutboundProgressInput,
     OutboundProgressReconciliation, OutboundProgressState, ReceiveItemFailureReason,
     ReceiveItemKind, ReconcileOutboundProgressInput,
 };
@@ -20,7 +20,12 @@ use uuid::Uuid;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_directory_batch_counts_only_one_complete_unit_after_commit() {
+    // 显式本机后端验收复用原实际目录流程，不让普通测试默认远程导出。
+    if std::env::var_os("UC_TEST_OTLP_TRACE_ENDPOINT").is_some() {
+        init_test_tracing();
+    }
     assert_directory(false, false).await;
+    flush_test_tracing();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_engine_failed_directory_batch_does_not_count_successful_children_as_delivered_units()

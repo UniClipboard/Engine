@@ -1218,3 +1218,35 @@ bash scripts/testing/run-blob-lifecycle-resources.sh
 ```
 
 本项完成原完整接收／重试与明确用户核对的观测边界，以及验收中发现的保留连接关闭结算兼容修复。真实 Collector／Jaeger 列表和详情、物理挂起、跨平台候选CI与产品宿主仍按各自未完成项执行，不因原始OTLP或主机资源通过自动记为通过。
+
+
+## 真实 Collector 与 Jaeger 的业务验收
+
+本机 Linux arm64 使用已校验官方 SHA-256 的 Collector Contrib0.160.0 和 Jaeger2.20.0 原生二进制；Docker socket 不可用时没有修改系统权限或服务。Collector 沿用仓库严格模板，只将接收与 Jaeger 导出地址替换为 loopback；Jaeger 使用隔离内存存储。两份配置均由实际二进制 validate 通过，不删过滤条件、不扩展字段、角色或错误词表，没有实际投递 PostHog。
+
+原正常目录用例首次虽通过实际文件／SQLite 断言，却未安装和刷新 OTLP，不能当作观测通过。现在仅在该原测试显式设置 OTLP 环境时安装既有运行时，并在原完整流程退出后刷新；保留原文件、计数、接收、核对和关闭断言。正常目录、部分失败／成功重试／取消、七次完整核对三个真实 Engine 场景分别通过8.304、11.595和4.462秒。前两者直接经过原始字节记录器转发到严格 Collector；七次核对沿原测试记录真实 protobuf，再逐份原样投递同一 Collector，不以 Mock 记录器冒充后端。Jaeger 按确切 Trace／Span ID 逐条保留七次核对的固定名称、实际结果及唯一完成日志。
+
+Chromium 使用独立临时 profile，通过真实列表链接进入详情，展开 Tags 与 Process。以下八类具体样本均检查列表筛选、完整父子树、同节点同 operation 的唯一完成日志及实际可见分类；所选样本的 span 时长与日志毫秒值偏差均小于1.3毫秒。节点数量只描述样本，不作业务成功判据。
+
+| 具体样本 | 详情中的固定结果 | 本次可解释的事实 |
+| --- | --- | --- |
+| 正常目录接收 | `clipboard_receive`／`ok` | 实际目录作为一个完整单元交付，两个成员逐字节读回。源端复制动作仍可为 deferred，不能用接收成功改写原异步发送结果。 |
+| 文件部分失败 | `clipboard_receive`／`partial` | 两份成功文件保留，不能用消息接受或末项成功推断全部交付。 |
+| 实际保存失败子节点 | `clipboard.export_file`／`error`／`storage` | 在同一发送树内展开真实失败，不把它升为新的业务 root。 |
+| 用户取消重试 | `clipboard.retry_receive`／`cancelled` | 等实际受监督输出退出，保留原成功文件；不是停止等待就假称取消完成。 |
+| 所选失败项重试成功 | `clipboard.retry_receive`／`ok` | exports3→4，仅重取所选项，原成功路径保持。 |
+| 未保留的远端事实 | `clipboard.reconcile_progress.not_retained`／`deferred` | 保持未知，不改写为文件失败。 |
+| 完整核对已结算 | `clipboard.reconcile_progress.settled`／`ok` | 表示已取得完整事实，可以包含文件失败，不表示全部文件成功。 |
+| 原任务仍运行 | `clipboard.reconcile_progress.running`／`deferred` | 继续原任务，不发起新下载。 |
+
+原始输出与设备测试均排除实际文件名及源／接收条目、目标身份哨兵。真实 Collector 另验证五种合成反例：私有展示名称、错误角色、额外内容字段、非法环境和日志正文。HTTP200不算导出成功；逐个反例 ID、哨兵及后端 trace 集合证明全部被过滤。JSON 正向对照重送同一真实 span 时，Jaeger memory 会保存重复项；该探针 epoch 单独保留，最终业务验收从全新内存实例重新执行，不对结果去重后冒充唯一记录。
+
+最终 test 查询有92条 trace／395个 span，production 查询为0；浏览器的默认 test 业务入口及 production 空入口另实际检查，保留18张列表／详情截图。这是隔离测试实例中的筛选证明，不是实际产品、其他平台或 PostHog 的验收。
+
+### 远端丢弃的实际边界
+
+不能把上述八类已逐条核对的具体样本扩大为所有记录完整。采样期间另有两条正常接收 span 缺少远端完成日志，汇总保留 `all_observed_samples_complete=false`，没有将它们记为完整样本。原用例重复执行用于定位丢失点，完整样本不覆盖首次缺失。设备原始 protobuf 已无对应日志，排除 Collector 删除；启用 Nextest 成功输出后，同一正常动作的本地成功完成记录与 `uc.observability.log_dropped`／`queue_contended` 健康记录同时可见。
+
+这是[既有非阻塞容量门合同](../../design-docs/observability.md#分层责任)允许的发送前丢弃：争用立即丢弃并计数，不能把远端记录当耐久交付依据。本项不将容量门改成阻塞、不补通知 outbox、不重放业务来伪造缺失记录。查询和文件成果仍由原 Application 权威决定；缺日志样本不能仅凭剩余节点判定完整。实际丢弃和选定完整样本分别保留，未宣称全量零丢弃或系统日志可靠交付。
+
+复跑入口、原始核对的投递步骤及浏览器筛选见[本地观测入口](../../../tests/observability/collector/README.md#文件进度场景复跑)。原始 protobuf、系统及 Collector 输出、JSON报告与截图按仓库规则保存于本地忽略目录；正式结论不依赖临时 trace 地址长期存活。全部本任务后端、记录器及隔离浏览器已退出，端口回收，下载工具与临时浏览器 profile 已清理；共享 Cargo target 与缓存保持。物理设备、真实产品宿主及跨平台候选CI仍按各自未完成项执行。
