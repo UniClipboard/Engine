@@ -655,3 +655,5 @@ pub use crate::transfer::progress::{
     ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
     ProgressProjectionRegistry, ProgressProjectionWorker,
 };
+
+pub use crate::transfer::progress::transfer_progress_connectivity_policy;

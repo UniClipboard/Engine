@@ -58,7 +58,7 @@ if (run.status === 0) {
       capacity.staged_capacity_items !== 1024 || capacity.page_item_limit !== 64 || capacity.frame_limit_bytes !== 65536 ||
       !Number.isSafeInteger(capacity.largest_frame_bytes) || capacity.largest_frame_bytes <= 0 || capacity.largest_frame_bytes > capacity.frame_limit_bytes ||
       !Number.isSafeInteger(capacity.staged_item_storage_bytes) || capacity.staged_item_storage_bytes <= 0 || capacity.plan_authority !== 'actual_application_cas_v3' ||
-      capacity.state_payload !== 'synthetic') throw new Error('maximum original-plan snapshot capacity proof is missing or invalid')
+      capacity.state_payload !== 'synthetic' || capacity.connection_profile !== 'transfer_progress') throw new Error('maximum original-plan snapshot capacity proof is missing or invalid')
 }
 const provenance = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' })
 const state = spawnSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' })

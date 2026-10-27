@@ -13,7 +13,7 @@ mod tests;
 pub use budget::{BudgetStatus, ElapsedBudget};
 pub use exchange::{
     ExchangePriority, ExchangeQueue, ExchangeRefusal, EXCHANGE_GLOBAL_ACTIVE,
-    EXCHANGE_GLOBAL_QUEUED,
+    EXCHANGE_GLOBAL_QUEUED, EXCHANGE_PEER_QUEUED,
 };
 pub use ledger::{TerminalLedger, TERMINAL_GLOBAL_CAPACITY, TERMINAL_PEER_CAPACITY};
 pub use retransmit::{
