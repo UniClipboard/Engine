@@ -63,7 +63,7 @@
 * [x] 扩展 ConnectionProtocol／ConnectivityProfile、入站 Router、manager／租约和最小单向流能力，旧版与新版均受管。 已逐当前生产源码核对同一Application对象图、manager／单向及双向work lease、双ALPN唯一handler、Engine端点安装和实际生命周期关闭；六项真实入站、profile复用及Router偏好共八项原PASS／JUnit和十四格网络证据一致。详见[生产受管接线核对](2026-10-24-transfer-progress-connectivity-feasibility.md#当前生产受管进度接线核对)，独立降级／授权父项及物理／最终CI保持各自状态。
 * [x] 新版双向交换的登记响应、终态 ACK 及查询结果来自 Application owner；adapter 不自行 ACK 广播入队成功。查询已由原接收目录／保存事实提供，7项强制真实连接证明包含实际失败清理后1024项／16页Query；生产Router和宿主结果采用仍按后续任务迁移。
 * [x] 只有真实能力不支持新版才使用旧协议；网络超时、错误来源、损坏帧、拒绝准入不触发降级。 已核对唯一握手的真实协议选择、错误原类别、完整旧批次汇总、FIN非业务ACK与旧入站保守采用；原21项旧语义PASS／JUnit、显式登记组合8项及十四格生产矩阵一致，默认ignore没有冒充普通workspace执行，见[版本选择与旧语义核对](2026-10-24-transfer-progress-connectivity-feasibility.md#生产版本选择与旧协议保守语义核对)。
-* [ ] 入站与出站逐次核对当前成员及会话；旧连接、撤销、晚到拨号或本地读取不能发送到新世代。
+* [x] 入站与出站逐次核对当前成员及会话；旧连接、撤销、晚到拨号或本地读取不能发送到新世代。 已核对原request／session／epoch、grant当前成员、每段wire授权与晚拨结果发布围栏；原22项PASS／JUnit及实际权威子进程／Iroh组合证明旧读取、旧Query与旧binding不能借新资格，见[授权与原会话核对](2026-10-24-transfer-progress-connectivity-feasibility.md#当前授权与原会话围栏核对)。第二backend与真实Iroh／Engine证据分层，物理与最终CI另行验收。
 * [x] 单项停止只结束本流；真实本地工作未结束时继续持有许可，空闲回收不误关活动交换。真实旧/1两条流中停止一项后另一项按原字节读回，实际work未释放时下一项准入仍等待；新/2真实输出后的Application采用跨期限仍被监督。实际profile仅持work的31秒内连接不关闭，释放work后原空闲期限回收；Application另验证本机work／实际关闭两种顺序及晚到拨号收尾。生产Router与物理挂起仍单独验收。
 * [x] 删除旧 reporter 自建原生连接缓存与独立业务发送循环，保留旧 codec 和兼容适配；不以 feature 留生产旁路。 原Native adapter、Core reporter port、Application旧邮箱和Engine译送循环均已删除；生产节点只安装Application双版本完整端点，旧34字节codec保留。workspace全部targets及真实成员撤销4项通过。
 * [x] 第二 backend 验证业务边界可替换；真实 Iroh 分别证明单向／双向流、两流隔离和实际授权。独立内存字节流backend使用原manager／profile、真实/2 codec与Application完整流程，完成登记、Contact／Update、精确终态ACK、65项两页核对采用；授权撤销不能复用旧连接或改变投影，停止单流后同连接下一交换仍可用。固定测试身份不冒充密码握手，内存通道不作为Direct／Relay证据；实际Iroh与设备矩阵按各自证据维护。
@@ -162,8 +162,8 @@ bash scripts/testing/run-peer-reachability-connectivity.sh
 
 ## 当前状态与下一个动作
 
-- 当前正式验收52/59，余7。生产双版本进度、兼容源身份头、完整接收成果／逐项通知／采用与ACK、稳定查询／绑定、原再次发起核对、删除／成员退休和保守重启视图已经接线；新新及两个冻结旧端的14格网络矩阵、原Blob10格，以及本项三端归属验证已取得主机证据。各项证据以对应复选框和[可行性记录](2026-10-24-transfer-progress-connectivity-feasibility.md)为准。
-- 下一个实施动作：复核阶段2当前授权／会话父项，同时核对阶段6同一交付head的跨平台CI。原必需网络／资源均已接入原工作流；Engine job实测触及60分钟外层上限，已调整为90分钟，所有单项期限／负载／阈值不变。显式触发stack未自动运行的原Windows门禁，分别核对Linux／macOS／Windows与三端绑定。保留成员F2间歇失败未定位状态；旧head CI与本地主机绿不替代最终交付head的检查。
+- 当前正式验收53/59，余6。生产双版本进度、兼容源身份头、完整接收成果／逐项通知／采用与ACK、稳定查询／绑定、原再次发起核对、删除／成员退休和保守重启视图已经接线；新新及两个冻结旧端的14格网络矩阵、原Blob10格，以及本项三端归属验证已取得主机证据。各项证据以对应复选框和[可行性记录](2026-10-24-transfer-progress-connectivity-feasibility.md)为准。
+- 下一个实施动作：继续AC01–AC13逐项证据映射与剩余设备／时间缺口核对，同时核对阶段6同一交付head的跨平台CI。原必需网络／资源均已接入原工作流；Engine job实测触及60分钟外层上限，已调整为90分钟，所有单项期限／负载／阈值不变。显式触发stack未自动运行的原Windows门禁，分别核对Linux／macOS／Windows与三端绑定。保留成员F2间歇失败未定位状态；旧head CI与本地主机绿不替代最终交付head的检查。
 - 阶段0实机挂起及设备／产品宿主、当前候选跨平台CI和最终验收映射仍待完成。Collector已完成正常与退化证据核对，真实日志丢弃边界保留。主机和普通计时结果不替代物理挂起，未执行项不记为通过；本片继续active，不合入或发布当前stack。
 - 按用户指示，每个完整任务通过本地交付检查后创建未合并stack PR，触发一次CI并直接继续下一项，不等待前层CI。
 

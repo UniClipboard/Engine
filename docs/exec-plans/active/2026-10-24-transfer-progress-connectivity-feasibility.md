@@ -1416,3 +1416,22 @@ UC_EXPECT_DIAGNOSTIC_STACK=available just cargo nextest run --profile ci --locke
 十四格生产网络另有16份真实V1方向：新发送端对旧接收端维持Unsupported／未确认，未伪造旧attempt、字节或轮次；旧发送端对新接收端只验证实际本地成果，不凭入站内容虚构出站意图。原旧旧4格与新版4份V2方向保持各自边界。原字节、旧端来源、实际文件和资料保留沿用同一严格矩阵与冻结摘要，未以其他版本替换。
 
 本项关闭阶段2“真实能力才使用旧协议”父项，不自动关闭下一项逐次授权／会话围栏或AC01整体验收。原F2间歇失败、物理挂起、设备／产品宿主和最终候选CI继续按原未完成状态维护。
+
+
+## 当前授权与原会话围栏核对
+
+2026-10-27基于#331的`d5f974e4c128f72c0bb4e13612fbae916156617b`，核对阶段2最后一个授权／会话父项。当前Application／P2P／协议／依赖相对原实际权威组合候选保持一致。本轮只更新验收文档，逐当前实现、原断言和实跑记录证明旧动作不能借新会话重新取得资格。
+
+| 边界 | 生产责任与实际证明 |
+| --- | --- |
+| 排队及本地读取之前固定资格 | [manager.request／freeze_request](../../../crates/uc-application/src/connectivity/manager.rs)取得原session和admission attempt；[ConnectionRequest／ScopedAttempt](../../../crates/uc-application/src/connectivity/request.rs)在异步资格读取前后核对同一session／fence。[producer](../../../crates/uc-application/src/transfer/progress/producer.rs)在本地authority读取之前创建request，[snapshot reader](../../../crates/uc-application/src/transfer/progress/snapshot/reader.rs)在round future入队之前冻结request；refresh沿用原attempt、session及deadline |
+| 当前成员与实际认证身份 | [Iroh准入](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/admission.rs)核对握手公钥对应身份与目标peer，成员读取前后都检查原RevocationEpoch；Grant保留原epoch，每次check_current读取当前成员，进度只接受实际V1／V2协议。[pending入站](../../../crates/uc-application/src/connectivity/pending.rs)在身份解析／grant绑定前后检查原session与入口revision fence |
+| 网络阶段及采用前再次检查 | [ConnectionLease](../../../crates/uc-application/src/connectivity/connection.rs)在原request及grant实际读取前后检查stop；[新wire Exchange](../../../crates/uc-infra-p2p/src/network/iroh/transfer_progress_v2/io.rs)在read／write／FIN阶段授权，FIN等待结束后再次授权才进入采用。[旧wire](../../../crates/uc-infra-p2p/src/network/iroh/transfer_progress_v2/legacy.rs)同样在完整帧／FIN后重新核对；本地读取失败仍保留原source |
+| 晚到拨号与关闭竞态 | manager在flight结果发布前检查manager／flight取消，失效结果不能成为新活动记录；原App用例断言拨号期间撤销后晚到实际连接关闭，并在64轮完成拨号／shutdown竞争中检查没有连接逃逸。旧排队请求、身份解析scope及其副本不能借新epoch或新缓存连接继续 |
+| 旧本地读取与排队查询 | 原4项authority-session用例验证入站／出站资格读取跨session或shutdown后返回Stopped、失败source仍保留；第二backend的注册／Contact／Update／Terminal四项在读取已进入后退休session，均断言零新拨号。排队Query旧动作同样零拨号且不改投影，新的显式Query仍能完成65项两页查询 |
+| 删除与新绑定不能被旧动作复活 | 第二backend分别在删除来源、移除peer、清空投影和关闭owner时暂停真实Challenge后的读取；重建同key后迟到登记／旧终态不能更新新投影或发出新事件。原实际Application权威子进程重开及Iroh新连接组合另断言新producer与新binding生效，旧挂起交换和旧终态不能覆盖新binding；这是子进程权威与真实Iroh证明，不冒充完整设备进程或物理挂起 |
+| 实际成员撤销与来源归属 | 真实Iroh profile组合断言进度退休不影响同peer剪贴板连接，实际成员撤销同时关闭两者且错误协议不能借用进度grant；生产node用例先证明旧进度连接有效，再移除成员并等待实际关闭。原Engine三运行时证明消息来源、内容provider和两个接收目标的attempt／成果相互独立 |
+
+本次从原完整workspace逐条提取22项，核对每条唯一PASS与JUnit无failure／error／skip，覆盖App 9项、P2P 12项和Engine 1项。权威子进程重开、当前Challenge与晚Bound等另来自原显式8项driver，按[版本核对](#生产版本选择与旧协议保守语义核对)保留其真实执行、来源及二进制摘要；默认ignore没有计作workspace通过。第二backend使用实际Application流程与codec，但身份／传输fixture受控，其零拨号／旧绑定隔离断言不作为密码握手、Direct／Relay或真机事实；上述真实Iroh、生产node、Engine与原十四格矩阵分别补齐对应层级。
+
+当前[生产受管接线](#当前生产受管进度接线核对)、[版本选择](#生产版本选择与旧协议保守语义核对)和本节共同关闭阶段2生产收发父项。此处不代替物理系统挂起、前后台设备、产品采用或最终同一head CI；原经过时间必需物理项、原F2间歇失败及所有未执行项继续保持原状态，整片仍为active。
