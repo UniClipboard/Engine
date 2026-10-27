@@ -92,5 +92,12 @@ Core 的 `ProgressRegistration` 现在提供单个已授权设备／源条目的
 不能因帧晚到而重新激活旧连接，也不能在普通重连时重建规则丢失修订。
 
 真实双端登记原型和未覆盖边界见[阶段 0 证明](../exec-plans/active/2026-10-24-transfer-progress-connectivity-feasibility.md)。
-生产接收 attempt 交接、生产终态采用、ACK 时点、补发、成员撤销、Router 迁移、
+Application `transfer/progress` 现在提供从原始发送意图授权的单任务登记及终态采用能力。
+Infra `transfer_progress_v2` 有界入站适配取得真实连接对端身份，等待完整描述／终态采用成功后才写 Bound／TerminalAck；
+帧结束、传输 FIN 或事件排队均不能代替采用。精确重复终态可再次确认，冲突不得覆盖已有结果。
+请求末尾额外字节在采用前拒收；取消或原 deadline 到期只停止后续网络，已开始的 Application 采用仍持流使用权至实际完成。
+取消／过期后已采用结果继续可读，后续精确重复仍可确认，不承诺跨重启 ACK。
+
+此入站能力目前只实现登记和终态交换，尚未接入生产 Router；普通更新、Contact、查询和完整调度仍按执行计划实施。
+生产接收 attempt 交接、完整生产终态链路、补发、成员撤销、Router 迁移、
 独立进程网络及平台矩阵继续以第八片执行计划为准。

@@ -629,3 +629,8 @@ pub use crate::space::{
     PeerReachabilityEnvironmentPort, PeerReachabilityTransport, PeerReachabilityTransportError,
     PeerReachabilityTransportPorts, PeerReachabilityWireError, PeerReachabilityWirePort,
 };
+
+pub use crate::transfer::progress::{
+    CurrentProgressTaskPort, ProgressBound, ProgressProjectionSnapshot, ProgressReceiveError,
+    ProgressReceiverPort, ProgressTaskDescriptor, ProgressTerminalNotice, TransferProgressReceiver,
+};

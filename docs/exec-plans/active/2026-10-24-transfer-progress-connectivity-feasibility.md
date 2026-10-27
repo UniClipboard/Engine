@@ -1,6 +1,6 @@
 # 第八片阶段 0：受管流、线上合同与登记围栏证明
 
-状态：**单向流接缝、字节合同及登记围栏主机原型已证明，阶段 0 整体尚未完成**（2026-10-24）。
+状态：**单向流、字节合同、登记围栏及输出后采用／ACK 主机链路已证明，阶段 0 整体尚未完成**（2026-10-24）。
 需求见[实现规格](2026-10-24-transfer-progress-connectivity-spec.md)，推进见[执行计划](2026-10-24-transfer-progress-connectivity-plan.md)。
 开工基线为 `5cbca8fc24a278fa7b01ae611bf4b925914bef13`；本记录描述该基线上的候选变更，
 不将主机探针当作完整生产迁移、独立进程网络矩阵或真机验收。
@@ -95,10 +95,49 @@ metadata、workspace 全目标 check、fmt、Rust style、repository 与 diff �
 没有实际杀进程。V3 计划关联和网络登记分别验证，尚未组成生产接收 owner→登记的完整链路。
 因此阶段 0 对应登记任务仍未勾选，不能将本原型冒充生产迁移或完整 AC02。
 
+## 真实输出后的 Application 采用与 ACK
+
+`transfer/progress` 为一个已接受的发送意图保存认证设备、源条目及不可变原始逻辑计划；
+登记与终态采用使用同一个 Core 围栏。身份与计划不由第一条远端进度授权，快照可在等待时读取。
+Core 保存不可变终态；精确重复允许再次 ACK 但不增加投影版本，冲突不覆盖、不产生 ACK。
+目录计划仅有完整单元，单计划数量上限由 Core 与 codec 共用同一常量。
+
+`transfer_progress_v2` 入站适配只负责有界字节交换，等待 Application 成功返回后才能写业务响应。
+每次 IO 前等待实际准入读取结束，再核对原截止时间与取消；已开始的业务采用不因网络超时／取消被丢弃，
+同一 StreamLease 持有许可直到实际采用及响应处理结束。
+
+`stream_terminal_probe.rs` 在同两个真实 Endpoint 上分别使用 blob 与 `/2` 受管连接：
+
+| 检查点 | 证据 |
+| --- | --- |
+| 实际接收与输出 | 固定 SDK 传输 256KiB 文件内容，BAO 校验接收，导出目标文件后逐字节读回；文件本体路径不适用额外内容解密 |
+| FIN 到达而 Application 采用暂停 | 快照无终态，真实响应读流未收到 ACK；FIN 仅证明传输结束 |
+| 采用完成 | 完整快照可读终态，然后返回绑定、scope、owner 修订和完整结果精确一致的 ACK |
+| 重复与冲突 | 精确重复再次 ACK，投影版本不增长；冲突拒收、无 ACK，文件与既有结果保留 |
+| 取消／原网络期限到达 | 实际采用继续持有租约，完成后不发送过期 ACK；结果保留，后续同结果交换仍可确认 |
+| 帧后的额外字节 | 在采用前拒收，不先确认再检查尾随输入 |
+
+验证入口：
+
+```bash
+just cargo test -p uc-core --lib 'file_transfer::' --locked
+just cargo test -p uc-application --lib 'transfer::progress::' --locked
+just cargo test -p uc-infra-p2p --lib 'network::iroh::connectivity::stream::' --locked
+just cargo test -p uc-infra-p2p --lib 'transfer_progress_v2::mapping::' --locked
+just cargo test -p uc-sync-protocol --tests --locked
+```
+
+本轮105项相关回归通过：Core 12项、Application 5项、真实流12项、原因／字段映射1项及协议75项。
+原始协议／流回归仍执行，未以单个新增探针代替。metadata、workspace 全目标 check、fmt、Rust style、repository 与 diff 六根门禁全部通过。
+
+该证明闭合阶段 0 的“输出后采用 ACK”最小能力，不代表生产接收 attempt／SQLite 提交交接、
+最终通知调度、独立进程、进度专属 profile／Router 或完整阶段 3 已完成。
+登记当前描述仍由测试响应提供，真实接收权威及真实进程重启继续保持未验收。
+
 ## 尚未证明的范围
 
 - 登记围栏已取得真实双端主机原型证据；生产接收 attempt 权威交接、完整源条目→逻辑项网络链路及真实进程重启仍未完成。
-- 完整接收输出后的 Application 终态采用与新 ACK、有限补发和状态核对尚未接线。
+- 输出后 Application 采用／ACK 的最小主机链路已有证据；生产接收输出／SQLite 结算交接、有限补发和状态核对尚未接线。
 - 最大负载、分页、终态淘汰、公平调度及新旧双角色 Direct／Relay 尚未执行。
 - Linux 当前头文件合同及 BOOTTIME syscall 已核对；真实系统挂起和其他平台尚未验证，不记跨平台经过时间证明通过。
 - 完整 workspace 行为回归、平台编译与设备矩阵仍按正式计划执行；本片尚未整体完成。

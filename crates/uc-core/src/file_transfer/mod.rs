@@ -25,3 +25,10 @@ pub use progress_registration::{
     ProgressRegistration, RegistrationDescriptor, RegistrationEffect, RegistrationInput,
     RegistrationRefusal,
 };
+
+mod progress_terminal;
+pub use progress_terminal::{
+    valid_progress_plan, ProgressFailureReason, ProgressIdentity, ProgressItem, ProgressItemKind,
+    ProgressTerminal, ProgressTerminalEffect, ProgressTerminalOutcome, ProgressTerminalSettlement,
+    MAX_PROGRESS_ITEMS,
+};
