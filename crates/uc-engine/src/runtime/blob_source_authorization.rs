@@ -1,5 +1,7 @@
 //! 完整 facade 动作经生产装配发送真实 B 消息，引用实际 C 提供的内容。
 mod ownership;
+// 真实读流屏障只在 Linux 测试装配中启用，隔离验收必须使用同一条件。
+#[cfg(target_os = "linux")]
 mod peer_isolation;
 mod quota;
 use super::ProductionRuntime;

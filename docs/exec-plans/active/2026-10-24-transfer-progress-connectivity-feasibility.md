@@ -1341,3 +1341,27 @@ node scripts/testing/run-progress-registration-proof.mjs
 只读核对#326已结束的[CI run](https://github.com/UniClipboard/Engine/actions/runs/40442754299)：iOS、Android、HarmonyOS绑定、原网络矩阵、连接恢复、升级smoke和coverage通过；macOS仓库检查在workspace all-targets编译失败，Engine tests在资源步骤被取消，不能登记整条CI通过。macOS原错误为`peer_isolation`测试引用仅Linux启用的`testing::receive_streams`，条件边界修复及同一交付head的CI核对进入后续任务。本轮不以旧head或本地Linux结果替代跨平台验收。
 
 当前仅闭合完整回归入口，未登记整片完成。物理挂起、真机切网／前后台、Desktop／移动产品采用继续未验收；当前主机没有adb／hdc／Xcode，iOS设备枚举也未成功，不推断设备已经不存在。原ignore、筛选排除项、升级非smoke维度和未运行设备均不记为通过。
+
+
+## 本地根门禁与读流测试平台条件
+
+2026-10-27闭合阶段6本地根门禁项，基于#327的`484331e5068b75669d11c0cfb8723579c59ce286`。原#326 macOS CI在`cargo check --workspace --all-targets --locked`报告E0432：`runtime/blob_source_authorization/peer_isolation.rs`引用`testing::receive_streams`，而该fixture及`assembly/sync_engine.rs`中的实际装饰接线仅在test＋dev-tools＋Linux启用。父模块已有test＋dev-tools条件，隔离测试子模块漏了Linux条件。
+
+本次为`mod peer_isolation`增加相同Linux条件和中文原因说明，使两项真实读流隔离测试只在已接入屏障的平台编译运行。唯一代码变化位于测试模块声明；Core／Application流程、生产装配、协议、持久化和稳定入口均未变化。没有扩展fixture或更改原测试断言。
+
+Linux arm64使用原workspace统一构建图，精确执行`runtime::blob_source_authorization::peer_isolation::`两项原用例，实际16.593秒、入口含构建546.019秒：
+
+- `adopted_result_waiting_for_its_real_ack_does_not_block_another_receivers_confirmation`通过，5.672秒。
+- `paused_native_read_and_local_cancel_do_not_stop_another_receivers_actual_completion`通过，10.910秒。
+
+两项PASS与JUnit2项无失败核对，其他363项为原选择器排除，不算本轮执行。随后根六项metadata、workspace all-targets、fmt、Rust style、repository和diff全部通过；定向测试到根门禁之间3412文件快照均为`fbfc471debc147f4a89880d64e5b108cb7950aae7aced4b3ee02051d8f8d3745`，之后仅回写本节与计划。没有源码／依赖变化时复用前项完整回归，不重复运行4927项或重建固定旧宿主。
+
+复跑定向入口：
+
+```bash
+UC_EXPECT_DIAGNOSTIC_STACK=available just cargo nextest run --profile ci --locked \
+  --workspace --all-targets --no-tests fail \
+  -E 'package(uc-engine) & kind(lib) & test(/^runtime::blob_source_authorization::peer_isolation::/)'
+```
+
+本地门禁证明Linux原隔离测试仍实际运行，macOS／Windows实际编译以同一交付head的原CI为准，当前未登记跨平台通过。Windows已有独立`windows-build.yml`，含windows-2025 x64和windows-11-arm原生检查；它的PR触发仅匹配main或migration目标，当前stack需要显式workflow_dispatch。后续使用原工作流核对，不另建重复Windows门禁。原成员F2间歇失败仍未定位，真机请求与未执行项保持原状态。
