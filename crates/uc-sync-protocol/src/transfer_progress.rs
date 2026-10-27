@@ -54,6 +54,9 @@ use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressSta
 /// `clipboard_wire::CLIPBOARD_MAGIC` (0xC1).
 pub const PROGRESS_MAGIC: u8 = 0xC2;
 
+/// 已发布的单向进度协议；字节保持不变。
+pub const LEGACY_TRANSFER_PROGRESS_ALPN: &[u8] = b"uniclipboard/transfer-progress/1";
+
 /// Hard-coded fixed frame size (after the magic byte).
 const PAYLOAD_LEN: usize = 16 /* transfer_id */ + 8 /* bytes */ + 8 /* total */ + 1 /* status */;
 

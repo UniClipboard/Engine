@@ -4,6 +4,7 @@ use super::{
     PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
 use async_trait::async_trait;
+use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -212,6 +213,37 @@ fn fixture(
     let manager =
         ConnectivityManager::new(backend.clone(), Arc::new(Admission(epoch.clone())), policy);
     (manager, backend, epoch)
+}
+
+#[tokio::test]
+async fn unsupported_uni_does_not_consume_single_exchange_or_capacity() {
+    let (manager, backend, _) = fixture(
+        ConnectionMode::SingleExchange,
+        ConnectivityPolicy::default(),
+    );
+    let connecting = request(&manager, 2);
+    backend.gate.add_permits(1);
+    let lease = connecting.await.unwrap().unwrap();
+    let result = lease
+        .open_uni(
+            Instant::now() + Duration::from_secs(2),
+            &CancellationToken::new(),
+        )
+        .await;
+    match result {
+        Err(error) => {
+            assert!(matches!(&error, ConnectivityError::Capability(_)));
+            assert!(error.source().is_some());
+        }
+        Ok(_) => panic!("只支持双向流的 backend 不应伪装为单向成功"),
+    }
+    let stream = lease
+        .open_bi(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    drop(stream);
+    drop(lease);
+    manager.shutdown().await.unwrap();
 }
 fn request(
     manager: &ConnectivityManager,

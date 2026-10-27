@@ -590,8 +590,8 @@ pub use crate::connectivity::{
     ConnectionRequest, ConnectivityBackend, ConnectivityError, ConnectivityManager,
     ConnectivityPolicy, IdleRetentionPolicy, InboundAdmissionFence, InboundAdmissionPolicy,
     InboundConnectionError, InboundIdentityReservation, PeerConnection, PeerReceiveStream,
-    PeerSendStream, PendingInboundLease, SessionConnectionAdmissionPort, StreamLease, StreamPair,
-    StreamWorkLease,
+    PeerSendStream, PeerUnidirectionalConnection, PendingInboundLease,
+    SessionConnectionAdmissionPort, StreamLease, StreamPair, StreamWorkLease, UniStreamLease,
 };
 
 // 测试装配参数只经被动依赖入口公开，不进入业务门面白名单。

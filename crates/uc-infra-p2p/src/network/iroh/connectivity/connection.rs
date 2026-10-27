@@ -4,14 +4,15 @@ use super::super::observed_connections::close_reason;
 use super::super::session_generation::{begin_session_local_work, SessionLocalWork};
 #[cfg(feature = "test-util")]
 use super::super::test_support::register_blob_connection;
-use super::stream::wrap;
+use super::stream::{wrap, wrap_receive, wrap_send};
 use async_trait::async_trait;
 use iroh::endpoint::{Connection, Side};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::broadcast;
 use uc_application::deps::{
-    ConnectionMode, ConnectionProtocol, ConnectivityError, PeerConnection, StreamPair,
+    ConnectionMode, ConnectionProtocol, ConnectivityError, PeerConnection, PeerReceiveStream,
+    PeerSendStream, PeerUnidirectionalConnection, StreamPair,
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ConnectionChannel, PeerReachabilityChanged, ReachabilityState};
@@ -26,6 +27,7 @@ use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
+use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
 pub(crate) struct IrohPeerConnection {
     native: Connection,
@@ -113,6 +115,7 @@ impl PeerConnection for IrohPeerConnection {
                 | MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN
                 | PEER_REACHABILITY_ALPN
                 | BLOBS_ALPN
+                | LEGACY_TRANSFER_PROGRESS_ALPN
         ) {
             ConnectionMode::Multiplexed
         } else if self.native.alpn() == LEGACY_PEER_REACHABILITY_ALPN {
@@ -124,6 +127,7 @@ impl PeerConnection for IrohPeerConnection {
     fn protocol(&self) -> ConnectionProtocol {
         match self.native.alpn() {
             BLOBS_ALPN => ConnectionProtocol::Blob,
+            LEGACY_TRANSFER_PROGRESS_ALPN => ConnectionProtocol::TransferProgressV1,
             PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV2,
             LEGACY_PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV1,
             MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,
@@ -208,5 +212,28 @@ impl PeerConnection for IrohPeerConnection {
             .await
             .map(|(send, recv)| wrap(send, recv))
             .map_err(|error| ConnectivityError::Stream(Box::new(error)))
+    }
+    fn unidirectional(&self) -> Option<&dyn PeerUnidirectionalConnection> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl PeerUnidirectionalConnection for IrohPeerConnection {
+    async fn open_uni(&self) -> Result<Box<dyn PeerSendStream>, ConnectivityError> {
+        self.observe_liveness();
+        self.native
+            .open_uni()
+            .await
+            .map(wrap_send)
+            .map_err(|source| ConnectivityError::Stream(Box::new(source)))
+    }
+
+    async fn accept_uni(&self) -> Result<Box<dyn PeerReceiveStream>, ConnectivityError> {
+        self.native
+            .accept_uni()
+            .await
+            .map(wrap_receive)
+            .map_err(|source| ConnectivityError::Stream(Box::new(source)))
     }
 }
