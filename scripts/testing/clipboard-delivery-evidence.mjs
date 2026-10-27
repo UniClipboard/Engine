@@ -10,6 +10,14 @@ const failurePrefixes = [
   ['target device offline or unreachable', 'unreachable'],
 ]
 
+// 旧端把多种来源压成apply_failed；这里只保留既有固定分支标记，不解释错误正文。
+export function receiveFailureKind(row) {
+  if (row?.fields?.error_kind === 'inbound_clipboard_apply_failed') return 'apply_failed'
+  const message = row?.message ?? row?.fields?.message
+  if (message === 'inbound: blob materialize stopped') return 'blob_materialize_stopped'
+  return undefined
+}
+
 export function summarizeDeliveryReport(report) {
   const counts = Object.fromEntries(
     ['total_accepted', 'total_offline', 'total_errored', 'total_pending', 'total_duplicate']

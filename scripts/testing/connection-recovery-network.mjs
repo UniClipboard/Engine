@@ -9,7 +9,7 @@ import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, relayTransportReadyAt, terminateRelay } from './relay-recovery-support.mjs'
-import { verifyDelivery } from './clipboard-delivery-evidence.mjs'
+import { receiveFailureKind, verifyDelivery } from './clipboard-delivery-evidence.mjs'
 import { verifyTransferProgress } from './transfer-progress-evidence.mjs'
 import { ensureSessionReady } from './connection-recovery-session.mjs'
 
@@ -1198,6 +1198,7 @@ finally {
   const allowedReasons = new Set(['no_consumer', 'receipt_dropped', 'application_timeout', 'rejected', 'sync_disabled', 'settings_unavailable', 'membership_scope_blocked', 'membership_scope_unavailable', 'member_missing', 'member_lookup_failed', 'receive_disabled', 'content_type_disabled', 'session_locked', 'content_key_missing', 'content_key_epoch_mismatch', 'invalid_transfer_format', 'decryption_failed', 'cipher_unavailable', 'invalid_content', 'apply_failed', 'permission_denied', 'storage_full', 'read_only_filesystem', 'io_failed'])
   for (const node of nodes) {
     node.failureReasons = []
+    node.receiveFailureCounts = { apply_failed: 0, blob_materialize_stopped: 0 }
     node.networkFacts = []
     node.networkDiagnostics = []
     try {
@@ -1205,6 +1206,8 @@ finally {
         for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
           try {
             const row = JSON.parse(line)
+            const receiveKind = receiveFailureKind(row)
+            if (receiveKind) node.receiveFailureCounts[receiveKind]++
             const reason = row.fields?.['error.reason']
             if (allowedReasons.has(reason)) node.failureReasons.push({ timestamp: row.timestamp, reason })
             const fields = row.fields ?? {}
@@ -1257,6 +1260,6 @@ finally {
     cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
     total_ms: Math.round(timingCompletedAt - timingStartedAt),
   }
-  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, progress_baseline: progressBaseline, progress_transfers: progressTransfers, reproduction, binaries, faults, records, deliveries, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, progress_baseline: progressBaseline, progress_transfers: progressTransfers, reproduction, binaries, faults, records, deliveries, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, receive_failure_counts: node.receiveFailureCounts, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0

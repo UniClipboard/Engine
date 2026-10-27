@@ -1,9 +1,36 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { summarizeDeliveryReport, verifyDelivery } from './clipboard-delivery-evidence.mjs'
+import { receiveFailureKind, summarizeDeliveryReport, verifyDelivery } from './clipboard-delivery-evidence.mjs'
 
 const facts = { kind: 'file', from: 'B', to: 'A', scenario: 'P00-prepaired-upgrade-old-pairing' }
 const accepted = { total_accepted: 1, per_target: [{ outcome: { kind: 'accepted' } }] }
+
+test('legacy receive records retain fixed branch evidence from both JSON layouts', () => {
+  assert.equal(receiveFailureKind({ fields: { error_kind: 'inbound_clipboard_apply_failed' } }), 'apply_failed')
+  for (const row of [
+    { message: 'inbound: blob materialize stopped' },
+    { fields: { message: 'inbound: blob materialize stopped' } },
+  ]) assert.equal(receiveFailureKind(row), 'blob_materialize_stopped')
+})
+
+test('receive evidence never derives a branch from raw errors or partial message matches', () => {
+  for (const row of [
+    { fields: { error: 'inbound: blob materialize stopped: sensitive-path' } },
+    { message: 'inbound: blob materialize stopped sensitive-content' },
+    { fields: { error_kind: 'inbound_clipboard_apply_failed_sensitive-token' } },
+    { message: { payload: 'inbound: blob materialize stopped' } },
+    null, undefined, {},
+  ]) assert.equal(receiveFailureKind(row), undefined)
+})
+
+test('receive branch evidence cannot export identities, payloads, timestamps or error bodies', () => {
+  const kind = receiveFailureKind({
+    timestamp: 'sensitive-timestamp', device: 'sensitive-device', path: 'sensitive-path',
+    fields: { error_kind: 'inbound_clipboard_apply_failed', error: 'sensitive-error', payload: 'sensitive-content' },
+  })
+  assert.equal(kind, 'apply_failed')
+  assert(!JSON.stringify(kind).includes('sensitive'))
+})
 
 test('recognized failures retain only their fixed category, including legacy file rejection', () => {
   for (const [message, category] of [

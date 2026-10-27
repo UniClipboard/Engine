@@ -1513,3 +1513,11 @@ AC05的全部默认预算逐项核对如下；计数来自原4927条PASS／JUnit
 本项只准备iOS／Android共同探针。HarmonyOS使用独立NAPI验收宿主，仍按独立入口核对；不把此补齐登记为三平台或真机通过。当前本机无Swift／Java编译器、Xcode及移动设备工具，原生App编译和真实前后台／系统挂起未执行，继续跳过并阻止AC08和归档。Linux完整共享探针30项、既有宿主边界13项，共43项实际通过，其中4项新增用例由原失败转为通过；逐条PASS与原输出核对。零doc test另行记录，不算执行案例；不以这些测试代替设备结果。
 
 后续核对发现原移动CI只构建`uc-engine-uniffi`，不能验证共同探针的Apple／Android条件编译。原`mobile-bindings`作业现各增加探针原生库构建：iOS设备arm64及两种模拟器目标，Android沿原arm64与固定cargo-ndk；均复用原SDK、共享target、MBX和dev／locked配置，不新增工作流，也不改生产绑定步骤或原60分钟预算。该配置补齐只建立后续候选的实际编译门禁；本地主机没有对应SDK，原生库构建结果须以该候选线上步骤为准，尚未取得时保持未验证。它不构建Swift／Java App，不运行设备，也不替代物理挂起证明。
+
+## 冻结旧端拒绝的固定分支标记
+
+继续核对原a07拒绝的反馈接缝时，读取冻结`f6f305d9689e4e79e7ab6d0e4921061f9416e4a6`的`clipboard/inbound/runtime.rs`及`clipboard/sync/apply_inbound/usecase.rs`：旧classifier只遍历source chain中的IoError，而原接收get／begin／commit、材料化等路径存在先转成`Internal(String)`的转换；runtime只写固定`inbound_clipboard_apply_failed`。所以原工件中的`apply_failed`既不能排除I/O，也不能证明具体存储、网络或材料化根因。当前代码保留来源不代表已修复冻结旧端的原失败。
+
+原日志另有固定`inbound: blob materialize stopped`标记，但网络工件原先只输出拒绝reason和网络事件。测试驱动现额外保存每个node的`receive_failure_counts`，只含`apply_failed`与`blob_materialize_stopped`两个计数。识别仅依赖既有固定error_kind或完整固定message，不读取错误正文来推断类别；正文、路径、业务身份及任意时间戳都不进入新字段。两个计数可能来自同一动作，粒度是整个node执行，不能求和充当失败任务数、跨记录推断因果，或凭零计数证明某阶段未发生（日志仍可能降级）。没有新增产品日志、trace或Engine接口，也不修改冻结旧端。
+
+18项原有及新增JS行为／隐私合同通过，包括两种既有JSON布局、正文伪造标记与前缀近似的拒绝、敏感字段不进入输出。原完整旧旧四格脚本实际79.881秒通过，双向内容／文件、实际Direct／Relay、清理和明文检查保持原断言；逐份核对新字段只有两个非负整数，四格两个node均为零。该成功没有提供原间歇故障的新正向复现；标记识别的正向证据来自固定日志形状测试，不把零计数或本轮通过称为原故障修复。原codec摘要和两个旧源码锚点保持，a07实际arm64 host摘要仍为`aaae467b8bb6e3cb80ed5bfeed50d26e7623aa849871187e4dc92ce63eba0ddc`；driver的两处采集代码与来源摘要如实变化，新构建Relay摘要单独记录，不声称它与先前本机12轮二进制相同。原#332失败与#333同二进制通过的证据继续分别保留，AC11仍待完整候选复核。
