@@ -1,8 +1,6 @@
 //! 同一组合测试中读取实际接收use case进程的当前权威，再通过真实Iroh流登记。
-use super::progress_probe::Fixture;
-use crate::network::iroh::transfer_progress_v2::{
-    TransferProgressInbound, TransferProgressRegistration,
-};
+use super::progress_probe::{progress_budget, Fixture};
+use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use anyhow::ensure;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -23,8 +21,12 @@ use uc_application::deps::{
     ProgressSourceTask, ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
     TransferProgressProducer, TransferProgressReceiver,
 };
-use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressItemKind};
+use uc_core::file_transfer::{
+    ProgressFailureReason, ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal,
+    ProgressTerminalOutcome,
+};
 use uc_core::ids::DeviceId;
+use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::transfer_progress::v2::{
     read_frame, write_frame, Envelope, ItemKind, LogicalItem, Message, TaskScope, TerminalOutcome,
     TerminalResult, WireId, TRANSFER_PROGRESS_ALPN,
@@ -226,8 +228,9 @@ impl ProgressReceiverPort for Gate {
 fn producer(fixture: &Fixture, authority: Arc<Authority>) -> Arc<TransferProgressProducer> {
     Arc::new(TransferProgressProducer::new(
         fixture.outbound.clone(),
-        Arc::new(TransferProgressRegistration),
+        Arc::new(TransferProgressWire),
         authority,
+        Arc::new(SystemElapsedClock),
     ))
 }
 async fn registration(
@@ -243,7 +246,7 @@ async fn registration(
             stream,
             &fixture.receiving,
             generation,
-            Instant::now() + BUDGET,
+            progress_budget(),
             &cancel,
             owner,
         )
@@ -297,7 +300,7 @@ async fn stale_terminal(
             incoming,
             &fixture.receiving,
             generation,
-            Instant::now() + BUDGET,
+            progress_budget(),
             &cancel,
             owner
         ),
@@ -350,7 +353,7 @@ async fn current_receive_authority_binds_over_real_iroh_and_old_descriptors_cann
                     incoming,
                     &connection,
                     1,
-                    Instant::now() + BUDGET,
+                    progress_budget(),
                     &CancellationToken::new(),
                     held.as_ref(),
                 )
@@ -430,7 +433,7 @@ async fn actual_receiver_restart_new_connection_retires_old_producer_and_pending
                 incoming,
                 &connection,
                 1,
-                Instant::now() + BUDGET,
+                progress_budget(),
                 &CancellationToken::new(),
                 held.as_ref(),
             )
@@ -567,7 +570,7 @@ async fn fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again(
                     incoming,
                     &connection,
                     1,
-                    Instant::now() + BUDGET,
+                    progress_budget(),
                     &CancellationToken::new(),
                     held.as_ref(),
                 )
@@ -599,4 +602,60 @@ async fn fresh_challenge_reads_current_attempt_and_late_bound_is_checked_again(
         Ok(())
     })
     .await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "由run-progress-registration-proof提供当前Application fixture二进制"]
+async fn live_receive_attempt_reports_its_failed_materialization_through_the_complete_action(
+) -> anyhow::Result<()> {
+    timeout(Duration::from_secs(30), async {
+        let worker = AuthorityProcess::start()?;
+        // 子进程真实use case在CAS后交接来源，再在受控materializer处返回IO失败。
+        let accepted = worker.accept(false)?;
+        let fixture = Fixture::new(4, 4, TRANSFER_PROGRESS_ALPN).await?;
+        let client = producer(&fixture, worker.authority.clone());
+        let owner = TransferProgressReceiver::new(
+            fixture.receiving.peer(),
+            SOURCE,
+            accepted.items.to_vec(),
+        )?;
+        let result = ProgressTerminal {
+            item: accepted.items[0],
+            round: 0,
+            sequence: 1,
+            result_revision: 1,
+            bytes: 0,
+            total: None,
+            outcome: ProgressTerminalOutcome::Failed(ProgressFailureReason::Unknown),
+        };
+        let stop = CancellationToken::new();
+        let peer = fixture.sending.peer();
+        let receive = async {
+            for _ in 0..2 {
+                TransferProgressInbound::serve(
+                    fixture.receiving.accept_bi().await?,
+                    &fixture.receiving,
+                    1,
+                    progress_budget(),
+                    &stop,
+                    &owner,
+                )
+                .await?;
+            }
+            anyhow::Ok(())
+        };
+        let (reported, served) = tokio::join!(
+            client.report_settled(&peer, SOURCE, accepted.descriptor.attempt, result, &stop),
+            receive
+        );
+        served?;
+        let reported = reported?;
+        assert_eq!(reported.attempt, accepted.descriptor.attempt);
+        assert_eq!(reported.result, result);
+        assert_eq!(owner.snapshot().items[0].1, Some(result));
+        fixture.close().await?;
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
 }

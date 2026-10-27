@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::ports::{BudgetStatus, ElapsedBudget};
+use super::{BudgetStatus, ElapsedBudget};
 
 /// 终态从产生起的最长保留时间。
 pub const TERMINAL_RETENTION: Duration = Duration::from_secs(600);

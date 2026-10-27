@@ -5,6 +5,8 @@ use uc_core::error_class::ErrorClass;
 
 #[derive(thiserror::Error)]
 pub enum ProgressReceiveError {
+    #[error("progress clock unavailable")]
+    Clock(#[from] ElapsedClockError),
     #[error("progress connection failed")]
     Connection(#[from] ConnectivityError),
     #[error("peer does not support current progress protocol")]
@@ -25,6 +27,7 @@ pub enum ProgressReceiveError {
 impl ErrorClass for ProgressReceiveError {
     fn class(&self) -> &'static str {
         match self {
+            Self::Clock(source) => source.class(),
             Self::Connection(source) => source.class(),
             Self::Unsupported => "progress_protocol_unsupported",
             Self::Protocol => "progress_protocol_invalid",
@@ -41,4 +44,29 @@ impl fmt::Debug for ProgressReceiveError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, formatter)
     }
+}
+
+#[derive(thiserror::Error)]
+#[error("elapsed clock unavailable")]
+pub struct ElapsedClockError {
+    #[source]
+    pub source: Box<dyn Error + Send + Sync>,
+}
+impl fmt::Debug for ElapsedClockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+impl ErrorClass for ElapsedClockError {
+    fn class(&self) -> &'static str {
+        "elapsed_clock_unavailable"
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ElapsedClockRefusal {
+    #[error("platform has no suspend-inclusive clock")]
+    UnsupportedPlatform,
+    #[error("native elapsed clock count is invalid")]
+    InvalidNativeCount,
 }

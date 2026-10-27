@@ -87,14 +87,32 @@ pub(super) fn terminal(
     }
 }
 pub(super) fn ack(value: ProgressTerminalNotice) -> Message {
+    let (binding, scope, owner_revision, result) = wire_terminal(value);
     Message::TerminalAck {
-        binding: WireId(value.binding.bytes()),
-        scope: TaskScope {
+        binding,
+        scope,
+        owner_revision,
+        result,
+    }
+}
+pub(super) fn outgoing_terminal(value: ProgressTerminalNotice) -> Message {
+    let (binding, scope, owner_revision, result) = wire_terminal(value);
+    Message::Terminal {
+        binding,
+        scope,
+        owner_revision,
+        result,
+    }
+}
+fn wire_terminal(value: ProgressTerminalNotice) -> (WireId, TaskScope, u64, TerminalResult) {
+    (
+        WireId(value.binding.bytes()),
+        TaskScope {
             source_entry: WireId(value.source.bytes()),
             attempt: WireId(value.attempt.bytes()),
         },
-        owner_revision: value.revision,
-        result: TerminalResult {
+        value.revision,
+        TerminalResult {
             item: LogicalItem {
                 kind: match value.result.item.kind {
                     ProgressItemKind::File => ItemKind::File,
@@ -129,7 +147,7 @@ pub(super) fn ack(value: ProgressTerminalNotice) -> Message {
                 }),
             },
         },
-    }
+    )
 }
 
 #[cfg(test)]

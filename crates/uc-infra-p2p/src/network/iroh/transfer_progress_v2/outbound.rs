@@ -1,26 +1,25 @@
 //! 新挑战到达后才从当前接收负责人取得描述；只做有界交换和精确回显检查。
 use super::io::{invalid, Exchange};
-use super::mapping::{descriptor, identity, wire_descriptor};
+use super::mapping::{descriptor, identity, outgoing_terminal, terminal, wire_descriptor};
 use async_trait::async_trait;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    ConnectionLease, ProgressBound, ProgressReceiveError, ProgressRegistrationWirePort,
-    ProgressTaskAuthorityPort, StreamLease,
+    ConnectionLease, ProgressBound, ProgressExchangeDeadline, ProgressReceiveError,
+    ProgressTaskAuthorityPort, ProgressTerminalNotice, ProgressWirePort, StreamLease,
 };
 use uc_core::file_transfer::ProgressIdentity;
 use uc_sync_protocol::transfer_progress::v2::{Message, WireId};
 
-pub struct TransferProgressRegistration;
+pub struct TransferProgressWire;
 #[async_trait]
-impl ProgressRegistrationWirePort for TransferProgressRegistration {
+impl ProgressWirePort for TransferProgressWire {
     async fn register(
         &self,
         stream: &mut StreamLease,
         connection: &ConnectionLease,
         source: ProgressIdentity,
         authority: &dyn ProgressTaskAuthorityPort,
-        deadline: Instant,
+        deadline: &ProgressExchangeDeadline,
         cancel: &CancellationToken,
     ) -> Result<ProgressBound, ProgressReceiveError> {
         let mut exchange = Exchange::new(stream, connection, deadline, cancel);
@@ -63,5 +62,33 @@ impl ProgressRegistrationWirePort for TransferProgressRegistration {
             binding: identity(binding),
             descriptor: current.descriptor,
         })
+    }
+
+    async fn terminal(
+        &self,
+        stream: &mut StreamLease,
+        connection: &ConnectionLease,
+        notice: ProgressTerminalNotice,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<ProgressTerminalNotice, ProgressReceiveError> {
+        let mut exchange = Exchange::new(stream, connection, deadline, cancel);
+        exchange.write(outgoing_terminal(notice)).await?;
+        exchange.finish_send().await?;
+        let Message::TerminalAck {
+            binding,
+            scope,
+            owner_revision,
+            result,
+        } = exchange.read().await?
+        else {
+            return Err(invalid());
+        };
+        let adopted = terminal(binding, scope, owner_revision, result);
+        if adopted != notice {
+            return Err(ProgressReceiveError::Conflict);
+        }
+        exchange.end_request().await?;
+        Ok(adopted)
     }
 }
