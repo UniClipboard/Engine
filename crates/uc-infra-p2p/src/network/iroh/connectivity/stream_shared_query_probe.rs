@@ -1,5 +1,5 @@
 //! 同一监督器的实际查询/终态交换；不可中断成员读取暂停后仍保留真实工作寿命。
-use super::progress_probe::{progress_budget, Fixture};
+use super::progress_probe::{progress_budget, Fixture, UnusedLive};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
 use iroh::{Endpoint, RelayMode};
@@ -20,6 +20,7 @@ use uc_application::deps::{
     ProgressTaskDescriptor, ProgressTerminalRoundPort, TransferProgressProducer,
     TransferProgressReceiver, TransferProgressSnapshotReader,
 };
+use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
     ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
 };
@@ -33,6 +34,7 @@ use uc_sync_protocol::transfer_progress::v2::{
 const SOURCE: ProgressIdentity = ProgressIdentity::new([1; 16]);
 fn task() -> ProgressSourceTask {
     ProgressSourceTask {
+        notification_closed: Default::default(),
         descriptor: ProgressTaskDescriptor {
             producer: ProgressIdentity::new([2; 16]),
             revision: 1,
@@ -62,7 +64,13 @@ impl ProgressTaskAuthorityPort for Authority {
         peer: &DeviceId,
         source: ProgressIdentity,
     ) -> Option<ProgressSourceTask> {
-        (*peer == self.peer && source == SOURCE).then(task)
+        (*peer == self.peer && source == SOURCE).then(|| {
+            let mut current = task();
+            if self.claimed.load(Ordering::SeqCst) {
+                current.notification_closed = Arc::new(current.items.iter().copied().collect());
+            }
+            current
+        })
     }
     fn claim_terminal(
         &self,
@@ -206,6 +214,7 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
             ),
             counts: counts.clone(),
         }),
+        Arc::new(UnusedLive),
     );
     let owner = Arc::new(TransferProgressReceiver::new(
         second.receiving.peer(),
@@ -355,7 +364,10 @@ async fn scenario(mode: Mode) -> anyhow::Result<()> {
     ));
     timeout(Duration::from_secs(2), counts.ack.notified()).await?;
     receive.await??;
-    assert_eq!(owner.snapshot().items[0].1, Some(settled));
+    assert_eq!(
+        owner.snapshot().items[0].1,
+        Some(ProgressItemState::Terminal(settled))
+    );
     assert_eq!(counts.reads.load(Ordering::SeqCst), 1);
     stop.cancel();
     if mode != Mode::Complete {

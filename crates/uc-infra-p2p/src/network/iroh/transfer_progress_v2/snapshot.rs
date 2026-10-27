@@ -1,5 +1,5 @@
 use super::io::{invalid, Exchange};
-use super::mapping::{descriptor, item, terminal_result};
+use super::mapping::{active, descriptor, terminal_result};
 use super::TransferProgressWire;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -7,10 +7,9 @@ use uc_application::deps::{
     ConnectionLease, ProgressExchangeDeadline, ProgressPageReply, ProgressPageRequest,
     ProgressReceiveError, ProgressSnapshotPage, ProgressSnapshotWirePort, StreamLease,
 };
-use uc_core::file_transfer::{ProgressActive, ProgressItemState, ProgressPhase};
+use uc_core::file_transfer::ProgressItemState;
 use uc_sync_protocol::transfer_progress::v2::{
-    ItemState, Message, Phase, ProducerDescriptor, QueryResult, RejectionReason, SnapshotPage,
-    WireId,
+    ItemState, Message, ProducerDescriptor, QueryResult, RejectionReason, SnapshotPage, WireId,
 };
 
 #[async_trait]
@@ -74,19 +73,7 @@ fn snapshot_page(current: ProducerDescriptor, page: SnapshotPage) -> ProgressSna
             .into_iter()
             .map(|value| match value {
                 ItemState::Terminal(value) => ProgressItemState::Terminal(terminal_result(value)),
-                ItemState::Active(value) => ProgressItemState::Active(ProgressActive {
-                    item: item(value.item),
-                    round: value.round,
-                    sequence: value.sequence,
-                    bytes: value.bytes,
-                    total: value.total,
-                    phase: match value.phase {
-                        Phase::Waiting => ProgressPhase::Waiting,
-                        Phase::Transferring => ProgressPhase::Transferring,
-                        Phase::Processing => ProgressPhase::Processing,
-                        Phase::Retrying => ProgressPhase::Retrying,
-                    },
-                }),
+                ItemState::Active(value) => ProgressItemState::Active(active(value)),
             })
             .collect(),
     }

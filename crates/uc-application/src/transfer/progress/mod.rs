@@ -37,3 +37,6 @@ pub use snapshot::{
     ProgressSnapshotRead, ProgressSnapshotRoundPort, ProgressSnapshotWirePort,
     TransferProgressSnapshotReader,
 };
+
+pub use model::ProgressUpdateNotice;
+pub use ports::ProgressLiveRoundPort;

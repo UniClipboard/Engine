@@ -18,9 +18,10 @@ use uc_application::deps::{
     ConnectivityError, ElapsedClockError, ElapsedClockPort, ProgressBound, ProgressClaimRefusal,
     ProgressExchangeDeadline, ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask,
     ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, ProgressWirePort, StreamLease, TransferProgressProducer,
-    TransferProgressReceiver,
+    ProgressTerminalRoundPort, ProgressUpdateNotice, ProgressWirePort, StreamLease,
+    TransferProgressProducer, TransferProgressReceiver,
 };
+use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
     ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
 };
@@ -42,19 +43,33 @@ impl Default for Authority {
 }
 impl ProgressTaskAuthorityPort for Authority {
     fn current_task(&self, _: &DeviceId, source: ProgressIdentity) -> Option<ProgressSourceTask> {
-        (source == SOURCE).then(|| ProgressSourceTask {
+        if source != SOURCE {
+            return None;
+        }
+        let revision = self.0.load(Ordering::SeqCst);
+        let attempt = if revision == 1 {
+            ATTEMPT
+        } else {
+            ProgressIdentity::new([4; 16])
+        };
+        Some(ProgressSourceTask {
             descriptor: ProgressTaskDescriptor {
                 producer: ProgressIdentity::new([2; 16]),
-                revision: self.0.load(Ordering::SeqCst),
+                revision,
                 source: SOURCE,
-                attempt: if self.0.load(Ordering::SeqCst) == 1 {
-                    ATTEMPT
-                } else {
-                    ProgressIdentity::new([4; 16])
-                },
+                attempt,
                 item_count: 1,
             },
             items: Arc::from([item()]),
+            notification_closed: Arc::new(
+                self.1
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(owned, _)| *owned == attempt)
+                    .map(|(_, item)| *item)
+                    .collect(),
+            ),
         })
     }
     fn claim_terminal(
@@ -212,7 +227,10 @@ async fn settled_file_single_action_registers_sends_and_observes_exact_adopted_a
         );
         served?;
         reported?;
-        assert_eq!(owner.snapshot().items[0].1, Some(terminal(exported)));
+        assert_eq!(
+            owner.snapshot().items[0].1,
+            Some(ProgressItemState::Terminal(terminal(exported)))
+        );
         assert_eq!(tokio::fs::read(&output).await?, bytes);
         drop(received);
         drop(tag);
@@ -341,7 +359,10 @@ async fn changed_ack_or_trailing_bytes_do_not_report_success() -> anyhow::Result
         } else {
             assert!(matches!(reported, Err(ProgressReceiveError::Conflict)));
         }
-        assert_eq!(owner.snapshot().items[0].1, Some(terminal(10)));
+        assert_eq!(
+            owner.snapshot().items[0].1,
+            Some(ProgressItemState::Terminal(terminal(10)))
+        );
         fixture.close().await?;
     }
     Ok(())
@@ -358,6 +379,18 @@ struct ConsumedBudget {
 }
 #[async_trait]
 impl ProgressWirePort for ConsumedBudget {
+    async fn update(
+        &self,
+        stream: &mut StreamLease,
+        connection: &ConnectionLease,
+        notice: ProgressUpdateNotice,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        TransferProgressWire
+            .update(stream, connection, notice, deadline, cancel)
+            .await
+    }
     async fn register(
         &self,
         stream: &mut StreamLease,
@@ -507,3 +540,6 @@ async fn new_attempt_during_challenge_cannot_relabel_an_old_settled_result() -> 
     fixture.close().await?;
     Ok(())
 }
+
+#[path = "stream_live_probe.rs"]
+mod live_probe;

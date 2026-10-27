@@ -1,13 +1,15 @@
 use super::{
     CurrentProgressTaskPort, ProgressReceiveError, ProgressReceiverPort, ProgressTaskDescriptor,
-    ProgressTerminalNotice, TransferProgressReceiver,
+    ProgressTerminalNotice, ProgressUpdateNotice, TransferProgressReceiver,
 };
 use async_trait::async_trait;
 use std::error::Error;
 use std::io;
 use uc_core::error_class::ErrorClass;
+use uc_core::file_transfer::ProgressItemState;
 use uc_core::file_transfer::{
-    ProgressIdentity, ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome,
+    ProgressActive, ProgressIdentity, ProgressItem, ProgressItemKind, ProgressPhase,
+    ProgressTerminal, ProgressTerminalOutcome,
 };
 use uc_core::ids::DeviceId;
 
@@ -73,7 +75,10 @@ async fn adoption_updates_complete_snapshot_before_exact_ack_and_duplicates_do_n
         owner.adopt_terminal(&peer, 1, notice).await.unwrap(),
         notice
     );
-    assert_eq!(owner.snapshot().items[0].1, Some(notice.result));
+    assert_eq!(
+        owner.snapshot().items[0].1,
+        Some(ProgressItemState::Terminal(notice.result))
+    );
     assert_eq!(owner.snapshot().version, version + 1);
     assert_eq!(
         owner.adopt_terminal(&peer, 1, notice).await.unwrap(),
@@ -101,7 +106,10 @@ async fn adoption_updates_complete_snapshot_before_exact_ack_and_duplicates_do_n
             Err(ProgressReceiveError::Conflict)
         ));
     }
-    assert_eq!(owner.snapshot().items[0].1, Some(notice.result));
+    assert_eq!(
+        owner.snapshot().items[0].1,
+        Some(ProgressItemState::Terminal(notice.result))
+    );
     assert_eq!(owner.snapshot().version, version + 1);
 }
 
@@ -258,4 +266,73 @@ async fn delayed_authoritative_reply_cannot_replace_newer_registration() {
     ));
     assert_eq!(owner.snapshot().bound.unwrap().binding, current.binding);
     assert_eq!(owner.snapshot().bound.unwrap().descriptor.attempt, id(4));
+}
+
+#[tokio::test]
+async fn updates_share_registration_fences_and_publish_only_new_valid_activity() {
+    let peer = DeviceId::new("receiver");
+    let owner = TransferProgressReceiver::new(peer, id(1), vec![item()]).unwrap();
+    let bound = owner
+        .register(&peer, 1, id(1), &mut Current(descriptor()))
+        .await
+        .unwrap();
+    let notice = ProgressUpdateNotice {
+        binding: bound.binding,
+        source: id(1),
+        attempt: id(3),
+        revision: 8,
+        update: ProgressActive {
+            item: item(),
+            round: 0,
+            sequence: 10,
+            bytes: 5,
+            total: Some(8),
+            phase: ProgressPhase::Transferring,
+        },
+    };
+    let version = owner.snapshot().version;
+    for invalid in [
+        ProgressUpdateNotice {
+            binding: id(9),
+            ..notice
+        },
+        ProgressUpdateNotice {
+            attempt: id(9),
+            ..notice
+        },
+        ProgressUpdateNotice {
+            revision: 7,
+            ..notice
+        },
+    ] {
+        assert!(matches!(
+            owner.adopt_update(&peer, 1, invalid).await,
+            Err(ProgressReceiveError::Stale)
+        ));
+    }
+    assert!(matches!(
+        owner.adopt_update(&DeviceId::new("other"), 1, notice).await,
+        Err(ProgressReceiveError::UnknownTask)
+    ));
+    assert!(matches!(
+        owner.adopt_update(&peer, 2, notice).await,
+        Err(ProgressReceiveError::Stale)
+    ));
+    assert_eq!(owner.snapshot().version, version);
+    owner.adopt_update(&peer, 1, notice).await.unwrap();
+    owner.adopt_update(&peer, 1, notice).await.unwrap();
+    assert_eq!(owner.snapshot().version, version + 1);
+    assert_eq!(
+        owner.snapshot().items[0].1,
+        Some(ProgressItemState::Active(notice.update))
+    );
+    owner
+        .adopt_terminal(&peer, 1, terminal(bound.binding))
+        .await
+        .unwrap();
+    assert!(matches!(
+        owner.adopt_update(&peer, 1, notice).await,
+        Err(ProgressReceiveError::Stale)
+    ));
+    assert_eq!(owner.snapshot().version, version + 2);
 }

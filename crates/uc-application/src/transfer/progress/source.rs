@@ -1,6 +1,6 @@
 //! 已接受接收尝试的运行期权威；不持久化来源材料，不按 UUID 大小排序。
 use super::{ProgressClaimRefusal, ProgressSourceTask, ProgressTaskDescriptor};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use uc_core::file_transfer::{valid_progress_plan, ProgressIdentity, ProgressItem};
 use uc_core::ids::{DeviceId, EntryId};
@@ -12,7 +12,6 @@ type SourceKey = (DeviceId, ProgressIdentity);
 struct AcceptedTask {
     local_entry: EntryId,
     task: ProgressSourceTask,
-    notified: HashSet<ProgressItem>,
 }
 
 pub(crate) struct ProgressSourceCatalog {
@@ -80,8 +79,8 @@ impl ProgressSourceCatalog {
             key,
             AcceptedTask {
                 local_entry: local_entry.clone(),
-                notified: HashSet::new(),
                 task: ProgressSourceTask {
+                    notification_closed: Default::default(),
                     descriptor: ProgressTaskDescriptor {
                         producer: self.producer,
                         revision,
@@ -121,7 +120,7 @@ impl ProgressSourceCatalog {
         if !current.task.items.contains(&item) {
             return Err(ProgressClaimRefusal::InvalidItem);
         }
-        if !current.notified.insert(item) {
+        if !Arc::make_mut(&mut current.task.notification_closed).insert(item) {
             return Err(ProgressClaimRefusal::AlreadyObserved);
         }
         Ok(current.task.clone())

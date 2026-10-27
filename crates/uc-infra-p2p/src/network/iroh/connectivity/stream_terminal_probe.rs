@@ -15,7 +15,8 @@ use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
     BlobExchangeError, BlobExchangePort, BlobReadStorePort, BlobValidatedProgress,
     CurrentProgressTaskPort, ProgressBound, ProgressReceiveError, ProgressReceiverPort,
-    ProgressTaskDescriptor, ProgressTerminalNotice, StreamLease, TransferProgressReceiver,
+    ProgressTaskDescriptor, ProgressTerminalNotice, ProgressUpdateNotice, StreamLease,
+    TransferProgressReceiver,
 };
 use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressItemKind};
 use uc_core::ids::DeviceId;
@@ -40,6 +41,14 @@ struct PausedAdoption {
 }
 #[async_trait]
 impl ProgressReceiverPort for PausedAdoption {
+    async fn adopt_update(
+        &self,
+        peer: &DeviceId,
+        generation: u64,
+        notice: ProgressUpdateNotice,
+    ) -> Result<(), ProgressReceiveError> {
+        self.owner.adopt_update(peer, generation, notice).await
+    }
     async fn register(
         &self,
         peer: &DeviceId,

@@ -1,14 +1,16 @@
-//! 已结算结果的一次完整通知；当前登记、终态与精确ACK共用原预算。
+//! 一次完整通知；当前登记、活动发送或终态精确ACK共用原预算。
 use super::{
-    ElapsedClockPort, ProgressBound, ProgressExchangeDeadline, ProgressReceiveError,
-    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
-    ProgressTerminalRoundPort, ProgressWirePort,
+    ElapsedClockPort, ProgressBound, ProgressExchangeDeadline, ProgressLiveRoundPort,
+    ProgressReceiveError, ProgressTaskAuthorityPort, ProgressTaskDescriptor,
+    ProgressTerminalNotice, ProgressTerminalRoundPort, ProgressUpdateNotice, ProgressWirePort,
 };
 use crate::connectivity::{ConnectionLease, ConnectionProtocol, ConnectivityManager};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use uc_core::file_transfer::{ProgressIdentity, ProgressTerminal, TERMINAL_ROUND_LIMIT};
+use uc_core::file_transfer::{
+    ProgressActive, ProgressIdentity, ProgressTerminal, TERMINAL_ROUND_LIMIT,
+};
 use uc_core::ids::DeviceId;
 
 pub struct TransferProgressProducer {
@@ -162,6 +164,65 @@ impl ProgressTerminalRoundPort for TransferProgressProducer {
         if adopted != notice {
             return Err(ProgressReceiveError::Conflict);
         }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ProgressLiveRoundPort for TransferProgressProducer {
+    async fn report_live(
+        &self,
+        peer: &DeviceId,
+        expected: ProgressTaskDescriptor,
+        update: ProgressActive,
+        deadline: &ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProgressReceiveError> {
+        let check = || -> Result<(), ProgressReceiveError> {
+            let current = self
+                .authority
+                .current_task(peer, expected.source)
+                .ok_or(ProgressReceiveError::UnknownTask)?;
+            if current.descriptor != expected {
+                return Err(ProgressReceiveError::Stale);
+            }
+            if !current.items.contains(&update.item) {
+                return Err(ProgressReceiveError::InvalidPlan);
+            }
+            if current.notification_closed.contains(&update.item) {
+                return Err(ProgressReceiveError::Stale);
+            }
+            deadline.check(cancel)
+        };
+        check()?;
+        let connection = self.connect(peer, deadline, cancel).await?;
+        let bound = self
+            .register_on(&connection, expected.source, deadline, cancel)
+            .await?;
+        if bound.descriptor != expected {
+            return Err(ProgressReceiveError::Stale);
+        }
+        let mut stream = connection
+            .open_bi_with_cancel(deadline.instant(), cancel)
+            .await?;
+        check()?;
+        self.wire
+            .update(
+                &mut stream,
+                &connection,
+                ProgressUpdateNotice {
+                    binding: bound.binding,
+                    source: expected.source,
+                    attempt: expected.attempt,
+                    revision: expected.revision,
+                    update,
+                },
+                deadline,
+                cancel,
+            )
+            .await?;
+        self.manager.retain(&connection).await?;
+        check()?;
         Ok(())
     }
 }

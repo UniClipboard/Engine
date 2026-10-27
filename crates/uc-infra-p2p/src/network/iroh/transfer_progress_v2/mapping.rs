@@ -1,11 +1,14 @@
-use uc_application::deps::{ProgressBound, ProgressTaskDescriptor, ProgressTerminalNotice};
+use uc_application::deps::{
+    ProgressBound, ProgressTaskDescriptor, ProgressTerminalNotice, ProgressUpdateNotice,
+};
 use uc_core::file_transfer::{
-    FileTransferCancellationReason as Cancel, ProgressFailureReason as Failure, ProgressIdentity,
-    ProgressItem, ProgressItemKind, ProgressTerminal, ProgressTerminalOutcome as Outcome,
+    FileTransferCancellationReason as Cancel, ProgressActive, ProgressFailureReason as Failure,
+    ProgressIdentity, ProgressItem, ProgressItemKind, ProgressPhase, ProgressTerminal,
+    ProgressTerminalOutcome as Outcome,
 };
 use uc_sync_protocol::transfer_progress::v2::{
-    CancelReason, FailureReason, ItemKind, LogicalItem, Message, ProducerDescriptor, TaskScope,
-    TerminalOutcome, TerminalResult, WireId,
+    ActiveProgress, CancelReason, FailureReason, ItemKind, LogicalItem, Message, Phase,
+    ProducerDescriptor, TaskScope, TerminalOutcome, TerminalResult, WireId,
 };
 
 pub(super) fn identity(id: WireId) -> ProgressIdentity {
@@ -158,6 +161,66 @@ pub(super) fn item(value: LogicalItem) -> ProgressItem {
     }
 }
 
+pub(super) fn active(value: ActiveProgress) -> ProgressActive {
+    ProgressActive {
+        item: item(value.item),
+        round: value.round,
+        sequence: value.sequence,
+        bytes: value.bytes,
+        total: value.total,
+        phase: match value.phase {
+            Phase::Waiting => ProgressPhase::Waiting,
+            Phase::Transferring => ProgressPhase::Transferring,
+            Phase::Processing => ProgressPhase::Processing,
+            Phase::Retrying => ProgressPhase::Retrying,
+        },
+    }
+}
+pub(super) fn update(
+    binding: WireId,
+    scope: TaskScope,
+    revision: u64,
+    value: ActiveProgress,
+) -> ProgressUpdateNotice {
+    ProgressUpdateNotice {
+        binding: identity(binding),
+        source: identity(scope.source_entry),
+        attempt: identity(scope.attempt),
+        revision,
+        update: active(value),
+    }
+}
+pub(super) fn outgoing_update(value: ProgressUpdateNotice) -> Message {
+    let update = value.update;
+    Message::Update {
+        binding: WireId(value.binding.bytes()),
+        scope: TaskScope {
+            source_entry: WireId(value.source.bytes()),
+            attempt: WireId(value.attempt.bytes()),
+        },
+        owner_revision: value.revision,
+        progress: ActiveProgress {
+            item: LogicalItem {
+                kind: match update.item.kind {
+                    ProgressItemKind::File => ItemKind::File,
+                    ProgressItemKind::Representation => ItemKind::Representation,
+                    ProgressItemKind::DirectoryUnit => ItemKind::DirectoryUnit,
+                },
+                index: update.item.index,
+            },
+            round: update.round,
+            sequence: update.sequence,
+            bytes: update.bytes,
+            total: update.total,
+            phase: match update.phase {
+                ProgressPhase::Waiting => Phase::Waiting,
+                ProgressPhase::Transferring => Phase::Transferring,
+                ProgressPhase::Processing => Phase::Processing,
+                ProgressPhase::Retrying => Phase::Retrying,
+            },
+        },
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{ack, terminal};

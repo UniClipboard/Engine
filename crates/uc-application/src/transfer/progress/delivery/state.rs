@@ -1,5 +1,6 @@
 use super::super::{ElapsedClockError, ProgressTaskDescriptor};
 use super::clock::Sample;
+use super::live::{LiveEntry, LiveTask};
 use super::model::{Action, Entry, Job, Key, QueryKey, Work};
 use super::query::QueryRecord;
 use std::collections::{HashMap, VecDeque};
@@ -15,6 +16,9 @@ use uc_core::ids::DeviceId;
 #[derive(Default)]
 pub(super) struct State {
     pub closed: bool,
+    pub(super) live: HashMap<Key, LiveEntry>,
+    pub(super) live_order: VecDeque<Key>,
+    pub(super) live_tasks: HashMap<QueryKey, LiveTask>,
     pub(super) observed: Option<Sample>,
     pub(super) entries: HashMap<Key, Entry>,
     pub(super) ledger: TerminalLedger<DeviceId, Key>,
@@ -31,6 +35,7 @@ impl State {
         result: ProgressTerminal,
         sample: Sample,
     ) -> bool {
+        self.settled_live(key.peer, descriptor, result);
         if self
             .observed
             .is_some_and(|current| current.epoch > sample.epoch)
@@ -78,6 +83,7 @@ impl State {
     }
     pub fn retire_before(&mut self, epoch: Option<u64>, source: Option<Arc<ElapsedClockError>>) {
         self.retire_queries(epoch, source);
+        self.retire_live(epoch);
         let keys: Vec<_> = self
             .entries
             .iter()
@@ -99,6 +105,7 @@ impl State {
             }
         }
         self.refresh_queries(sample);
+        self.refresh_live(sample);
         let retired: Vec<_> = self
             .entries
             .iter_mut()
@@ -160,10 +167,19 @@ impl State {
                 }
             }
         }
+        self.enqueue_live(sample);
         let mut jobs = Vec::new();
         while let Some((peer, work)) = self.queue.next_ready() {
             let key = match work {
                 Work::Terminal(key) => key,
+                Work::Live(key) => {
+                    if let Some(job) = self.start_live(key, sample) {
+                        jobs.push(job);
+                    } else {
+                        self.queue.complete(&peer);
+                    }
+                    continue;
+                }
                 Work::Snapshot(key) => {
                     if let Some(job) = self.start_query(key) {
                         jobs.push(job);
@@ -225,6 +241,7 @@ impl State {
         }
     }
     pub fn recovered(&mut self, peer: Option<DeviceId>) {
+        self.recover_live(peer);
         for (key, entry) in &mut self.entries {
             if peer.is_none_or(|peer| key.peer == peer) {
                 entry.retry.apply(RetransmitInput::NetworkRecovered);
@@ -233,6 +250,7 @@ impl State {
     }
     pub fn close(&mut self) {
         self.closed = true;
+        self.close_live();
         self.close_queries();
         let keys: Vec<_> = self.entries.keys().copied().collect();
         for key in keys {
@@ -243,7 +261,10 @@ impl State {
         }
     }
     pub fn has_work(&self) -> bool {
-        !self.entries.is_empty() || !self.active.is_empty() || !self.queries.is_empty()
+        !self.entries.is_empty()
+            || !self.active.is_empty()
+            || !self.queries.is_empty()
+            || self.pending_live()
     }
     fn remove(&mut self, key: Key) {
         if let Some(entry) = self.entries.remove(&key) {

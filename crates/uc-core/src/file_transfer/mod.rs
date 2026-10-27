@@ -47,3 +47,6 @@ pub use progress_snapshot::{
     ProgressSnapshotEffect, ProgressSnapshotInput, ProgressSnapshotRefusal,
     MAX_SNAPSHOT_PAGE_ITEMS,
 };
+
+mod progress_projection;
+pub use progress_projection::{ProgressItemEffect, ProgressItemInput, ProgressItemProjection};
