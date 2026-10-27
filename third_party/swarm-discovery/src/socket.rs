@@ -2,9 +2,10 @@ use crate::IpClass;
 use hickory_proto::op::Message;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, PoisonError, RwLock},
 };
 use thiserror::Error;
 use tokio::net::UdpSocket;
@@ -244,10 +245,10 @@ pub fn socket_v6() -> Result<UdpSocket, SocketError> {
     })
 }
 
-/// UniClipboard 补丁：接口套接字创建的测试观察点。
+/// UniClipboard 补丁：接口套接字创建与主通配套接字组播成员操作的测试观察点。
 ///
-/// 生产构建中为零大小类型，不改变行为；单元测试用它注入创建失败，并以弱引用
-/// 观察每个接口套接字是否已被所有持有者释放。
+/// 生产构建中为零大小类型，不改变行为；单元测试用它注入创建或加入失败，以弱引用
+/// 观察每个接口套接字是否已被所有持有者释放，并记录加入与退出组播组的顺序。
 #[derive(Clone, Debug, Default)]
 pub(crate) struct InterfaceProbe(#[cfg(test)] Option<Arc<probe::State>>);
 
@@ -264,16 +265,47 @@ impl InterfaceProbe {
         }
         Ok(socket)
     }
+
+    fn join(&self, socket: &UdpSocket, addr: Ipv4Addr) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(state) = &self.0 {
+            state.before_join(addr)?;
+        }
+        let result = socket.join_multicast_v4(MDNS_IPV4, addr);
+        #[cfg(test)]
+        if let Some(state) = &self.0 {
+            state.record(probe::Membership::Join, addr, &result);
+        }
+        result
+    }
+
+    fn leave(&self, socket: &UdpSocket, addr: Ipv4Addr) -> io::Result<()> {
+        let result = socket.leave_multicast_v4(MDNS_IPV4, addr);
+        #[cfg(test)]
+        if let Some(state) = &self.0 {
+            state.record(probe::Membership::Leave, addr, &result);
+        }
+        result
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod probe {
     use super::{InterfaceProbe, SocketError, IP};
     use std::{
+        collections::HashMap,
+        io,
         net::Ipv4Addr,
         sync::{Arc, Mutex, Weak},
     };
     use tokio::net::UdpSocket;
+
+    /// 主通配套接字上的组播成员操作。
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Membership {
+        Join,
+        Leave,
+    }
 
     #[derive(Debug, Default)]
     pub(crate) struct State {
@@ -285,6 +317,9 @@ pub(crate) mod probe {
         failures_remaining: usize,
         attempts: Vec<Ipv4Addr>,
         created: Vec<(Ipv4Addr, Weak<UdpSocket>)>,
+        join_failures: HashMap<Ipv4Addr, usize>,
+        /// 按发生顺序记录的组播成员操作及其是否成功（含注入的失败）。
+        memberships: Vec<(Membership, Ipv4Addr, bool)>,
     }
 
     impl State {
@@ -334,6 +369,34 @@ pub(crate) mod probe {
             let mut inner = self.inner.lock().unwrap();
             inner.created.push((addr, Arc::downgrade(socket)));
         }
+
+        /// 让 `addr` 接下来的 `count` 次组播组加入失败。
+        pub(crate) fn fail_next_joins(&self, addr: Ipv4Addr, count: usize) {
+            self.inner.lock().unwrap().join_failures.insert(addr, count);
+        }
+
+        /// 迄今记录的组播成员操作。
+        pub(crate) fn memberships(&self) -> Vec<(Membership, Ipv4Addr, bool)> {
+            self.inner.lock().unwrap().memberships.clone()
+        }
+
+        pub(super) fn before_join(&self, addr: Ipv4Addr) -> io::Result<()> {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(remaining) = inner.join_failures.get_mut(&addr).filter(|n| **n > 0) else {
+                return Ok(());
+            };
+            *remaining -= 1;
+            inner.memberships.push((Membership::Join, addr, false));
+            Err(io::Error::other("injected multicast join failure"))
+        }
+
+        pub(super) fn record(&self, op: Membership, addr: Ipv4Addr, result: &io::Result<()>) {
+            let ok = match result {
+                Ok(()) => true,
+                Err(e) => op == Membership::Join && e.kind() == io::ErrorKind::AddrInUse,
+            };
+            self.inner.lock().unwrap().memberships.push((op, addr, ok));
+        }
     }
 }
 
@@ -342,6 +405,12 @@ pub struct Sockets {
     v4: Option<Arc<UdpSocket>>,
     v6: Option<Arc<UdpSocket>>,
     interface_sockets_v4: Arc<RwLock<HashMap<Ipv4Addr, Arc<UdpSocket>>>>,
+    /// UniClipboard 补丁：仍在接口表中、但主通配套接字尚未确认为其加入组播组的地址。
+    ///
+    /// 组播成员关系属于（套接字、组播组、操作系统接口），而不是接口表中的单个地址：
+    /// 同一网卡上的两个地址共用一个成员关系，任一地址退出都会让该网卡离开组播组。
+    /// 因此退出后要为其余地址重新加入；加入失败的地址记在这里，由 guardian 的安装重试补齐。
+    unjoined_v4: Arc<Mutex<HashSet<Ipv4Addr>>>,
     probe: InterfaceProbe,
 }
 
@@ -372,6 +441,7 @@ impl Sockets {
                     v4: socket_v4(None).ok().map(Arc::new),
                     v6: socket_v6().ok().map(Arc::new),
                     interface_sockets_v4: interface_sockets_v4.clone(),
+                    unjoined_v4: Arc::default(),
                     probe,
                 };
                 if socket.v4.is_none() && socket.v6.is_none() {
@@ -389,11 +459,13 @@ impl Sockets {
                     .then(|| socket_v6().map(Arc::new))
                     .transpose()?,
                 interface_sockets_v4: interface_sockets_v4.clone(),
+                unjoined_v4: Arc::default(),
                 probe,
             },
         };
         for addr in sockets.get_all_interface_addresses_v4() {
-            sockets.join_group_on_main_v4(addr);
+            // 失败已记入 `unjoined_v4`；期望集合模式下由 guardian 重试。
+            let _ = sockets.join_group_on_main_v4(addr);
         }
         Ok(sockets)
     }
@@ -418,25 +490,71 @@ impl Sockets {
     /// therefore never match multicast-destined packets. Joining the group
     /// per interface on the wildcard socket makes reception work on all
     /// interfaces.
-    fn join_group_on_main_v4(&self, addr: Ipv4Addr) {
-        if let Some(v4) = &self.v4 {
-            match v4.join_multicast_v4(MDNS_IPV4, addr) {
-                Ok(()) => tracing::debug!("joined multicast group on interface {}", addr),
-                // Already being a member on this interface (e.g. the default
-                // interface joined at socket creation) is not a problem.
-                Err(e) => tracing::debug!("could not join multicast group on {}: {}", addr, e),
+    ///
+    /// UniClipboard 补丁：返回加入结果，并按结果维护 `unjoined_v4`。该接口已是成员
+    /// （`AddrInUse`，例如创建套接字时的默认接口或同一网卡上的另一地址已加入）视为成功。
+    fn join_group_on_main_v4(&self, addr: Ipv4Addr) -> io::Result<()> {
+        let result = match &self.v4 {
+            Some(v4) => match self.probe.join(v4, addr) {
+                Err(e) if e.kind() == io::ErrorKind::AddrInUse => Ok(()),
+                result => result,
+            },
+            None => Ok(()),
+        };
+        let mut unjoined = self
+            .unjoined_v4
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match &result {
+            Ok(()) => {
+                unjoined.remove(&addr);
+            }
+            Err(e) => {
+                tracing::debug!("could not join multicast group on interface: {}", e);
+                unjoined.insert(addr);
             }
         }
+        result
     }
 
     /// Leaves the multicast group on the given interface on the main wildcard
     /// IPv4 socket. See [`Self::join_group_on_main_v4`].
     fn leave_group_on_main_v4(&self, addr: Ipv4Addr) {
         if let Some(v4) = &self.v4 {
-            if let Err(e) = v4.leave_multicast_v4(MDNS_IPV4, addr) {
-                tracing::debug!("could not leave multicast group on {}: {}", addr, e);
+            if let Err(e) = self.probe.leave(v4, addr) {
+                tracing::debug!("could not leave multicast group on interface: {}", e);
             }
         }
+    }
+
+    /// UniClipboard 补丁：先退出再加入，使该地址所在的操作系统接口重新成为成员。
+    ///
+    /// 不依赖各平台对重复加入返回的错误码：接口仍是成员时，退出后立即重新加入；
+    /// 成员关系已被同一网卡上的另一地址带走时，退出失败而加入恢复它。同一网卡上的
+    /// 其他地址共用该成员关系，加入后同样恢复。
+    fn rejoin_group_on_main_v4(&self, addr: Ipv4Addr) -> io::Result<()> {
+        if let Some(v4) = &self.v4 {
+            let _ = self.probe.leave(v4, addr);
+        }
+        self.join_group_on_main_v4(addr)
+    }
+
+    /// UniClipboard 补丁：确认接口地址在主通配套接字上的组播成员关系。尚未确认时重新
+    /// 加入一次；失败表示接口尚未完整安装，guardian 按安装退避重试。
+    pub(crate) fn ensure_group_on_main_v4(&self, addr: Ipv4Addr) -> Result<(), SocketError> {
+        let unjoined = self
+            .unjoined_v4
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&addr);
+        if !unjoined {
+            return Ok(());
+        }
+        self.rejoin_group_on_main_v4(addr)
+            .map_err(|source| SocketError::JoinMulticast {
+                domain: IP::Ipv4,
+                source,
+            })
     }
 
     /// Add a new IPv4 interface for multicast operations.
@@ -463,7 +581,8 @@ impl Sockets {
                 socket
             });
         }
-        self.join_group_on_main_v4(addr);
+        // 套接字已可用于发送；加入失败记入 `unjoined_v4`，由 `ensure_group_on_main_v4` 补齐。
+        let _ = self.join_group_on_main_v4(addr);
         Ok(())
     }
 
@@ -474,10 +593,20 @@ impl Sockets {
 
         if interfaces.contains_key(&addr) {
             let socket = interfaces.remove(&addr);
+            let retained: Vec<Ipv4Addr> = interfaces.keys().copied().collect();
             drop(interfaces);
             // drop socket outside the lock
             drop(socket);
+            self.unjoined_v4
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&addr);
             self.leave_group_on_main_v4(addr);
+            // UniClipboard 补丁：退出按操作系统接口生效，同一网卡上仍保留的地址也随之失去
+            // 成员关系；逐个重新加入，失败的地址留在 `unjoined_v4` 等待安装重试。
+            for retained in retained {
+                let _ = self.rejoin_group_on_main_v4(retained);
+            }
             tracing::info!("Removed interface {} from multicast", addr);
 
             true

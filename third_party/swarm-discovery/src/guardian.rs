@@ -102,16 +102,25 @@ impl Interfaces {
         true
     }
 
-    /// 只有套接字和接收者都已就绪才算安装成功。
+    /// 只有套接字、接收者以及主通配套接字上的组播成员关系都已就绪才算安装成功。
+    ///
+    /// 已安装的地址也要重新确认成员关系：移除同一网卡上的另一地址会让该网卡离开组播组，
+    /// 重新加入失败时这里返回 `false`，期望集合模式据此按退避重试。
     fn install(&mut self, addr: Ipv4Addr) -> bool {
-        if self.receivers.contains_key(&addr) {
-            return true;
-        }
         if let Err(e) = self.sockets.add_interface_v4(addr) {
             tracing::debug!("interface addition failed: {}", e);
             return false;
         }
-        self.start_receiver(addr)
+        if !self.start_receiver(addr) {
+            return false;
+        }
+        match self.sockets.ensure_group_on_main_v4(addr) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!("interface multicast membership incomplete: {}", e);
+                false
+            }
+        }
     }
 
     /// 先停止并等待接收者退出，再释放接口套接字。

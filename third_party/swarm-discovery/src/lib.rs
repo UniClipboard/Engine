@@ -734,4 +734,103 @@ mod tests {
             .expect("callback channel open");
         drop(guard);
     }
+
+    /// `left` 最后一次退出组播组之后 `addr` 的加入操作，返回（成功数，失败数）。
+    fn joins_after_leave(
+        state: &socket::probe::State,
+        left: Ipv4Addr,
+        addr: Ipv4Addr,
+    ) -> (usize, usize) {
+        use socket::probe::Membership;
+        let log = state.memberships();
+        let Some(leave) = log
+            .iter()
+            .rposition(|(op, a, _)| *op == Membership::Leave && *a == left)
+        else {
+            return (0, 0);
+        };
+        log[leave + 1..]
+            .iter()
+            .filter(|(op, a, _)| *op == Membership::Join && *a == addr)
+            .fold((0, 0), |(ok, failed), (_, _, joined)| {
+                if *joined {
+                    (ok + 1, failed)
+                } else {
+                    (ok, failed + 1)
+                }
+            })
+    }
+
+    /// 启动只使用期望集合的发现服务，并等待 `interfaces` 全部完成安装（含组播成员关系）。
+    async fn spawn_with_interfaces(
+        service: &str,
+        state: &Arc<socket::probe::State>,
+        interfaces: [Ipv4Addr; 2],
+    ) -> DropGuard {
+        use socket::probe::Membership;
+        let guard = Discoverer::new(service.to_string(), "membership_peer".to_string())
+            .with_cadence(Duration::from_millis(500))
+            .with_interface_probe(state.probe())
+            .spawn(&tokio::runtime::Handle::current())
+            .expect("spawn membership discoverer");
+        guard.set_interfaces_v4(interfaces);
+        wait_until("both interfaces installed", || {
+            let log = state.memberships();
+            interfaces.iter().all(|addr| {
+                state.live(*addr) == 1
+                    && log
+                        .iter()
+                        .any(|(op, a, ok)| *op == Membership::Join && a == addr && *ok)
+            })
+        })
+        .await;
+        guard
+    }
+
+    /// UniClipboard 补丁：组播成员关系按操作系统接口生效。移除同一网卡上的另一地址后，
+    /// 仍保留地址必须在主通配套接字上重新加入组播组，而不是因为接收者仍在而被跳过。
+    ///
+    /// 断言只依赖观察点记录的加入与退出顺序，不依赖 Linux 的跨套接字组播投递；Linux 上
+    /// 127.0.0.1 与 127.0.0.2 同属回环网卡，其他平台没有可用的第二个回环地址，跳过本测试。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn removing_an_address_rejoins_the_group_for_an_address_retained_on_the_same_interface() {
+        let retained = Ipv4Addr::LOCALHOST;
+        let removed = Ipv4Addr::new(127, 0, 0, 2);
+        let state = Arc::new(socket::probe::State::default());
+        let service = format!("rejoin{}", std::process::id());
+        let guard = spawn_with_interfaces(&service, &state, [retained, removed]).await;
+
+        guard.set_interfaces_v4([retained]);
+        wait_until("removed interface released", || state.live(removed) == 0).await;
+        wait_until("retained address rejoined after the removal", || {
+            joins_after_leave(&state, removed, retained).0 >= 1
+        })
+        .await;
+        assert_eq!(state.live(retained), 1);
+        assert_eq!(state.created(retained), 1, "retained socket is not rebuilt");
+    }
+
+    /// UniClipboard 补丁：保留地址重新加入组播组失败时，接口算作未完整安装，后台安装
+    /// 重试在不提交新期望集合的情况下补齐成员关系。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_failed_rejoin_for_a_retained_address_is_retried_without_a_new_interface_set() {
+        let retained = Ipv4Addr::LOCALHOST;
+        let removed = Ipv4Addr::new(127, 0, 0, 2);
+        let state = Arc::new(socket::probe::State::default());
+        let service = format!("rejoinretry{}", std::process::id());
+        let guard = spawn_with_interfaces(&service, &state, [retained, removed]).await;
+
+        // 移除时的重新加入与同一轮协调中的立即重试都失败。
+        state.fail_next_joins(retained, 2);
+        guard.set_interfaces_v4([retained]);
+        wait_until("removed interface released", || state.live(removed) == 0).await;
+        wait_until("failed rejoin retried in the background", || {
+            joins_after_leave(&state, removed, retained).0 >= 1
+        })
+        .await;
+        assert_eq!(joins_after_leave(&state, removed, retained).1, 2);
+        assert_eq!(state.created(retained), 1, "retained socket is not rebuilt");
+    }
 }
