@@ -448,3 +448,5 @@ AC10源码核对：成员维护worker把分支恢复作为既有维护轮次中�
 补齐RequestGroupInfo、SubmitExternalCommit及RecoveryPackage固定字节向量后，五类消息向量测试通过（run `e5dd9571-e73d-4819-a859-3dcd3e0ec57e`，1项通过、7项筛选跳过）；格式、Rust规范及diff检查通过。与旧锚点 `5cbca8fc` 比较，恢复消息枚举、编码函数及恢复包源码一致，Postcard、Serde与Serde derive锁定版本及校验和一致，协议源码差异为解码端拒绝正文尾随字节。新向量由当前编码器检验并以源码比较支持旧版对应关系，并非独立运行旧编码器生成；真实新旧网络互通仍以原矩阵为准。
 
 随后从冻结旧提交 `5cbca8fc24a278fa7b01ae611bf4b925914bef13` 提取协议源码，单独编译并运行同一五类固定向量，通过（run `0c271cf7-d540-467e-9325-6cc6e209c0f9`，1项通过、10项筛选跳过）。旧协议源码在当前workspace中链接当前Core和当前锁定依赖；前述对照确认恢复包源码及Postcard／Serde版本一致，但此验证不是完整旧workspace构建。临时测试源码和提取目录已回收。
+
+容量关闭测试与五消息向量纳入候选 `6957ed453c9533ca31ac00925829f57a13a3e4e7` 后，locked metadata、workspace全目标check、格式、Rust规范、仓库架构检查及diff检查再次通过；编译与架构日志分别为 `target/branch-recovery-candidate-check.log` 和 `target/branch-recovery-candidate-architecture.log`。此后的变更仅为本条证据记录；远端候选CI及未执行设备平台仍不计通过。
