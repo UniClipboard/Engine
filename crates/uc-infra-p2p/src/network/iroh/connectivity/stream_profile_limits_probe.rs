@@ -119,10 +119,12 @@ async fn real_recovery_connections_enforce_inbound_capacity_and_shutdown() -> an
             .spawn();
         let mut clients = Vec::new();
         let mut active = Vec::new();
+        let mut native_handles = Vec::new();
         for _ in 0..8 {
             let connection = client
                 .connect(server.addr(), MEMBERSHIP_BRANCH_RECOVERY_ALPN)
                 .await?;
+            native_handles.push(connection.weak_handle());
             let (mut send, receive) = connection.open_bi().await?;
             send.write_all(&[1]).await?;
             let accepted = timeout(BUDGET, received.recv())
@@ -138,6 +140,7 @@ async fn real_recovery_connections_enforce_inbound_capacity_and_shutdown() -> an
         let rejected = client
             .connect(server.addr(), MEMBERSHIP_BRANCH_RECOVERY_ALPN)
             .await?;
+        native_handles.push(rejected.weak_handle());
         let result = timeout(BUDGET, received.recv())
             .await?
             .ok_or_else(|| anyhow::anyhow!("missing overflow event"))?;
@@ -159,6 +162,7 @@ async fn real_recovery_connections_enforce_inbound_capacity_and_shutdown() -> an
         let replacement = client
             .connect(server.addr(), MEMBERSHIP_BRANCH_RECOVERY_ALPN)
             .await?;
+        native_handles.push(replacement.weak_handle());
         let (mut send, receive) = replacement.open_bi().await?;
         send.write_all(&[1]).await?;
         let accepted = timeout(BUDGET, received.recv())
@@ -178,8 +182,19 @@ async fn real_recovery_connections_enforce_inbound_capacity_and_shutdown() -> an
         .await?;
         drop(active);
         drop(clients);
+        drop(rejected);
         router.shutdown().await?;
         client.close().await;
+        assert_eq!(native_handles.len(), 10);
+        timeout(BUDGET, async {
+            while native_handles
+                .iter()
+                .any(|handle| handle.upgrade().is_some())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
         anyhow::Ok(())
     })
     .await??;
