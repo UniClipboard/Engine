@@ -518,3 +518,5 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 新增跨进程用例的首次根门禁因测试诊断把超时source拼进文本而被Rust规范拒绝；改为保留source chain后，定向用例再次通过（run `a66510b5-b651-4ddf-a60d-f29897d72450`），六项根交付门禁通过，记录于 `target/branch-recovery-cross-process-final-gates.log`。此前workspace和成员拓扑全量结果先于此测试专用增量；生产代码未变化，新增用例及相关根门禁已单独复验，仍不代替最终候选远端CI。
 
 使用Linux PR workspace组相同过滤表达式列举新增跨进程用例，nextest返回 `matches`、`ignored=false`，结果为 `target/branch-recovery-cross-process-ci-selection.json`；这只验证本机选测，不代表远端CI运行。
+
+包含跨进程测试的候选 `164d8583e6e2c7d861abf3c03124115e46524561` 再次通过独立Engine Git消费者依赖来源核对与构建，日志 `target/branch-recovery-cross-process-git-consumer.log`；临时工作树已回收，共享 `target` 保留。后续文档记录不改变代码树，远端CI仍未执行。
