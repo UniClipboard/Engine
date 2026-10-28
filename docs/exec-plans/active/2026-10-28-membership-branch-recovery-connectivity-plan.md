@@ -371,7 +371,7 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 | AC03 | 合法分叉与签发资格有业务及真实进程测试；恢复准入直接覆盖未知、歧义、错peer和撤销，签发业务覆盖来源与recipient不匹配以及正确来源搭配不存在的recipient时拒绝。各测试的替身与真实网络范围见下文。 |
 | AC04 | 单元测试覆盖冻结与提交边界，真实进程覆盖旧GroupInfo响应期间切Space及同设备移除重加；另有真实Iroh身份读取和握手后准入交接围栏测试，其他时序不能由此推定。 |
 | AC05 | 第二backend覆盖取消隔离、30秒跨受控出站准入／拨号／排队／前缀／正文和10秒首流，已开始签发的监督有真实重置测试；真实身份读取耗时、网络和其他本地工作边界不能由受控准入测试推定。 |
-| AC06 | 入站8、拨号4、单peer等待4和全局等待16的受控测试通过；拨号与等待同时占满时关闭等待实际结算、归还等待额度并关闭连接的组合测试通过。真实Iroh入站饱和后handler及两端各10个原生连接弱句柄归零；跨进程压力及进程全部资源整体回归基线尚未证明。 |
+| AC06 | 入站8、拨号4、单peer等待4和全局等待16的受控测试通过；拨号与等待同时占满时关闭等待实际结算、归还等待额度并关闭连接的组合测试通过。独立进程真实Iroh入站饱和、拒绝超额和替换连接后，服务端handler及两端各10个原生连接弱句柄归零，Linux两端文件描述符回到网络启动前基线；该场景不覆盖真实MLS恢复工作负载或所有进程资源类别。 |
 | AC07 | 最终生产候选三角色Direct／Relay矩阵与逐连接路径通过；协议及wire定向8项覆盖正文尾随、短／超长帧和FIN期限。五类消息固定字节向量在当前编码器和单独编译的旧协议源码上均通过；旧源码测试使用当前Core及依赖，源码与锁定版本对照见下文。 |
 | AC08 | 11项真实进程组通过，覆盖持久检查点崩溃、原包重试和不同commit；加密SQLite重开及敏感哨兵扫描已有定向证据。 |
 | AC09 | 内存第二backend经实际Application transport／receiver与恢复wire完成GroupInfo和external commit两次交换，核对输入输出及两次独立拨号；签发方为替身。Application／Core／协议包清单和恢复源码未见Iroh依赖，仓库架构检查及其恢复旁路负fixture通过。 |
@@ -512,3 +512,9 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 上述成员拓扑全组复验通过（run `a1a1d72b-c552-4220-9986-62c9169eb3bf`，56项通过、14项测试及135个binary筛选跳过，599.096秒；日志与JUnit为 `target/branch-recovery-otlp-fix-membership.log` 和 `target/branch-recovery-otlp-fix-membership.xml`，原JUnit已恢复）。此前超时的Space切换用例及F2均在本轮通过；历史失败的根因仍未知，本轮通过不覆盖原失败，也不代替远端CI。
 
 包含上述结果的候选 `13d836164c5401611b633a4ab87c2cb3d88a0f0d` 通过独立Engine Git消费者的依赖来源核对和构建，日志 `target/branch-recovery-final-git-consumer.log`。首次临时检出以 `--no-fetch` 初始化子模块因本地新克隆缺少固定对象而失败，改为从原仓库已有子模块对象初始化后通过；临时工作树已回收，共享 `target` 保留。本条记录产生的后续文档提交不改变受验证的代码树，不代替远端CI。
+
+补充独立进程真实Iroh入站容量与关闭验证：子进程逐条建立8条恢复协议连接并由父进程确认占满，第9条被Busy拒绝，释放一条后替换连接成功；关闭后服务端handler归零、两端各10个原生连接弱句柄均无法升级，Linux两进程文件描述符数量回到各自创建端点前基线，子进程正常退出。最终单项通过（run `f7e36070-7925-48eb-8939-10a424ae6a7f`），直接运行相同测试binary连续20次通过，日志 `target/branch-recovery-cross-process-fd-repeat.log`。首两次加入描述符基线的测试失败：服务端多2个UDP socket，调查发现测试夹具在关闭路由后仍持有路由对象；释放该对象后通过，失败记录分别为 `target/branch-recovery-cross-process-fd.log` 和 `target/branch-recovery-cross-process-fd-baseline.log`。此场景使用真实网络与受管准入但不执行MLS／SQLite恢复，拨号与等待队列的组合饱和仍由受控backend验证，不能推广为所有OS资源或真实业务压力均已验证。新增测试后的根门禁正在执行。
+
+新增跨进程用例的首次根门禁因测试诊断把超时source拼进文本而被Rust规范拒绝；改为保留source chain后，定向用例再次通过（run `a66510b5-b651-4ddf-a60d-f29897d72450`），六项根交付门禁通过，记录于 `target/branch-recovery-cross-process-final-gates.log`。此前workspace和成员拓扑全量结果先于此测试专用增量；生产代码未变化，新增用例及相关根门禁已单独复验，仍不代替最终候选远端CI。
+
+使用Linux PR workspace组相同过滤表达式列举新增跨进程用例，nextest返回 `matches`、`ignored=false`，结果为 `target/branch-recovery-cross-process-ci-selection.json`；这只验证本机选测，不代表远端CI运行。

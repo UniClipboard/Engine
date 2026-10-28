@@ -17,6 +17,10 @@ use uc_sync_protocol::clipboard::MULTIPLEXED_CLIPBOARD_ALPN;
 use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use uc_sync_protocol::transfer_progress::{self, ProgressFrame, LEGACY_TRANSFER_PROGRESS_ALPN};
 
+#[cfg(unix)]
+#[path = "stream_profile_cross_process_probe.rs"]
+mod cross_process;
+
 async fn incoming(rx: &mut mpsc::Receiver<Incoming>) -> Incoming {
     timeout(BUDGET, rx.recv()).await.unwrap().unwrap()
 }
