@@ -1,6 +1,10 @@
 use super::super::super::BranchRecoveryAdmission;
 use super::*;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use iroh::endpoint::WeakConnectionHandle;
+use std::sync::{
+    atomic::{AtomicU64, AtomicUsize},
+    Mutex,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use uc_application::deps::{
@@ -35,6 +39,7 @@ struct RecoveryCapacityCapture {
     manager: ConnectivityManager,
     events: mpsc::Sender<RecoveryIncoming>,
     active: Arc<AtomicUsize>,
+    native_handles: Arc<Mutex<Vec<WeakConnectionHandle>>>,
 }
 
 struct ActiveRecoveryHandler(Arc<AtomicUsize>);
@@ -55,6 +60,10 @@ impl ProtocolHandler for RecoveryCapacityCapture {
     async fn accept(&self, native: Connection) -> Result<(), AcceptError> {
         self.active.fetch_add(1, Ordering::SeqCst);
         let _active = ActiveRecoveryHandler(self.active.clone());
+        self.native_handles
+            .lock()
+            .unwrap()
+            .push(native.weak_handle());
         let raw = IrohPeerConnection::wrap(native);
         let result = self
             .manager
@@ -107,6 +116,7 @@ async fn real_recovery_connections_enforce_inbound_capacity_and_shutdown() -> an
         );
         let (events, mut received) = mpsc::channel(16);
         let handlers = Arc::new(AtomicUsize::new(0));
+        let server_handles = Arc::new(Mutex::new(Vec::new()));
         let router = Router::builder((*server).clone())
             .accept(
                 MEMBERSHIP_BRANCH_RECOVERY_ALPN,
@@ -114,6 +124,7 @@ async fn real_recovery_connections_enforce_inbound_capacity_and_shutdown() -> an
                     manager: manager.clone(),
                     events,
                     active: handlers.clone(),
+                    native_handles: server_handles.clone(),
                 },
             )
             .spawn();
@@ -186,10 +197,16 @@ async fn real_recovery_connections_enforce_inbound_capacity_and_shutdown() -> an
         router.shutdown().await?;
         client.close().await;
         assert_eq!(native_handles.len(), 10);
+        assert_eq!(server_handles.lock().unwrap().len(), 10);
         timeout(BUDGET, async {
             while native_handles
                 .iter()
                 .any(|handle| handle.upgrade().is_some())
+                || server_handles
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|handle| handle.upgrade().is_some())
             {
                 tokio::task::yield_now().await;
             }
@@ -269,6 +286,7 @@ async fn real_recovery_identity_read_keeps_original_revocation_fence() -> anyhow
                     manager: manager.clone(),
                     events,
                     active: Arc::new(AtomicUsize::new(0)),
+                    native_handles: Arc::new(Mutex::new(Vec::new())),
                 },
             )
             .spawn();
