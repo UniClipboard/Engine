@@ -490,3 +490,5 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 带补充失败诊断的完整Linux PR进程组重跑通过（run `a95258b0-d186-496d-a8a5-adfda84c8e95`，11项通过、0项跳过，总计491.813秒；日志与JUnit分别为 `target/branch-recovery-observation-process-rerun.log` 和 `target/branch-recovery-observation-process-rerun.xml`，原JUnit已恢复）。前一轮冲突未清零失败仍保留、根因未明，不能称为已修复；该结果也不代替生产观测改动后的workspace全量回归与远端CI。
 
 观测生产改动后的locked metadata、workspace全目标check、格式、Rust规范、仓库架构／隐私检查及diff检查通过；日志 `target/branch-recovery-observation-check.log` 和 `target/branch-recovery-observation-gate.log`。仍需生产改动后的workspace全量测试和最终候选远端CI，不能沿用改动前的全量结果。
+
+观测生产代码候选 `9da4f52ede928a8eefa9fde8ed0fd80d4f816d58` 的Linux CI配置workspace全量测试已启动，日志 `target/branch-recovery-observation-workspace.log`；运行结束前不计通过。运行包装会保留独立JUnit并恢复原JUnit；本条为执行状态，不代表远端CI。
