@@ -460,3 +460,5 @@ AC10源码核对：成员维护worker把分支恢复作为既有维护轮次中�
 新增网络响应成功但转换持久提交失败的受控测试：返回延期，未记录nonce消费或转换；随后重试使用已保存的恢复状态，无需再次请求GroupInfo或恢复包，并成功保存转换。恢复业务组通过（run `f35293c7-b186-46e0-93d6-dbd37da3d1f5`，20项通过、1425项筛选跳过）。该场景使用内存仓储与恢复响应替身，不代替真实网络日志关联；初次格式检查发现排版差异，调整后格式、Rust规范及diff检查通过。
 
 CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成员拓扑binary与升级矩阵包；新增Application容量／接收方／持久失败、Infra准入期限及协议向量测试不在这些排除范围内且未标记ignore。11项真实进程测试另由工作流显式启用 `branch-recovery-fault-tests` 与Engine对应feature执行。此为工作流与测试源码的静态核对，不表示远端任务已经运行或通过。
+
+使用CI profile及workspace组相同的排除表达式，对上述五项新增测试进一步运行nextest实际列表检查：五项均返回 `matches` 且 `ignored=false`，机器可读结果位于 `target/branch-recovery-ci-selection.json`。此命令只构建并列举选定的三个包，不运行测试，也不证明远端CI状态。
