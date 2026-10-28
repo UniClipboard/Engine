@@ -376,7 +376,7 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 | AC08 | 11项真实进程组通过，覆盖持久检查点崩溃、原包重试和不同commit；加密SQLite重开及敏感哨兵扫描已有定向证据。 |
 | AC09 | 内存第二backend经实际Application transport／receiver与恢复wire完成GroupInfo和external commit两次交换，核对输入输出及两次独立拨号；签发方为替身。Application／Core／协议包清单和恢复源码未见Iroh依赖，仓库架构检查及其恢复旁路负fixture通过。 |
 | AC10 | 来源保留、签发日志脱敏、JSONL导出及新路径未创建网络业务root有定向测试或源码证据；受控测试验证网络成功后持久提交失败返回延期而非完成。新增封闭诊断关联后，真实Direct恢复按匿名连接引用与维护轮次明确匹配；两个并发轮次的JSONL隔离及原始键不输出通过。尚待完整回归与远端CI。 |
-| AC11 | 工作区4970项通过且42项测试与4个binary跳过；后续测试专用增量已分别通过，根门禁及新增容量测试的相关格式／规范检查已复验。远端最终候选CI和设备平台未执行。 |
+| AC11 | 生产观测改动后workspace全量4985项通过、1项失败，42项测试与4个binary跳过；失败单项复验通过但原因未知，全集尚未通过。根门禁已复验，远端最终候选CI和设备平台未执行。 |
 | AC12 | 稳定文档和执行计划已有更新；未结项不得归档，历史失败与技术债继续保留。 |
 
 完整进程组构建后补充恢复准入适配器定向测试：未知指纹、同一指纹映射两个设备和出站目标不匹配均须拒绝，前两者还须保留原始身份解析来源。新增用例尚未编译或运行；本轮进程组使用增量之前的二进制，且该测试使用内存连接。
@@ -492,3 +492,7 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 观测生产改动后的locked metadata、workspace全目标check、格式、Rust规范、仓库架构／隐私检查及diff检查通过；日志 `target/branch-recovery-observation-check.log` 和 `target/branch-recovery-observation-gate.log`。仍需生产改动后的workspace全量测试和最终候选远端CI，不能沿用改动前的全量结果。
 
 观测生产代码候选 `9da4f52ede928a8eefa9fde8ed0fd80d4f816d58` 的Linux CI配置workspace全量测试已启动，日志 `target/branch-recovery-observation-workspace.log`；运行结束前不计通过。运行包装会保留独立JUnit并恢复原JUnit；本条为执行状态，不代表远端CI。
+
+上述workspace全量运行结束但未通过（run `22bdc163-dc9a-41ed-abc3-a8cc49486252`，4985项通过、1项失败、42项测试及4个binary跳过，1592.756秒；日志与JUnit分别为 `target/branch-recovery-observation-workspace.log` 和 `target/branch-recovery-observation-workspace.xml`）。唯一失败为真实Engine接收重试观测测试：OTLP测试接收器收到预期traces／logs之外的路径，现有断言未记录具体路径，来源未知。相同workspace构建范围单项复验通过（run `6222f085-da31-4795-8c44-336107f3e10e`，1项通过）；未复现不等于根因已解决，不能将全集记为通过。历史进程组失败同样保留，远端CI和未执行设备仍未结算。
+
+最终生产观测代码后的成员拓扑组未通过（run `30a6e229-8fd2-4f01-a839-672ef285b3b9`，55项通过、1项失败、14项测试及135个binary筛选跳过，687.706秒；日志和JUnit为 `target/branch-recovery-observation-membership.log` 与 `target/branch-recovery-observation-membership.xml`）。失败用例为 `committed_space_switch_recovers_after_repeated_session_activation_failures`：加入方初始准入等待超时，尚不确定原因或与本片的关系。相同构建范围的单项复验通过（run `df6bba31-ee68-43b1-a3b5-e2f553488f6a`，1项通过、69项筛选跳过），未复现不代表根因已解决。本轮F2通过，历史F2失败仍保留；这次全集失败不能被其他通过结果覆盖。
