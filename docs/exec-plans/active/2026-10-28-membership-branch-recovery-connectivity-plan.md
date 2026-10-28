@@ -376,7 +376,7 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 | AC08 | 11项真实进程组通过，覆盖持久检查点崩溃、原包重试和不同commit；加密SQLite重开及敏感哨兵扫描已有定向证据。 |
 | AC09 | 内存第二backend经实际Application transport／receiver与恢复wire完成GroupInfo和external commit两次交换，核对输入输出及两次独立拨号；签发方为替身。Application／Core／协议包清单和恢复源码未见Iroh依赖，仓库架构检查及其恢复旁路负fixture通过。 |
 | AC10 | 来源保留、签发日志脱敏、JSONL导出及新路径未创建网络业务root有定向测试或源码证据；受控测试验证网络成功后持久提交失败返回延期而非完成。新增封闭诊断关联后，真实Direct恢复按匿名连接引用与维护轮次明确匹配；两个并发轮次的JSONL隔离及原始键不输出通过。尚待完整回归与远端CI。 |
-| AC11 | 生产观测改动后workspace全量4985项通过、1项失败，42项测试与4个binary跳过；失败单项复验通过但原因未知，全集尚未通过。根门禁已复验，远端最终候选CI和设备平台未执行。 |
+| AC11 | 测试接收器修正后workspace全量4986项通过，42项测试与4个binary跳过；此前全集失败及成员拓扑组失败保留。根门禁已复验，成员拓扑组需复验，远端最终候选CI和设备平台未执行。 |
 | AC12 | 稳定文档和执行计划已有更新；未结项不得归档，历史失败与技术债继续保留。 |
 
 完整进程组构建后补充恢复准入适配器定向测试：未知指纹、同一指纹映射两个设备和出站目标不匹配均须拒绝，前两者还须保留原始身份解析来源。新增用例尚未编译或运行；本轮进程组使用增量之前的二进制，且该测试使用内存连接。
@@ -500,3 +500,11 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 对workspace中OTLP观测失败建立单项复现：无探针的第2次运行再次出现同一断言，封闭分类探针确认收到的是空的根路径GET，发起方未知。现有真实Engine测试主动注入此请求后，在原解析器上确定性失败（run `00b7761e-9ee7-4ecc-9657-1951e7eab88d`）；解析器仅跳过该GET，其余未知路径仍拒绝，全部请求仍参与敏感内容检查，证据文件只保存真实OTLP请求。修正后同一用例及证据导出通过（run `1a8b447b-ab68-470f-b6f1-3e4eff8bfffc`），另连续20次通过；临时分类探针已删除，格式、Rust规范和diff检查通过。该修正限于测试接收器，不证明请求来源或其他间歇失败已解决；此前workspace全集失败保留，仍需修正后的完整回归。
 
 上述测试接收器修正后的六项根交付门禁通过，记录于 `target/branch-recovery-otlp-fix-gates.log`。Space切换用例使用workspace构建出的真实测试binary连续运行20次均通过，未复现原超时（日志 `target/branch-recovery-observation-space-switch-repeat.log`）；此前全集失败及其未知根因仍保留。
+
+进一步核对该次Space切换失败：故障注入发生在目标Space会话激活阶段；日志中随后出现一次准入建立被本地拒绝、连接scope核对超时，以及约119秒后随测试结束中断的应用关闭／会话准备观测。应用关闭会并发等待多个领域负责人，现有失败日志不足以确定具体等待项或因果关系；不能直接归因于成员恢复，也不能根据单项重复通过认定修复。
+
+测试接收器修正后的候选 `3a24d1026cc14303ec044627eb2897f554642bb4` 已启动Linux CI配置workspace全量回归，日志 `target/branch-recovery-otlp-fix-workspace.log`；本条为执行状态，结束前不计通过。
+
+上述workspace全量回归通过（run `a342af97-f23e-40f2-bf73-36957a7bf611`，4986项通过，42项测试及4个binary跳过，1580.735秒；日志和JUnit为 `target/branch-recovery-otlp-fix-workspace.log` 与 `target/branch-recovery-otlp-fix-workspace.xml`，原JUnit已恢复）。此前失败的OTLP用例在全集中通过；先前全集失败、成员拓扑组超时及历史故障仍分别保留，本地结果不代替最终候选远端CI。
+
+同一生产代码及测试修正后的Linux成员拓扑全组复验已启动，日志 `target/branch-recovery-otlp-fix-membership.log`；运行结束前不计通过。
