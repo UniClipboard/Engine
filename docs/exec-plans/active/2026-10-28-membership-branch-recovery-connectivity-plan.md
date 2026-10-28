@@ -462,3 +462,5 @@ AC10源码核对：成员维护worker把分支恢复作为既有维护轮次中�
 CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成员拓扑binary与升级矩阵包；新增Application容量／接收方／持久失败、Infra准入期限及协议向量测试不在这些排除范围内且未标记ignore。11项真实进程测试另由工作流显式启用 `branch-recovery-fault-tests` 与Engine对应feature执行。此为工作流与测试源码的静态核对，不表示远端任务已经运行或通过。
 
 使用CI profile及workspace组相同的排除表达式，对上述五项新增测试进一步运行nextest实际列表检查：五项均返回 `matches` 且 `ignored=false`，机器可读结果位于 `target/branch-recovery-ci-selection.json`。此命令只构建并列举选定的三个包，不运行测试，也不证明远端CI状态。
+
+当前候选真实Engine多轮创建／退出资源测试通过（run `17ce0fb8-eacd-4d89-bdac-ec04804caa20`，1项通过、38项筛选跳过）：测试在多轮退出后采样任务与Unix文件描述符，检查任务数不增长及句柄趋势低于既定阈值。该运行使用默认feature，覆盖普通会话生命周期，不制造分支恢复饱和负载，不能据此证明恢复协议压力下全部进程资源回归基线。
