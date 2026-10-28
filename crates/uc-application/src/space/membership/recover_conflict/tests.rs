@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    AdmissionChangeFacts, HistoricalMembershipSignatureVerifier, MembershipBranchRecoveryPackageV1,
-    MembershipBranchTransitionV1, MembershipConflictChoice, MembershipConflictId,
-    MembershipConflictPolicy, MembershipCredential, VersionedMembershipHistory,
-    ED25519_SIGNATURE_ALGORITHM_V1,
+    AdmissionChangeFacts, HistoricalMembershipSignatureVerifier, MemberInstanceId,
+    MembershipBranchRecoveryPackageV1, MembershipBranchTransitionV1, MembershipConflictChoice,
+    MembershipConflictId, MembershipConflictPolicy, MembershipCredential,
+    VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::ports::ClockPort;
 
@@ -934,6 +934,35 @@ async fn issuer_authenticates_recipient_before_preparing_and_signing_material() 
         IssueMembershipBranchRecoveryError::Rejected { .. }
     ));
     assert_eq!(material.group_info_calls.load(Ordering::SeqCst), 0);
+
+    let invalid_recipient = MemberInstanceId::from_bytes([0x99; 32]);
+    let invalid_begin = issuer
+        .begin_membership_branch_recovery(BeginMembershipBranchRecoveryInput {
+            scope: issuer_scope(),
+            source_device_id: local_device_id.clone(),
+            conflict_id: fixture.conflict_id,
+            target_branch_id,
+            recipient_member: invalid_recipient,
+        })
+        .await;
+    assert!(matches!(
+        invalid_begin,
+        Err(IssueMembershipBranchRecoveryError::Rejected { .. })
+    ));
+    assert_eq!(material.group_info_calls.load(Ordering::SeqCst), 0);
+    let invalid_issue = issuer
+        .issue_membership_branch_recovery(IssueMembershipBranchRecoveryInput {
+            scope: issuer_scope(),
+            source_device_id: local_device_id.clone(),
+            recipient_member: invalid_recipient,
+            ..request.clone()
+        })
+        .await;
+    assert!(matches!(
+        invalid_issue,
+        Err(IssueMembershipBranchRecoveryError::Rejected { .. })
+    ));
+    assert_eq!(material.calls.load(Ordering::SeqCst), 0);
 
     let group_info = issuer
         .begin_membership_branch_recovery(BeginMembershipBranchRecoveryInput {
