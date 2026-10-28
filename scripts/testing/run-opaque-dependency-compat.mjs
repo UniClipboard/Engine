@@ -2,7 +2,7 @@
 // 固定旧源码、相同测试与真实二进制，验证双向混合密码消息及解密后资料兼容。
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '../..')
@@ -41,11 +41,15 @@ try {
   const archive = execFileSync('git', ['archive', oldRevision], { cwd: root, maxBuffer: 512 * 1024 * 1024 })
   execFileSync('tar', ['-x', '-C', source], { input: archive })
   const submodule = git(['rev-parse', `${oldRevision}:third_party/iroh`])
-  if (git(['-C', 'third_party/iroh', 'rev-parse', 'HEAD']) !== submodule || git(['-C', 'third_party/iroh', 'status', '--porcelain'])) {
-    throw new Error('fixed old network source does not match clean local submodule')
+  // 旧版 gitlink 与当前子模块可以不同。只按旧版提交归档，不切换当前工作树。
+  if (spawnSync('git', ['-C', 'third_party/iroh', 'cat-file', '-e', `${submodule}^{commit}`], { cwd: root, stdio: 'ignore' }).status !== 0) {
+    execFileSync('git', ['-C', 'third_party/iroh', 'fetch', '--no-tags', 'origin', submodule], { cwd: root, stdio: 'inherit' })
   }
-  rmSync(join(source, 'third_party/iroh'), { recursive: true, force: true })
-  symlinkSync(join(root, 'third_party/iroh'), join(source, 'third_party/iroh'), 'dir')
+  const networkArchive = execFileSync('git', ['-C', 'third_party/iroh', 'archive', submodule], { cwd: root, maxBuffer: 512 * 1024 * 1024 })
+  const oldNetwork = join(source, 'third_party/iroh')
+  rmSync(oldNetwork, { recursive: true, force: true })
+  mkdirSync(oldNetwork, { recursive: true })
+  execFileSync('tar', ['-x', '-C', oldNetwork], { input: networkArchive })
   mkdirSync(join(source, 'crates/uc-infra-crypto/tests'), { recursive: true })
   copyFileSync(join(root, testPath), join(source, testPath))
   const oldBinary = join(scratch, 'fixed-old-peer')
