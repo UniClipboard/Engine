@@ -472,3 +472,5 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 真实Iroh入站饱和测试增加客户端原生弱句柄回收检查后通过：初版run `701c9050-6bba-4e6d-8352-da9c78a8b42b`，加上确实观察10个句柄的数量断言后复验run `0c9e946c-65f0-444f-b621-8d100189d151`（1项通过、442项筛选跳过）。8条活动连接、超额连接与替换连接关闭并释放后，10个客户端原生弱句柄均无法升级，受追踪handler归零。此测试运行在单个测试进程，只检查本场景客户端句柄和受追踪handler，不证明跨进程全部资源回落；其后仅调整格式，格式、Rust规范及diff检查通过。
 
 同一真实饱和场景补充服务端原生弱句柄观察：客户端与服务端各登记10个句柄，关闭后两端均无法升级，受追踪handler归零。首次构建因共用的身份竞态测试handler未初始化新增字段而失败，未运行测试；补齐后饱和与身份撤销两项通过（run `b6940a9d-ae85-4541-b4f4-035165ede0d4`，441项筛选跳过），格式、Rust规范及diff检查通过。两端仍在同一测试进程，不代表所有进程任务或文件描述符的压力回归。
+
+两端句柄测试纳入候选 `01e88c6a25c5fc9c5c276feb36dba57b0c2ffe2e` 后，locked metadata、workspace全目标check、格式、Rust规范、仓库架构及diff检查通过；编译和架构日志分别为 `target/branch-recovery-delivery-check.log` 与 `target/branch-recovery-delivery-architecture.log`。随后仅补充本条记录；远端CI与未执行平台仍不计通过。
