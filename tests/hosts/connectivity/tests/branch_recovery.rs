@@ -87,6 +87,35 @@ fn completed_conflict_rounds(host: &mut HostProcess) -> HashSet<u64> {
                 })
             })
         })
+        .filter(|round| {
+            let start = records.iter().find(|row| {
+                row["fields"]["event.name"] == "runtime.work.started"
+                    && row["fields"]["step"] == "maintenance_conflicts"
+                    && row["fields"]["maintenance_round"].as_u64() == Some(*round)
+            });
+            let end = records.iter().find(|row| {
+                row["fields"]["event.name"] == "runtime.work.finished"
+                    && row["fields"]["step"] == "maintenance_conflicts"
+                    && row["fields"]["maintenance_round"].as_u64() == Some(*round)
+            });
+            let Some((start, end)) = start
+                .and_then(|row| row["timestamp"].as_str())
+                .zip(end.and_then(|row| row["timestamp"].as_str()))
+            else {
+                return false;
+            };
+            records
+                .iter()
+                .filter(|row| {
+                    row["fields"]["event.name"] == "connection.protocol.negotiated"
+                        && row["fields"]["protocol"] == "membership_branch_recovery"
+                        && row["timestamp"]
+                            .as_str()
+                            .is_some_and(|timestamp| start <= timestamp && timestamp <= end)
+                })
+                .count()
+                >= 2
+        })
         .collect()
 }
 
@@ -261,6 +290,8 @@ async fn run_scenario(crash_after_completion: bool, crash_at: Option<&str>) {
         } else {
             c.request(json!({"command": "start_network_capture"}));
         }
+    } else if crash_at.is_none() && old_side.is_none() {
+        c.request(json!({"command": "start_network_capture"}));
     }
     if let Some(side) = old_side.as_deref() {
         let old_hosts: Vec<&HostProcess> = if side == "issuer" {
