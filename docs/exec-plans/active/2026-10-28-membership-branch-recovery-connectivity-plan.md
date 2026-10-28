@@ -366,7 +366,7 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 
 | 条件 | 当前证据与尚欠项 |
 | --- | --- |
-| AC01 | 五进程真实恢复与F2全组通过；仍须在最终候选核对入口和接口边界。 |
+| AC01 | 五进程真实恢复与F2全组通过；候选相对基线的Engine源码改动仅在assembly，公开入口源码无差异，恢复仍由Application维护worker调用。接口结论基于源码差异与架构检查，不代替所有平台绑定验收。 |
 | AC02 | 专属profile、受管出入站和架构负fixture已有证据；新增测试后的仓库架构门禁已通过。 |
 | AC03 | 合法分叉与签发资格有业务及真实进程测试；恢复准入直接覆盖未知、歧义、错peer和撤销，签发业务覆盖来源与recipient不匹配。仍须核对其余资格边界。 |
 | AC04 | 单元测试覆盖冻结与提交边界，真实进程覆盖旧GroupInfo响应期间切Space及同设备移除重加；另有真实Iroh身份读取和握手后准入交接围栏测试，其他时序不能由此推定。 |
@@ -452,3 +452,5 @@ AC10源码核对：成员维护worker把分支恢复作为既有维护轮次中�
 容量关闭测试与五消息向量纳入候选 `6957ed453c9533ca31ac00925829f57a13a3e4e7` 后，locked metadata、workspace全目标check、格式、Rust规范、仓库架构检查及diff检查再次通过；编译与架构日志分别为 `target/branch-recovery-candidate-check.log` 和 `target/branch-recovery-candidate-architecture.log`。此后的变更仅为本条证据记录；远端候选CI及未执行设备平台仍不计通过。
 
 新增第二backend出站准入期限测试通过（run `4a44dbfe-c6ad-4100-bb3c-74d3b3d71288`，1项通过、442项筛选跳过）：受控连接身份准入占用20秒后，请求发出且响应不返回，29秒仍等待、原第30秒按不可用结束。测试使用虚拟时钟与替身准入，并非真实身份目录或网络；其后仅调整测试格式，格式、Rust规范及diff检查通过。
+
+入口边界源码核对：候选 `784aef98f92f25269569bc0dff457a0528a0e555` 相对当前 `HEAD` 的 `uc-engine/src` 差异仅涉及 `assembly/sync_engine.rs` 装配和 `assembly/host.rs` 内的测试；Engine公开入口文件无差异。组装层创建manager、transport及receiver并交给builder安装，Application维护worker仍执行已有完整 `recover_membership_conflicts` 动作。该核对不证明各绑定平台已运行，也不将测试宿主的故障控制当成产品公开接口。
