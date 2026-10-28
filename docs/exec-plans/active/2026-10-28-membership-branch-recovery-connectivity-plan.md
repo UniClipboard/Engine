@@ -424,3 +424,5 @@ PR testkit／持久化证据组通过（run `bc1c772f-210b-43d8-839c-f0407ce437c
 PR隔离网络E02 Direct冒烟通过：真实三节点文本与文件传输分别通过，单轮证据在 `target/branch-recovery-e02-evidence/`；运行使用用户网络／挂载命名空间和预构建宿主。此结果仅覆盖E02 Direct，不代表完整网络矩阵。
 
 成员历史隔离Relay内部场景通过：使用预构建测试二进制，在用户网络／挂载命名空间运行三进程跨轮连接复用，1项通过、7项筛选跳过；UDP封锁规则实际丢弃506包，日志及规则证据分别在 `target/branch-recovery-history-relay.log` 和 `target/branch-recovery-history-relay-evidence/`。此次只运行脚本的内部场景，没有执行其外层完整工作区构建，不代表完整CI通过。
+
+AC10源码核对：成员维护worker把分支恢复作为既有维护轮次中的 `MaintenanceConflicts` 步骤并汇总其业务结果；受管传输只返回响应或错误，恢复owner在后续状态提交后才返回对应结果。新入站handler和签发失败路径仅记录固定错误分类及I/O种类，未在这些路径创建新的网络业务root，也未记录请求内容或来源错误原文。结合前述source保留、签发脱敏及JSONL测试，可支持这些局部边界；源码核对不能替代对完整真实恢复全过程业务记录关联与结算的端到端证明，AC10仍未结项。
