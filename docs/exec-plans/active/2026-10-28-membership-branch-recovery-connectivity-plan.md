@@ -476,3 +476,5 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 两端句柄测试纳入候选 `01e88c6a25c5fc9c5c276feb36dba57b0c2ffe2e` 后，locked metadata、workspace全目标check、格式、Rust规范、仓库架构及diff检查通过；编译和架构日志分别为 `target/branch-recovery-delivery-check.log` 与 `target/branch-recovery-delivery-architecture.log`。随后仅补充本条记录；远端CI与未执行平台仍不计通过。
 
 观测验收纠正：此前使用时间区间将连接协商归到维护轮次的断言不满足业务记录标准对并发场景明确关联的要求，已从进程测试移除；前述相关测试通过记录保留，但不再作为真实恢复日志关联的证据。原业务结果与路径测试仍保留，移除后当前／当前五进程Direct复验通过（run `e1b8ba7e-8ca8-4dc9-ace8-b1c7f9ba6d36`，1项通过、10项筛选跳过）。完整业务记录关联仍未证明。
+
+关联机制核对：维护诊断通过task-local的 `MaintenanceContext` 记录轮次，物理连接观察在Iroh握手回调中采集独立连接上下文；连接管理器的拨号工作使用独立spawn及空span。现有源码未提供将该物理连接记录明确绑定到发起它的维护轮次的证据，因此不能把两者的时间相邻当作关联，也不能假定额外业务root已经形成。若补齐该验证或能力，须先确定完整负责人的不透明上下文如何跨异步交接，保持Engine不查询业务步骤、协议不增加传播字段；当前AC10仍未结项。
