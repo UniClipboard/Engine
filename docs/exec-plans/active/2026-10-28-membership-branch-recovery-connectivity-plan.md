@@ -416,3 +416,5 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 固定旧版主动剪贴板Direct双角色互通通过（1项通过、7项筛选跳过，47.50秒，JUnit及场景证据在 `target/branch-recovery-active-fixed-evidence/`）；旧Engine源码 `2f9afc9956b0cda82e65c912f0c0f6dc6aa51256`，本次旧宿主SHA256 `021629a76b5e64012c0ccf5851333e038fbfe718a57656cd36cb38637529ec30`。原 `target/active-clipboard-connectivity-evidence/fixed-main` 目录已恢复并通过其原SHA校验；此结果不代表Relay或远端CI通过。
 
 PR工作流实际接收授权登记证明通过：8项真实Iroh／接收侧用例通过、434项筛选跳过，包含1024项原计划和16页快照容量证据；来源与两个测试二进制SHA记录在 `target/test-artifacts/slice9-progress-proof/progress-registration/report.json`，源码为 `80bda137` 加未提交修改。该本地结果不代替远端最终候选CI。
+
+PR必需的通用原生资源检查通过（run `ea6d6980-5df7-4701-ab88-35ff8da48c80`，9项通过、356项筛选跳过，389.061秒）；资源验收脚本确认7个生命周期场景及两个1 GiB文件的内核资源、SDK标记、原生句柄和下载配额满足既定阈值，证据在 `target/test-artifacts/slice9-blob-lifecycle/`。原JUnit已与备份逐字节核对并恢复。这是通用文件接收资源证据，不代替恢复协议全部资源矩阵或远端CI。
