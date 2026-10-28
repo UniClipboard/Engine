@@ -376,7 +376,7 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 | AC08 | 11项真实进程组通过，覆盖持久检查点崩溃、原包重试和不同commit；加密SQLite重开及敏感哨兵扫描已有定向证据。 |
 | AC09 | 内存第二backend经实际Application transport／receiver与恢复wire完成GroupInfo和external commit两次交换，核对输入输出及两次独立拨号；签发方为替身。Application／Core／协议包清单和恢复源码未见Iroh依赖，仓库架构检查及其恢复旁路负fixture通过。 |
 | AC10 | 来源保留、签发日志脱敏、JSONL导出及新路径未创建网络业务root有定向测试或源码证据；受控测试验证网络成功后持久提交失败返回延期而非完成。新增封闭诊断关联后，真实Direct恢复按匿名连接引用与维护轮次明确匹配；两个并发轮次的JSONL隔离及原始键不输出通过。尚待完整回归与远端CI。 |
-| AC11 | 测试接收器修正后workspace全量4986项通过，42项测试与4个binary跳过；此前全集失败及成员拓扑组失败保留。根门禁已复验，成员拓扑组需复验，远端最终候选CI和设备平台未执行。 |
+| AC11 | 测试接收器修正后workspace全量4986项通过，42项测试与4个binary跳过；成员拓扑组56项通过、14项筛选跳过。此前全集失败及成员拓扑组失败保留，根门禁已复验，远端最终候选CI和设备平台未执行。 |
 | AC12 | 稳定文档和执行计划已有更新；未结项不得归档，历史失败与技术债继续保留。 |
 
 完整进程组构建后补充恢复准入适配器定向测试：未知指纹、同一指纹映射两个设备和出站目标不匹配均须拒绝，前两者还须保留原始身份解析来源。新增用例尚未编译或运行；本轮进程组使用增量之前的二进制，且该测试使用内存连接。
@@ -508,3 +508,5 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 上述workspace全量回归通过（run `a342af97-f23e-40f2-bf73-36957a7bf611`，4986项通过，42项测试及4个binary跳过，1580.735秒；日志和JUnit为 `target/branch-recovery-otlp-fix-workspace.log` 与 `target/branch-recovery-otlp-fix-workspace.xml`，原JUnit已恢复）。此前失败的OTLP用例在全集中通过；先前全集失败、成员拓扑组超时及历史故障仍分别保留，本地结果不代替最终候选远端CI。
 
 同一生产代码及测试修正后的Linux成员拓扑全组复验已启动，日志 `target/branch-recovery-otlp-fix-membership.log`；运行结束前不计通过。
+
+上述成员拓扑全组复验通过（run `a1a1d72b-c552-4220-9986-62c9169eb3bf`，56项通过、14项测试及135个binary筛选跳过，599.096秒；日志与JUnit为 `target/branch-recovery-otlp-fix-membership.log` 和 `target/branch-recovery-otlp-fix-membership.xml`，原JUnit已恢复）。此前超时的Space切换用例及F2均在本轮通过；历史失败的根因仍未知，本轮通过不覆盖原失败，也不代替远端CI。
