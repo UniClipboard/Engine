@@ -37,7 +37,7 @@ wire_enum! {
         Startup => "startup",
         /// 设备刚刚上线。
         PeerOnline => "peer_online",
-        /// 设备仍在线，但此前留下了可恢复结果，按退避到期再试。
+        /// 设备仍在线，但此前留下了可恢复结果，按退避到期再试；同一条目最多 3 次。
         Retry => "retry",
         /// 可恢复结果通知积压丢失，重新扫描当前在线设备。
         ResultsLagged => "results_lagged",
@@ -177,7 +177,8 @@ pub(super) struct OfflineDeliveryRecoveryDeps {
 
 /// 只恢复持久状态仍未结束（`Pending`/`Unreachable`）的发送。触发来源有三类：启动扫描、
 /// 设备上线事件，以及设备保持在线期间记录负责人通知的投递结果：可恢复或未能落库时按目标
-/// 有界退避重试，已结算时清除该目标的退避，均不依赖新的上线事件。
+/// 有界退避重试（同一条目最多计时重试 3 次，之后只等下一次上线事件），已结算时清除该目标的
+/// 退避，均不依赖新的上线事件。
 pub(super) struct OfflineDeliveryRecovery {
     cancel: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
@@ -209,7 +210,8 @@ impl OfflineDeliveryRecovery {
                     _ = task_cancel.cancelled() => return,
                     event = events.recv() => match event {
                         Ok(event) if event.state == ReachabilityState::Online => {
-                            // 上线事件立即恢复，此前的退避不再适用。
+                            // 上线事件立即恢复，此前的退避与已用尽标记不再适用：这次补发
+                            // 若仍未送达，开启新的 3 次计时重试窗口，每次上线至多一个窗口。
                             schedule.clear(&event.device_id);
                             recover_and_schedule(
                                 &task_deps,

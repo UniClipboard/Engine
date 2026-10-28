@@ -1672,6 +1672,64 @@ async fn a_failed_recovery_round_is_retried_with_backoff() {
     harness.recovery.shutdown().await.unwrap();
 }
 
+/// presence 一直在线、每次补发都中断：同一条目只计时重试 3 次（约 2、5、10 秒后），
+/// 第三次失败发布的可恢复结果不再排期，长时间内不再补发；之后只有新的上线事件才再补发一次。
+#[tokio::test(start_paused = true)]
+async fn an_online_target_gets_exactly_three_timed_retries_for_the_same_entry() {
+    let harness = RetryHarness::start(
+        None,
+        &[
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Accepted,
+        ],
+    );
+    settle().await;
+    harness
+        .record_dispatch(EntryDeliveryStatus::Unreachable)
+        .await;
+    settle().await;
+
+    // 每次重试在上一结果到达后按下一个间隔到期；暂停时钟下结果在到期时刻即被处理。
+    let mut due = Instant::now();
+    for (retry, delay) in RETRY_BACKOFF.iter().enumerate() {
+        due += *delay;
+        tokio::time::sleep_until(due - JUST_BEFORE).await;
+        settle().await;
+        assert_eq!(
+            harness.delivery.calls(),
+            retry,
+            "retry {retry} waits for its interval"
+        );
+        tokio::time::sleep_until(due + JUST_BEFORE).await;
+        settle().await;
+        assert_eq!(harness.delivery.calls(), retry + 1);
+        assert_eq!(harness.status(), Some(EntryDeliveryStatus::Unreachable));
+    }
+
+    tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+    settle().await;
+    assert_eq!(
+        harness.delivery.calls(),
+        RETRY_BACKOFF.len(),
+        "no timed retry after the third failed retry while the target stays online"
+    );
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Unreachable));
+
+    harness
+        .reachability
+        .announce(harness.target, ReachabilityState::Online);
+    settle().await;
+    assert_eq!(
+        harness.delivery.calls(),
+        RETRY_BACKOFF.len() + 1,
+        "the next online event resends the newest undelivered entry once"
+    );
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    harness.recovery.shutdown().await.unwrap();
+}
+
 // ── 经真实发送用例与记录负责人的端到端重试 ────────────────────────────
 
 /// 下一次写入失败的种类；命中一次后存储即恢复。
