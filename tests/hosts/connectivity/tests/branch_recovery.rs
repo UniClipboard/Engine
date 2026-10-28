@@ -14,9 +14,9 @@ use std::{io::Read, os::unix::net::UnixListener};
 mod process;
 use process::{join_host, mount_rendezvous, HostProcess};
 
-fn recovery_paths(host: &mut HostProcess) -> HashMap<String, HashSet<String>> {
+fn host_log_records(host: &mut HostProcess) -> Vec<Value> {
     host.request(json!({"command": "flush"}));
-    let records: Vec<Value> = std::fs::read_dir(host.root.path().join("logs"))
+    std::fs::read_dir(host.root.path().join("logs"))
         .expect("diagnostic directory")
         .filter_map(Result::ok)
         .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
@@ -25,7 +25,11 @@ fn recovery_paths(host: &mut HostProcess) -> HashMap<String, HashSet<String>> {
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
                 .collect::<Vec<_>>()
         })
-        .collect();
+        .collect()
+}
+
+fn recovery_paths(host: &mut HostProcess) -> HashMap<String, HashSet<String>> {
+    let records = host_log_records(host);
     let mut paths = HashMap::new();
     for row in &records {
         if row["fields"]["event.name"] == "connection.protocol.negotiated"
@@ -58,6 +62,32 @@ fn recovery_paths(host: &mut HostProcess) -> HashMap<String, HashSet<String>> {
         }
     }
     paths
+}
+
+fn completed_conflict_rounds(host: &mut HostProcess) -> HashSet<u64> {
+    let records = host_log_records(host);
+    records
+        .iter()
+        .filter(|row| {
+            row["fields"]["event.name"] == "runtime.work.finished"
+                && row["fields"]["step"] == "maintenance_conflicts"
+                && row["fields"]["uc.outcome"] == "ok"
+        })
+        .filter_map(|row| row["fields"]["maintenance_round"].as_u64())
+        .filter(|round| {
+            [
+                "membership.maintenance.started",
+                "membership.maintenance.finished",
+            ]
+            .iter()
+            .all(|name| {
+                records.iter().any(|row| {
+                    row["fields"]["event.name"] == *name
+                        && row["fields"]["maintenance_round"].as_u64() == Some(*round)
+                })
+            })
+        })
+        .collect()
 }
 
 fn snapshot(host: &mut HostProcess) -> Value {
@@ -337,6 +367,11 @@ async fn run_scenario(crash_after_completion: bool, crash_at: Option<&str>) {
         host.request(json!({"command": "set_network_partition", "endpoint_ids": []}));
         host.request(json!({"command": "opportunity"}));
     }
+    let prior_rounds = if crash_at.is_none() && old_side.is_none() {
+        Some(completed_conflict_rounds(&mut c))
+    } else {
+        None
+    };
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let choices = c.request(json!({"command": "eligibility"}));
@@ -534,6 +569,20 @@ async fn run_scenario(crash_after_completion: bool, crash_at: Option<&str>) {
     let recovered = wait_branch(&mut [&mut b, &mut c], 4, "recovered");
     assert_eq!(recovered["branch_id"], target["branch_id"]);
     assert_eq!(snapshot(&mut c)["pending_conflict_count"], 0);
+    if let Some(prior_rounds) = prior_rounds {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if completed_conflict_rounds(&mut c)
+                .difference(&prior_rounds)
+                .next()
+                .is_some()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "恢复后缺少关联的维护轮次结算");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     if let Some(expected) = expected_path {
         let mut paths = HashMap::new();
         if old_side.as_deref() == Some("recipient") {
