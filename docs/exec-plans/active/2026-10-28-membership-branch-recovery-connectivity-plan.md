@@ -464,3 +464,5 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 使用CI profile及workspace组相同的排除表达式，对上述五项新增测试进一步运行nextest实际列表检查：五项均返回 `matches` 且 `ignored=false`，机器可读结果位于 `target/branch-recovery-ci-selection.json`。此命令只构建并列举选定的三个包，不运行测试，也不证明远端CI状态。
 
 当前候选真实Engine多轮创建／退出资源测试通过（run `17ce0fb8-eacd-4d89-bdac-ec04804caa20`，1项通过、38项筛选跳过）：测试在多轮退出后采样任务与Unix文件描述符，检查任务数不增长及句柄趋势低于既定阈值。该运行使用默认feature，覆盖普通会话生命周期，不制造分支恢复饱和负载，不能据此证明恢复协议压力下全部进程资源回归基线。
+
+候选 `d2861dd06a9ae8cdadb2fcda688e808e60c04bda` 上包含新增期限、接收方及持久失败测试的交付门禁通过：locked metadata、workspace全目标check、格式、Rust规范、仓库架构及diff检查；日志为 `target/branch-recovery-latest-check.log` 和 `target/branch-recovery-latest-architecture.log`。此后仅追加本条记录，远端CI及未运行平台仍未结算。
