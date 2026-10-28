@@ -390,11 +390,20 @@ impl SystemClipboardPort for ObservedSystemClipboard {
     fn read_snapshot(&self) -> anyhow::Result<SystemClipboardSnapshot> {
         self.inner.read_snapshot()
     }
+    fn read_observation(&self) -> anyhow::Result<(SystemClipboardSnapshot, Option<Vec<u8>>)> {
+        self.inner.read_observation()
+    }
     fn write_snapshot(&self, snapshot: SystemClipboardSnapshot) -> anyhow::Result<()> {
+        self.write_with_receipt(snapshot).map(|_| ())
+    }
+    fn write_with_receipt(
+        &self,
+        snapshot: SystemClipboardSnapshot,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         let operation = DiagnosticOperation::ClipboardWriteSystem;
         let started = Instant::now();
         clipboard_local_span(operation).in_scope(|| {
-            let result = self.inner.write_snapshot(snapshot);
+            let result = self.inner.write_with_receipt(snapshot);
             complete_local(
                 operation,
                 DiagnosticErrorType::Unavailable,

@@ -14,6 +14,16 @@ use async_trait::async_trait;
 /// platform-specific implementations.
 #[async_trait]
 pub trait SystemClipboardPort: Send + Sync {
+    /// 读取内容及与该次读取绑定的宿主身份。没有可靠身份时返回 None。
+    fn read_observation(&self) -> Result<(SystemClipboardSnapshot, Option<Vec<u8>>)> {
+        self.read_snapshot().map(|snapshot| (snapshot, None))
+    }
+
+    /// 写入完成后返回宿主能证明属于该次写入的身份。
+    fn write_with_receipt(&self, snapshot: SystemClipboardSnapshot) -> Result<Option<Vec<u8>>> {
+        self.write_snapshot(snapshot).map(|()| None)
+    }
+
     /// Read current clipboard content
     ///
     /// Returns the current clipboard content as a Payload, which can contain

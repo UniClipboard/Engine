@@ -9,6 +9,9 @@ use uc_engine::{
     HostFileHandle, HostFileMetadata, HostSecureStorage,
 };
 
+#[path = "host_contract/clipboard_attribution.rs"]
+mod clipboard_attribution;
+
 #[path = "host_contract/clipboard_startup.rs"]
 mod clipboard_startup;
 

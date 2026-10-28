@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use crate::contract::HostAnalyticsCapabilities;
 use crate::{
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
-    HostClipboardChange, HostClipboardChangeStream, HostClipboardSnapshot, HostDirectories,
-    HostFileAccess, HostSecureStorage,
+    HostClipboardChange, HostClipboardChangeStream, HostClipboardIdentity, HostClipboardSnapshot,
+    HostClipboardWriteReceipt, HostDirectories, HostFileAccess, HostSecureStorage,
 };
 
 pub(crate) struct ReusableHost {
@@ -122,6 +122,27 @@ impl SharedClipboard {
 struct ClipboardView(Arc<SharedClipboard>);
 
 impl HostClipboard for ClipboardView {
+    fn read_with_identity(
+        &self,
+    ) -> Result<(HostClipboardSnapshot, Option<HostClipboardIdentity>), HostCapabilityError> {
+        self.0
+            .inner
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .read_with_identity()
+    }
+
+    fn write_with_receipt(
+        &self,
+        snapshot: HostClipboardSnapshot,
+    ) -> Result<HostClipboardWriteReceipt, HostCapabilityError> {
+        self.0
+            .inner
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .write_with_receipt(snapshot)
+    }
+
     fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
         self.0
             .inner

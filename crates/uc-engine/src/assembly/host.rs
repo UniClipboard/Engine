@@ -34,9 +34,9 @@ use crate::engine::event_stream::EventSender;
 use crate::engine::startup::StartupProgressStore;
 use crate::{
     EngineConfig, EngineEvent, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
-    HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostDirectories,
-    HostFileAccess, HostSecureStorage, RefreshReason, SettingsChanged, SettingsSectionSummary,
-    TransferProgress,
+    HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostClipboardSnapshot,
+    HostDirectories, HostFileAccess, HostSecureStorage, RefreshReason, SettingsChanged,
+    SettingsSectionSummary, TransferProgress,
 };
 
 struct HostSecureStorageAdapter {
@@ -91,7 +91,11 @@ struct HostClipboardAdapter {
 
 impl SystemClipboardPort for HostClipboardAdapter {
     fn read_snapshot(&self) -> anyhow::Result<SystemClipboardSnapshot> {
-        let snapshot = self.host.read()?;
+        self.read_observation().map(|(snapshot, _)| snapshot)
+    }
+
+    fn read_observation(&self) -> anyhow::Result<(SystemClipboardSnapshot, Option<Vec<u8>>)> {
+        let (snapshot, identity) = self.host.read_with_identity()?;
         let mut representations = Vec::with_capacity(snapshot.representations.len());
         let mut file_metadata = Vec::new();
         let operation_dir = self
@@ -122,15 +126,25 @@ impl SystemClipboardPort for HostClipboardAdapter {
             }
         }
 
-        Ok(SystemClipboardSnapshot {
-            ts_ms: snapshot.observed_at_ms,
-            representations,
-            file_content_digests: Vec::new(),
-            file_set_v1_component: None,
-        })
+        Ok((
+            SystemClipboardSnapshot {
+                ts_ms: snapshot.observed_at_ms,
+                representations,
+                file_content_digests: Vec::new(),
+                file_set_v1_component: None,
+            },
+            identity.map(|value| value.0),
+        ))
     }
 
     fn write_snapshot(&self, snapshot: SystemClipboardSnapshot) -> anyhow::Result<()> {
+        self.write_with_receipt(snapshot).map(|_| ())
+    }
+
+    fn write_with_receipt(
+        &self,
+        snapshot: SystemClipboardSnapshot,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         let representations = snapshot
             .representations
             .into_iter()
@@ -152,10 +166,11 @@ impl SystemClipboardPort for HostClipboardAdapter {
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         self.host
-            .write(crate::HostClipboardSnapshot {
+            .write_with_receipt(HostClipboardSnapshot {
                 observed_at_ms: snapshot.ts_ms,
                 representations,
             })
+            .map(|receipt| receipt.identity.map(|value| value.0))
             .map_err(anyhow::Error::new)
     }
 }

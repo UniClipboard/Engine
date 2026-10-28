@@ -408,6 +408,60 @@ pub(crate) fn empty_engine_host(root: &std::path::Path) -> HostCapabilities {
 }
 
 #[cfg(feature = "dev-tools")]
+#[derive(Clone, Default)]
+struct AttributedInboundClipboard {
+    state: Arc<Mutex<Option<(HostClipboardSnapshot, Vec<u8>)>>>,
+    writes: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "dev-tools")]
+impl HostClipboard for AttributedInboundClipboard {
+    fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
+        self.read_with_identity().map(|(snapshot, _)| snapshot)
+    }
+
+    fn read_with_identity(
+        &self,
+    ) -> Result<(HostClipboardSnapshot, Option<crate::HostClipboardIdentity>), HostCapabilityError>
+    {
+        Ok(match self.state.lock().unwrap().clone() {
+            Some((snapshot, identity)) => (snapshot, Some(crate::HostClipboardIdentity(identity))),
+            None => (
+                HostClipboardSnapshot {
+                    observed_at_ms: 0,
+                    representations: Vec::new(),
+                },
+                None,
+            ),
+        })
+    }
+
+    fn write(&self, snapshot: HostClipboardSnapshot) -> Result<(), HostCapabilityError> {
+        self.write_with_receipt(snapshot).map(|_| ())
+    }
+
+    fn write_with_receipt(
+        &self,
+        _snapshot: HostClipboardSnapshot,
+    ) -> Result<crate::HostClipboardWriteReceipt, HostCapabilityError> {
+        let sequence = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+        let identity = sequence.to_be_bytes().to_vec();
+        let projected = HostClipboardSnapshot {
+            observed_at_ms: 1,
+            representations: vec![HostClipboardRepresentation::Inline {
+                format: "text/plain".into(),
+                mime_type: Some("text/plain".into()),
+                bytes: b"synthetic native projection".to_vec(),
+            }],
+        };
+        *self.state.lock().unwrap() = Some((projected, identity.clone()));
+        Ok(crate::HostClipboardWriteReceipt {
+            identity: Some(crate::HostClipboardIdentity(identity)),
+        })
+    }
+}
+
+#[cfg(feature = "dev-tools")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behavior() {
     let _guard = ENGINE_TEST_LOCK.lock().await;
@@ -442,9 +496,19 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         }),
     );
     let (sponsor, mut sponsor_events) = Engine::start(config.clone(), sponsor_host).await.unwrap();
-    let (joiner, mut joiner_events) = Engine::start(config, empty_engine_host(joiner_root.path()))
-        .await
-        .unwrap();
+    let clipboard = AttributedInboundClipboard::default();
+    let joiner_host = HostCapabilities::new(
+        HostDirectories::new(
+            joiner_root.path().join("private"),
+            joiner_root.path().join("cache"),
+            joiner_root.path().join("temporary"),
+            joiner_root.path().join("logs"),
+        ),
+        Box::new(MemoryHostSecureStorage::default()),
+        Box::new(clipboard.clone()),
+        Box::new(EmptyHostFiles),
+    );
+    let (joiner, mut joiner_events) = Engine::start(config, joiner_host).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     sponsor
@@ -622,6 +686,26 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
             if entries.len() == 1 && entries[0].preview.as_deref() == Some(text)
     ));
     wait_entry_delivered(&sponsor, &first_entry_id, &joiner_device_id).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while clipboard.writes.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("inbound clipboard must reach the isolated host");
+    assert!(matches!(
+        joiner
+            .execute(crate::Operation::ObserveClipboardChange(
+                crate::ObserveClipboardChangeInput { dispatch: true }
+            ))
+            .await
+            .unwrap(),
+        crate::OperationResult::ClipboardChangeObserved { report: None }
+    ));
+    assert!(
+        matches!(joiner.execute(crate::Operation::QueryHistoryStats).await.unwrap(),
+        crate::OperationResult::HistoryStats(ref stats) if stats.total_items == 1)
+    );
 
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
@@ -765,6 +849,36 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         crate::OperationResult::EntryFileRead(resource) if resource.bytes == file_bytes
     ));
     wait_entry_delivered(&sponsor, &file_entry_id, &joiner_device_id).await;
+
+    // 本机用户的下一次复制具有新的宿主身份，必须真正发送给另一台 Engine。
+    let sequence = clipboard.writes.fetch_add(1, Ordering::SeqCst) + 1;
+    *clipboard.state.lock().unwrap() = Some((
+        HostClipboardSnapshot {
+            observed_at_ms: 2,
+            representations: vec![HostClipboardRepresentation::Inline {
+                format: "text/plain".into(),
+                mime_type: Some("text/plain".into()),
+                bytes: b"synthetic next user copy".to_vec(),
+            }],
+        },
+        sequence.to_be_bytes().to_vec(),
+    ));
+    assert!(
+        matches!(joiner.execute(crate::Operation::ObserveClipboardChange(crate::ObserveClipboardChangeInput { dispatch: true })).await.unwrap(),
+        crate::OperationResult::ClipboardChangeObserved { report: Some(ref report) } if report.total_accepted == 1)
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let history = sponsor.execute(crate::Operation::QueryHistory(crate::QueryHistoryInput {
+                cursor: None, limit: 10, query: None,
+            })).await.unwrap();
+            if matches!(history, crate::OperationResult::HistoryPage { ref entries, .. }
+                if entries.iter().any(|entry| entry.preview.as_deref() == Some("synthetic next user copy"))) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("the next user copy must reach the other Engine");
 
     sponsor
         .execute(crate::Operation::UpdateSettings(Box::new(
@@ -2051,76 +2165,6 @@ async fn suspend_waits_for_a_started_host_clipboard_change_to_finish() {
         .shutdown(std::time::Duration::from_secs(15))
         .await
         .unwrap();
-}
-
-#[tokio::test]
-async fn new_engine_does_not_inherit_previous_engine_clipboard_attribution() {
-    let _guard = ENGINE_TEST_LOCK.lock().await;
-    let first_temp = tempfile::tempdir().unwrap();
-    let first = crate::assembly::host::wire_host_capabilities(
-        &EngineConfig::new("1.2.3"),
-        HostCapabilities::new(
-            HostDirectories::new(
-                first_temp.path().join("private"),
-                first_temp.path().join("cache"),
-                first_temp.path().join("temporary"),
-                first_temp.path().join("logs"),
-            ),
-            Box::new(MemoryHostSecureStorage::default()),
-            Box::new(StaticHostClipboard {
-                snapshot: HostClipboardSnapshot {
-                    observed_at_ms: 0,
-                    representations: Vec::new(),
-                },
-            }),
-            Box::new(EmptyHostFiles),
-        ),
-    )
-    .await
-    .unwrap();
-    first
-        .wired
-        .application
-        .host_adapters()
-        .change_origin
-        .record_self_write(
-            uc_core::ports::clipboard::SelfWriteMatch::ByNextChange("old-write".into()),
-            uc_core::ports::clipboard::SelfWriteAttribution::Remote,
-            std::time::Duration::from_secs(60),
-        )
-        .await;
-
-    let second_temp = tempfile::tempdir().unwrap();
-    let second = crate::assembly::host::wire_host_capabilities(
-        &EngineConfig::new("1.2.3"),
-        HostCapabilities::new(
-            HostDirectories::new(
-                second_temp.path().join("private"),
-                second_temp.path().join("cache"),
-                second_temp.path().join("temporary"),
-                second_temp.path().join("logs"),
-            ),
-            Box::new(MemoryHostSecureStorage::default()),
-            Box::new(StaticHostClipboard {
-                snapshot: HostClipboardSnapshot {
-                    observed_at_ms: 0,
-                    representations: Vec::new(),
-                },
-            }),
-            Box::new(EmptyHostFiles),
-        ),
-    )
-    .await
-    .unwrap();
-    let origin = second
-        .wired
-        .application
-        .host_adapters()
-        .change_origin
-        .attribute_observed_change("fresh-local-copy")
-        .await;
-
-    assert_eq!(origin, uc_core::ClipboardChangeOrigin::LocalCapture);
 }
 
 #[test]

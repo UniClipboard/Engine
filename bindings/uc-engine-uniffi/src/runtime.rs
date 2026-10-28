@@ -19,13 +19,13 @@ use uc_engine::{
     CustomRelayMutation, CustomRelayMutationOutcome, CustomRelayRejection, Engine, EngineConfig,
     EntryReceiveProgressInput, EntryReceiveRetryOutcome as EngineReceiveRetryOutcome,
     ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
-    HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot, HostDirectories,
-    HostFileAccess, HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
-    ObserveClipboardChangeInput, Operation, OperationResult, OutboundProgressInput,
-    OutboundProgressSummary, ReceiveProgressSummary, ReconcileOutboundProgressInput,
-    RecoverSessionInput, RemoveMemberInput, ResendEntryInput, RestoreClipboardInput,
-    RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    StartupLifecycleInput, StartupProgress, TransferCancellationReason,
+    HostClipboard, HostClipboardIdentity, HostClipboardRepresentation, HostClipboardSnapshot,
+    HostClipboardWriteReceipt, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
+    HostSecureStorage, JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult,
+    OutboundProgressInput, OutboundProgressSummary, ReceiveProgressSummary,
+    ReconcileOutboundProgressInput, RecoverSessionInput, RemoveMemberInput, ResendEntryInput,
+    RestoreClipboardInput, RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput,
+    SendTextInput, StartupLifecycleInput, StartupProgress, TransferCancellationReason,
 };
 use zeroize::Zeroizing;
 
@@ -3267,28 +3267,51 @@ struct BindingClipboard {
 
 impl HostClipboard for BindingClipboard {
     fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
+        self.read_with_identity().map(|(snapshot, _)| snapshot)
+    }
+
+    fn read_with_identity(
+        &self,
+    ) -> Result<(HostClipboardSnapshot, Option<HostClipboardIdentity>), HostCapabilityError> {
         self.host
             .clipboard_read()
-            .map(|snapshot| HostClipboardSnapshot {
-                observed_at_ms: snapshot.observed_at_ms,
-                representations: snapshot
-                    .representations
-                    .into_iter()
-                    .map(map_clipboard_representation)
-                    .collect(),
+            .map(|snapshot| {
+                let identity = snapshot.identity.map(HostClipboardIdentity);
+                (
+                    HostClipboardSnapshot {
+                        observed_at_ms: snapshot.observed_at_ms,
+                        representations: snapshot
+                            .representations
+                            .into_iter()
+                            .map(map_clipboard_representation)
+                            .collect(),
+                    },
+                    identity,
+                )
             })
             .map_err(map_host_capability_error)
     }
 
     fn write(&self, snapshot: HostClipboardSnapshot) -> Result<(), HostCapabilityError> {
+        self.write_with_receipt(snapshot).map(|_| ())
+    }
+
+    fn write_with_receipt(
+        &self,
+        snapshot: HostClipboardSnapshot,
+    ) -> Result<HostClipboardWriteReceipt, HostCapabilityError> {
         self.host
             .clipboard_write(BindingClipboardSnapshot {
+                identity: None,
                 observed_at_ms: snapshot.observed_at_ms,
                 representations: snapshot
                     .representations
                     .into_iter()
                     .map(map_engine_clipboard_representation)
                     .collect(),
+            })
+            .map(|identity| HostClipboardWriteReceipt {
+                identity: identity.map(HostClipboardIdentity),
             })
             .map_err(map_host_capability_error)
     }

@@ -223,7 +223,38 @@ impl fmt::Debug for HostClipboardSnapshot {
     }
 }
 
+/// 仅在宿主证明观察属于该次写入时使用的不透明身份。
+#[derive(Clone, PartialEq, Eq)]
+pub struct HostClipboardIdentity(pub Vec<u8>);
+
+impl fmt::Debug for HostClipboardIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HostClipboardIdentity([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostClipboardWriteReceipt {
+    pub identity: Option<HostClipboardIdentity>,
+}
+
 pub trait HostClipboard: Send + Sync {
+    /// 返回与快照同时捕获的身份；无法证明时返回 None。
+    fn read_with_identity(
+        &self,
+    ) -> Result<(HostClipboardSnapshot, Option<HostClipboardIdentity>), HostCapabilityError> {
+        self.read().map(|snapshot| (snapshot, None))
+    }
+
+    /// 仅成功写入后返回该次写入的可靠身份。
+    fn write_with_receipt(
+        &self,
+        snapshot: HostClipboardSnapshot,
+    ) -> Result<HostClipboardWriteReceipt, HostCapabilityError> {
+        self.write(snapshot)
+            .map(|()| HostClipboardWriteReceipt { identity: None })
+    }
+
     fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError>;
     fn write(&self, snapshot: HostClipboardSnapshot) -> Result<(), HostCapabilityError>;
 
