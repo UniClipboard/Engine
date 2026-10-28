@@ -138,6 +138,111 @@ async fn assert_response_deadline(partial_body: bool) -> anyhow::Result<()> {
 }
 
 #[tokio::test(start_paused = true)]
+async fn recovery_exchange_deadline_includes_outbound_identity_admission() -> anyhow::Result<()> {
+    struct SlowAdmission {
+        members: Members,
+        started: Arc<Semaphore>,
+    }
+    struct SlowAttempt {
+        inner: Box<dyn AdmissionAttempt>,
+        started: Arc<Semaphore>,
+    }
+    #[async_trait]
+    impl AdmissionAttempt for SlowAttempt {
+        async fn check_current(&self) -> Result<(), ConnectivityError> {
+            self.inner.check_current().await
+        }
+        async fn adopt(
+            &self,
+            connection: Arc<dyn PeerConnection>,
+        ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+            self.started.add_permits(1);
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            self.inner.adopt(connection).await
+        }
+    }
+    #[async_trait]
+    impl SessionConnectionAdmissionPort for SlowAdmission {
+        fn inbound_fence(&self) -> Option<Box<dyn InboundAdmissionFence>> {
+            self.members.inbound_fence()
+        }
+        fn begin(&self, peer: DeviceId) -> Box<dyn AdmissionAttempt> {
+            Box::new(SlowAttempt {
+                inner: self.members.begin(peer),
+                started: self.started.clone(),
+            })
+        }
+        async fn adopt_inbound(
+            &self,
+            connection: Arc<dyn PeerConnection>,
+            reservation: &dyn InboundIdentityReservation,
+        ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+            self.members.adopt_inbound(connection, reservation).await
+        }
+    }
+
+    let peer = DeviceId::new("deadline-peer");
+    let (incoming, mut connections) = mpsc::channel(1);
+    let admission_started = Arc::new(Semaphore::new(0));
+    let manager = ConnectivityManager::new(
+        Arc::new(MemoryDial {
+            target: peer,
+            second_target: None,
+            incoming,
+            dials: AtomicUsize::new(0),
+        }),
+        Arc::new(SlowAdmission {
+            members: Members {
+                peer,
+                key: [2; 32],
+                allowed: Arc::new(AtomicBool::new(true)),
+            },
+            started: admission_started.clone(),
+        }),
+        ConnectivityPolicy {
+            supervise_local_work: true,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let transport = BranchRecoveryTransport::new(manager.clone(), Arc::new(BranchRecoveryWire));
+    let scope = transport.freeze(peer)?;
+    let started = Instant::now();
+    let exchange = tokio::spawn(async move {
+        scope
+            .exchange(BranchRecoveryRequest::GroupInfo {
+                conflict_id: MembershipConflictId::from_bytes([1; 32]),
+                target_branch_id: MembershipBranchId::from_bytes([2; 32]),
+                recipient_member: MemberInstanceId::from_bytes([3; 32]),
+            })
+            .await
+    });
+    admission_started.acquire().await?.forget();
+    tokio::time::advance(Duration::from_secs(20)).await;
+    let unanswered = connections
+        .recv()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("missing dial"))?;
+    let (_send, mut receive) = unanswered.accept_bi().await?;
+    let request = BranchRecoveryWire
+        .read_request(receive.as_mut(), started + Duration::from_secs(30))
+        .await?;
+    assert!(matches!(request, BranchRecoveryRequest::GroupInfo { .. }));
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert!(!exchange.is_finished());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(matches!(
+        exchange.await?,
+        Err(MembershipBranchRecoveryChannelError::Unavailable { .. })
+    ));
+    assert_eq!(
+        Instant::now().duration_since(started),
+        Duration::from_secs(30)
+    );
+    manager.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
 async fn recovery_exchange_deadline_includes_waiting_for_peer_capacity() -> anyhow::Result<()> {
     let peer = DeviceId::new("deadline-peer");
     let (incoming, mut connections) = mpsc::channel(2);
