@@ -8,7 +8,10 @@ use std::error::Error;
 use tokio::io::AsyncReadExt;
 use uc_core::file_transfer::OutboundProgressStatus;
 use uc_core::ids::EntryId;
-use uc_core::membership::{SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind};
+use uc_core::membership::{
+    MemberInstanceId, MembershipBranchId, MembershipBranchRecoveryPackageV1, MembershipConflictId,
+    SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind,
+};
 use uc_core::ports::ClipboardHeader;
 use uc_sync_protocol::active_clipboard_pull::{self, PullResponse};
 use uc_sync_protocol::active_clipboard_state::{self, ActiveClipboardWireMessage};
@@ -176,6 +179,59 @@ async fn space_admission_initial_hello_frame() {
 
 #[test]
 fn membership_branch_recovery_messages() {
+    let conflict = MembershipConflictId::from_bytes([0x11; 32]);
+    let branch = MembershipBranchId::from_bytes([0x22; 32]);
+    let recipient = MemberInstanceId::from_bytes([0x33; 32]);
+    let bindings = format!("{}{}{}", "11".repeat(32), "22".repeat(32), "33".repeat(32));
+    let request = membership_branch_recovery::encode(
+        &MembershipBranchRecoveryWireMessage::request_group_info(conflict, branch, recipient),
+    )
+    .expect("encode");
+    assert_vector(
+        "membership-branch-recovery/1 request group info",
+        &request,
+        &format!("0001{bindings}"),
+    );
+    let commit = membership_branch_recovery::encode(
+        &MembershipBranchRecoveryWireMessage::submit_external_commit(
+            conflict,
+            branch,
+            recipient,
+            vec![4, 5],
+        ),
+    )
+    .expect("encode");
+    assert_vector(
+        "membership-branch-recovery/1 external commit",
+        &commit,
+        &format!("0201{bindings}020405"),
+    );
+    let package = MembershipBranchRecoveryPackageV1::new_unsigned(
+        conflict,
+        branch,
+        recipient,
+        MemberInstanceId::from_bytes([0x44; 32]),
+        1,
+        [0x55; 32],
+        vec![6],
+        vec![7],
+        vec![8],
+    )
+    .expect("package")
+    .with_authorization_signature(vec![9]);
+    let recovery = membership_branch_recovery::encode(
+        &MembershipBranchRecoveryWireMessage::recovery_package(package),
+    )
+    .expect("encode");
+    assert_vector(
+        "membership-branch-recovery/1 recovery package",
+        &recovery,
+        &format!(
+            "030101{bindings}{}02{}0106010701080109",
+            "44".repeat(32),
+            "55".repeat(32)
+        ),
+    );
     let rejected =
         membership_branch_recovery::encode(&MembershipBranchRecoveryWireMessage::rejected())
             .expect("encode");
