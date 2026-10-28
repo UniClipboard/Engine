@@ -375,7 +375,7 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 | AC07 | 最终生产候选三角色Direct／Relay矩阵与逐连接路径通过；协议及wire定向8项覆盖正文尾随、短／超长帧和FIN期限。五类消息固定字节向量在当前编码器和单独编译的旧协议源码上均通过；旧源码测试使用当前Core及依赖，源码与锁定版本对照见下文。 |
 | AC08 | 11项真实进程组通过，覆盖持久检查点崩溃、原包重试和不同commit；加密SQLite重开及敏感哨兵扫描已有定向证据。 |
 | AC09 | 内存第二backend经实际Application transport／receiver与恢复wire完成GroupInfo和external commit两次交换，核对输入输出及两次独立拨号；签发方为替身。Application／Core／协议包清单和恢复源码未见Iroh依赖，仓库架构检查及其恢复旁路负fixture通过。 |
-| AC10 | 来源保留、签发日志脱敏、JSONL导出及新路径未创建网络业务root有定向测试或源码证据；受控测试验证网络成功后持久提交失败返回延期而非完成，并可复用已保存状态重试。真实恢复的业务记录与网络诊断尚无明确关联证据，时间邻近不能代替该证据。 |
+| AC10 | 来源保留、签发日志脱敏、JSONL导出及新路径未创建网络业务root有定向测试或源码证据；受控测试验证网络成功后持久提交失败返回延期而非完成。新增封闭诊断关联后，真实Direct恢复按匿名连接引用与维护轮次明确匹配；两个并发轮次的JSONL隔离及原始键不输出通过。尚待完整回归与远端CI。 |
 | AC11 | 工作区4970项通过且42项测试与4个binary跳过；后续测试专用增量已分别通过，根门禁及新增容量测试的相关格式／规范检查已复验。远端最终候选CI和设备平台未执行。 |
 | AC12 | 稳定文档和执行计划已有更新；未结项不得归档，历史失败与技术债继续保留。 |
 
@@ -480,3 +480,13 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 关联机制核对：维护诊断通过task-local的 `MaintenanceContext` 记录轮次，物理连接观察在Iroh握手回调中采集独立连接上下文；连接管理器的拨号工作使用独立spawn及空span。现有源码未提供将该物理连接记录明确绑定到发起它的维护轮次的证据，因此不能把两者的时间相邻当作关联，也不能假定额外业务root已经形成。若补齐该验证或能力，须先确定完整负责人的不透明上下文如何跨异步交接，保持Engine不查询业务步骤、协议不增加传播字段；当前AC10仍未结项。
 
 进一步核对已有接缝：Application的 `ConnectionLease` 内部已持有现有连接标识和认证公钥，观测contract的 `NetworkRecorder::in_connection_scope` 已能把原生连接键放入仅内存上下文，运行期再将其映射为匿名 `connection_id`。维护轮次上下文与该连接上下文目前没有共同的记录出口；不能直接在协议或Engine增加观测专用字段。可行性仍需验证：在已有连接租约内部以封闭诊断事件桥接两个上下文，并在真实并发恢复中按同一匿名连接引用及轮次验证，不产生额外业务root或暴露原始标识；该方案尚未实现或完成合同验证。
+
+已在现有出站连接租约内部加入本地封闭关联事件：仅恢复连接且存在维护轮次时发出，原始公钥与原生连接键只留在内存上下文，日志使用运行期匿名引用；不增加Engine接口、协议字段或网络业务root。封闭字段拒绝负例通过（run `4ab9a4ec-3dab-49c7-847a-68b7d933f8c3`），实际JSONL两轮不同连接关联与隐私测试组2项通过（run `9fc9aa5e-71eb-4c37-ab24-1ce0cfdcd488`），Application连接管理器66项通过（run `dd5e6c2b-e323-46af-bcc0-17fcc5c4ef36`）。当前／当前真实五进程Direct按匿名连接引用与维护轮次明确匹配通过（run `b586cc65-be82-4554-a045-8bfd2b5abe9f`）；新诊断事件后的三角色Direct／Relay矩阵均通过，逐连接选路、UDP封锁和二进制SHA见 `target/branch-recovery-observation-matrix/`。这些结果不代表所有并发场景或远端CI通过。
+
+新观测生产代码后的Linux PR进程组未通过（run `1beed1d7-0113-4c91-b72a-aa4a3b03e1ce`，10项通过、1项失败、0项跳过，总计581.471秒，日志 `target/branch-recovery-observation-process.log`）。失败为 `conflicting_commit_is_rejected_after_issuer_crash`：最终双方分支／head一致、各4成员、无待处理效果，接收方仍有1个未完成冲突而在原90秒等待失败。失败原因尚不确定，不能将其归因于观测修改，也不能用之前或后续单项通过覆盖本次全集失败。原JUnit已由运行包装恢复，本次报告另存 `target/branch-recovery-observation-process.xml`。为下一次复现增加失败时接收方待选择问题数量，未改变成功条件或期限；该增量尚待运行。
+
+带补充诊断的冲突重试单项通过（run `1f571425-8cae-4ee7-9758-c67877af7f3f`，1项通过、10项筛选跳过，94.095秒）；未复现失败，根因仍未知，此结果不覆盖上述完整组失败。实际JSONL关联测试改为两个维护轮次经屏障并发执行，并按触发类型与匿名连接引用逐一匹配，2项通过、0项跳过（run `2fbab781-9560-4995-a265-bed6856d7eb6`）。新增封闭合同负例的首次格式检查指出排版差异，已调整，仍需最终门禁。
+
+带补充失败诊断的完整Linux PR进程组重跑通过（run `a95258b0-d186-496d-a8a5-adfda84c8e95`，11项通过、0项跳过，总计491.813秒；日志与JUnit分别为 `target/branch-recovery-observation-process-rerun.log` 和 `target/branch-recovery-observation-process-rerun.xml`，原JUnit已恢复）。前一轮冲突未清零失败仍保留、根因未明，不能称为已修复；该结果也不代替生产观测改动后的workspace全量回归与远端CI。
+
+观测生产改动后的locked metadata、workspace全目标check、格式、Rust规范、仓库架构／隐私检查及diff检查通过；日志 `target/branch-recovery-observation-check.log` 和 `target/branch-recovery-observation-gate.log`。仍需生产改动后的workspace全量测试和最终候选远端CI，不能沿用改动前的全量结果。

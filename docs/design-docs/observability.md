@@ -514,6 +514,11 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 `blob`由固定SDK的ALPN匹配产生；不记录任意ALPN原文，不新增业务入口，未知协议继续归`other`。
 该记录仅进入本地连接诊断，远程入口仍忽略整个`uc.connectivity`，不扩大Collector字段。
 
+成员分支恢复在维护轮次内取得出站连接租约时，记录本地诊断 `membership.maintenance.connection_bound`，
+用既有轮次号和运行期生成的匿名 `connection_id` 将该轮与物理连接诊断关联。原始认证公钥和连接键只在
+同步发射时作为不可输出的内存上下文，未能建立匿名映射时保留既有不可关联状态，不输出原始值。该记录
+只表示租约已取得，不表示交换或恢复成功；无维护轮次时不发出，也不创建独立业务root。
+
 入站对端拒绝另以本地运行诊断 `peer.inbound.rejected` 记录固定协议和原因。展开字段仅有 `event.name`、
 `direction=inbound`、`protocol`、`uc.outcome=rejected`、`error.phase` 和 `error.reason`；不含对端标识、
 公钥、指纹或地址，不改变拨号侧收到的拒绝结果。

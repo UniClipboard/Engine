@@ -60,6 +60,56 @@ fn recovery_paths(host: &mut HostProcess) -> HashMap<String, HashSet<String>> {
     paths
 }
 
+fn has_correlated_recovery_round(host: &mut HostProcess) -> bool {
+    host.request(json!({"command": "flush"}));
+    let records: Vec<Value> = std::fs::read_dir(host.root.path().join("logs"))
+        .expect("diagnostic directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .flat_map(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let negotiated: HashSet<_> = records
+        .iter()
+        .filter(|row| {
+            row["fields"]["event.name"] == "connection.protocol.negotiated"
+                && row["fields"]["protocol"] == "membership_branch_recovery"
+        })
+        .filter_map(|row| row["connection_id"].as_str())
+        .collect();
+    let mut rounds: HashMap<u64, HashSet<&str>> = HashMap::new();
+    for row in &records {
+        if row["fields"]["event.name"] != "membership.maintenance.connection_bound" {
+            continue;
+        }
+        if let (Some(round), Some(id)) = (
+            row["fields"]["maintenance_round"].as_u64(),
+            row["connection_id"].as_str(),
+        ) {
+            if negotiated.contains(id) {
+                rounds.entry(round).or_default().insert(id);
+            }
+        }
+    }
+    rounds.into_iter().any(|(round, connections)| {
+        connections.len() >= 2
+            && [
+                "membership.maintenance.started",
+                "membership.maintenance.finished",
+            ]
+            .iter()
+            .all(|event| {
+                records.iter().any(|row| {
+                    row["fields"]["event.name"] == *event
+                        && row["fields"]["maintenance_round"].as_u64() == Some(round)
+                })
+            })
+    })
+}
+
 fn snapshot(host: &mut HostProcess) -> Value {
     host.request(json!({"command": "membership_diagnostics"}))
 }
@@ -93,7 +143,11 @@ fn wait_branch(hosts: &mut [&mut HostProcess], count: u64, stage: &str) -> Value
                     })
                 })
                 .collect();
-            panic!("成员历史未收敛: stage={stage}, expected_members={count}, facts={facts:?}");
+            let recipient_issue_count = hosts
+                .last_mut()
+                .map(|host| host.request(json!({"command": "eligibility"})))
+                .and_then(|value| value["issues"].as_array().map(Vec::len));
+            panic!("成员历史未收敛: stage={stage}, expected_members={count}, facts={facts:?}, recipient_issue_count={recipient_issue_count:?}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -231,6 +285,8 @@ async fn run_scenario(crash_after_completion: bool, crash_at: Option<&str>) {
         } else {
             c.request(json!({"command": "start_network_capture"}));
         }
+    } else if crash_at.is_none() && old_side.is_none() {
+        c.request(json!({"command": "start_network_capture"}));
     }
     if let Some(side) = old_side.as_deref() {
         let old_hosts: Vec<&HostProcess> = if side == "issuer" {
@@ -534,6 +590,13 @@ async fn run_scenario(crash_after_completion: bool, crash_at: Option<&str>) {
     let recovered = wait_branch(&mut [&mut b, &mut c], 4, "recovered");
     assert_eq!(recovered["branch_id"], target["branch_id"]);
     assert_eq!(snapshot(&mut c)["pending_conflict_count"], 0);
+    if crash_at.is_none() && old_side.is_none() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !has_correlated_recovery_round(&mut c) {
+            assert!(Instant::now() < deadline, "恢复连接缺少明确的维护轮次关联");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     if let Some(expected) = expected_path {
         let mut paths = HashMap::new();
         if old_side.as_deref() == Some("recipient") {
