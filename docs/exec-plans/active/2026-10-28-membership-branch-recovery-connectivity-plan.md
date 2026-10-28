@@ -510,3 +510,5 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 同一生产代码及测试修正后的Linux成员拓扑全组复验已启动，日志 `target/branch-recovery-otlp-fix-membership.log`；运行结束前不计通过。
 
 上述成员拓扑全组复验通过（run `a1a1d72b-c552-4220-9986-62c9169eb3bf`，56项通过、14项测试及135个binary筛选跳过，599.096秒；日志与JUnit为 `target/branch-recovery-otlp-fix-membership.log` 和 `target/branch-recovery-otlp-fix-membership.xml`，原JUnit已恢复）。此前超时的Space切换用例及F2均在本轮通过；历史失败的根因仍未知，本轮通过不覆盖原失败，也不代替远端CI。
+
+包含上述结果的候选 `13d836164c5401611b633a4ab87c2cb3d88a0f0d` 通过独立Engine Git消费者的依赖来源核对和构建，日志 `target/branch-recovery-final-git-consumer.log`。首次临时检出以 `--no-fetch` 初始化子模块因本地新克隆缺少固定对象而失败，改为从原仓库已有子模块对象初始化后通过；临时工作树已回收，共享 `target` 保留。本条记录产生的后续文档提交不改变受验证的代码树，不代替远端CI。
