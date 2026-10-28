@@ -418,3 +418,9 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 PR工作流实际接收授权登记证明通过：8项真实Iroh／接收侧用例通过、434项筛选跳过，包含1024项原计划和16页快照容量证据；来源与两个测试二进制SHA记录在 `target/test-artifacts/slice9-progress-proof/progress-registration/report.json`，源码为 `80bda137` 加未提交修改。该本地结果不代替远端最终候选CI。
 
 PR必需的通用原生资源检查通过（run `ea6d6980-5df7-4701-ab88-35ff8da48c80`，9项通过、356项筛选跳过，389.061秒）；资源验收脚本确认7个生命周期场景及两个1 GiB文件的内核资源、SDK标记、原生句柄和下载配额满足既定阈值，证据在 `target/test-artifacts/slice9-blob-lifecycle/`。原JUnit已与备份逐字节核对并恢复。这是通用文件接收资源证据，不代替恢复协议全部资源矩阵或远端CI。
+
+PR testkit／持久化证据组通过（run `bc1c772f-210b-43d8-839c-f0407ce437c8`，18项通过、1900项测试及16个binary按选择条件跳过），成功和失败示例工件位于 `target/test-artifacts/slice9-testkit/`。原JUnit已按运行包装恢复；该组未执行的测试与远端CI不计通过。
+
+PR隔离网络E02 Direct冒烟通过：真实三节点文本与文件传输分别通过，单轮证据在 `target/branch-recovery-e02-evidence/`；运行使用用户网络／挂载命名空间和预构建宿主。此结果仅覆盖E02 Direct，不代表完整网络矩阵。
+
+成员历史隔离Relay内部场景通过：使用预构建测试二进制，在用户网络／挂载命名空间运行三进程跨轮连接复用，1项通过、7项筛选跳过；UDP封锁规则实际丢弃506包，日志及规则证据分别在 `target/branch-recovery-history-relay.log` 和 `target/branch-recovery-history-relay-evidence/`。此次只运行脚本的内部场景，没有执行其外层完整工作区构建，不代表完整CI通过。
