@@ -15,6 +15,8 @@ use prost::Message;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
@@ -194,6 +196,15 @@ async fn real_engine_reconciliation_exports_its_result_without_extending_receive
     for (bytes, path) in &case.saved {
         assert_eq!(&std::fs::read(path).unwrap(), bytes);
     }
+    // 接收器可能收到与OTLP无关的根路径探测，不能把它当成业务记录。
+    let mut probe = TcpStream::connect(endpoint.address()).await.unwrap();
+    probe
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    probe.read_to_end(&mut response).await.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 404"));
     // 原通知仍被持有时，完整接收与重试必须已经结束并实际导出。
     let (spans, logs) = timeout(Duration::from_secs(10), async {
         loop {
@@ -283,10 +294,10 @@ async fn real_engine_reconciliation_exports_its_result_without_extending_receive
         let root = PathBuf::from(root);
         std::fs::create_dir_all(&root).unwrap();
         for (index, request) in requests.iter().enumerate() {
-            let signal = if request.url.path() == "/v1/traces" {
-                "traces"
-            } else {
-                "logs"
+            let signal = match request.url.path() {
+                "/v1/traces" => "traces",
+                "/v1/logs" => "logs",
+                _ => continue,
             };
             std::fs::write(root.join(format!("{index}-{signal}.pb")), &request.body).unwrap();
         }
@@ -319,6 +330,8 @@ async fn records(endpoint: &MockServer) -> (Vec<Span>, Vec<LogRecord>) {
     let mut logs = Vec::new();
     for request in endpoint.received_requests().await.unwrap() {
         match request.url.path() {
+            // 无关的根路径探测不是OTLP记录；隐私检查仍覆盖全部收到的请求。
+            "/" if request.method.as_str() == "GET" => {}
             "/v1/traces" => spans.extend(
                 ExportTraceServiceRequest::decode(request.body.as_slice())
                     .unwrap()

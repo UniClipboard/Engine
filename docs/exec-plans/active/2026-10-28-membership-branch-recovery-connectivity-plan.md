@@ -495,4 +495,8 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 
 上述workspace全量运行结束但未通过（run `22bdc163-dc9a-41ed-abc3-a8cc49486252`，4985项通过、1项失败、42项测试及4个binary跳过，1592.756秒；日志与JUnit分别为 `target/branch-recovery-observation-workspace.log` 和 `target/branch-recovery-observation-workspace.xml`）。唯一失败为真实Engine接收重试观测测试：OTLP测试接收器收到预期traces／logs之外的路径，现有断言未记录具体路径，来源未知。相同workspace构建范围单项复验通过（run `6222f085-da31-4795-8c44-336107f3e10e`，1项通过）；未复现不等于根因已解决，不能将全集记为通过。历史进程组失败同样保留，远端CI和未执行设备仍未结算。
 
-最终生产观测代码后的成员拓扑组未通过（run `30a6e229-8fd2-4f01-a839-672ef285b3b9`，55项通过、1项失败、14项测试及135个binary筛选跳过，687.706秒；日志和JUnit为 `target/branch-recovery-observation-membership.log` 与 `target/branch-recovery-observation-membership.xml`）。失败用例为 `committed_space_switch_recovers_after_repeated_session_activation_failures`：加入方初始准入等待超时，尚不确定原因或与本片的关系。相同构建范围的单项复验通过（run `df6bba31-ee68-43b1-a3b5-e2f553488f6a`，1项通过、69项筛选跳过），未复现不代表根因已解决。本轮F2通过，历史F2失败仍保留；这次全集失败不能被其他通过结果覆盖。
+最终生产观测代码后的成员拓扑组未通过（run `30a6e229-8fd2-4f01-a839-672ef285b3b9`，55项通过、1项失败、14项测试及135个binary筛选跳过，687.706秒；日志和JUnit为 `target/branch-recovery-observation-membership.log` 与 `target/branch-recovery-observation-membership.xml`）。失败用例为 `committed_space_switch_recovers_after_repeated_session_activation_failures`：会话激活故障注入后加入恢复等待超时，尚不确定原因或与本片的关系。相同构建范围的单项复验通过（run `df6bba31-ee68-43b1-a3b5-e2f553488f6a`，1项通过、69项筛选跳过），未复现不代表根因已解决。本轮F2通过，历史F2失败仍保留；这次全集失败不能被其他通过结果覆盖。
+
+对workspace中OTLP观测失败建立单项复现：无探针的第2次运行再次出现同一断言，封闭分类探针确认收到的是空的根路径GET，发起方未知。现有真实Engine测试主动注入此请求后，在原解析器上确定性失败（run `00b7761e-9ee7-4ecc-9657-1951e7eab88d`）；解析器仅跳过该GET，其余未知路径仍拒绝，全部请求仍参与敏感内容检查，证据文件只保存真实OTLP请求。修正后同一用例及证据导出通过（run `1a8b447b-ab68-470f-b6f1-3e4eff8bfffc`），另连续20次通过；临时分类探针已删除，格式、Rust规范和diff检查通过。该修正限于测试接收器，不证明请求来源或其他间歇失败已解决；此前workspace全集失败保留，仍需修正后的完整回归。
+
+上述测试接收器修正后的六项根交付门禁通过，记录于 `target/branch-recovery-otlp-fix-gates.log`。Space切换用例使用workspace构建出的真实测试binary连续运行20次均通过，未复现原超时（日志 `target/branch-recovery-observation-space-switch-repeat.log`）；此前全集失败及其未知根因仍保留。
