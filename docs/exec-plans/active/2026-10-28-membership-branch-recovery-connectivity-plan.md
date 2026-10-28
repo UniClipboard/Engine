@@ -408,3 +408,11 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 补充PR必需检查：直接日志宏检查两轮Clippy通过（0处）；缓存快照单元18项、路由检查及独立目录的真实冷构建／导出／导入／失效集成通过，临时目录已回收；`just cargo audit --deny unsound` 通过，报告10项允许的未维护或撤回警告，见 `target/branch-recovery-cargo-audit.log`。固定旧版OPAQUE兼容检查首次失败，原因是原脚本要求当前Iroh子模块与旧锚点提交相同，但当前 `413531dd` 与旧锚点 `4f388e14` 不同（失败日志 `target/branch-recovery-opaque-compat.log`）；脚本现从旧提交导出独立源码、不修改当前子模块，重跑固定旧端及混合兼容均通过，报告在 `target/test-reports/opaque-compat/`。以上为本地检查，不代表远端macOS或最终候选CI通过。
 
 本地升级矩阵冒烟（run `f2aac9f0-f3f8-48e7-84fc-30861cc4129a`）5项测试通过、65项筛选跳过；矩阵按既有登记结算为3项兼容通过、1项按合同拒绝、1项已知不兼容，另64单元未运行，见 `target/test-artifacts/20261028T190833Z-3759378/upgrade-matrix/matrix.md`。旧锚点构建使用共享 `target`；运行前的原有a13缓存已恢复，运行产物的二进制和日志保留于 `target/branch-recovery-upgrade-a13-evidence/`，临时源码在确认无活动进程后回收。此本地冒烟不代表全部升级矩阵或远端CI通过。
+
+本地候选分支 `codex/issue-34-slice-9` 初始提交为 `863da5c65017b62953eeee5277910c424f252751`，先前独立文档提交为 `7d5a68514c3cc6cd822135041a212829e3dab99d`；候选树在构建时与工作区一致，原 `main` 和实际暂存区未改动。独立Git消费者以该提交为来源构建通过并检查依赖来源，日志 `target/branch-recovery-git-consumer.log`；临时工作树已在确认无活动Cargo后回收，共享target保留。本文随后补充证据，故该提交不再包含最新文档；最终候选需重新固定SHA，不能把该次检查误记为最终SHA的远端CI。
+
+固定旧版成员历史／组更新双向互通通过（run `eefd7cbe-4590-43c5-af84-afa83b2cc492`，V1/V2共2项通过、6项筛选跳过）。旧端冻结源码 `edf0a296118c071a97d4c14ae27b09a61931bbae`，本次旧端二进制 SHA256 `586d678144e4b5076173f21be7189a68f057e0e975ce064b6c923d3f08a0c7cd`，产物保留在 `target/branch-recovery-history-evidence/`；原有 `target/fixed-main-history` 已恢复并校验其原SHA。该本地互通不代表远端CI通过。
+
+固定旧版主动剪贴板Direct双角色互通通过（1项通过、7项筛选跳过，47.50秒，JUnit及场景证据在 `target/branch-recovery-active-fixed-evidence/`）；旧Engine源码 `2f9afc9956b0cda82e65c912f0c0f6dc6aa51256`，本次旧宿主SHA256 `021629a76b5e64012c0ccf5851333e038fbfe718a57656cd36cb38637529ec30`。原 `target/active-clipboard-connectivity-evidence/fixed-main` 目录已恢复并通过其原SHA校验；此结果不代表Relay或远端CI通过。
+
+PR工作流实际接收授权登记证明通过：8项真实Iroh／接收侧用例通过、434项筛选跳过，包含1024项原计划和16页快照容量证据；来源与两个测试二进制SHA记录在 `target/test-artifacts/slice9-progress-proof/progress-registration/report.json`，源码为 `80bda137` 加未提交修改。该本地结果不代替远端最终候选CI。
