@@ -374,7 +374,7 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 | AC06 | 入站8、拨号4、单peer等待4和全局等待16的受控测试通过；拨号与等待同时占满时关闭等待实际结算、归还等待额度并关闭连接的组合测试通过。真实Iroh入站饱和与连接handler归零通过；跨进程压力及进程全部资源整体回归基线尚未证明。 |
 | AC07 | 最终生产候选三角色Direct／Relay矩阵与逐连接路径通过；协议及wire定向8项覆盖正文尾随、短／超长帧和FIN期限。五类消息固定字节向量在当前编码器和单独编译的旧协议源码上均通过；旧源码测试使用当前Core及依赖，源码与锁定版本对照见下文。 |
 | AC08 | 11项真实进程组通过，覆盖持久检查点崩溃、原包重试和不同commit；加密SQLite重开及敏感哨兵扫描已有定向证据。 |
-| AC09 | 内存第二backend两阶段通信通过；需与依赖方向检查及最终候选测试一起结算。 |
+| AC09 | 内存第二backend经实际Application transport／receiver与恢复wire完成GroupInfo和external commit两次交换，核对输入输出及两次独立拨号；签发方为替身。Application／Core／协议包清单和恢复源码未见Iroh依赖，仓库架构检查及其恢复旁路负fixture通过。 |
 | AC10 | 来源保留、签发日志脱敏、JSONL导出及新路径未创建网络业务root有定向测试或源码证据；受控测试验证网络成功后持久提交失败返回延期而非完成，并可复用已保存状态重试。真实恢复中两次协议协商处于同一有始有终的冲突处理轮次内，但这仅为时间关联，完整业务记录关联仍须核对。 |
 | AC11 | 工作区4970项通过且42项测试与4个binary跳过；后续测试专用增量已分别通过，根门禁及新增容量测试的相关格式／规范检查已复验。远端最终候选CI和设备平台未执行。 |
 | AC12 | 稳定文档和执行计划已有更新；未结项不得归档，历史失败与技术债继续保留。 |
@@ -466,3 +466,5 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 当前候选真实Engine多轮创建／退出资源测试通过（run `17ce0fb8-eacd-4d89-bdac-ec04804caa20`，1项通过、38项筛选跳过）：测试在多轮退出后采样任务与Unix文件描述符，检查任务数不增长及句柄趋势低于既定阈值。该运行使用默认feature，覆盖普通会话生命周期，不制造分支恢复饱和负载，不能据此证明恢复协议压力下全部进程资源回归基线。
 
 候选 `d2861dd06a9ae8cdadb2fcda688e808e60c04bda` 上包含新增期限、接收方及持久失败测试的交付门禁通过：locked metadata、workspace全目标check、格式、Rust规范、仓库架构及diff检查；日志为 `target/branch-recovery-latest-check.log` 和 `target/branch-recovery-latest-architecture.log`。此后仅追加本条记录，远端CI及未运行平台仍未结算。
+
+第二backend与依赖方向证据核对：`memory_backend_runs_both_managed_recovery_exchanges` 使用真实Application transport、receiver和恢复wire，断言两次业务输入输出、两次拨号与关闭；原通过记录为 `2e7bf097-7f3c-4387-b4a7-5e08bade6456`，签发方仍是替身。三个下层包的Cargo清单与Application恢复／协议源码未发现Iroh依赖；最近仓库架构门禁及故意引入原生拨号的负fixture通过。此核对不将内存backend称为真实网络或MLS验证。
