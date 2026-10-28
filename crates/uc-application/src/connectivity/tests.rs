@@ -754,6 +754,72 @@ async fn four_recovery_dials_keep_capacity_until_cancelled_work_settles() {
 }
 
 #[tokio::test]
+async fn saturated_recovery_shutdown_waits_for_dials_and_releases_waiters() {
+    let (manager, backend, _) = fixture(
+        ConnectionMode::SingleExchange,
+        ConnectivityPolicy {
+            outbound_per_peer: 1,
+            waiters_per_peer: 4,
+            waiters_per_session: 16,
+            flights_per_session: 4,
+            supervise_local_work: true,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let mut tasks = Vec::new();
+    for peer in ["one", "two", "three", "four"] {
+        for _ in 0..4 {
+            let owner = manager.clone();
+            tasks.push(tokio::spawn(async move {
+                owner
+                    .request(DeviceId::new(peer))
+                    .connect(
+                        Instant::now() + Duration::from_secs(10),
+                        &CancellationToken::new(),
+                    )
+                    .await
+            }));
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while manager.waiting_capacity().available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    started(&backend, 4).await;
+    let owner = manager.clone();
+    let shutdown = tokio::spawn(async move { owner.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(1), manager.stop_token().cancelled())
+        .await
+        .unwrap();
+    assert!(!shutdown.is_finished(), "关闭必须等待已开始的拨号结算");
+    backend.gate.add_permits(4);
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    for task in tasks {
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ConnectivityError::Stopped)
+        ));
+    }
+    assert_eq!(manager.waiting_capacity().available_permits(), 16);
+    assert!(backend
+        .connections
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|connection| connection.is_closed()));
+}
+
+#[tokio::test]
 async fn recovery_waiter_limits_return_capacity_after_cancellation() {
     let (manager, backend, _) = fixture(
         ConnectionMode::SingleExchange,
