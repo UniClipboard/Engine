@@ -625,6 +625,70 @@ async fn valid_package_consumes_nonce_and_saves_prepared_transition_atomically()
 }
 
 #[tokio::test]
+async fn successful_network_response_does_not_hide_transition_commit_failure() {
+    struct FailTransitionCommit {
+        inner: Arc<TransitionPreparer>,
+        records: Arc<MemoryMembershipRecords>,
+    }
+    #[async_trait]
+    impl PrepareMembershipBranchTransitionPort for FailTransitionCommit {
+        async fn prepare_membership_branch_transition(
+            &self,
+            input: PrepareMembershipBranchTransitionInput,
+        ) -> Result<MembershipBranchTransitionV1, PrepareMembershipBranchTransitionError> {
+            let transition = self
+                .inner
+                .prepare_membership_branch_transition(input)
+                .await?;
+            self.records.fail_next_commits(1);
+            Ok(transition)
+        }
+    }
+
+    let fixture = fixture();
+    let use_case = RecoverMembershipConflictUseCase::new(
+        fixture.repository.owner.clone(),
+        fixture.recovery.clone(),
+        fixture.recipient.clone(),
+        Arc::new(FailTransitionCommit {
+            inner: fixture.transition.clone(),
+            records: fixture.repository.records.clone(),
+        }),
+        fixture.transition.clone(),
+        Arc::new(AcceptingVerifier),
+        Arc::new(FixedClock),
+    );
+    assert_eq!(
+        use_case.execute().await,
+        RecoverMembershipConflictOutcome::Deferred
+    );
+    assert_eq!(fixture.recovery.group_info_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.recovery.submit_calls.load(Ordering::SeqCst), 1);
+    let persisted = fixture.repository.space().branch_recovery;
+    assert!(!persisted
+        .consumed_recovery_nonces
+        .contains_key(&fixture.nonce));
+    assert!(!persisted
+        .branch_transitions
+        .contains_key(&fixture.transition_id));
+
+    assert_eq!(
+        fixture.use_case.execute().await,
+        RecoverMembershipConflictOutcome::Completed
+    );
+    assert_eq!(fixture.recovery.group_info_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.recovery.submit_calls.load(Ordering::SeqCst), 1);
+    let persisted = fixture.repository.space().branch_recovery;
+    assert_eq!(
+        persisted.consumed_recovery_nonces[&fixture.nonce],
+        fixture.conflict_id
+    );
+    assert!(persisted
+        .branch_transitions
+        .contains_key(&fixture.transition_id));
+}
+
+#[tokio::test]
 async fn retry_after_commit_advances_without_fetching_or_preparing_again() {
     let fixture = fixture();
     assert_eq!(
