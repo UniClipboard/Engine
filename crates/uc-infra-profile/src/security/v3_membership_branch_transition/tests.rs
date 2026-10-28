@@ -289,7 +289,12 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
         .branch_transitions
         .insert(transition_id, transition.clone());
     records
-        .commit_record(0, &MembershipRecord::Space(Box::new(record)), None)
+        .commit_record(
+            control_pool.generation(),
+            0,
+            &MembershipRecord::Space(Box::new(record)),
+            None,
+        )
         .unwrap();
     let generations = Arc::new(SpaceControlGeneration::new(
         root.clone(),
@@ -385,6 +390,7 @@ async fn v3_membership_branch_replays_every_control_phase_after_crash() {
             .insert(transition_id, next.clone());
         records
             .commit_record(
+                control_pool.generation(),
                 loaded.revision(),
                 &MembershipRecord::Space(replacement),
                 None,

@@ -46,6 +46,9 @@ impl IrohConnectionAdmission {
                 ConnectivityProfile::ActiveClipboardState => InboundPeerProtocol::ActiveClipboard,
                 ConnectivityProfile::Clipboard => InboundPeerProtocol::Clipboard,
                 ConnectivityProfile::MembershipHistory => InboundPeerProtocol::MembershipHistory,
+                ConnectivityProfile::MembershipBranchRecovery => {
+                    InboundPeerProtocol::MembershipBranchRecovery
+                }
                 ConnectivityProfile::GroupUpdate | ConnectivityProfile::LegacyGroupUpdate => {
                     InboundPeerProtocol::GroupUpdate
                 }

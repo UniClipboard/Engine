@@ -524,3 +524,16 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::backpressure::real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup)"
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 五个独立进程执行成员分叉与恢复；外层覆盖多次原90秒业务等待和正常关闭。
+[[profile.default.overrides]]
+filter = "package(uc-connectivity-host) & binary(branch_recovery)"
+test-group = "process"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-connectivity-host) & binary(branch_recovery)"
+test-group = "process"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }

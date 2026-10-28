@@ -32,6 +32,12 @@ struct ScopedAttempt {
 }
 #[async_trait]
 impl AdmissionAttempt for ScopedAttempt {
+    fn check_frozen(&self) -> Result<(), ConnectivityError> {
+        self.fence
+            .as_ref()
+            .ok_or(ConnectivityError::Denied)?
+            .check_current(&self.peer)
+    }
     async fn check_current(&self) -> Result<(), ConnectivityError> {
         if let Some(fence) = &self.fence {
             fence.check_current(&self.peer)?;
@@ -58,6 +64,21 @@ impl ConnectionRequestScope {
         target: DeviceId,
         address_hint: Vec<u8>,
     ) -> Result<ConnectionRequest, ConnectivityError> {
+        self.bind_inner(target, Some(address_hint))
+    }
+
+    pub(crate) fn bind_peer(
+        self,
+        target: DeviceId,
+    ) -> Result<ConnectionRequest, ConnectivityError> {
+        self.bind_inner(target, None)
+    }
+
+    fn bind_inner(
+        self,
+        target: DeviceId,
+        address_hint: Option<Vec<u8>>,
+    ) -> Result<ConnectionRequest, ConnectivityError> {
         if self.session.is_cancelled() {
             return Err(ConnectivityError::Stopped);
         }
@@ -74,11 +95,25 @@ impl ConnectionRequestScope {
             target,
             attempt,
             session: self.session,
-            address_hint: Some(address_hint),
+            address_hint,
         })
     }
 }
 impl ConnectionRequest {
+    pub(crate) fn check_frozen(&self) -> Result<(), ConnectivityError> {
+        if self.session.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
+        self.attempt.check_frozen()?;
+        if self.session.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
+        Ok(())
+    }
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.session.child_token()
+    }
+
     pub async fn connect(
         &self,
         deadline: Instant,

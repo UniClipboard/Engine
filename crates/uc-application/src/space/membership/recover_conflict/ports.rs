@@ -1,11 +1,38 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     MemberInstanceId, MembershipBranchId, MembershipBranchRecoveryPackageV1,
     MembershipBranchTransitionV1, MembershipConflictId, VersionedMembershipHistory,
 };
 
-use crate::space::membership::StagedMembershipRecord;
+use super::{BranchRecoveryRequest, BranchRecoveryResponse};
+use crate::connectivity::ConnectivityError;
+use crate::space::membership::{MembershipLedgerError, StagedMembershipRecord};
+
+/// 签发动作携带原入站连接的撤销与会话基线。
+pub(crate) trait BranchRecoveryIssuerScope: Send + Sync {
+    fn check_frozen(&self) -> Result<(), ConnectivityError>;
+}
+
+/// 本次业务动作的原会话与撤销基线；不向调用方暴露连接或流。
+#[async_trait]
+pub trait BranchRecoveryOperationScopePort: Send + Sync {
+    fn check_frozen(&self) -> Result<(), MembershipBranchRecoveryChannelError>;
+    async fn exchange(
+        &self,
+        request: BranchRecoveryRequest,
+    ) -> Result<BranchRecoveryResponse, MembershipBranchRecoveryChannelError>;
+}
+
+/// 分支恢复的连接候选只使用当前成员事实；具体请求资格由签发负责人核验。
+#[async_trait]
+pub trait BranchRecoveryPeerPort: Send + Sync {
+    async fn is_current_recovery_peer(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<bool, MembershipLedgerError>;
+}
 
 #[derive(Clone)]
 pub struct MembershipBranchRecoveryRequest {
@@ -13,6 +40,27 @@ pub struct MembershipBranchRecoveryRequest {
     pub conflict_id: MembershipConflictId,
     pub target_branch_id: MembershipBranchId,
     pub recipient_member: MemberInstanceId,
+    pub(crate) scope: Arc<dyn BranchRecoveryOperationScopePort>,
+}
+
+#[cfg(feature = "test-support")]
+impl MembershipBranchRecoveryRequest {
+    /// 仅供跨 crate 的真实信道夹具建立与生产动作同样的范围。
+    pub fn for_test(
+        peer_device_id: DeviceId,
+        conflict_id: MembershipConflictId,
+        target_branch_id: MembershipBranchId,
+        recipient_member: MemberInstanceId,
+        scope: Arc<dyn BranchRecoveryOperationScopePort>,
+    ) -> Self {
+        Self {
+            peer_device_id,
+            conflict_id,
+            target_branch_id,
+            recipient_member,
+            scope,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -53,6 +101,10 @@ impl std::fmt::Debug for MembershipBranchRecoveryChannelError {
 /// 单个认证 peer 的两阶段恢复信道；不选择 peer、不解释 MLS，也不持久化流程状态。
 #[async_trait]
 pub trait MembershipBranchRecoveryChannelPort: Send + Sync {
+    fn freeze(
+        &self,
+        peer: DeviceId,
+    ) -> Result<Arc<dyn BranchRecoveryOperationScopePort>, MembershipBranchRecoveryChannelError>;
     async fn request_membership_branch_group_info(
         &self,
         request: MembershipBranchRecoveryRequest,
@@ -246,6 +298,7 @@ pub trait PrepareMembershipBranchRecoveryMaterialPort: Send + Sync {
 
 #[derive(Clone)]
 pub struct BeginMembershipBranchRecoveryInput {
+    pub(crate) scope: Arc<dyn BranchRecoveryIssuerScope>,
     pub source_device_id: DeviceId,
     pub conflict_id: MembershipConflictId,
     pub target_branch_id: MembershipBranchId,
@@ -254,6 +307,7 @@ pub struct BeginMembershipBranchRecoveryInput {
 
 #[derive(Clone)]
 pub struct IssueMembershipBranchRecoveryInput {
+    pub(crate) scope: Arc<dyn BranchRecoveryIssuerScope>,
     pub source_device_id: DeviceId,
     pub conflict_id: MembershipConflictId,
     pub target_branch_id: MembershipBranchId,

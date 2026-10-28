@@ -25,6 +25,7 @@ use uc_sync_protocol::clipboard::{
     ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
 };
 use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
+use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
@@ -142,6 +143,7 @@ impl PeerConnection for IrohPeerConnection {
             ACTIVE_CLIPBOARD_ALPN => ConnectionProtocol::ActiveClipboardState,
             CLIPBOARD_ALPN => ConnectionProtocol::Clipboard,
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN => ConnectionProtocol::MembershipHistory,
+            MEMBERSHIP_BRANCH_RECOVERY_ALPN => ConnectionProtocol::MembershipBranchRecovery,
             MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN => ConnectionProtocol::MultiplexedMembershipHistory,
             GROUP_UPDATE_ALPN => ConnectionProtocol::GroupUpdate,
             LEGACY_GROUP_UPDATE_ALPN => ConnectionProtocol::LegacyGroupUpdate,

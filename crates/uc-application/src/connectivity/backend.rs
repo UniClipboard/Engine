@@ -31,6 +31,7 @@ pub enum ConnectionProtocol {
     GroupUpdate,
     LegacyGroupUpdate,
     MembershipHistory,
+    MembershipBranchRecovery,
     MultiplexedMembershipHistory,
 }
 

@@ -9,14 +9,15 @@ use diesel::sql_query;
 use diesel::sql_types::Binary;
 use tempfile::TempDir;
 use uc_application::deps::{
-    MembershipLedgerError, MembershipRecord, MembershipRecordCommit, MembershipRecordStorePort,
-    SpaceMembershipRecord,
+    MembershipBranchRecoverySession, MembershipLedgerError, MembershipRecord,
+    MembershipRecordCommit, MembershipRecordStorePort, SpaceMembershipRecord,
 };
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
     AdmissionChangeFacts, HistoricalMembershipSignatureError,
-    HistoricalMembershipSignatureVerifier, MembershipCredential, MembershipLedger,
-    VersionedMembershipHistory, ED25519_SIGNATURE_ALGORITHM_V1,
+    HistoricalMembershipSignatureVerifier, MembershipBranchId, MembershipBranchRecoveryPackageV1,
+    MembershipConflictId, MembershipCredential, MembershipLedger, VersionedMembershipHistory,
+    ED25519_SIGNATURE_ALGORITHM_V1,
 };
 use uc_core::ports::{SecureStorageError, SecureStoragePort};
 use uc_infra_local::time::SystemClock;
@@ -27,6 +28,42 @@ use uc_infra_storage::db::pool::init_db_pool;
 use uc_infra_storage::db::ports::DbExecutor;
 
 const SENSITIVE_DEVICE_NAME: &str = "sensitive-membership-device-name-marker";
+
+#[tokio::test]
+async fn old_generation_commit_cannot_write_the_replacement_database() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("first.sqlite");
+    let second = temp.path().join("second.sqlite");
+    let pool = init_db_pool(first.to_str().unwrap()).unwrap();
+    let executor = Arc::new(DieselSqliteExecutor::new(pool.clone()));
+    let store = SqliteMembershipRecordStore::new(
+        executor,
+        Arc::new(AdmissionKeyManager::new(
+            Arc::new(MemorySecureStorage::default()),
+            [0x71; 16],
+        )),
+        Arc::new(AcceptingVerifier),
+        Arc::new(SystemClock),
+    );
+    let old_generation = store.generation();
+    pool.replace_database(second.to_str().unwrap()).unwrap();
+    let result = store
+        .commit(MembershipRecordCommit {
+            expected_generation: old_generation,
+            expected_revision: 0,
+            replacement: MembershipRecord::NoSpace { revision: 1 },
+            projection: None,
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(MembershipLedgerError::Unavailable { .. })
+    ));
+    assert!(matches!(
+        store.load().unwrap(),
+        MembershipRecord::NoSpace { revision: 0 }
+    ));
+}
 
 #[derive(Default)]
 struct MemorySecureStorage {
@@ -109,6 +146,7 @@ async fn commit(
 ) -> Result<(), MembershipLedgerError> {
     store
         .commit(MembershipRecordCommit {
+            expected_generation: store.generation(),
             expected_revision,
             replacement,
             projection: None,
@@ -189,6 +227,92 @@ impl Fixture {
                 Ok(())
             })
             .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn recovery_sessions_remain_encrypted_and_survive_database_reopen_at_each_phase() {
+    const EXTERNAL: &[u8] = b"PRIVATE_RECOVERY_EXTERNAL_COMMIT_SENTINEL";
+    const RECIPIENT_STATE: &[u8] = b"PRIVATE_RECOVERY_RECIPIENT_STATE_SENTINEL";
+    const TARGET_STATE: &[u8] = b"PRIVATE_RECOVERY_TARGET_STATE_SENTINEL";
+    const PACKAGE_HISTORY: &[u8] = b"PRIVATE_RECOVERY_PACKAGE_HISTORY_SENTINEL";
+    let fixture = Fixture::new();
+    let mut space = single_member_space(1);
+    let recipient = space.ledger.local_member;
+    let conflict = MembershipConflictId::from_bytes([0x51; 32]);
+    let branch = MembershipBranchId::from_bytes([0x52; 32]);
+    let transition = [0x53; 32];
+    let package = MembershipBranchRecoveryPackageV1::new_unsigned(
+        conflict,
+        branch,
+        recipient,
+        recipient,
+        1000,
+        [0x54; 32],
+        PACKAGE_HISTORY.to_vec(),
+        vec![1],
+        vec![2],
+    )
+    .unwrap()
+    .with_authorization_signature(vec![3]);
+    let recipient_session = MembershipBranchRecoverySession::new_recipient_prepared(
+        transition,
+        conflict,
+        branch,
+        recipient,
+        EXTERNAL.to_vec(),
+        RECIPIENT_STATE.to_vec(),
+    )
+    .unwrap();
+    let target_session = MembershipBranchRecoverySession::new_target_prepared(
+        transition,
+        conflict,
+        branch,
+        recipient,
+        [0x55; 32],
+        TARGET_STATE.to_vec(),
+        package.clone(),
+    )
+    .unwrap();
+    let mut recipient_completed = recipient_session.clone();
+    assert!(recipient_completed.complete_recipient(package));
+    let mut target_committed = target_session.clone();
+    assert!(target_committed.commit_target());
+    for (index, session) in [
+        recipient_session,
+        recipient_completed,
+        target_session,
+        target_committed,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        space.ledger.revision = u64::try_from(index + 1).unwrap();
+        space
+            .branch_recovery
+            .recovery_sessions
+            .insert(transition, session);
+        let record = MembershipRecord::Space(Box::new(space.clone()));
+        commit(
+            &fixture.store,
+            u64::try_from(index).unwrap(),
+            record.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fixture.reopen().load().unwrap(), record);
+        for path in [
+            fixture.db_path.clone(),
+            PathBuf::from(format!("{}-wal", fixture.db_path.display())),
+            PathBuf::from(format!("{}-shm", fixture.db_path.display())),
+        ] {
+            if path.exists() {
+                let bytes = std::fs::read(path).unwrap();
+                for marker in [EXTERNAL, RECIPIENT_STATE, TARGET_STATE, PACKAGE_HISTORY] {
+                    assert!(!contains(&bytes, marker), "恢复状态不得以明文写入SQLite");
+                }
+            }
+        }
     }
 }
 

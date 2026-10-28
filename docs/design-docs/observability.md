@@ -57,7 +57,7 @@
   任务异常退出统一由等待该任务的负责人调用 `record_task_join_failure`，以固定 `task.kind` 写入健康记录；
   Blob 受管交换及关闭监督任务为 `blob_transport_worker`；进度受管连接监督任务为 `transfer_progress_connectivity_worker`；
   剪贴板投递记录、入站系统写入、活跃剪贴板收敛、延后排空、配对 mDNS 转发与移动端出站分发分别为 `clipboard_delivery_record`、`clipboard_inbound_os_write`、`active_clipboard_converge`、`clipboard_deferred_drain`、`pairing_mdns_forward`、`mobile_outbound_dispatch`；
-  Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；成员维护的一轮动作为 `membership_maintenance_round`，活跃剪贴板必需 worker 为 `active_clipboard_worker`，移动端绑定的引擎 worker 线程为 `mobile_worker`，Engine 启动任务为 `engine_startup`，出站进度翻译任务为 `outbound_progress_translator`，设备发现订阅及共用 mDNS 服务的任务异常退出为 `peer_discovery`，普通剪贴板共享拨号任务为 `clipboard_connectivity_worker`，设备可达性准入、连接监督及范围读取任务为 `presence_connectivity_worker`，成员历史连接任务为 `membership_history_connectivity_worker`。
+  Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；成员维护的一轮动作为 `membership_maintenance_round`，活跃剪贴板必需 worker 为 `active_clipboard_worker`，移动端绑定的引擎 worker 线程为 `mobile_worker`，Engine 启动任务为 `engine_startup`，出站进度翻译任务为 `outbound_progress_translator`，设备发现订阅及共用 mDNS 服务的任务异常退出为 `peer_discovery`，普通剪贴板共享拨号任务为 `clipboard_connectivity_worker`，设备可达性准入、连接监督及范围读取任务为 `presence_connectivity_worker`，成员历史连接任务为 `membership_history_connectivity_worker`，成员分支恢复连接任务为 `membership_branch_recovery_connectivity_worker`。
 - 真正执行的后台恢复可以成为独立动作，但要说明上线、重启、重试等固定触发原因，以及实际恢复结果。
 - 隐藏例行噪声不能丢失业务动作中的失败证据，不能单独过滤必要父节点、导致完整记录变成孤儿片段。
 - 测试记录与实际产品记录明确隔离。测试可以显式导出整批诊断用于验收，但不能让这些记录默认混入实际产品的业务视图。
@@ -510,7 +510,7 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 正文，也不原样写入诊断文件；系统日志中的编码只包含同一组固定分类。远程入口忽略这个本地 target，
 不将正常路由计为远程隐私拒收。
 
-实际握手完成的 `connection.protocol.negotiated` 只输出封闭类别：可达性v1／v2、进度v1／v2、`blob`或`other`；进度版本直接取握手已协商的ALPN常量，不从对端版本或宿主能力推断。同一协商记录的`initial_path`复用该连接握手完成时实际选路的既有封闭分类；缺少该字段的旧记录仍可读取，但不能据此声称已证明连接路径。
+实际握手完成的 `connection.protocol.negotiated` 只输出封闭类别：可达性v1／v2、进度v1／v2、成员分支恢复、`blob`或`other`；协议类别直接取握手已协商的ALPN常量，不从对端版本或宿主能力推断。同一协商记录的`initial_path`复用该连接握手完成时实际选路的既有封闭分类；缺少该字段的旧记录仍可读取，但不能据此声称已证明连接路径。
 `blob`由固定SDK的ALPN匹配产生；不记录任意ALPN原文，不新增业务入口，未知协议继续归`other`。
 该记录仅进入本地连接诊断，远程入口仍忽略整个`uc.connectivity`，不扩大Collector字段。
 

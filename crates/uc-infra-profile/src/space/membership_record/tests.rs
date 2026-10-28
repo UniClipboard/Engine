@@ -406,17 +406,17 @@ fn commit_requires_the_expected_revision_and_a_larger_replacement() {
 
     assert!(matches!(
         store
-            .commit_record(0, &MembershipRecord::NoSpace { revision: 0 }, None)
+            .commit_record(0, 0, &MembershipRecord::NoSpace { revision: 0 }, None)
             .unwrap_err(),
         MembershipLedgerError::Conflict
     ));
     // 一次提交可以包含多项账本转换，修订号只要求增大。
     store
-        .commit_record(0, &MembershipRecord::NoSpace { revision: 2 }, None)
+        .commit_record(0, 0, &MembershipRecord::NoSpace { revision: 2 }, None)
         .unwrap();
     assert!(matches!(
         store
-            .commit_record(0, &MembershipRecord::NoSpace { revision: 3 }, None)
+            .commit_record(0, 0, &MembershipRecord::NoSpace { revision: 3 }, None)
             .unwrap_err(),
         MembershipLedgerError::Conflict
     ));
@@ -424,7 +424,7 @@ fn commit_requires_the_expected_revision_and_a_larger_replacement() {
     let mut space = migrate("two_member_active", TWO_MEMBER_ACTIVE);
     space.ledger.revision = 3;
     let record = MembershipRecord::Space(Box::new(space));
-    store.commit_record(2, &record, None).unwrap();
+    store.commit_record(0, 2, &record, None).unwrap();
     assert_eq!(store.load().unwrap(), record);
 }
 
@@ -447,6 +447,7 @@ async fn the_read_model_is_written_in_the_record_transaction() {
     let conflicting = MembershipRecordStorePort::commit(
         &store,
         MembershipRecordCommit {
+            expected_generation: 0,
             expected_revision: 7,
             replacement: replacement.clone(),
             projection: Some(projection.clone()),
@@ -459,6 +460,7 @@ async fn the_read_model_is_written_in_the_record_transaction() {
     MembershipRecordStorePort::commit(
         &store,
         MembershipRecordCommit {
+            expected_generation: 0,
             expected_revision: 0,
             replacement: replacement.clone(),
             projection: Some(projection.clone()),
@@ -502,6 +504,7 @@ async fn a_read_model_plan_without_a_read_model_store_writes_nothing() {
     let result = MembershipRecordStorePort::commit(
         &store,
         MembershipRecordCommit {
+            expected_generation: 0,
             expected_revision: 0,
             replacement: MembershipRecord::Space(Box::new(space)),
             projection: Some(projection),

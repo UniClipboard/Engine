@@ -9,7 +9,8 @@ use crate::space::membership::testing::{
     with_peer_relation, AcceptingVerifier, EstablishedSpace, OwnerFixture,
 };
 use crate::space::membership::{
-    ledger_error, MembershipLedgerError, MembershipRecord, MembershipView, SpaceMembershipRecord,
+    ledger_error, BranchRecoveryPeerPort, MembershipLedgerError, MembershipRecord, MembershipView,
+    SpaceMembershipRecord,
 };
 
 fn device(name: &str) -> DeviceId {
@@ -207,6 +208,33 @@ async fn unbound_access_refuses_every_peer() {
         access.known_peer_identities().await,
         Err(MembershipLedgerError::Unavailable { .. })
     ));
+    assert!(matches!(
+        access.is_current_recovery_peer(&device("device-b")).await,
+        Err(MembershipLedgerError::Unavailable { .. })
+    ));
+}
+
+#[tokio::test]
+async fn diverged_current_member_can_be_a_recovery_peer_but_unknown_device_cannot() {
+    let space = EstablishedSpace::new(&["device-a", "device-b"]);
+    let record = with_peer_relation(
+        space.record("device-a", 1),
+        &device("device-b"),
+        PeerRelation::Diverged,
+        None,
+    );
+    let fixture = OwnerFixture::new(record);
+    let access = PeerAccess::unbound();
+    access.bind(fixture.owner.clone());
+    assert!(!access.is_admitted(&device("device-b")).await.unwrap());
+    assert!(access
+        .is_current_recovery_peer(&device("device-b"))
+        .await
+        .unwrap());
+    assert!(!access
+        .is_current_recovery_peer(&device("device-z"))
+        .await
+        .unwrap());
 }
 
 /// 移除一经负责人提交，入站判定立即拒绝被移除设备，而它的身份仍可识别；判定不依赖成员读模型的更新。
@@ -217,6 +245,10 @@ async fn a_committed_removal_is_enforced_before_any_read_model_update() {
     let access = PeerAccess::unbound();
     access.bind(fixture.owner.clone());
     assert!(access.is_admitted(&device("device-b")).await.unwrap());
+    assert!(access
+        .is_current_recovery_peer(&device("device-b"))
+        .await
+        .unwrap());
 
     fixture
         .owner
@@ -233,6 +265,10 @@ async fn a_committed_removal_is_enforced_before_any_read_model_update() {
         .unwrap();
 
     assert!(!access.is_admitted(&device("device-b")).await.unwrap());
+    assert!(!access
+        .is_current_recovery_peer(&device("device-b"))
+        .await
+        .unwrap());
     assert!(access
         .known_peer_identities()
         .await

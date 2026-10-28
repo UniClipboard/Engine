@@ -92,6 +92,7 @@ pub(crate) struct HostProcess {
     replies: Receiver<Value>,
     reader: Option<JoinHandle<()>>,
     pub(crate) root: TempDir,
+    pub(crate) host_info: Value,
     rendezvous: String,
     binary: PathBuf,
     legacy_group_updates: bool,
@@ -114,7 +115,7 @@ impl HostProcess {
         bind_port: Option<u16>,
     ) -> Self {
         let root = TempDir::new().expect("host root");
-        let (child, input, replies, reader) = Self::spawn(
+        let (child, input, replies, reader, host_info) = Self::spawn(
             root.path(),
             rendezvous,
             None,
@@ -128,6 +129,7 @@ impl HostProcess {
             replies,
             reader: Some(reader),
             root,
+            host_info,
             rendezvous: rendezvous.to_owned(),
             binary,
             legacy_group_updates,
@@ -160,7 +162,7 @@ impl HostProcess {
         binary: &PathBuf,
         legacy_group_updates: bool,
         bind_port: Option<u16>,
-    ) -> (Child, ChildStdin, Receiver<Value>, JoinHandle<()>) {
+    ) -> (Child, ChildStdin, Receiver<Value>, JoinHandle<()>, Value) {
         let (child, input, replies, reader, ready) = spawn_host(
             root,
             rendezvous,
@@ -174,7 +176,7 @@ impl HostProcess {
             "host did not start: code={}, state={}",
             ready["code"], ready["startup"]["state"]
         );
-        (child, input, replies, reader)
+        (child, input, replies, reader, ready["host"].clone())
     }
 
     pub(crate) fn request(&mut self, request: Value) -> Value {
@@ -216,6 +218,21 @@ impl HostProcess {
         next_reply(&self.replies)
     }
 
+    #[cfg(feature = "branch-recovery-fault-tests")]
+    pub(crate) fn send_without_waiting(&mut self, request: Value) {
+        writeln!(self.input, "{request}").expect("write host request");
+        self.input.flush().expect("flush host request");
+    }
+
+    #[cfg(feature = "branch-recovery-fault-tests")]
+    pub(crate) fn has_response_within(&self, timeout: Duration) -> bool {
+        match self.replies.recv_timeout(timeout) {
+            Ok(_) => true,
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("host disconnected"),
+        }
+    }
+
     pub(crate) fn shutdown(&mut self) {
         let _ = self.request(json!({ "command": "shutdown" }));
         let status = self.child.wait().expect("wait for host");
@@ -243,7 +260,7 @@ impl HostProcess {
             "host exit before restart: {status}"
         );
         self.join_reader();
-        let (child, input, replies, reader) = Self::spawn(
+        let (child, input, replies, reader, host_info) = Self::spawn(
             self.root.path(),
             &self.rendezvous,
             Some(secure_storage),
@@ -255,6 +272,7 @@ impl HostProcess {
         self.input = input;
         self.replies = replies;
         self.reader = Some(reader);
+        self.host_info = host_info;
     }
 
     /// 宿主退出后其 stdout 关闭，读取线程随之结束。
@@ -276,12 +294,17 @@ fn spawn_host(
     legacy_group_updates: bool,
     bind_port: Option<u16>,
 ) -> SpawnedHost {
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("start connectivity host");
+        .stderr(Stdio::inherit());
+    #[cfg(feature = "branch-recovery-fault-tests")]
+    command.env(
+        "UC_BRANCH_RECOVERY_TEST_GATE",
+        root.join("branch-recovery-test-gate"),
+    );
+    let mut child = command.spawn().expect("start connectivity host");
     let mut input = child.stdin.take().expect("host input");
     let output = child.stdout.take().expect("host output");
     let mut start = json!({

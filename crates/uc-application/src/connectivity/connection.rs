@@ -96,6 +96,16 @@ impl ConnectionLease {
     pub async fn closed(&self) {
         self.record.connection.closed().await;
     }
+    pub(crate) fn check_frozen(&self) -> Result<(), ConnectivityError> {
+        if self.record.stop.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
+        self.record.grant.check_frozen()?;
+        if self.record.stop.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
+        Ok(())
+    }
     pub async fn check_current(&self) -> Result<(), ConnectivityError> {
         if self.record.stop.is_cancelled() {
             return Err(ConnectivityError::Stopped);

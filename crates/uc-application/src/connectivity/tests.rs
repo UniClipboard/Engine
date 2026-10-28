@@ -216,6 +216,27 @@ fn fixture(
 }
 
 #[tokio::test]
+async fn frozen_peer_scope_never_revives_after_revocation_or_session_restart() {
+    let (manager, _, epoch) = fixture(
+        ConnectionMode::SingleExchange,
+        ConnectivityPolicy::default(),
+    );
+    let peer = DeviceId::new("peer");
+    let old = manager.freeze_request().bind_peer(peer).unwrap();
+    assert!(old.check_frozen().is_ok());
+    epoch.fetch_add(1, Ordering::SeqCst);
+    let readded = manager.freeze_request().bind_peer(peer).unwrap();
+    assert!(old.check_frozen().is_err());
+    assert!(readded.check_frozen().is_ok());
+    manager.disconnect_all().await.unwrap();
+    assert!(old.check_frozen().is_err());
+    assert!(readded.check_frozen().is_err());
+    let next_session = manager.freeze_request().bind_peer(peer).unwrap();
+    assert!(next_session.check_frozen().is_ok());
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn unsupported_uni_does_not_consume_single_exchange_or_capacity() {
     let (manager, backend, _) = fixture(
         ConnectionMode::SingleExchange,
@@ -647,6 +668,180 @@ async fn single_exchange_followers_work_with_one_dial_slot() {
     let second = second.await.unwrap().unwrap();
     assert_ne!(first.record.connection.id(), second.record.connection.id());
     drop((first, second));
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn four_recovery_dials_keep_capacity_until_cancelled_work_settles() {
+    let (manager, backend, _) = fixture(
+        ConnectionMode::SingleExchange,
+        ConnectivityPolicy {
+            outbound_per_peer: 1,
+            inbound_per_connection: 1,
+            inbound_per_session: 8,
+            reject_excess_inbound: true,
+            waiters_per_peer: 4,
+            waiters_per_session: 16,
+            flights_per_session: 4,
+            supervise_local_work: true,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let mut tasks = Vec::new();
+    let mut tokens = Vec::new();
+    for name in ["one", "two", "three", "four"] {
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let owner = manager.clone();
+        tasks.push(tokio::spawn(async move {
+            owner
+                .request(DeviceId::new(name))
+                .connect(Instant::now() + Duration::from_secs(5), &token)
+                .await
+        }));
+        tokens.push(cancel);
+    }
+    started(&backend, 4).await;
+    assert!(matches!(
+        manager
+            .request(DeviceId::new("five"))
+            .connect(
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new(),
+            )
+            .await,
+        Err(ConnectivityError::Busy(_))
+    ));
+    for token in tokens {
+        token.cancel();
+    }
+    tokio::task::yield_now().await;
+    assert!(tasks.iter().all(|task| !task.is_finished()));
+    assert!(matches!(
+        manager
+            .request(DeviceId::new("five"))
+            .connect(
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new(),
+            )
+            .await,
+        Err(ConnectivityError::Busy(_))
+    ));
+    backend.gate.add_permits(4);
+    for task in tasks {
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(ConnectivityError::Stopped)
+        ));
+    }
+    assert!(backend
+        .connections
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|raw| raw.is_closed()));
+    backend.gate.add_permits(1);
+    let next = manager
+        .request(DeviceId::new("five"))
+        .connect(
+            Instant::now() + Duration::from_secs(1),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    drop(next);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_waiter_limits_return_capacity_after_cancellation() {
+    let (manager, backend, _) = fixture(
+        ConnectionMode::SingleExchange,
+        ConnectivityPolicy {
+            waiters_per_peer: 4,
+            waiters_per_session: 16,
+            flights_per_session: 4,
+            supervise_local_work: true,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let spawn = |peer: &'static str| {
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let owner = manager.clone();
+        let task = tokio::spawn(async move {
+            owner
+                .request(DeviceId::new(peer))
+                .connect(Instant::now() + Duration::from_secs(10), &token)
+                .await
+        });
+        (cancel, task)
+    };
+    let mut tasks: Vec<_> = (0..4).map(|_| spawn("one")).collect();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while manager.waiting_capacity().available_permits() != 12 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        manager
+            .request(DeviceId::new("one"))
+            .connect(
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new()
+            )
+            .await,
+        Err(ConnectivityError::Busy(_))
+    ));
+    for peer in ["two", "three", "four"] {
+        tasks.extend((0..4).map(|_| spawn(peer)));
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while manager.waiting_capacity().available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    started(&backend, 4).await;
+    assert!(matches!(
+        manager
+            .request(DeviceId::new("five"))
+            .connect(
+                Instant::now() + Duration::from_secs(1),
+                &CancellationToken::new()
+            )
+            .await,
+        Err(ConnectivityError::Busy(_))
+    ));
+    let (cancel, task) = tasks.remove(0);
+    cancel.cancel();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(ConnectivityError::Stopped)
+    ));
+    assert_eq!(manager.waiting_capacity().available_permits(), 1);
+    tasks.push(spawn("one"));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while manager.waiting_capacity().available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for (cancel, _) in &tasks {
+        cancel.cancel();
+    }
+    backend.gate.add_permits(4);
+    for (_, task) in tasks {
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(ConnectivityError::Stopped)
+        ));
+    }
+    assert_eq!(manager.waiting_capacity().available_permits(), 16);
     manager.shutdown().await.unwrap();
 }
 #[tokio::test]
@@ -1710,3 +1905,62 @@ mod retention_tests;
 
 #[path = "authority_session_tests.rs"]
 mod authority_session;
+
+#[tokio::test]
+async fn single_exchange_rejects_overload_without_waiting_for_capacity() {
+    let (manager, _, _) = fixture(
+        ConnectionMode::SingleExchange,
+        ConnectivityPolicy {
+            inbound_per_session: 1,
+            reject_excess_inbound: true,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let capacity = manager.inbound_capacity();
+    let held = capacity.acquire_owned().await.unwrap();
+    let raw = Arc::new(TestConnection {
+        id: 987,
+        mode: ConnectionMode::SingleExchange,
+        closed: watch::channel(false).0,
+    });
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        manager.accept_exchange(raw.clone(), Instant::now() + Duration::from_secs(10)),
+    )
+    .await
+    .expect("入站过载应立即拒绝，而非等待容量");
+    assert!(matches!(result, Err(ConnectivityError::Busy(_))));
+    assert!(raw.is_closed());
+    drop(held);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn single_exchange_default_policy_waits_for_inbound_capacity() {
+    let (manager, _, _) = fixture(
+        ConnectionMode::SingleExchange,
+        ConnectivityPolicy {
+            inbound_per_session: 1,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let capacity = manager.inbound_capacity();
+    let held = capacity.acquire_owned().await.unwrap();
+    let raw = Arc::new(TestConnection {
+        id: 988,
+        mode: ConnectionMode::SingleExchange,
+        closed: watch::channel(false).0,
+    });
+    let mut pending =
+        Box::pin(manager.accept_exchange(raw.clone(), Instant::now() + Duration::from_secs(10)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut pending)
+            .await
+            .is_err()
+    );
+    assert!(!raw.is_closed());
+    drop(pending);
+    assert!(raw.is_closed());
+    drop(held);
+    manager.shutdown().await.unwrap();
+}

@@ -1,16 +1,431 @@
+use super::super::super::BranchRecoveryAdmission;
 use super::*;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
-use uc_application::deps::ConnectivityPolicy;
+use uc_application::deps::{
+    BranchRecoveryPeerPort, ConnectivityBackend, ConnectivityPolicy, StreamLease,
+};
 use uc_application::deps::{ElapsedClockError, ElapsedClockPort};
 use uc_core::file_transfer::OutboundProgressStatus;
 use uc_infra_local::SystemElapsedClock;
 use uc_sync_protocol::clipboard::MULTIPLEXED_CLIPBOARD_ALPN;
+use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use uc_sync_protocol::transfer_progress::{self, ProgressFrame, LEGACY_TRANSFER_PROGRESS_ALPN};
 
 async fn incoming(rx: &mut mpsc::Receiver<Incoming>) -> Incoming {
     timeout(BUDGET, rx.recv()).await.unwrap().unwrap()
+}
+
+#[async_trait]
+impl BranchRecoveryPeerPort for Directory {
+    async fn is_current_recovery_peer(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<bool, MembershipLedgerError> {
+        Ok(self.allowed.load(Ordering::SeqCst) && self.peers.iter().any(|(id, _)| id == peer))
+    }
+}
+
+type RecoveryIncoming =
+    Result<(Arc<dyn PeerConnection>, ConnectionLease, StreamLease), ConnectivityError>;
+
+#[derive(Clone)]
+struct RecoveryCapacityCapture {
+    manager: ConnectivityManager,
+    events: mpsc::Sender<RecoveryIncoming>,
+    active: Arc<AtomicUsize>,
+}
+
+struct ActiveRecoveryHandler(Arc<AtomicUsize>);
+
+impl Drop for ActiveRecoveryHandler {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl std::fmt::Debug for RecoveryCapacityCapture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RecoveryCapacityCapture")
+    }
+}
+
+impl ProtocolHandler for RecoveryCapacityCapture {
+    async fn accept(&self, native: Connection) -> Result<(), AcceptError> {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        let _active = ActiveRecoveryHandler(self.active.clone());
+        let raw = IrohPeerConnection::wrap(native);
+        let result = self
+            .manager
+            .accept_exchange(raw.clone(), Instant::now() + Duration::from_secs(10))
+            .await
+            .map(|(lease, stream)| (raw.clone(), lease, stream));
+        if self.events.send(result).await.is_ok() {
+            raw.closed().await;
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_recovery_connections_enforce_inbound_capacity_and_shutdown() -> anyhow::Result<()> {
+    timeout(Duration::from_secs(60), async {
+        let client = endpoint().await?;
+        let server = endpoint().await?;
+        let directory = Arc::new(Directory {
+            peers: vec![
+                (DeviceId::new("client"), client.addr()),
+                (DeviceId::new("server"), server.addr()),
+            ],
+            allowed: AtomicBool::new(true),
+        });
+        let manager = ConnectivityManager::new(
+            Arc::new(IrohConnectivityBackend::new(
+                server.clone(),
+                directory.clone(),
+                None,
+                ConnectivityProfile::MembershipBranchRecovery,
+            )),
+            Arc::new(BranchRecoveryAdmission::new(
+                directory.clone(),
+                directory,
+                Arc::new(Sha256IdentityFingerprintFactory),
+                AdmittedConnections::default(),
+            )),
+            ConnectivityPolicy {
+                outbound_per_peer: 1,
+                inbound_per_connection: 1,
+                inbound_per_session: 8,
+                reject_excess_inbound: true,
+                waiters_per_peer: 4,
+                waiters_per_session: 16,
+                flights_per_session: 4,
+                supervise_local_work: true,
+                ..ConnectivityPolicy::default()
+            },
+        );
+        let (events, mut received) = mpsc::channel(16);
+        let handlers = Arc::new(AtomicUsize::new(0));
+        let router = Router::builder((*server).clone())
+            .accept(
+                MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+                RecoveryCapacityCapture {
+                    manager: manager.clone(),
+                    events,
+                    active: handlers.clone(),
+                },
+            )
+            .spawn();
+        let mut clients = Vec::new();
+        let mut active = Vec::new();
+        for _ in 0..8 {
+            let connection = client
+                .connect(server.addr(), MEMBERSHIP_BRANCH_RECOVERY_ALPN)
+                .await?;
+            let (mut send, receive) = connection.open_bi().await?;
+            send.write_all(&[1]).await?;
+            let accepted = timeout(BUDGET, received.recv())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("missing inbound event"))??;
+            assert_eq!(
+                accepted.1.protocol(),
+                ConnectionProtocol::MembershipBranchRecovery
+            );
+            clients.push((connection, send, receive));
+            active.push(accepted);
+        }
+        let rejected = client
+            .connect(server.addr(), MEMBERSHIP_BRANCH_RECOVERY_ALPN)
+            .await?;
+        let result = timeout(BUDGET, received.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing overflow event"))?;
+        assert!(matches!(result, Err(ConnectivityError::Busy(_))));
+        timeout(BUDGET, rejected.closed()).await?;
+        timeout(BUDGET, async {
+            while handlers.load(Ordering::SeqCst) != 8 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        drop(active.pop());
+        timeout(BUDGET, async {
+            while handlers.load(Ordering::SeqCst) != 7 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let replacement = client
+            .connect(server.addr(), MEMBERSHIP_BRANCH_RECOVERY_ALPN)
+            .await?;
+        let (mut send, receive) = replacement.open_bi().await?;
+        send.write_all(&[1]).await?;
+        let accepted = timeout(BUDGET, received.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing replacement event"))??;
+        clients.push((replacement, send, receive));
+        active.push(accepted);
+        manager.shutdown().await?;
+        for (raw, _, _) in &active {
+            timeout(BUDGET, raw.closed()).await?;
+        }
+        timeout(BUDGET, async {
+            while handlers.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        drop(active);
+        drop(clients);
+        router.shutdown().await?;
+        client.close().await;
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_recovery_identity_read_keeps_original_revocation_fence() -> anyhow::Result<()> {
+    struct DelayedDirectory {
+        directory: Arc<Directory>,
+        first: AtomicBool,
+        started: Semaphore,
+        release: Semaphore,
+    }
+
+    #[async_trait]
+    impl PeerIdentityDirectoryPort for DelayedDirectory {
+        async fn known_peer_identities(
+            &self,
+        ) -> Result<Vec<KnownPeerIdentity>, MembershipLedgerError> {
+            if self.first.swap(false, Ordering::SeqCst) {
+                self.started.add_permits(1);
+                self.release.acquire().await.unwrap().forget();
+            }
+            self.directory.known_peer_identities().await
+        }
+    }
+
+    timeout(Duration::from_secs(30), async {
+        let client = endpoint().await?;
+        let server = endpoint().await?;
+        let peer = DeviceId::new("client");
+        let directory = Arc::new(Directory {
+            peers: vec![
+                (peer, client.addr()),
+                (DeviceId::new("server"), server.addr()),
+            ],
+            allowed: AtomicBool::new(true),
+        });
+        let delayed = Arc::new(DelayedDirectory {
+            directory: directory.clone(),
+            first: AtomicBool::new(true),
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let ledger = AdmittedConnections::default();
+        let manager = ConnectivityManager::new(
+            Arc::new(IrohConnectivityBackend::new(
+                server.clone(),
+                directory.clone(),
+                None,
+                ConnectivityProfile::MembershipBranchRecovery,
+            )),
+            Arc::new(BranchRecoveryAdmission::new(
+                delayed.clone(),
+                directory.clone(),
+                Arc::new(Sha256IdentityFingerprintFactory),
+                ledger.clone(),
+            )),
+            ConnectivityPolicy {
+                inbound_per_session: 8,
+                reject_excess_inbound: true,
+                supervise_local_work: true,
+                ..ConnectivityPolicy::default()
+            },
+        );
+        let (events, mut received) = mpsc::channel(2);
+        let router = Router::builder((*server).clone())
+            .accept(
+                MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+                RecoveryCapacityCapture {
+                    manager: manager.clone(),
+                    events,
+                    active: Arc::new(AtomicUsize::new(0)),
+                },
+            )
+            .spawn();
+        let old = client
+            .connect(server.addr(), MEMBERSHIP_BRANCH_RECOVERY_ALPN)
+            .await?;
+        timeout(BUDGET, delayed.started.acquire()).await??.forget();
+        directory.allowed.store(false, Ordering::SeqCst);
+        ledger.close_device(&peer, b"test retirement");
+        directory.allowed.store(true, Ordering::SeqCst);
+        delayed.release.add_permits(1);
+        let old_result = timeout(BUDGET, received.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing old admission"))?;
+        assert!(matches!(old_result, Err(ConnectivityError::Denied)));
+        timeout(BUDGET, old.closed()).await?;
+
+        let fresh = client
+            .connect(server.addr(), MEMBERSHIP_BRANCH_RECOVERY_ALPN)
+            .await?;
+        let (mut send, _receive) = fresh.open_bi().await?;
+        send.write_all(&[1]).await?;
+        let (_raw, lease, stream) = timeout(BUDGET, received.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing fresh admission"))??;
+        assert_eq!(
+            lease.protocol(),
+            ConnectionProtocol::MembershipBranchRecovery
+        );
+        drop(stream);
+        drop(lease);
+        manager.shutdown().await?;
+        router.shutdown().await?;
+        client.close().await;
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_recovery_dial_does_not_adopt_connection_after_rejoin() -> anyhow::Result<()> {
+    fn denied(error: &ConnectivityError) -> bool {
+        match error {
+            ConnectivityError::Denied => true,
+            ConnectivityError::Shared(source) => denied(source),
+            _ => false,
+        }
+    }
+
+    struct DelayedBackend {
+        inner: IrohConnectivityBackend,
+        first: AtomicBool,
+        started: Semaphore,
+        release: Semaphore,
+    }
+
+    #[async_trait]
+    impl ConnectivityBackend for DelayedBackend {
+        async fn connect(
+            &self,
+            target: DeviceId,
+            hint: Option<Vec<u8>>,
+            cancel: CancellationToken,
+        ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+            let connection = self.inner.connect(target, hint, cancel).await?;
+            if self.first.swap(false, Ordering::SeqCst) {
+                self.started.add_permits(1);
+                self.release.acquire().await.unwrap().forget();
+            }
+            Ok(connection)
+        }
+    }
+
+    #[derive(Clone)]
+    struct RawCapture(mpsc::Sender<Connection>);
+    impl std::fmt::Debug for RawCapture {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("RawRecoveryCapture")
+        }
+    }
+    impl ProtocolHandler for RawCapture {
+        async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+            if self.0.send(connection.clone()).await.is_ok() {
+                connection.closed().await;
+            }
+            Ok(())
+        }
+    }
+
+    timeout(Duration::from_secs(30), async {
+        let client = endpoint().await?;
+        let server = endpoint().await?;
+        let peer = DeviceId::new("server");
+        let directory = Arc::new(Directory {
+            peers: vec![
+                (DeviceId::new("client"), client.addr()),
+                (peer, server.addr()),
+            ],
+            allowed: AtomicBool::new(true),
+        });
+        let backend = Arc::new(DelayedBackend {
+            inner: IrohConnectivityBackend::new(
+                client.clone(),
+                directory.clone(),
+                None,
+                ConnectivityProfile::MembershipBranchRecovery,
+            ),
+            first: AtomicBool::new(true),
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        let ledger = AdmittedConnections::default();
+        let manager = ConnectivityManager::new(
+            backend.clone(),
+            Arc::new(BranchRecoveryAdmission::new(
+                directory.clone(),
+                directory.clone(),
+                Arc::new(Sha256IdentityFingerprintFactory),
+                ledger.clone(),
+            )),
+            ConnectivityPolicy {
+                supervise_local_work: true,
+                ..ConnectivityPolicy::default()
+            },
+        );
+        let (events, mut received) = mpsc::channel(2);
+        let router = Router::builder((*server).clone())
+            .accept(MEMBERSHIP_BRANCH_RECOVERY_ALPN, RawCapture(events))
+            .spawn();
+        let request = manager.request(peer);
+        let old = tokio::spawn(async move {
+            request
+                .connect(Instant::now() + BUDGET, &CancellationToken::new())
+                .await
+        });
+        timeout(BUDGET, backend.started.acquire()).await??.forget();
+        let old_remote = timeout(BUDGET, received.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing old connection"))?;
+        directory.allowed.store(false, Ordering::SeqCst);
+        ledger.close_device(&peer, b"test retirement");
+        directory.allowed.store(true, Ordering::SeqCst);
+        backend.release.add_permits(1);
+        let error = match old.await? {
+            Ok(_) => anyhow::bail!("old request adopted a connection after rejoin"),
+            Err(error) => error,
+        };
+        assert!(denied(&error), "旧拨号必须因撤销而拒绝: {error}");
+        timeout(BUDGET, old_remote.closed()).await?;
+
+        let fresh = manager
+            .request(peer)
+            .connect(Instant::now() + BUDGET, &CancellationToken::new())
+            .await?;
+        assert_eq!(
+            fresh.protocol(),
+            ConnectionProtocol::MembershipBranchRecovery
+        );
+        let fresh_remote = timeout(BUDGET, received.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing fresh connection"))?;
+        fresh.close();
+        timeout(BUDGET, fresh_remote.closed()).await?;
+        drop(fresh);
+        manager.shutdown().await?;
+        router.shutdown().await?;
+        client.close().await;
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

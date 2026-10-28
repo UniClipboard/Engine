@@ -376,3 +376,42 @@ async fn incoming_direction_is_independent_and_keeps_its_slot_until_work_and_clo
         manager.shutdown().await.expect("shutdown");
     }
 }
+
+#[tokio::test]
+async fn single_exchange_busy_releases_capacity_only_after_stream_is_dropped() {
+    let (_unused, admission, backend) = setup(None);
+    let manager = ConnectivityManager::new(
+        backend,
+        admission.clone(),
+        ConnectivityPolicy {
+            inbound_per_session: 1,
+            inbound_per_connection: 1,
+            reject_excess_inbound: true,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    admission.identity_finish.add_permits(2);
+    admission.ledger_finish.add_permits(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let (connection, stream) = manager.accept_exchange(raw(1), deadline).await.unwrap();
+    let excess = raw(2);
+    let result = timeout(
+        Duration::from_millis(100),
+        manager.accept_exchange(excess.clone(), deadline),
+    )
+    .await
+    .expect("超额请求不能排队");
+    assert!(matches!(result, Err(ConnectivityError::Busy(_))));
+    assert!(excess.is_closed());
+    drop(connection);
+    let still_busy = raw(3);
+    assert!(matches!(
+        manager.accept_exchange(still_busy, deadline).await,
+        Err(ConnectivityError::Busy(_))
+    ));
+    drop(stream);
+    let (next, next_stream) = manager.accept_exchange(raw(4), deadline).await.unwrap();
+    drop(next_stream);
+    drop(next);
+    manager.shutdown().await.unwrap();
+}

@@ -31,12 +31,12 @@ use crate::dev::{
 use uc_application::deps::{
     ApplicationClipboardAdapters, ApplicationNetworkAdapters, ApplicationNetworkBinding,
     ApplicationSpaceAdapters, ApplyGroupUpdatePort, BlobDownloadResources, BlobTransport,
-    ClipboardReceiverPort, ConnectivityManager, ConnectivityPolicy, GroupUpdateEndpoint,
-    GroupUpdateLocalWorkPort, GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort,
-    IdleRetentionPolicy, MembershipHistoryReceiver, MembershipHistoryTransport,
-    PeerIdentityDirectoryPort, PeerReachabilityTransport, PeerReachabilityTransportPorts,
-    ProgressWirePort, SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters,
-    TransferProgressNetwork,
+    BranchRecoveryReceiver, BranchRecoveryTransport, BranchRecoveryWirePort, ClipboardReceiverPort,
+    ConnectivityManager, ConnectivityPolicy, GroupUpdateEndpoint, GroupUpdateLocalWorkPort,
+    GroupUpdateReceiverPort, GroupUpdateWirePort, HistoryWirePort, IdleRetentionPolicy,
+    MembershipHistoryReceiver, MembershipHistoryTransport, PeerIdentityDirectoryPort,
+    PeerReachabilityTransport, PeerReachabilityTransportPorts, ProgressWirePort,
+    SpaceAdmissionAdapters, SpaceMembershipAdapters, SpaceRuntimeAdapters, TransferProgressNetwork,
 };
 use uc_application::facade::ApplicationAssembly;
 use uc_core::membership::{GroupUpdateDispatchPort, PeerAdmissionPort};
@@ -53,7 +53,9 @@ use uc_infra_p2p::network::iroh::transfer_progress_v2::{
 };
 use uc_infra_p2p::network::iroh::{
     blob_exchange::IrohBlobSourceResolver,
-    connectivity::{ConnectivityProfile, PeerReachabilityWire},
+    connectivity::{
+        BranchRecoveryLocalWork, BranchRecoveryWire, ConnectivityProfile, PeerReachabilityWire,
+    },
     group_update_adapter::{GroupUpdateWire, IrohGroupUpdateAdapter, SessionGroupUpdateLocalWork},
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     IrohIdentityStore, IrohNodeError, IrohSessionBuilder, MembershipHistoryWire,
@@ -144,8 +146,33 @@ pub async fn prepare_sync_session(
         Arc::clone(&space_setup.peer_addr_repo),
         Arc::clone(&space_setup.clock),
     );
-    let membership_branch_recovery_channel =
-        builder.build_membership_branch_recovery_channel(Arc::clone(&space_setup.peer_addr_repo));
+    let branch_deps = builder.branch_recovery_connectivity_deps(
+        space_setup.peer_addr_repo.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.peer_access.clone(),
+        space_setup.fingerprint.clone(),
+    );
+    let branch_manager = ConnectivityManager::new(
+        branch_deps.backend,
+        branch_deps.admission,
+        ConnectivityPolicy {
+            task_kind: DiagnosticTaskKind::MembershipBranchRecoveryConnectivityWorker,
+            outbound_per_peer: 1,
+            inbound_per_connection: 1,
+            inbound_per_session: 8,
+            reject_excess_inbound: true,
+            waiters_per_peer: 4,
+            waiters_per_session: 16,
+            flights_per_session: 4,
+            supervise_local_work: true,
+            ..ConnectivityPolicy::default()
+        },
+    );
+    let branch_wire: Arc<dyn BranchRecoveryWirePort> = Arc::new(BranchRecoveryWire);
+    let membership_branch_recovery_channel = Arc::new(BranchRecoveryTransport::new(
+        branch_manager.clone(),
+        branch_wire.clone(),
+    ));
     let (known_peer_contact_tx, known_peer_contacts) = broadcast::channel(64);
     // Presence is installed before the convergence owner is assembled so the
     // owner can expose reachability as an independent product fact.
@@ -642,11 +669,12 @@ pub async fn prepare_sync_session(
         observe_history_endpoint(history_endpoint),
     ));
     builder.install_membership_history_exchange(history_manager, history_receiver)?;
-    builder.install_membership_branch_recovery(
-        Arc::clone(&space_setup.peer_access) as Arc<dyn PeerIdentityDirectoryPort>,
-        Arc::clone(&space_setup.fingerprint),
+    let branch_receiver = Arc::new(BranchRecoveryReceiver::new(
+        branch_wire,
+        Arc::new(BranchRecoveryLocalWork),
         application_network.membership_branch_recovery_endpoint(),
-    )?;
+    ));
+    builder.install_managed_branch_recovery(branch_manager, branch_receiver)?;
 
     // Install the active-clipboard pull ALPN (0xC2, issue #1017 PR8) as a
     // further independent sibling, before `spawn()`. The serve port reuses the

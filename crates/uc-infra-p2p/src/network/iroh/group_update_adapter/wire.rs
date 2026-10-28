@@ -25,6 +25,7 @@ fn version(protocol: ConnectionProtocol) -> Result<GroupUpdateVersion, Connectiv
         | ConnectionProtocol::AttributedClipboard
         | ConnectionProtocol::MultiplexedClipboard
         | ConnectionProtocol::MembershipHistory
+        | ConnectionProtocol::MembershipBranchRecovery
         | ConnectionProtocol::MultiplexedMembershipHistory
         | ConnectionProtocol::PeerReachabilityV1
         | ConnectionProtocol::PeerReachabilityV2

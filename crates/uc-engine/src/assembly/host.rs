@@ -1024,8 +1024,11 @@ mod tests {
                 uc_infra_p2p::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
             )
             .await;
-        let membership_branch_recovery_reachable = network
-            .accepts_protocol_for_test(uc_infra_p2p::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN)
+        let branch_recovery_alpn = uc_infra_p2p::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
+        let membership_branch_recovery_installed =
+            network.has_active_protocol_for_test(branch_recovery_alpn);
+        let anonymous_branch_recovery_rejected = network
+            .rejects_anonymous_protocol_for_test(branch_recovery_alpn)
             .await;
         let space_admission_reachable = network
             .accepts_protocol_for_test(uc_infra_p2p::network::iroh::SPACE_ADMISSION_ALPN)
@@ -1047,8 +1050,12 @@ mod tests {
             "membership history exchange was not installed"
         );
         assert!(
-            membership_branch_recovery_reachable,
+            membership_branch_recovery_installed,
             "membership branch recovery protocol was not installed"
+        );
+        assert!(
+            anonymous_branch_recovery_rejected,
+            "anonymous branch recovery was not rejected"
         );
         assert!(
             space_admission_reachable,
