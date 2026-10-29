@@ -182,6 +182,9 @@ A03、A04 在仅局域网模式下只经 mDNS 解析邀请码并发现对端，�
 登记不一致（包括登记为已知不兼容却通过、未登记的跳过）时测试失败；不得通过修改登记掩盖产品失败。旧版公开接口的
 差异由宿主按能力划分的 feature 表达，锚点与能力的对应见 `tests/upgrade-matrix/host-features.json`；只有能力分层
 无法覆盖时才为锚点新增 `tests/upgrade-matrix/anchors/<锚点>.patch`，且只能改宿主与工作区成员声明。
+`automatic-sync-control` 表达 Engine 1.0.0-rc.8（`ef3ccc2d`）起的独立自动同步开关，a03 起启用；
+a01/rc.1 与 a02/rc.6 不支持时必须明确拒绝 `auto_sync_enabled`，不能映射到语义不同的旧 `auto_sync`。
+`sync_on_restore` 保持独立可用，缺少本地网络配置能力的旧宿主仍在启动时返回 `local_network_unavailable`。
 
 `real-network` 会转交现有 Linux 网络脚本；`device` 要求明确平台与设备，不会自动运行。cargo-nextest 必须为脚本声明的固定版本；脚本不会静默退回语义不同的 runner。
 
