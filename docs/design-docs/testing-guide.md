@@ -303,3 +303,24 @@ runner 工件中的 `timings.prepare_ms`、`scenario_ms`、`cleanup_ms` 和 `tot
 ## 编译缓存入口
 
 测试分组与连接恢复脚本自动使用仓库固定的 MBX。直接 Cargo 命令用 `just cargo …`，或先 `source scripts/build-cache/env.sh`；不要从绝对路径绕过仓库入口。缓存只恢复编译产物，测试仍每次实际运行并生成自己的工件。统一缓存与 CI/发布信任边界见 [ADR-033](decisions/033-unified-mbx-rust-builds.md)。
+
+## PR 检查范围
+
+PR Check 与 Windows Build 共用 [范围分类器](../../scripts/ci/pr-scope.py)，只对 PR 优化：
+纯 `docs/` Markdown（不含 generated、AGENTS 及被 Rust 测试嵌入的 observability.md）或根 README 运行分类回归与补丁空白检查；
+精确的 `mbx-snapshot.py`、`mbx-snapshot.test.py` 变更（可附带上述文档）运行
+macOS、Linux、Windows x64/arm64 快照 SDK 测试与真实 cold/export/import/hit/失效回归，
+不构建无关产品矩阵。Linux 结果由保留原名的 Engine repository checks 汇总，失败或意外跳过不能通过。
+MBX 专项仍保留既有平台、凭据边界与实际 Engine 迁移/缓存消费者验证。
+
+分类读取 PR base 的脚本，以完整 Git merge-base diff 的原始记录判定；重命名拆为删除和新增，
+两端都必须满足白名单。未知文件、其他脚本、产品代码混合、文件类型/执行位改变、分类器或工作流
+自身变更、空 diff、历史或分类失败均执行完整产品检查。首次引入分类器的 PR 同样执行完整检查。
+主线 push、merge queue、手动运行和 `full-ci` 标签不缩减验证；添加 `full-ci` 会重新运行产品门禁。
+未改变 workflow 的 PR 路径触发条件，范围外 job 以显式 skipped 结束，不冒充产品测试已运行。
+现有检查名称保留；远端必需检查配置由仓库维护者管理，不能从 workflow 文件推断。
+
+[快照测试 action](../../.github/actions/snapshot-tests/action.yml) 独立安装固定 Boto3，显式设置
+测试的 PYTHONPATH 并检查 SDK 导入；安装失败会阻断测试，不会退回 SDK 缺失时的 unittest skip。
+快照传输 action 的可选 SDK 安装路径不能代替测试环境装配。分类回归入口为
+`python3 scripts/ci/pr-scope.test.py`。

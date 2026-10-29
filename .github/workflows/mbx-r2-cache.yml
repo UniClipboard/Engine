@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - scripts/build-cache/**
+      - .github/actions/snapshot-tests/**
       - .github/actions/mbx-snapshot/**
       - .github/actions/rust-ci-setup/**
       - .github/workflows/mbx-r2-cache.yml
@@ -63,11 +64,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
 
       - name: Test snapshot boundaries and native round trip
-        run: |
-          python3 scripts/build-cache/verify-r2-build.test.py
-          python3 scripts/build-cache/mbx-snapshot.test.py
-          python3 scripts/build-cache/check-snapshot-routing.py
-          python3 scripts/build-cache/mbx-snapshot.integration.py
+        uses: ./.github/actions/snapshot-tests
 
       - name: Prepare isolated outputs
         run: |
