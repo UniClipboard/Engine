@@ -26,7 +26,7 @@
 | 6：设备可达性 | 已完成；设备和额外历史矩阵跳过 | [计划](../completed/2026-10-14-peer-reachability-connectivity-plan.md) |
 | 7：文件／blob | 后续#340统一候选补齐原安全阻塞，48项计划／13项验收已结算归档 | [计划](../completed/2026-10-21-blob-connectivity-plan.md) |
 | 8：反向进度 | 已完成并归档；物理挂起／设备后台按原授权跳过 | [最终结算](../completed/2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论) |
-| 9：成员分支恢复 | #345 已合并；原attempt 2网络24格已核验通过，Engine再次90分钟超时取消；#350新候选网络在升级前旧旧Relay文件接收失败，workspace观测关联缺失已修复并184项专项通过，网络日志夹具竞态已复现并修正，完整验证仍待完成，仍未闭环 | [计划](2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29) |
+| 9：成员分支恢复 | #345 已合并；原attempt 2网络24格已核验通过，Engine再次90分钟超时取消；#350首轮旧旧Relay文件接收及观测失败保留；统一候选网络、升级、平台编译及仓库检查已通过，原两个观测失败用例通过；Engine终态失败，workspace新出现接收历史删除1404错误；本地真实短写锁复现后修正组合删除事务，仓储14项及原Engine／删除owner共7项通过，原真实短锁反馈已转绿，最终CI仍待验证；恢复／资源／证据／成员及Direct smoke已核验通过，接收登记和三组网络因失败跳过，仍未闭环 | [计划](2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29) |
 | Space 加入／续接 | #346 已合并并归档；旧发布二进制、Relay 和设备矩阵跳过 | [计划](../completed/2026-10-29-space-admission-connectivity-plan.md) |
 
 ## Definition of Done 逐项对应
