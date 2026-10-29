@@ -313,7 +313,9 @@ jobs:
       - name: Run mandatory blob lifecycle resources
         if: success() || failure()
         id: blob_lifecycle_resources
-        run: bash scripts/testing/run-blob-lifecycle-resources.sh
+        run: |
+          rm -f target/nextest/ci/junit.xml
+          bash scripts/testing/run-blob-lifecycle-resources.sh
         env:
           UC_EXPECT_DIAGNOSTIC_STACK: available
           # 保留连续两轮及原资源断言，仅在轮末记录任务来源，定位 runner 上的瞬时增长。
