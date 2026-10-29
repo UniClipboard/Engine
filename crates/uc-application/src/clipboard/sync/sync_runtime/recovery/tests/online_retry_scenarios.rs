@@ -482,3 +482,50 @@ async fn a_newer_result_with_unknown_ordering_is_rechecked_later() {
     assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
     harness.recovery.shutdown().await.unwrap();
 }
+
+/// 较新条目 B 已用 2 次计时重试，较旧条目 A 的结果迟到后，B 第 3 次重试时读取 B 失败：
+/// 恢复轮次不能跳过 B 去补发较旧的 A（那会重发历史并让 B 的次数重新开始），这一轮按失败计入，
+/// B 的次数保持有界；之后只有上线事件再补发 B 一次。
+#[tokio::test(start_paused = true)]
+async fn an_unreadable_newer_entry_never_makes_a_retry_resend_older_content() {
+    let harness = RetryHarness::start_with(
+        None,
+        &[
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Accepted,
+        ],
+        RetryScenario {
+            older_entry: Some(EntryDeliveryStatus::Superseded),
+            ..RetryScenario::default()
+        },
+    );
+    settle().await;
+    harness
+        .record_dispatch(EntryDeliveryStatus::Unreachable)
+        .await;
+    tokio::time::sleep(RETRY_BACKOFF[0] + RETRY_BACKOFF[1] + JUST_BEFORE).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 2);
+
+    harness
+        .record_results([(
+            harness.older.entry_id.clone(),
+            harness.target,
+            EntryDeliveryStatus::Unreachable,
+        )])
+        .await;
+    settle().await;
+    harness.reads.failing_sources.store(1, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 2, "older content is never resent");
+
+    harness
+        .reachability
+        .announce(harness.target, ReachabilityState::Online);
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 3);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    harness.recovery.shutdown().await.unwrap();
+}
