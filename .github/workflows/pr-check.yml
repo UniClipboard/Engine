@@ -290,6 +290,14 @@ jobs:
         if: always() && (steps.workspace_tests.outcome == 'success' || steps.workspace_tests.outcome == 'failure')
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/workspace.xml || true
 
+      - name: Retain workspace failure before remaining groups
+        if: failure() && steps.workspace_tests.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-workspace-failure
+          path: target/test-reports/workspace.xml
+          if-no-files-found: ignore
+
       - name: Run branch recovery process and checkpoint tests
         if: success() || failure()
         id: branch_recovery_process
