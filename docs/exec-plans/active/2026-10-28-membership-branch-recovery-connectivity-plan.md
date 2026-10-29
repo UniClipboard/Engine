@@ -376,7 +376,7 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 | AC08 | 11项真实进程组通过，覆盖持久检查点崩溃、原包重试和不同commit；加密SQLite重开及敏感哨兵扫描已有定向证据。 |
 | AC09 | 内存第二backend经实际Application transport／receiver与恢复wire完成GroupInfo和external commit两次交换，核对输入输出及两次独立拨号；签发方为替身。Application／Core／协议包清单和恢复源码未见Iroh依赖，仓库架构检查及其恢复旁路负fixture通过。 |
 | AC10 | 来源保留、签发日志脱敏、JSONL导出及新路径未创建网络业务root有定向测试或源码证据；受控测试验证网络成功后持久提交失败返回延期而非完成。新增封闭诊断关联后，真实Direct恢复按匿名连接引用与维护轮次明确匹配；两个并发轮次的JSONL隔离及原始键不输出通过。尚待完整回归与远端CI。 |
-| AC11 | 测试接收器修正后workspace全量4986项通过，42项测试与4个binary跳过；新增跨进程用例后的全量回归4986项通过、1项成员收敛超时失败。成员拓扑组56项通过、14项筛选跳过；此前全集及成员拓扑组失败保留，根门禁已复验，远端最终候选CI和设备平台未执行。 |
+| AC11 | 新增跨进程用例后的workspace全量复验4987项通过，42项测试与4个binary跳过；前一轮4986项通过、1项成员收敛超时失败仍保留。成员拓扑组56项通过、14项筛选跳过；此前全集及成员拓扑组失败保留，根门禁已复验，远端最终候选CI和设备平台未执行。 |
 | AC12 | 稳定文档和执行计划已有更新；未结项不得归档，历史失败与技术债继续保留。 |
 
 完整进程组构建后补充恢复准入适配器定向测试：未知指纹、同一指纹映射两个设备和出站目标不匹配均须拒绝，前两者还须保留原始身份解析来源。新增用例尚未编译或运行；本轮进程组使用增量之前的二进制，且该测试使用内存连接。
@@ -530,3 +530,5 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 失败用例以相同workspace构建范围单项复验通过（run `b38bdccc-95cb-432e-b475-10c7267779b0`，1项通过、5176项筛选跳过）；随后直接使用同一构建binary连续10次通过，日志 `target/branch-recovery-owner-repeat.log`。未复现不证明原因或修复，全集仍记失败。
 
 为核实该偶发失败后的完整选测，已再次启动同一生产代码与新增测试的Linux workspace全组，日志 `target/branch-recovery-cross-process-workspace-rerun.log`；结束前不计通过。
+
+上述workspace全组复验通过（run `7e14abdd-7b3f-4feb-85fe-c874d935d466`，4987项通过，42项测试及4个binary跳过，1572.557秒；日志和JUnit为 `target/branch-recovery-cross-process-workspace-rerun.log` 与 `target/branch-recovery-cross-process-workspace-rerun.xml`，原JUnit已恢复）。前轮成员收敛超时及其未知根因仍保留；复验通过不代表该间歇问题已修复，也不代替远端候选CI。
