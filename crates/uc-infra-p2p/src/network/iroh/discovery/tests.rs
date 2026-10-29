@@ -75,7 +75,7 @@ async fn lan_only_directory_lookup_yields_only_local_network_candidates() {
     ] {
         let lookup = DirectoryAddressLookup {
             manager: manager.clone(),
-            mdns: None,
+            mdns: Arc::new(iroh::address_lookup::MemoryLookup::new()),
             lan_only,
         };
         let item = lookup
@@ -126,7 +126,7 @@ async fn directory_lookup_establishes_real_multistream_connection_with_bidirecti
         .relay_mode(RelayMode::Disabled)
         .address_lookup(DirectoryAddressLookup {
             manager: manager.clone(),
-            mdns: Some(Arc::new(MemoryLookup::new())),
+            mdns: Arc::new(MemoryLookup::new()),
             lan_only: false,
         })
         .bind()

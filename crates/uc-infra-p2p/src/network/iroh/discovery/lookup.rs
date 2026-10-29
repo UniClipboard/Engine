@@ -57,7 +57,6 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
             mdns: self.mdns,
             lookup: lookup.clone(),
         }));
-        let mdns = Some(lookup);
         if let Some(configured) = self.configured {
             providers.push(Arc::new(ConfiguredAddressProvider(configured)));
         }
@@ -80,7 +79,7 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
         })?;
         Ok(DirectoryAddressLookup {
             manager,
-            mdns,
+            mdns: lookup,
             lan_only: self.lan_only,
         })
     }
@@ -89,7 +88,8 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
 /// 原连接调用继续交给 iroh；iroh 的 lookup 统一从发现负责人获得各来源候选。
 pub(in super::super) struct DirectoryAddressLookup {
     pub(in super::super) manager: Arc<DiscoveryManager>,
-    pub(in super::super) mdns: Option<Arc<dyn AddressLookup>>,
+    /// 长期 mDNS 的发布入口；服务尚未建立时发布只被记录，建立后补发。
+    pub(in super::super) mdns: Arc<dyn AddressLookup>,
     /// 与 [`DirectoryAddressLookupBuilder::lan_only`] 相同。
     pub(in super::super) lan_only: bool,
 }
@@ -102,9 +102,7 @@ impl fmt::Debug for DirectoryAddressLookup {
 
 impl AddressLookup for DirectoryAddressLookup {
     fn publish(&self, data: &EndpointData) {
-        if let Some(mdns) = &self.mdns {
-            mdns.publish(data);
-        }
+        self.mdns.publish(data);
     }
 
     fn resolve(&self, endpoint: EndpointId) -> Option<BoxStream<'static, Result<Item, Error>>> {

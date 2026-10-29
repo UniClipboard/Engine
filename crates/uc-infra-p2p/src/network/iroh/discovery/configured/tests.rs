@@ -153,7 +153,7 @@ async fn lan_only_directory_lookup_drops_a_configured_public_address() {
         );
         let lookup = DirectoryAddressLookup {
             manager: manager.clone(),
-            mdns: None,
+            mdns: Arc::new(iroh::address_lookup::MemoryLookup::new()),
             lan_only,
         };
         let item = lookup
