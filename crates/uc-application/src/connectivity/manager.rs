@@ -7,9 +7,9 @@ use super::pending::{PendingInboundLease, UnboundConnection};
 use super::request::ConnectionRequestScope;
 use super::retention::{ConnectionActivity, IdleRetentionPolicy};
 use super::{
-    AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionRequest,
-    ConnectivityBackend, ConnectivityError, InboundConnectionError, InboundIdentityReservation,
-    PeerConnection, SessionConnectionAdmissionPort, StreamLease,
+    AdmissionAttempt, AdmissionGrant, ConnectionKey, ConnectionLease, ConnectionMode,
+    ConnectionRequest, ConnectivityBackend, ConnectivityError, InboundConnectionError,
+    InboundIdentityReservation, PeerConnection, SessionConnectionAdmissionPort, StreamLease,
 };
 use futures::future::{ready, Either};
 use std::collections::HashMap;
@@ -92,18 +92,18 @@ pub(super) struct PeerState {
     pub outbound_connections: Option<Arc<Semaphore>>,
     pub retained_outbound_settlement: Mutex<Option<watch::Receiver<bool>>>,
 }
-struct FlightOutcome {
+struct FlightOutcome<K: ConnectionKey> {
     mode: ConnectionMode,
-    record: Mutex<Option<Arc<ConnectionRecord>>>,
+    record: Mutex<Option<Arc<ConnectionRecord<K>>>>,
 }
-type FlightResult = Result<Arc<FlightOutcome>, Arc<ConnectivityError>>;
-struct Flight {
+type FlightResult<K> = Result<Arc<FlightOutcome<K>>, Arc<ConnectivityError>>;
+struct Flight<K: ConnectionKey> {
     cancel: CancellationToken,
     waiters: AtomicUsize,
-    result: watch::Sender<Option<FlightResult>>,
+    result: watch::Sender<Option<FlightResult<K>>>,
     permit: Mutex<Option<OwnedSemaphorePermit>>,
 }
-impl Flight {
+impl<K: ConnectionKey> Flight<K> {
     async fn settled(&self) -> Result<(), ConnectivityError> {
         let mut result = self.result.subscribe();
         loop {
@@ -121,27 +121,26 @@ impl Flight {
         }
     }
 }
-struct Waiter(Arc<Flight>);
-impl Drop for Waiter {
+struct Waiter<K: ConnectionKey>(Arc<Flight<K>>);
+impl<K: ConnectionKey> Drop for Waiter<K> {
     fn drop(&mut self) {
         if self.0.waiters.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.0.cancel.cancel();
         }
     }
 }
-#[derive(Default)]
-struct State {
-    peers: HashMap<DeviceId, Weak<PeerState>>,
-    active: HashMap<DeviceId, Weak<ConnectionRecord>>,
-    flights: HashMap<DeviceId, Arc<Flight>>,
-    live: Vec<Weak<ConnectionRecord>>,
+struct State<K: ConnectionKey> {
+    peers: HashMap<K, Weak<PeerState>>,
+    active: HashMap<K, Weak<ConnectionRecord<K>>>,
+    flights: HashMap<K, Arc<Flight<K>>>,
+    live: Vec<Weak<ConnectionRecord<K>>>,
 }
-pub(super) struct Inner {
-    backend: Arc<dyn ConnectivityBackend>,
-    pub(super) admission: Arc<dyn SessionConnectionAdmissionPort>,
+pub(super) struct Inner<K: ConnectionKey> {
+    backend: Arc<dyn ConnectivityBackend<K>>,
+    pub(super) admission: Arc<dyn SessionConnectionAdmissionPort<K>>,
     policy: ConnectivityPolicy,
-    state: Mutex<State>,
-    retained: Mutex<HashMap<(DeviceId, bool), Arc<ConnectionRecord>>>,
+    state: Mutex<State<K>>,
+    retained: Mutex<HashMap<(K, bool), Arc<ConnectionRecord<K>>>>,
     tasks: Mutex<JoinSet<()>>,
     stop: CancellationToken,
     session: Mutex<CancellationToken>,
@@ -152,7 +151,18 @@ pub(super) struct Inner {
     pub(super) incoming: Arc<Semaphore>,
     shutdown: tokio::sync::Mutex<()>,
 }
-impl Drop for Inner {
+impl<K: ConnectionKey> Default for State<K> {
+    fn default() -> Self {
+        Self {
+            peers: HashMap::new(),
+            active: HashMap::new(),
+            flights: HashMap::new(),
+            live: Vec::new(),
+        }
+    }
+}
+
+impl<K: ConnectionKey> Drop for Inner<K> {
     fn drop(&mut self) {
         self.stop.cancel();
     }
@@ -160,13 +170,13 @@ impl Drop for Inner {
 
 /// 同一协议会话的完整连接负责人。任务由自身 JoinSet 持有。
 #[derive(Clone)]
-pub struct ConnectivityManager {
-    pub(super) inner: Arc<Inner>,
+pub struct ConnectivityManager<K: ConnectionKey = DeviceId> {
+    pub(super) inner: Arc<Inner<K>>,
 }
-impl ConnectivityManager {
+impl<K: ConnectionKey> ConnectivityManager<K> {
     pub fn new(
-        backend: Arc<dyn ConnectivityBackend>,
-        admission: Arc<dyn SessionConnectionAdmissionPort>,
+        backend: Arc<dyn ConnectivityBackend<K>>,
+        admission: Arc<dyn SessionConnectionAdmissionPort<K>>,
         policy: ConnectivityPolicy,
     ) -> Self {
         Self {
@@ -197,7 +207,7 @@ impl ConnectivityManager {
             }),
         }
     }
-    pub(super) fn peer(&self, target: DeviceId) -> Arc<PeerState> {
+    pub(super) fn peer(&self, target: K) -> Arc<PeerState> {
         let mut state = self
             .inner
             .state
@@ -232,7 +242,7 @@ impl ConnectivityManager {
         peer
     }
     /// 同步冻结本请求的准入与会话；协议可在自己的有界队列之前创建它。
-    pub fn request(&self, target: DeviceId) -> ConnectionRequest {
+    pub fn request(&self, target: K) -> ConnectionRequest<K> {
         ConnectionRequest {
             manager: self.clone(),
             target,
@@ -241,7 +251,7 @@ impl ConnectivityManager {
             address_hint: None,
         }
     }
-    pub(crate) fn freeze_request(&self) -> ConnectionRequestScope {
+    pub(crate) fn freeze_request(&self) -> ConnectionRequestScope<K> {
         ConnectionRequestScope {
             manager: self.clone(),
             session: self.stop_token(),
@@ -250,10 +260,10 @@ impl ConnectivityManager {
     }
     pub(super) async fn acquire_request(
         &self,
-        request: &ConnectionRequest,
+        request: &ConnectionRequest<K>,
         deadline: Instant,
         cancel: &CancellationToken,
-    ) -> Result<ConnectionLease, ConnectivityError> {
+    ) -> Result<ConnectionLease<K>, ConnectivityError> {
         if cancel.is_cancelled() {
             return Err(ConnectivityError::Stopped);
         }
@@ -417,10 +427,10 @@ impl ConnectivityManager {
     /// 尚未发送请求的已失活连接可重获；原请求撤销快照不能随新拨号刷新。
     pub async fn refresh(
         &self,
-        previous: ConnectionLease,
+        previous: ConnectionLease<K>,
         deadline: Instant,
         cancel: &CancellationToken,
-    ) -> Result<ConnectionLease, ConnectivityError> {
+    ) -> Result<ConnectionLease<K>, ConnectivityError> {
         let request = previous.request.clone().ok_or(ConnectivityError::Denied)?;
         if !previous.is_closed() && !previous.is_unreachable() {
             return Err(ConnectivityError::Denied);
@@ -453,10 +463,10 @@ impl ConnectivityManager {
     }
     fn launch(
         &self,
-        target: DeviceId,
+        target: K,
         peer: Arc<PeerState>,
-        flight: Arc<Flight>,
-        attempt: Arc<dyn AdmissionAttempt>,
+        flight: Arc<Flight<K>>,
+        attempt: Arc<dyn AdmissionAttempt<K>>,
         address_hint: Option<Vec<u8>>,
     ) {
         let weak = Arc::downgrade(&self.inner);
@@ -562,7 +572,7 @@ impl ConnectivityManager {
             .with_current_subscriber(),
         );
     }
-    fn acquisition(&self) -> Acquisition {
+    fn acquisition(&self) -> Acquisition<K> {
         Acquisition {
             owner: Arc::downgrade(&self.inner),
             backend: self.inner.backend.clone(),
@@ -577,11 +587,11 @@ impl ConnectivityManager {
     }
     async fn acquire(
         &self,
-        target: DeviceId,
+        target: K,
         peer: Arc<PeerState>,
-        attempt: Arc<dyn AdmissionAttempt>,
+        attempt: Arc<dyn AdmissionAttempt<K>>,
         address_hint: Option<Vec<u8>>,
-    ) -> Result<Arc<ConnectionRecord>, ConnectivityError> {
+    ) -> Result<Arc<ConnectionRecord<K>>, ConnectivityError> {
         let _permit = self
             .inner
             .flights
@@ -598,8 +608,8 @@ impl ConnectivityManager {
     pub(super) async fn admit_pending(
         &self,
         connection: Arc<dyn PeerConnection>,
-        reservation: &dyn InboundIdentityReservation,
-    ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        reservation: &dyn InboundIdentityReservation<K>,
+    ) -> Result<Box<dyn AdmissionGrant<K>>, ConnectivityError> {
         self.inner
             .admission
             .adopt_inbound(connection, reservation)
@@ -626,7 +636,7 @@ impl ConnectivityManager {
         &self,
         connection: Arc<dyn PeerConnection>,
         deadline: Instant,
-    ) -> Result<(ConnectionLease, StreamLease), ConnectivityError> {
+    ) -> Result<(ConnectionLease<K>, StreamLease<K>), ConnectivityError> {
         let fence = self.inner.admission.inbound_fence();
         let session = self.stop_token();
         let raw = UnboundConnection {
@@ -672,7 +682,8 @@ impl ConnectivityManager {
         &self,
         connection: Arc<dyn PeerConnection>,
         deadline: Instant,
-    ) -> impl Future<Output = Result<PendingInboundLease, ConnectivityError>> + Send + 'static {
+    ) -> impl Future<Output = Result<PendingInboundLease<K>, ConnectivityError>> + Send + 'static
+    {
         let manager = self.clone();
         let fence = manager.inner.admission.inbound_fence();
         let session = manager.stop_token();
@@ -730,7 +741,7 @@ impl ConnectivityManager {
     pub fn accept(
         &self,
         connection: Arc<dyn PeerConnection>,
-    ) -> impl Future<Output = Result<ConnectionLease, InboundConnectionError>> + Send + 'static
+    ) -> impl Future<Output = Result<ConnectionLease<K>, InboundConnectionError>> + Send + 'static
     {
         let pending = match InboundReservation::new(self.clone(), connection) {
             Ok(pending) => pending,
@@ -906,7 +917,7 @@ impl ConnectivityManager {
         }
     }
     /// 交换预算已耗尽时停止复用；在途兄弟流保留原使用权，最后使用者结束才关闭旧连接。
-    pub fn evict(&self, lease: &ConnectionLease) {
+    pub fn evict(&self, lease: &ConnectionLease<K>) {
         lease.record.cache_cancel.cancel();
         {
             let mut state = self
@@ -937,7 +948,7 @@ impl ConnectivityManager {
         }
     }
     /// 取消指定使用权的跨轮保留；失效连接不再留给后续请求。
-    pub fn retire(&self, lease: &ConnectionLease) {
+    pub fn retire(&self, lease: &ConnectionLease<K>) {
         let key = (lease.peer(), lease.record.inbound_direction);
         let mut retained = self
             .inner
@@ -969,7 +980,7 @@ impl ConnectivityManager {
         }
     }
     /// 只有完整准入负责人授予当前资格后才持有强引用；返回 false 表示本次交换后释放。
-    pub async fn retain(&self, lease: &ConnectionLease) -> Result<bool, ConnectivityError> {
+    pub async fn retain(&self, lease: &ConnectionLease<K>) -> Result<bool, ConnectivityError> {
         let Some(policy) = self.inner.policy.idle_retention.clone() else {
             return Ok(false);
         };
@@ -1101,7 +1112,7 @@ impl ConnectivityManager {
         );
         Ok(true)
     }
-    pub(super) fn track(&self, record: &Arc<ConnectionRecord>) -> Result<(), ConnectivityError> {
+    pub(super) fn track(&self, record: &Arc<ConnectionRecord<K>>) -> Result<(), ConnectivityError> {
         let mut state = self
             .inner
             .state
@@ -1115,7 +1126,7 @@ impl ConnectivityManager {
         Ok(())
     }
     pub(super) fn watch_connection(
-        inner: &Inner,
+        inner: &Inner<K>,
         connection: Arc<dyn PeerConnection>,
         lifetime: Arc<ConnectionLifetime>,
         stop: CancellationToken,
@@ -1137,7 +1148,7 @@ impl ConnectivityManager {
             .with_current_subscriber(),
         );
     }
-    fn record_task_result(inner: &Inner, result: Result<(), JoinError>) {
+    fn record_task_result(inner: &Inner<K>, result: Result<(), JoinError>) {
         if let Err(error) = result {
             record_task_join_failure(inner.policy.task_kind);
             let mut failure = inner.failure.lock().unwrap_or_else(PoisonError::into_inner);

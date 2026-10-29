@@ -1,4 +1,6 @@
 use super::*;
+use sha2::{Digest, Sha256};
+use uc_sync_protocol::space_admission::{read_envelope, write_envelope, AuthenticatedEnvelopeV1};
 
 #[test]
 fn old_layout_and_close_codes_keep_upgrade_authentication_and_protocol_distinct() {
@@ -251,7 +253,12 @@ async fn new_sponsor_rejects_an_old_joiner_before_consuming_credentials() {
         entered: Notify::new(),
     });
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials).expect("handler"),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            endpoint.clone(),
+            credentials,
+        )
+        .expect("handler"),
     );
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, handler)
@@ -341,9 +348,13 @@ async fn stalled_authenticated_endpoint_records_one_server_timeout() {
         entered: Notify::new(),
     });
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials)
-            .expect("handler")
-            .with_exchange_deadline(Duration::from_secs(30)),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            endpoint.clone(),
+            credentials,
+        )
+        .expect("handler")
+        .with_exchange_deadline(Duration::from_secs(30)),
     );
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, handler)
@@ -473,7 +484,12 @@ async fn real_iroh_loopback_runs_initial_and_continuation_typed_exchanges() {
         continuation_route: route_bytes,
     });
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials).expect("handler"),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            endpoint.clone(),
+            credentials,
+        )
+        .expect("handler"),
     );
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, Arc::clone(&handler))
@@ -531,6 +547,95 @@ async fn real_iroh_loopback_runs_initial_and_continuation_typed_exchanges() {
     );
     assert_eq!(endpoint.calls.load(Ordering::SeqCst), 2);
 
+    // 固定迁移前的原生单流续接方式，证明新服务端不要求新的传输握手或成员身份。
+    let raw = connect(&joiner, sponsor.addr()).await.expect("旧传输连接");
+    let (mut send, mut receive) = open_stream(&raw).await.expect("旧传输开流");
+    let nonce = [0x71; 32];
+    let mac = calculate_mac(
+        &continuation,
+        b"resume",
+        admission,
+        binding.local_peer_id(),
+        binding.remote_peer_id(),
+        &nonce,
+        &[0; 32],
+        None,
+    )
+    .expect("续接证明");
+    write_typed(
+        &mut send,
+        FrameKind::ContinuationHello,
+        &ContinuationHelloV1 {
+            admission_id: *admission.as_bytes(),
+            local_peer_id: *binding.local_peer_id().as_bytes(),
+            remote_peer_id: *binding.remote_peer_id().as_bytes(),
+            nonce,
+            request_digest: [0; 32],
+            mac,
+        },
+        AUTH_FRAME_LIMIT,
+    )
+    .await
+    .expect("原续接帧");
+    let canonical = prepared.encode_canonical_v1().expect("原请求编码");
+    let digest: [u8; 32] = Sha256::digest(&canonical).into();
+    let nonce = [0x72; 32];
+    let mac = calculate_mac(
+        &continuation,
+        b"request",
+        admission,
+        binding.local_peer_id(),
+        binding.remote_peer_id(),
+        &nonce,
+        &digest,
+        None,
+    )
+    .expect("原请求证明");
+    write_envelope(
+        &mut send,
+        FrameKind::Request,
+        &AuthenticatedEnvelopeV1 {
+            nonce,
+            canonical_envelope: canonical,
+            trace_context: None,
+            mac,
+        },
+    )
+    .await
+    .expect("原请求帧");
+    let (wire, reply, digest) = read_envelope(&mut receive, FrameKind::Reply)
+        .await
+        .expect("原回复帧");
+    verify_mac(
+        &continuation,
+        b"reply",
+        admission,
+        binding.remote_peer_id(),
+        binding.local_peer_id(),
+        &wire.nonce,
+        &digest,
+        wire.trace_context.as_ref(),
+        &wire.mac,
+    )
+    .expect("原回复证明");
+    assert_eq!(
+        reply.kind(),
+        uc_core::membership::SpaceAdmissionMessageKind::Commit
+    );
+    write_typed(&mut send, FrameKind::Ack, &1u8, AUTH_FRAME_LIMIT)
+        .await
+        .expect("原确认帧");
+    send.finish().expect("原流结束");
+    let mut trailing = [0; 1];
+    assert_eq!(
+        tokio::io::AsyncReadExt::read(&mut receive, &mut trailing)
+            .await
+            .expect("服务端结束"),
+        0
+    );
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 3);
+    raw.close(0u32.into(), b"test_complete");
+
     router.shutdown().await.expect("router shutdown");
     joiner.close().await;
     sponsor.close().await;
@@ -573,7 +678,12 @@ async fn attempt_step_records(seed: u8) -> (SpaceAdmissionId, Vec<serde_json::Va
         continuation_route: route_bytes,
     });
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials).expect("handler"),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            endpoint.clone(),
+            credentials,
+        )
+        .expect("handler"),
     );
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, handler)

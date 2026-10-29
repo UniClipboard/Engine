@@ -705,6 +705,7 @@ struct IrohSessionContext {
 }
 
 pub struct IrohSessionBuilder {
+    admission_transport: Arc<IrohSpaceAdmissionTransport>,
     context: Arc<IrohSessionContext>,
     handlers: SessionProtocolHandlersBuilder,
     /// 本会话各协议 handler 共享的已授权入站连接登记。
@@ -723,7 +724,10 @@ impl PreparedIrohSession {
 
 impl IrohSessionBuilder {
     fn new(context: Arc<IrohSessionContext>) -> Self {
+        let admission_transport =
+            Arc::new(IrohSpaceAdmissionTransport::new(context.endpoint.clone()));
         Self {
+            admission_transport,
             context,
             handlers: SessionProtocolHandlersBuilder::new(),
             admitted_connections: AdmittedConnections::default(),
@@ -835,9 +839,7 @@ impl IrohSessionBuilder {
 
     /// 在 Application 构造前取得同一 endpoint 支撑的被动出站能力。
     pub fn space_admission_transport(&self) -> Arc<dyn SpaceAdmissionTransportPort> {
-        Arc::new(IrohSpaceAdmissionTransport::new(Arc::clone(
-            &self.context.endpoint,
-        )))
+        self.admission_transport.clone()
     }
 
     /// 在 Router spawn 前一次性安装 Application 的认证消息 endpoint。
@@ -846,10 +848,11 @@ impl IrohSessionBuilder {
         endpoint: Arc<dyn HandleAuthenticatedSpaceAdmissionMessagePort>,
         credentials: Arc<dyn SpaceAdmissionChannelCredentialPort>,
     ) -> Result<(), IrohNodeError> {
-        let handler = IrohSpaceAdmissionHandler::new(&self.context.endpoint, endpoint, credentials)
-            .map_err(|source| IrohNodeError::AdmissionInstall {
-                source: anyhow::anyhow!(source),
-            })?;
+        let handler =
+            IrohSpaceAdmissionHandler::new(self.admission_transport.clone(), endpoint, credentials)
+                .map_err(|source| IrohNodeError::AdmissionInstall {
+                    source: anyhow::anyhow!(source),
+                })?;
         self.install_session_handler([SPACE_ADMISSION_ALPN], handler)
     }
 }

@@ -3,9 +3,10 @@ use super::lifetime::ConnectionLifetime;
 use super::manager::PeerState;
 use super::retention::{ActivityGuard, ConnectionActivity};
 use super::{
-    AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityError,
-    PeerConnection, StreamLease, StreamPair,
+    AdmissionAttempt, AdmissionGrant, ConnectionKey, ConnectionMode, ConnectionProtocol,
+    ConnectivityError, PeerConnection, StreamLease, StreamPair,
 };
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
@@ -16,7 +17,7 @@ use uc_core::ids::DeviceId;
 use uc_core::ports::ConnectionChannel;
 use uc_observability_contract::diagnostics::connectivity::record_maintenance_connection;
 
-pub(super) struct ConnectionRecord {
+pub(super) struct ConnectionRecord<K: ConnectionKey> {
     pub connection: Arc<dyn PeerConnection>,
     pub address_hint: Option<Vec<u8>>,
     pub activity: Arc<ConnectionActivity>,
@@ -28,7 +29,7 @@ pub(super) struct ConnectionRecord {
     pub first_inbound_at: StdMutex<Option<Instant>>,
     pub pending: Mutex<Option<AcceptedStream>>,
     pub exchange_claimed: AtomicBool,
-    pub grant: Box<dyn AdmissionGrant>,
+    pub grant: Box<dyn AdmissionGrant<K>>,
     pub peer: Arc<PeerState>,
     pub inbound: Arc<Semaphore>,
     pub inbound_global: Arc<Semaphore>,
@@ -44,7 +45,7 @@ pub(super) struct AcceptedStream {
     pub accepted_at: Instant,
 }
 
-impl Drop for ConnectionRecord {
+impl<K: ConnectionKey> Drop for ConnectionRecord<K> {
     fn drop(&mut self) {
         self.connection.close();
     }
@@ -52,16 +53,20 @@ impl Drop for ConnectionRecord {
 
 /// 连接使用权；出站请求活动随最后一份使用权释放，入站监听本身不算活动。
 #[derive(Clone)]
-pub struct ConnectionLease {
-    pub(super) record: Arc<ConnectionRecord>,
-    pub(super) request: Option<Arc<dyn AdmissionAttempt>>,
+pub struct ConnectionLease<K: ConnectionKey = DeviceId> {
+    pub(super) record: Arc<ConnectionRecord<K>>,
+    pub(super) request: Option<Arc<dyn AdmissionAttempt<K>>>,
     pub(super) _activity: Option<Arc<ActivityGuard>>,
 }
 
-impl ConnectionLease {
+impl<K: ConnectionKey> ConnectionLease<K> {
+    /// 供协议适配器解释传输特有的关闭结果；不转移租约所有权。
+    pub fn transport(&self) -> &dyn Any {
+        self.record.connection.as_ref() as &dyn Any
+    }
     pub(super) fn outbound(
-        record: Arc<ConnectionRecord>,
-        request: Arc<dyn AdmissionAttempt>,
+        record: Arc<ConnectionRecord<K>>,
+        request: Arc<dyn AdmissionAttempt<K>>,
     ) -> Result<Self, ConnectivityError> {
         let activity = record.activity.acquire(record.connection.as_ref())?;
         if record.connection.protocol() == ConnectionProtocol::MembershipBranchRecovery {
@@ -79,7 +84,7 @@ impl ConnectionLease {
     pub fn connection_id(&self) -> usize {
         self.record.connection.id()
     }
-    pub fn peer(&self) -> DeviceId {
+    pub fn peer(&self) -> K {
         self.record.grant.peer()
     }
     pub fn mode(&self) -> ConnectionMode {
@@ -140,7 +145,7 @@ impl ConnectionLease {
         }
         Ok(())
     }
-    pub async fn open_bi(&self, deadline: Instant) -> Result<StreamLease, ConnectivityError> {
+    pub async fn open_bi(&self, deadline: Instant) -> Result<StreamLease<K>, ConnectivityError> {
         self.open_bi_with_cancel(deadline, &CancellationToken::new())
             .await
     }
@@ -149,7 +154,7 @@ impl ConnectionLease {
         &self,
         deadline: Instant,
         cancel: &CancellationToken,
-    ) -> Result<StreamLease, ConnectivityError> {
+    ) -> Result<StreamLease<K>, ConnectivityError> {
         let permit = self.reserve_outbound(deadline, cancel).await?;
         let result = tokio::select! {
             biased;
@@ -205,7 +210,7 @@ impl ConnectionLease {
         }
         Ok(permit)
     }
-    pub async fn accept_bi(&self) -> Result<StreamLease, ConnectivityError> {
+    pub async fn accept_bi(&self) -> Result<StreamLease<K>, ConnectivityError> {
         if self.protocol() == ConnectionProtocol::PeerReachabilityV2 {
             // 先取出请求，再立即判每连接容量；超量仅丢弃当前半流。
             let pair = self.record.connection.accept_bi().await?;

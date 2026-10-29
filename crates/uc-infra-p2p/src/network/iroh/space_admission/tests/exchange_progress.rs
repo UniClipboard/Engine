@@ -66,6 +66,7 @@ enum ReplyScenario {
     Invalid,
     WrongProof,
     StalledFinish,
+    ExchangeDeadline,
     Cancelled,
 }
 
@@ -79,6 +80,7 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
         ReplyScenario::Invalid,
         ReplyScenario::WrongProof,
         ReplyScenario::StalledFinish,
+        ReplyScenario::ExchangeDeadline,
         ReplyScenario::Cancelled,
     ] {
         let spans = InMemorySpanExporter::default();
@@ -106,8 +108,9 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
         wait_for_direct_addrs(&sponsor).await;
         let joiner = bound_endpoint().await;
         wait_for_direct_addrs(&joiner).await;
+        let manager = super::super::managed::manager(joiner.clone(), 8);
         let (client_connection, server_connection) = tokio::join!(
-            joiner.connect(sponsor.addr(), SPACE_ADMISSION_ALPN),
+            super::super::connection::acquire(&manager, sponsor.addr()),
             async {
                 sponsor
                     .accept()
@@ -117,8 +120,15 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
                     .expect("accept")
             },
         );
-        let client_connection = client_connection.expect("connect");
-        let (send, receive) = client_connection.open_bi().await.expect("stream");
+        let (client_connection, lease) = client_connection.expect("connect");
+        let deadline = tokio::time::Instant::now()
+            + if matches!(scenario, ReplyScenario::ExchangeDeadline) {
+                Duration::from_secs(1)
+            } else {
+                Duration::from_secs(120)
+            };
+        let stream = lease.open_bi(deadline).await.expect("stream");
+        let ((send, receive), work) = stream.into_parts();
         let binding = AdmissionPeerBinding::new(
             peer_id(joiner.id().as_bytes()).expect("joiner"),
             peer_id(sponsor.id().as_bytes()).expect("sponsor"),
@@ -128,6 +138,8 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
             client_connection,
             send,
             receive,
+            work,
+            deadline,
             admission_id(),
             binding,
             credential(),
@@ -142,7 +154,9 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
                 .await
                 .expect("request");
             match scenario {
-                ReplyScenario::Missing | ReplyScenario::Cancelled => {
+                ReplyScenario::Missing
+                | ReplyScenario::Cancelled
+                | ReplyScenario::ExchangeDeadline => {
                     server_ready.notify_one();
                     std::future::pending::<()>().await;
                 }
@@ -221,7 +235,7 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
         let mut future = Box::pin(exchange.exchange(&request));
         let virtual_wait = matches!(
             scenario,
-            ReplyScenario::Missing | ReplyScenario::StalledFinish
+            ReplyScenario::Missing | ReplyScenario::StalledFinish | ReplyScenario::ExchangeDeadline
         );
         if virtual_wait || matches!(scenario, ReplyScenario::Cancelled) {
             tokio::select! {
@@ -231,7 +245,13 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
         }
         if virtual_wait {
             tokio::time::pause();
-            tokio::time::advance(IO_DEADLINE + Duration::from_millis(1)).await;
+            let elapsed = if matches!(scenario, ReplyScenario::ExchangeDeadline) {
+                // 只耗尽一秒总预算，不能同时触发三十秒帧超时。
+                Duration::from_secs(2)
+            } else {
+                IO_DEADLINE + Duration::from_millis(1)
+            };
+            tokio::time::advance(elapsed).await;
         }
         let result = if matches!(scenario, ReplyScenario::Cancelled) {
             drop(future);
@@ -255,7 +275,9 @@ async fn actual_client_exchange_reports_reply_failures_and_preserves_trace_resul
         logs.force_flush().expect("logs");
         let (step, reason, error_type) = match scenario {
             ReplyScenario::Delayed => ("wait_peer_finish", None, None),
-            ReplyScenario::Missing => ("receive_reply", Some("timed_out"), Some("timeout")),
+            ReplyScenario::Missing | ReplyScenario::ExchangeDeadline => {
+                ("receive_reply", Some("timed_out"), Some("timeout"))
+            }
             ReplyScenario::Closed => (
                 "receive_reply",
                 Some("connection_closed"),

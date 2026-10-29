@@ -1,7 +1,9 @@
 //! 完成身份与请求证明校验后，才允许交接请求并接纳远端关联。
 use std::sync::OnceLock;
 
+use super::super::managed::AdmissionEndpoint;
 use iroh::endpoint::Connection;
+use uc_application::deps::{ConnectionLease, PeerReceiveStream, PeerSendStream, StreamWorkLease};
 use uc_core::membership::{
     AdmissionAttemptContractV2, AdmissionChannelPeerId, AdmissionContinuationCredential,
     InvitationId, SpaceAdmissionId, SpaceAdmissionProtocolVersion,
@@ -25,8 +27,9 @@ use uc_sync_protocol::space_admission::{
 };
 
 pub(super) struct AuthenticatedRequest {
-    pub(super) send: iroh::endpoint::SendStream,
-    pub(super) receive: iroh::endpoint::RecvStream,
+    pub(super) _work: StreamWorkLease<AdmissionEndpoint>,
+    pub(super) send: Box<dyn PeerSendStream>,
+    pub(super) receive: Box<dyn PeerReceiveStream>,
     pub(super) remote_peer_id: AdmissionChannelPeerId,
     pub(super) admission_id: SpaceAdmissionId,
     pub(super) credential: AdmissionContinuationCredential,
@@ -41,6 +44,7 @@ impl IrohSpaceAdmissionHandler {
     pub(super) async fn authenticate(
         &self,
         connection: &Connection,
+        lease: &ConnectionLease<AdmissionEndpoint>,
         deadline: tokio::time::Instant,
         connection_started: std::time::Instant,
         attempt: &OnceLock<AdmissionAttemptRef>,
@@ -52,13 +56,14 @@ impl IrohSpaceAdmissionHandler {
                     source: anyhow::Error::new(source),
                 }
             })?;
-            let (mut send, mut receive) = tokio::time::timeout(IO_DEADLINE, connection.accept_bi())
+            let stream = tokio::time::timeout(IO_DEADLINE, lease.accept_bi())
                 .await
                 // discarded-source[timeout]: `Elapsed`: the timeout itself is the classification
                 .map_err(|_| HandlerError::Timeout)?
                 .map_err(|source| HandlerError::Transport {
                     source: anyhow::Error::new(source),
                 })?;
+            let ((mut send, mut receive), work) = stream.into_parts();
             let (kind, payload) = read_raw_with_limit(&mut receive, AUTH_FRAME_LIMIT)
                 .await
                 .map_err(map_server_wire_error)?;
@@ -217,6 +222,7 @@ impl IrohSpaceAdmissionHandler {
                 envelope,
                 canonical_digest,
                 attempt_contract,
+                work,
             ))
         })
         .await;
@@ -249,8 +255,10 @@ impl IrohSpaceAdmissionHandler {
             envelope,
             canonical_digest,
             attempt_contract,
+            work,
         ) = authenticated;
         Ok(AuthenticatedRequest {
+            _work: work,
             send,
             receive,
             remote_peer_id,

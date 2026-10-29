@@ -1,10 +1,13 @@
+use super::managed::AdmissionEndpoint;
 use async_trait::async_trait;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::Connection;
 use sha2::{Digest, Sha256};
+use tokio::time::{timeout_at, Instant};
 use tracing::Instrument;
 use uc_application::deps::{
     AuthenticatedAdmissionExchangePort, AuthenticatedAdmissionReply, SpaceAdmissionTransportError,
 };
+use uc_application::deps::{PeerReceiveStream, PeerSendStream, StreamWorkLease};
 use uc_core::membership::{
     AdmissionContinuationCredential, AdmissionPeerBinding, SpaceAdmissionEnvelopeV1,
     SpaceAdmissionId, SpaceAdmissionProtocolVersion,
@@ -29,8 +32,10 @@ use uc_sync_protocol::space_admission::{
 
 pub(super) struct EstablishedExchange {
     connection: Connection,
-    send: SendStream,
-    receive: RecvStream,
+    send: Box<dyn PeerSendStream>,
+    receive: Box<dyn PeerReceiveStream>,
+    _work: StreamWorkLease<AdmissionEndpoint>,
+    deadline: Instant,
     admission_id: SpaceAdmissionId,
     binding: AdmissionPeerBinding,
     credential: AdmissionContinuationCredential,
@@ -40,8 +45,10 @@ pub(super) struct EstablishedExchange {
 impl EstablishedExchange {
     pub(super) fn new(
         connection: Connection,
-        send: SendStream,
-        receive: RecvStream,
+        send: Box<dyn PeerSendStream>,
+        receive: Box<dyn PeerReceiveStream>,
+        work: StreamWorkLease<AdmissionEndpoint>,
+        deadline: Instant,
         admission_id: SpaceAdmissionId,
         binding: AdmissionPeerBinding,
         credential: AdmissionContinuationCredential,
@@ -51,6 +58,8 @@ impl EstablishedExchange {
             connection,
             send,
             receive,
+            _work: work,
+            deadline,
             admission_id,
             binding,
             credential,
@@ -84,104 +93,110 @@ impl AuthenticatedAdmissionExchangePort for EstablishedExchange {
             AdmissionExchangeObservation::begin(AdmissionExchangeSide::Joiner)
                 .with_attempt(AdmissionAttemptRef::derive(self.admission_id.as_bytes()))
         });
-        let result = async {
-            record_network_snapshot(
-                &self.connection,
-                AdmissionExchangeSide::Joiner,
-                AdmissionNetworkPoint::ExchangeStarted,
-            );
-            progress.start_step(AdmissionExchangeStep::PrepareRequest);
-            if request.header().protocol_version() != SpaceAdmissionProtocolVersion::CURRENT {
-                progress.fail(AdmissionExchangeFailure::PeerUpgradeRequired);
-                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
-            }
-            let canonical = request
-                .encode_canonical_v1()
-                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::InvalidMessage))
-                .map_err(SpaceAdmissionTransportError::protocol_rejected_from)?;
-            let digest: [u8; 32] = Sha256::digest(&canonical).into();
-            let trace_context = inject_current();
-            let nonce = random_nonce();
-            let mac = calculate_mac(
-                &self.credential,
-                b"request",
-                self.admission_id,
-                self.binding.local_peer_id(),
-                self.binding.remote_peer_id(),
-                &nonce,
-                &digest,
-                trace_context.as_ref(),
-            )
-            .inspect_err(|_| progress.fail(AdmissionExchangeFailure::AuthenticationRejected))
-            .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
-            progress.start_step(AdmissionExchangeStep::SendRequest);
-            write_envelope(
-                &mut self.send,
-                FrameKind::Request,
-                &AuthenticatedEnvelopeV1 {
-                    nonce,
-                    canonical_envelope: canonical,
-                    trace_context,
-                    mac,
-                },
-            )
-            .await
-            .inspect_err(|error| progress.fail(wire_failure(error)))
-            .map_err(SpaceAdmissionTransportError::unavailable_from)?;
-            progress.start_step(AdmissionExchangeStep::ReceiveReply);
-            let (wire, reply, reply_digest) =
-                read_authenticated_reply(&mut self.receive, &self.connection, &mut progress)
-                    .await?;
-            progress.start_step(AdmissionExchangeStep::ValidateReply);
-            if reply.header().protocol_version() != request.header().protocol_version() {
-                progress.fail(AdmissionExchangeFailure::PeerUpgradeRequired);
-                return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
-            }
-            verify_mac(
-                &self.credential,
-                b"reply",
-                self.admission_id,
-                self.binding.remote_peer_id(),
-                self.binding.local_peer_id(),
-                &wire.nonce,
-                &reply_digest,
-                wire.trace_context.as_ref(),
-                &wire.mac,
-            )
-            .inspect_err(|_| progress.fail(AdmissionExchangeFailure::AuthenticationRejected))
-            .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
-            progress.start_step(AdmissionExchangeStep::SendAcknowledgement);
-            write_typed(&mut self.send, FrameKind::Ack, &1u8, AUTH_FRAME_LIMIT)
+        let result = timeout_at(
+            self.deadline,
+            async {
+                record_network_snapshot(
+                    &self.connection,
+                    AdmissionExchangeSide::Joiner,
+                    AdmissionNetworkPoint::ExchangeStarted,
+                );
+                progress.start_step(AdmissionExchangeStep::PrepareRequest);
+                if request.header().protocol_version() != SpaceAdmissionProtocolVersion::CURRENT {
+                    progress.fail(AdmissionExchangeFailure::PeerUpgradeRequired);
+                    return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+                }
+                let canonical = request
+                    .encode_canonical_v1()
+                    .inspect_err(|_| progress.fail(AdmissionExchangeFailure::InvalidMessage))
+                    .map_err(SpaceAdmissionTransportError::protocol_rejected_from)?;
+                let digest: [u8; 32] = Sha256::digest(&canonical).into();
+                let trace_context = inject_current();
+                let nonce = random_nonce();
+                let mac = calculate_mac(
+                    &self.credential,
+                    b"request",
+                    self.admission_id,
+                    self.binding.local_peer_id(),
+                    self.binding.remote_peer_id(),
+                    &nonce,
+                    &digest,
+                    trace_context.as_ref(),
+                )
+                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::AuthenticationRejected))
+                .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
+                progress.start_step(AdmissionExchangeStep::SendRequest);
+                write_envelope(
+                    &mut self.send,
+                    FrameKind::Request,
+                    &AuthenticatedEnvelopeV1 {
+                        nonce,
+                        canonical_envelope: canonical,
+                        trace_context,
+                        mac,
+                    },
+                )
                 .await
                 .inspect_err(|error| progress.fail(wire_failure(error)))
                 .map_err(SpaceAdmissionTransportError::unavailable_from)?;
-            progress.start_step(AdmissionExchangeStep::FinishSend);
-            self.send
-                .finish()
-                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::ConnectionClosed))
+                progress.start_step(AdmissionExchangeStep::ReceiveReply);
+                let (wire, reply, reply_digest) =
+                    read_authenticated_reply(&mut self.receive, &self.connection, &mut progress)
+                        .await?;
+                progress.start_step(AdmissionExchangeStep::ValidateReply);
+                if reply.header().protocol_version() != request.header().protocol_version() {
+                    progress.fail(AdmissionExchangeFailure::PeerUpgradeRequired);
+                    return Err(SpaceAdmissionTransportError::PeerUpgradeRequired);
+                }
+                verify_mac(
+                    &self.credential,
+                    b"reply",
+                    self.admission_id,
+                    self.binding.remote_peer_id(),
+                    self.binding.local_peer_id(),
+                    &wire.nonce,
+                    &reply_digest,
+                    wire.trace_context.as_ref(),
+                    &wire.mac,
+                )
+                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::AuthenticationRejected))
+                .map_err(SpaceAdmissionTransportError::authentication_rejected_from)?;
+                progress.start_step(AdmissionExchangeStep::SendAcknowledgement);
+                write_typed(&mut self.send, FrameKind::Ack, &1u8, AUTH_FRAME_LIMIT)
+                    .await
+                    .inspect_err(|error| progress.fail(wire_failure(error)))
+                    .map_err(SpaceAdmissionTransportError::unavailable_from)?;
+                progress.start_step(AdmissionExchangeStep::FinishSend);
+                self.send
+                    .finish()
+                    .inspect_err(|_| progress.fail(AdmissionExchangeFailure::ConnectionClosed))
+                    .map_err(SpaceAdmissionTransportError::unavailable_from)?;
+                progress.start_step(AdmissionExchangeStep::WaitPeerFinish);
+                let mut trailing = [0_u8; 1];
+                let trailing_length = tokio::time::timeout(
+                    IO_DEADLINE,
+                    tokio::io::AsyncReadExt::read(&mut self.receive, &mut trailing),
+                )
+                .await
+                .inspect_err(|_| progress.fail(AdmissionExchangeFailure::TimedOut))
+                .map_err(SpaceAdmissionTransportError::unavailable_from)?
+                .inspect_err(|error| progress.fail(io_failure(error)))
                 .map_err(SpaceAdmissionTransportError::unavailable_from)?;
-            progress.start_step(AdmissionExchangeStep::WaitPeerFinish);
-            let mut trailing = [0_u8; 1];
-            let trailing_length = tokio::time::timeout(
-                IO_DEADLINE,
-                tokio::io::AsyncReadExt::read(&mut self.receive, &mut trailing),
-            )
-            .await
-            .inspect_err(|_| progress.fail(AdmissionExchangeFailure::TimedOut))
-            .map_err(SpaceAdmissionTransportError::unavailable_from)?
-            .inspect_err(|error| progress.fail(io_failure(error)))
-            .map_err(SpaceAdmissionTransportError::unavailable_from)?;
-            if trailing_length != 0 {
-                progress.fail(AdmissionExchangeFailure::InvalidMessage);
-                return Err(SpaceAdmissionTransportError::protocol_rejected());
+                if trailing_length != 0 {
+                    progress.fail(AdmissionExchangeFailure::InvalidMessage);
+                    return Err(SpaceAdmissionTransportError::protocol_rejected());
+                }
+                AuthenticatedAdmissionReply::new(reply, reply_digest).ok_or_else(|| {
+                    progress.fail(AdmissionExchangeFailure::InvalidMessage);
+                    SpaceAdmissionTransportError::protocol_rejected()
+                })
             }
-            AuthenticatedAdmissionReply::new(reply, reply_digest).ok_or_else(|| {
-                progress.fail(AdmissionExchangeFailure::InvalidMessage);
-                SpaceAdmissionTransportError::protocol_rejected()
-            })
-        }
-        .instrument(span.clone())
-        .await;
+            .instrument(span.clone()),
+        )
+        .await
+        .inspect_err(|_| progress.fail(AdmissionExchangeFailure::TimedOut))
+        .map_err(SpaceAdmissionTransportError::unavailable_from)
+        .and_then(|result| result);
         span.in_scope(|| {
             record_network_snapshot(
                 &self.connection,
@@ -199,7 +214,7 @@ impl AuthenticatedAdmissionExchangePort for EstablishedExchange {
 }
 
 async fn read_authenticated_reply(
-    receive: &mut RecvStream,
+    receive: &mut Box<dyn PeerReceiveStream>,
     connection: &Connection,
     progress: &mut AdmissionExchangeObservation,
 ) -> Result<

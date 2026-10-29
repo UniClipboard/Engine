@@ -2,11 +2,13 @@ use super::super::blobs::BLOBS_ALPN;
 use super::super::conn_path::connection_channel;
 use super::super::observed_connections::close_reason;
 use super::super::session_generation::{begin_session_local_work, SessionLocalWork};
+use super::super::space_admission::SPACE_ADMISSION_ALPN;
 #[cfg(feature = "test-util")]
 use super::super::test_support::register_resource_connection;
 use super::stream::{wrap, wrap_receive, wrap_send};
 use async_trait::async_trait;
 use iroh::endpoint::{Connection, Side};
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::broadcast;
@@ -44,6 +46,12 @@ pub(crate) struct IrohPeerConnection {
     )>,
 }
 impl IrohPeerConnection {
+    pub(crate) fn native(connection: &dyn Any) -> Result<Connection, ConnectivityError> {
+        connection
+            .downcast_ref::<Self>()
+            .map(|connection| connection.native.clone())
+            .ok_or(ConnectivityError::Denied)
+    }
     pub(crate) fn wrap(connection: Connection) -> Arc<dyn PeerConnection> {
         #[cfg(feature = "test-util")]
         register_resource_connection(&connection);
@@ -132,6 +140,7 @@ impl PeerConnection for IrohPeerConnection {
     }
     fn protocol(&self) -> ConnectionProtocol {
         match self.native.alpn() {
+            SPACE_ADMISSION_ALPN => ConnectionProtocol::SpaceAdmission,
             BLOBS_ALPN => ConnectionProtocol::Blob,
             LEGACY_TRANSFER_PROGRESS_ALPN => ConnectionProtocol::TransferProgressV1,
             TRANSFER_PROGRESS_ALPN => ConnectionProtocol::TransferProgressV2,

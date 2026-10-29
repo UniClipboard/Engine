@@ -1,11 +1,11 @@
-use super::{ConnectivityError, PeerConnection};
+use super::{ConnectionKey, ConnectivityError, PeerConnection};
 use async_trait::async_trait;
 use std::sync::Arc;
 use uc_core::ids::DeviceId;
 
 #[async_trait]
-pub trait AdmissionGrant: Send + Sync {
-    fn peer(&self) -> DeviceId;
+pub trait AdmissionGrant<K: ConnectionKey = DeviceId>: Send + Sync {
+    fn peer(&self) -> K;
     /// 核对本连接原始撤销基线；缺少同步围栏时禁止跨步骤提交。
     fn check_frozen(&self) -> Result<(), ConnectivityError> {
         Err(ConnectivityError::Denied)
@@ -18,7 +18,7 @@ pub trait AdmissionGrant: Send + Sync {
 }
 
 #[async_trait]
-pub trait AdmissionAttempt: Send + Sync {
+pub trait AdmissionAttempt<K: ConnectionKey = DeviceId>: Send + Sync {
     /// 同步核对冻结的撤销基线；未提供围栏的实现不能用于跨步骤的提交保护。
     fn check_frozen(&self) -> Result<(), ConnectivityError> {
         Err(ConnectivityError::Denied)
@@ -28,20 +28,20 @@ pub trait AdmissionAttempt: Send + Sync {
     async fn adopt(
         &self,
         connection: Arc<dyn PeerConnection>,
-    ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError>;
+    ) -> Result<Box<dyn AdmissionGrant<K>>, ConnectivityError>;
 }
 
 /// 首帧尚未识别 peer 时冻结的撤销围栏；绑定后核对同一请求基线。
-pub trait InboundAdmissionFence: Send + Sync {
-    fn check_current(&self, peer: &DeviceId) -> Result<(), ConnectivityError>;
+pub trait InboundAdmissionFence<K: ConnectionKey = DeviceId>: Send + Sync {
+    fn check_current(&self, peer: &K) -> Result<(), ConnectivityError>;
 }
 
 /// 身份解析后、成员读取之前交接准入额度；失败时不得继续读取成员或登记连接。
-pub trait InboundIdentityReservation: Send + Sync {
-    fn identified(&self, peer: DeviceId) -> Result<(), ConnectivityError>;
+pub trait InboundIdentityReservation<K: ConnectionKey = DeviceId>: Send + Sync {
+    fn identified(&self, peer: K) -> Result<(), ConnectivityError>;
 }
-impl InboundIdentityReservation for Option<Box<dyn InboundAdmissionFence>> {
-    fn identified(&self, peer: DeviceId) -> Result<(), ConnectivityError> {
+impl<K: ConnectionKey> InboundIdentityReservation<K> for Option<Box<dyn InboundAdmissionFence<K>>> {
+    fn identified(&self, peer: K) -> Result<(), ConnectivityError> {
         if let Some(fence) = self {
             fence.check_current(&peer)?;
         }
@@ -51,16 +51,16 @@ impl InboundIdentityReservation for Option<Box<dyn InboundAdmissionFence>> {
 
 /// 复用会话唯一身份、准入和撤销登记；不向协议调用方暴露步骤。
 #[async_trait]
-pub trait SessionConnectionAdmissionPort: Send + Sync {
-    fn inbound_fence(&self) -> Option<Box<dyn InboundAdmissionFence>> {
+pub trait SessionConnectionAdmissionPort<K: ConnectionKey = DeviceId>: Send + Sync {
+    fn inbound_fence(&self) -> Option<Box<dyn InboundAdmissionFence<K>>> {
         None
     }
-    fn begin(&self, target: DeviceId) -> Box<dyn AdmissionAttempt>;
+    fn begin(&self, target: K) -> Box<dyn AdmissionAttempt<K>>;
     async fn adopt_inbound(
         &self,
         connection: Arc<dyn PeerConnection>,
-        reservation: &dyn InboundIdentityReservation,
-    ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError>;
+        reservation: &dyn InboundIdentityReservation<K>,
+    ) -> Result<Box<dyn AdmissionGrant<K>>, ConnectivityError>;
 }
 
 /// 入站拒绝仍持有有限处理额度，直到有界拒绝回执结算；过载直接关闭。

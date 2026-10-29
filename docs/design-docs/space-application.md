@@ -389,6 +389,8 @@ flowchart TD
 
 #### `SpaceAdmissionProtocol`
 
+加入通信的专属非成员授权及受管资源生命周期见 [Space 加入通信](space-admission-connectivity.md)。
+
 - **入口**：用户 Join/Cancel、认证入站消息、当前状态查询、待完成激活和后台恢复。
 - **职责/作用**：在 profile 级串行边界内驱动 Core aggregate，原子保存加密状态，并通过认证 transport 继续可恢复交换。
 - **关系**：facade 只调用协议动作；Infra 只提供密码材料、密文仓库、认证传输和最终激活能力。

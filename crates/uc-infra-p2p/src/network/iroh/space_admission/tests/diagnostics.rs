@@ -1,5 +1,6 @@
-use super::super::connection::{connect, open_stream};
+use super::super::connection::connect;
 use super::*;
+use std::error::Error;
 
 #[test]
 fn deferred_client_completion_is_not_reported_as_a_failure() {
@@ -115,9 +116,13 @@ async fn stalled_pre_authentication_records_one_unassociated_timeout() {
         continuation: Mutex::new(None),
     });
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials)
-            .expect("handler")
-            .with_exchange_deadline(Duration::from_millis(100)),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            endpoint.clone(),
+            credentials,
+        )
+        .expect("handler")
+        .with_exchange_deadline(Duration::from_millis(100)),
     );
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, handler)
@@ -175,9 +180,13 @@ async fn a_sponsor_at_capacity_records_one_busy_warning_without_peer_identity() 
         continuation: Mutex::new(None),
     });
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials)
-            .expect("handler")
-            .with_capacity(0),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            endpoint.clone(),
+            credentials,
+        )
+        .expect("handler")
+        .with_capacity(0),
     );
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, handler)
@@ -251,9 +260,13 @@ async fn server_handshake_outcomes_are_recorded_without_peer_identity() {
         continuation: Mutex::new(None),
     });
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&sponsor, endpoint, credentials)
-            .expect("handler")
-            .with_capacity(0),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            endpoint,
+            credentials,
+        )
+        .expect("handler")
+        .with_capacity(0),
     );
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, handler)
@@ -295,7 +308,12 @@ async fn server_handshake_outcomes_are_recorded_without_peer_identity() {
         continuation: Mutex::new(None),
     });
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&rejecting, endpoint.clone(), credentials).expect("handler"),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(rejecting.clone())),
+            endpoint.clone(),
+            credentials,
+        )
+        .expect("handler"),
     );
     let router = Router::builder((*rejecting).clone())
         .accept(SPACE_ADMISSION_ALPN, handler)
@@ -363,8 +381,12 @@ async fn sponsor_with_handler(
         continuation: Mutex::new(None),
     });
     let handler = Arc::new(setup(
-        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials.clone())
-            .expect("handler"),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            endpoint.clone(),
+            credentials.clone(),
+        )
+        .expect("handler"),
     ));
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, handler.clone())
@@ -588,8 +610,12 @@ async fn rejected_continuation_diagnostics_distinguish_identity_credentials_and_
             continuation: Mutex::new(stored_credential),
         });
         let handler = Arc::new(
-            IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials)
-                .expect("handler"),
+            IrohSpaceAdmissionHandler::new(
+                Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+                endpoint.clone(),
+                credentials,
+            )
+            .expect("handler"),
         );
         let router = Router::builder((*sponsor).clone())
             .accept(SPACE_ADMISSION_ALPN, handler)
@@ -665,7 +691,12 @@ async fn old_joiner_version_is_reported_as_hello_upgrade_not_identity_mismatch()
         continuation: Mutex::new(None),
     });
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&sponsor, endpoint.clone(), credentials).expect("handler"),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            endpoint.clone(),
+            credentials,
+        )
+        .expect("handler"),
     );
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, handler)
@@ -1054,4 +1085,35 @@ async fn failed_initial_exchange_stops_the_step_records_at_the_response() {
     router.shutdown().await.expect("router");
     joiner.close().await;
     sponsor.close().await;
+}
+
+#[tokio::test]
+async fn total_exchange_deadline_keeps_its_source_and_reports_timeout() {
+    let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+        .await
+        .expect_err("总截止结束");
+    let error = SpaceAdmissionTransportError::unavailable_from(elapsed);
+    assert!(error.source().is_some(), "总截止保留来源");
+    let exporter = InMemoryLogExporter::default();
+    let logs = SdkLoggerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry().with(
+        OpenTelemetryTracingBridge::new(&logs)
+            .with_filter(filter_fn(|metadata| metadata.target() == "uc.telemetry")),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        record_client_completion(
+            DiagnosticOperation::SpaceAdmission,
+            Duration::from_secs(120),
+            Some(&error),
+        );
+    });
+    logs.force_flush().expect("完成记录");
+    let records = exporter.get_emitted_logs().expect("记录");
+    assert_eq!(records.len(), 1);
+    assert!(records[0].record.attributes_iter().any(|(key, value)| {
+        key.as_str() == "error.type"
+            && matches!(value, AnyValue::String(value) if value.as_str() == "timeout")
+    }));
 }

@@ -38,7 +38,7 @@ use uc_sync_protocol::space_admission::{
 };
 use uc_sync_protocol::WireTraceContext;
 
-use super::connection::{connect, open_stream};
+use super::connection::connect;
 use super::crypto::{calculate_mac, peer_id, verify_mac};
 use super::diagnostics::{record_client_completion, server_error_type};
 use super::errors::{
@@ -635,4 +635,16 @@ fn prepared_request(
 mod crypto;
 mod diagnostics;
 mod exchange_progress;
+mod lifecycle;
 mod protocol;
+
+// 固定旧端验收直接操作原生流，生产准入必须经过受管租约。
+async fn open_stream(
+    connection: &Connection,
+) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream), SpaceAdmissionTransportError>
+{
+    tokio::time::timeout(IO_DEADLINE, connection.open_bi())
+        .await
+        .map_err(SpaceAdmissionTransportError::deferred_from)?
+        .map_err(SpaceAdmissionTransportError::deferred_from)
+}

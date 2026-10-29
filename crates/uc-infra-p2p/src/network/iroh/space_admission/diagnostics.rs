@@ -1,6 +1,7 @@
 use iroh::endpoint::{Connection, ConnectionError, ReadError, WriteError};
 use std::io::{Error as IoError, ErrorKind};
 use std::time::Duration;
+use tokio::time::error::Elapsed;
 
 use uc_application::deps::SpaceAdmissionTransportError;
 use uc_observability_contract::diagnostics::connectivity::{
@@ -74,6 +75,15 @@ pub(super) fn client_completion(
             DiagnosticDomain::SpaceAdmission,
             operation,
             DiagnosticRole::Joiner,
+            elapsed,
+        ),
+        Some(SpaceAdmissionTransportError::Unavailable {
+            source: Some(source),
+        }) if source.downcast_ref::<Elapsed>().is_some() => OperationCompletion::failed(
+            DiagnosticDomain::SpaceAdmission,
+            operation,
+            DiagnosticRole::Joiner,
+            DiagnosticErrorType::Timeout,
             elapsed,
         ),
         Some(
