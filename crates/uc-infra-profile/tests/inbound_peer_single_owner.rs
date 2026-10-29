@@ -71,7 +71,8 @@ const INBOUND_HANDLERS: [&str; 9] = [
 fn identity_resolution_has_a_single_implementation() {
     let gate = production("crates/uc-infra-p2p/src/network/iroh/inbound_peer.rs");
     assert!(gate.contains("struct PeerIdentityResolver"));
-    assert!(gate.contains("struct InboundPeerGate"));
+    assert!(gate.contains("impl PeerIdentityResolver"));
+    assert!(gate.contains("pub(crate) async fn resolve("));
     for handler in INBOUND_HANDLERS {
         let code = production(handler);
         for forbidden in [
