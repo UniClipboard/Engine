@@ -400,10 +400,8 @@ async fn apply_delivery_result(
                     schedule.record_recoverable(target, Some(newest), Instant::now());
                 }
                 Ok(_) | Err(ScanStopped::Cancelled) => {}
-                // 无法判断先后时按恢复轮次自身失败处理：照常排期，但不重置次数。
-                Err(ScanStopped::ListingFailed) => {
-                    schedule.record_recoverable(target, None, Instant::now());
-                }
+                // 先后未知：不改动任何目标的次数，按退避再核对一次，通知不会因此丢失。
+                Err(ScanStopped::ListingFailed) => schedule.reconcile_later(Instant::now()),
             }
         }
         DeliveryResultKind::Settled => {
@@ -502,7 +500,7 @@ async fn recover_for_target(
         return RecoveryOutcome::TargetPaused.into();
     }
 
-    let (entry_id, record) = match newest_delivery_for_target(deps, &target, cancel).await {
+    let (entry_id, record) = match newest_delivery_for_target(deps, &target, cancel, true).await {
         Ok(Some(found)) => found,
         Ok(None) => return RecoveryOutcome::NothingToRecover.into(),
         Err(ScanStopped::Cancelled) => return RecoveryOutcome::Cancelled.into(),
@@ -599,16 +597,19 @@ async fn recover_for_target(
 /// 扫描为什么提前结束。
 enum ScanStopped {
     Cancelled,
+    /// 列举失败；或不允许跳过时有条目无法读取，此时最新内容未知。
     ListingFailed,
 }
 
 /// 目标当前的最新内容：按新到旧扫描本机发出且跟踪投递的条目，第一条带有该目标投递记录的
 /// 条目及其记录。恢复轮次只补发它，较旧内容随后被标记为已取代；结果通知的先后也只按它判断，
-/// 不另建条目顺序。读取单条条目失败时跳过该条目，列举失败时中止扫描。
+/// 不另建条目顺序。列举失败时中止扫描；读取单条条目失败时，`skip_unreadable` 为真则跳过该
+/// 条目（恢复轮次沿用的行为），否则中止，因为被跳过的条目可能才是最新内容。
 async fn newest_delivery_for_target(
     deps: &OfflineDeliveryRecoveryDeps,
     target: &DeviceId,
     cancel: &CancellationToken,
+    skip_unreadable: bool,
 ) -> Result<Option<(EntryId, EntryDeliveryRecord)>, ScanStopped> {
     let local_device = deps.device_identity.current_device_id();
     let mut offset = 0;
@@ -644,6 +645,9 @@ async fn newest_delivery_for_target(
                         error_kind = "entry_source",
                         "clipboard delivery recovery: entry skipped"
                     );
+                    if !skip_unreadable {
+                        return Err(ScanStopped::ListingFailed);
+                    }
                     continue;
                 }
             };
@@ -660,6 +664,9 @@ async fn newest_delivery_for_target(
                         error_kind = "delivery_lookup",
                         "clipboard delivery recovery: entry skipped"
                     );
+                    if !skip_unreadable {
+                        return Err(ScanStopped::ListingFailed);
+                    }
                     continue;
                 }
             };
@@ -681,13 +688,13 @@ async fn newest_delivery_for_target(
 }
 
 /// 目标当前最新内容仍未结束（`Pending`/`Unreachable`）时返回该条目；最新内容已结算或没有
-/// 记录时返回 `None`。
+/// 记录时返回 `None`。有条目无法读取时先后未知，返回失败而不是把较旧条目当作最新内容。
 async fn newest_recoverable_entry(
     deps: &OfflineDeliveryRecoveryDeps,
     target: &DeviceId,
     cancel: &CancellationToken,
 ) -> Result<Option<EntryId>, ScanStopped> {
-    Ok(newest_delivery_for_target(deps, target, cancel)
+    Ok(newest_delivery_for_target(deps, target, cancel, false)
         .await?
         .filter(|(_, record)| is_recovery_eligible(record, target))
         .map(|(entry_id, _)| entry_id))

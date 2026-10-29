@@ -407,3 +407,78 @@ async fn lagged_reconciliation_continues_past_a_failed_target_and_rechecks_it() 
     assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
     harness.recovery.shutdown().await.unwrap();
 }
+
+/// 判断迟到结果的先后时较新条目 B 的来源读取失败：不能据此把较旧条目 A 当作最新内容，
+/// B 已用尽的次数保持不变，再核对时 B 仍是最新内容，因此不会再补发。
+#[tokio::test(start_paused = true)]
+async fn an_unreadable_newer_entry_does_not_let_a_late_older_result_restart_retries() {
+    let harness = RetryHarness::start_with(
+        None,
+        &[
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Accepted,
+        ],
+        RetryScenario {
+            older_entry: Some(EntryDeliveryStatus::Superseded),
+            known_target: true,
+            ..RetryScenario::default()
+        },
+    );
+    settle().await;
+    harness
+        .record_dispatch(EntryDeliveryStatus::Unreachable)
+        .await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), RETRY_BACKOFF.len());
+
+    harness.reads.failing_sources.store(1, Ordering::SeqCst);
+    harness
+        .record_results([(
+            harness.older.entry_id.clone(),
+            harness.target,
+            EntryDeliveryStatus::Unreachable,
+        )])
+        .await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), RETRY_BACKOFF.len());
+    harness.recovery.shutdown().await.unwrap();
+}
+
+/// 较旧条目 A 已用尽 3 次后，真正较新的条目 B 留下可恢复结果，但判断先后时条目列表读取失败：
+/// B 的通知不会丢失，再核对时确认 B 是最新内容并按完整的 3 次重试补发。
+#[tokio::test(start_paused = true)]
+async fn a_newer_result_with_unknown_ordering_is_rechecked_later() {
+    let harness = RetryHarness::start_with(
+        None,
+        &[
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Accepted,
+        ],
+        RetryScenario {
+            older_entry: Some(EntryDeliveryStatus::Unreachable),
+            known_target: true,
+            ..RetryScenario::default()
+        },
+    );
+    // 启动扫描补发 A 一次，随后 3 次计时重试全部中断。
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), RETRY_BACKOFF.len() + 1);
+
+    harness.reads.failing_listings.store(1, Ordering::SeqCst);
+    harness
+        .record_dispatch(EntryDeliveryStatus::Unreachable)
+        .await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), RETRY_BACKOFF.len() + 2);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    harness.recovery.shutdown().await.unwrap();
+}
