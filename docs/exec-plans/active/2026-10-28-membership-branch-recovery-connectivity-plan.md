@@ -562,7 +562,7 @@ Blob job 的旧旧 a07 Relay 前置内容场景通过，但 A 关闭返回 `1104
 本机按冻结 a07 和原 Relay 入口复验通过，不能认定关闭根因已修复。驱动补充 stdin／进程错误统一结算，
 确定性 EPIPE 用例通过；真实旧端包装夹具注入关闭 `1104` 时仍退出失败，但清理及脱敏 JSON 正常保存。
 该修复只防止二次错误丢失证据，不修改旧端库、关闭预算或业务成功断言。
-原 run 的失败／取消 job 已启动 attempt 2；网络 job 已完成下述核验，Engine job 仍在执行，当前不得勾选 AC11／AC12 或提前归档。
+原 run 的失败／取消 job 已完成 attempt 2；网络 job 已通过，Engine job 再次因原90分钟上限取消，结算见下文。新候选必需CI未通过，当前不得勾选 AC11／AC12 或提前归档。
 
 ### 驱动修复后的本地完整复验
 
@@ -599,7 +599,34 @@ Blob job 的旧旧 a07 Relay 前置内容场景通过，但 A 关闭返回 `1104
 Blob summary为 `de84c4fe1226221067665152afe9a2ea239cb1fda3a35f40f797f01fc0a17adf`。
 
 本次成功补齐首轮网络作业的未完成范围，原旧端关闭失败及驱动丢失证据继续保留。
-Engine作业及剩余必需步骤尚未终结，不能据网络作业成功提前归档本片。
+Engine作业随后再次超时取消，不能据网络作业成功提前归档本片；终态与未执行范围见下一节。
+
+### Attempt 2 Engine 终态结算
+
+[Engine job 123463843510](https://github.com/UniClipboard/Engine/actions/runs/40827495920/job/123463843510)
+最终为 `cancelled`，GitHub check注解再次明确超过 `1h30m0s`；不是成员smoke的产品失败判定。
+该固定旧head仍运行原90分钟workflow，不包含本PR的120分钟预算修复，不再重复启动同一旧预算。
+
+| 范围 | 实际结果 |
+| --- | --- |
+| workspace | 4979项通过，无failure／error／skipped |
+| 恢复故障进程组 | 11项通过，无failure／error／skipped |
+| 实际接收权威登记 | 步骤success |
+| blob生命周期资源 | 9项通过；原外部校验器重验7类生命周期、两轮各1 GiB、SDK tags／原生句柄、FD／线程／任务和下载额度全部通过 |
+| testkit evidence | 18项通过，无failure／error／skipped |
+| 成员smoke | cancelled，不计通过 |
+| Relay历史复用、Direct／Relay主动内容、隔离配对 | 前序取消后skipped，不计通过 |
+
+新artifact `12905068680` 的ZIP SHA-256为
+`8581f993b9a36e4978d267b80464b525bb1786184767ab5f8f436736c91c7f5e`，下载重算匹配。
+四份有效XML逐项核对唯一测试身份及结果。资源原始记录重跑既有
+[外部校验器](../../../scripts/testing/verify-blob-lifecycle-resources.py)成功；
+重算summary除顶层case／scheduler按文件枚举产生的数组顺序外，与原工件完全一致。
+本轮 `membership-e2e-smoke.xml` 仍与 `evidence.xml` 逐字节相同，
+再次证实原取消报告误归属；不能凭其18项零失败把取消步骤写成通过。
+
+至此原 #345 两轮失败、重跑及跳过原因均有明确结算。剩余必需步骤须在修正预算与报告归属的
+交付候选上实际通过；本节不把该原始取消运行改写为成功。
 
 ### 当前交付候选的分支恢复矩阵
 

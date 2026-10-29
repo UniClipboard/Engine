@@ -26,7 +26,7 @@
 | 6：设备可达性 | 已完成；设备和额外历史矩阵跳过 | [计划](../completed/2026-10-14-peer-reachability-connectivity-plan.md) |
 | 7：文件／blob | 后续#340统一候选补齐原安全阻塞，48项计划／13项验收已结算归档 | [计划](../completed/2026-10-21-blob-connectivity-plan.md) |
 | 8：反向进度 | 已完成并归档；物理挂起／设备后台按原授权跳过 | [最终结算](../completed/2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论) |
-| 9：成员分支恢复 | #345 已合并；原attempt 2网络24格已核验通过，Engine待结算；#350新候选网络在升级前旧旧Relay文件接收失败，仍未闭环 | [计划](2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29) |
+| 9：成员分支恢复 | #345 已合并；原attempt 2网络24格已核验通过，Engine再次90分钟超时取消；#350新候选网络在升级前旧旧Relay文件接收失败，仍未闭环 | [计划](2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29) |
 | Space 加入／续接 | #346 已合并并归档；旧发布二进制、Relay 和设备矩阵跳过 | [计划](../completed/2026-10-29-space-admission-connectivity-plan.md) |
 
 ## Definition of Done 逐项对应
@@ -117,7 +117,7 @@ D15 的结论是“证据不足”：现有Direct完整同步可以使用已有�
 
 ## 首次失败与未完成清单
 
-- [ ] 结算 #345 原最终 head 的失败／取消 CI；保存首轮失败、重跑结果与每一步跳过原因。
+- [x] 结算 #345 原最终 head 的失败／取消 CI；首轮失败、网络重跑24格通过、Engine再次90分钟超时及逐步骤跳过原因已保存。修正候选的必需CI仍待完成。
 - [x] 第七片逐项回填 48 项计划／13 项验收与后续安全修复证据，按后续统一候选结算归档。
 - [ ] 第九片逐项回填 AC01–AC12、最终候选及平台范围；满足原退出条件后归档。
 - [x] 完成 D09／D10／D13 的当前生产入口总审与 D15 的证据边界核对；D15 端到端缺口继续明确保留。
