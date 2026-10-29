@@ -1727,6 +1727,8 @@ mod tests {
         clock: Arc<dyn ClockPort>,
         contacts: tokio::sync::broadcast::Sender<uc_application::deps::KnownPeerContact>,
     ) -> Result<Arc<dyn PeerReachabilityPort>, IrohNodeError> {
+        let address_refresh =
+            builder.build_verified_peer_address_refresh(addresses.clone(), clock.clone());
         let (deps, environment) = builder.presence_connectivity_deps(
             addresses,
             identities,
@@ -1749,6 +1751,7 @@ mod tests {
             uc_application::deps::PeerReachabilityTransportPorts {
                 wire: Arc::new(super::super::connectivity::PeerReachabilityWire),
                 environment,
+                address_refresh,
             },
             clock,
             contacts,
