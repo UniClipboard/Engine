@@ -252,6 +252,17 @@ async fn a_late_result_for_an_older_entry_does_not_restart_the_newer_entrys_retr
 /// 多于结果通知缓冲上限（64）的一批结果，在恢复负责人处理之前一次写入。
 const OVERFLOWING_RESULTS: usize = 80;
 
+/// 与恢复无关的目标的一批已结算结果，足以让此前的结果通知积压丢失。
+fn unrelated_results() -> impl Iterator<Item = (EntryId, DeviceId, EntryDeliveryStatus)> {
+    (0..OVERFLOWING_RESULTS).map(|index| {
+        (
+            EntryId::from(format!("unrelated-entry-{index}").as_str()),
+            DeviceId::new(&format!("unrelated-target-{index}")),
+            EntryDeliveryStatus::Delivered,
+        )
+    })
+}
+
 /// 其他目标的大量结果让通知积压丢失：恢复负责人按持久记录核对丢失的通知，只把仍有未送达
 /// 内容的目标排入原有退避，不立即补发，也不清除已用尽标记，因此已用尽 3 次的条目不再补发。
 #[tokio::test(start_paused = true)]
@@ -277,15 +288,7 @@ async fn lagged_results_do_not_resend_to_a_target_that_exhausted_its_retries() {
     settle().await;
     assert_eq!(harness.delivery.calls(), RETRY_BACKOFF.len());
 
-    harness
-        .record_results((0..OVERFLOWING_RESULTS).map(|index| {
-            (
-                EntryId::from(format!("unrelated-entry-{index}").as_str()),
-                DeviceId::new(&format!("unrelated-target-{index}")),
-                EntryDeliveryStatus::Delivered,
-            )
-        }))
-        .await;
+    harness.record_results(unrelated_results()).await;
     tokio::time::sleep(Duration::from_secs(600)).await;
     settle().await;
     assert_eq!(
@@ -338,5 +341,69 @@ async fn reconciling_lagged_results_does_not_sustain_another_overflow() {
         OVERFLOWING_RESULTS * RETRY_BACKOFF.len(),
         "every target keeps exactly three timed retries"
     );
+    harness.recovery.shutdown().await.unwrap();
+}
+
+/// 通知积压丢失后核对时配对设备列表读取失败：核对按退避再做一次，丢失通知的目标随后仍被补发。
+#[tokio::test(start_paused = true)]
+async fn lagged_reconciliation_retries_after_the_peer_list_read_fails() {
+    let harness = RetryHarness::start_with(
+        None,
+        &[Attempt::Accepted],
+        RetryScenario {
+            known_target: true,
+            ..RetryScenario::default()
+        },
+    );
+    settle().await;
+    harness.reads.failing_peer_lists.store(1, Ordering::SeqCst);
+    let lost = (
+        harness.entry.entry_id.clone(),
+        harness.target,
+        EntryDeliveryStatus::Unreachable,
+    );
+    harness
+        .record_results(std::iter::once(lost).chain(unrelated_results()))
+        .await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 1);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    harness.recovery.shutdown().await.unwrap();
+}
+
+/// 核对时第一个目标的条目列表读取失败：不放弃后面的目标，失败的目标按退避再核对后同样被补发。
+#[tokio::test(start_paused = true)]
+async fn lagged_reconciliation_continues_past_a_failed_target_and_rechecks_it() {
+    let harness = RetryHarness::start_with(
+        None,
+        &[Attempt::Accepted, Attempt::Accepted],
+        RetryScenario {
+            other_targets: 1,
+            ..RetryScenario::default()
+        },
+    );
+    settle().await;
+    harness.reads.failing_listings.store(1, Ordering::SeqCst);
+    let (other, other_entry) = other_target(0);
+    let lost = [
+        (
+            harness.entry.entry_id.clone(),
+            harness.target,
+            EntryDeliveryStatus::Unreachable,
+        ),
+        (
+            other_entry.entry_id,
+            other,
+            EntryDeliveryStatus::Unreachable,
+        ),
+    ];
+    harness
+        .record_results(lost.into_iter().chain(unrelated_results()))
+        .await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), 2, "both targets are recovered");
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
     harness.recovery.shutdown().await.unwrap();
 }

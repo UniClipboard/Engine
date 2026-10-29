@@ -29,6 +29,10 @@ pub(super) const RETRY_BACKOFF: [Duration; 3] = [
 #[derive(Default)]
 pub(super) struct RetrySchedule {
     targets: HashMap<DeviceId, TargetRetry>,
+    /// 读取失败而未完成的通知核对：下一次再核对的到期时间，以及已开始的再核对次数。
+    /// 同样按 [`RETRY_BACKOFF`] 退避、最多 3 次；核对只排期不补发，不改动任何目标的次数。
+    reconcile_due: Option<Instant>,
+    reconcile_rounds: usize,
 }
 
 struct TargetRetry {
@@ -83,7 +87,34 @@ impl RetrySchedule {
 
     /// 最早的到期时间；没有排期时返回 `None`。已用尽的目标没有排期。
     pub(super) fn next_due(&self) -> Option<Instant> {
-        self.targets.values().filter_map(|retry| retry.due).min()
+        self.targets
+            .values()
+            .filter_map(|retry| retry.due)
+            .chain(self.reconcile_due)
+            .min()
+    }
+
+    /// 通知核对因读取失败没有完成：按退避安排再核对一次；已排期时不推迟，次数用尽后不再排期。
+    pub(super) fn reconcile_later(&mut self, now: Instant) {
+        if self.reconcile_due.is_none() {
+            self.reconcile_due = retry_at(self.reconcile_rounds, now);
+        }
+    }
+
+    /// 再核对已到期时取出并计入次数。
+    pub(super) fn take_due_reconcile(&mut self, now: Instant) -> bool {
+        if self.reconcile_due.is_some_and(|due| due <= now) {
+            self.reconcile_due = None;
+            self.reconcile_rounds += 1;
+            return true;
+        }
+        false
+    }
+
+    /// 一次核对完整完成：清除待再核对的义务与次数。
+    pub(super) fn reconciled(&mut self) {
+        self.reconcile_due = None;
+        self.reconcile_rounds = 0;
     }
 
     /// 取出一个已到期的目标。取出即开始一轮计时重试，计入当前条目的重试次数。
@@ -401,6 +432,27 @@ mod tests {
         schedule.await_result(&target(), EntryId::from("entry"));
         assert!(!schedule.is_tracking(&target()));
         assert_eq!(schedule.next_due(), None);
+    }
+
+    #[test]
+    fn a_failing_reconciliation_is_retried_three_times_without_touching_targets() {
+        let mut now = Instant::now();
+        let mut schedule = RetrySchedule::default();
+        let entry = EntryId::from("entry");
+        exhaust(&mut schedule, &entry, now);
+        for delay in RETRY_BACKOFF {
+            schedule.reconcile_later(now);
+            assert_eq!(schedule.next_due(), Some(now + delay));
+            now += delay;
+            assert!(schedule.take_due_reconcile(now));
+        }
+        schedule.reconcile_later(now);
+        assert_eq!(schedule.next_due(), None);
+        assert!(schedule.is_exhausted(&target()));
+
+        schedule.reconciled();
+        schedule.reconcile_later(now);
+        assert_eq!(schedule.next_due(), Some(now + RETRY_BACKOFF[0]));
     }
 
     #[test]

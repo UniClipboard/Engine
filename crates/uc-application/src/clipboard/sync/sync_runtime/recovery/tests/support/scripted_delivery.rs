@@ -110,11 +110,28 @@ impl RecoveryDeliveryPort for ScriptedDelivery {
     }
 }
 
-/// 恢复负责人可列举的配对设备；未知目标的地址资料与写入都不参与这些场景。
-pub(in super::super) struct KnownPeers(pub(in super::super) Vec<DeviceId>);
+/// 恢复负责人读取的配对设备、条目列表与条目来源；可让接下来的若干次读取失败。
+#[derive(Default)]
+pub(in super::super) struct FlakyReads {
+    pub(in super::super) peers: Vec<DeviceId>,
+    pub(in super::super) entries: Vec<ClipboardEntry>,
+    pub(in super::super) sources: HashMap<EventId, DeviceId>,
+    pub(in super::super) failing_peer_lists: AtomicUsize,
+    pub(in super::super) failing_listings: AtomicUsize,
+    pub(in super::super) failing_sources: AtomicUsize,
+}
+
+/// 计数未用完时消耗一次并返回 `true`。
+fn take_failure(remaining: &AtomicUsize) -> bool {
+    remaining
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            left.checked_sub(1)
+        })
+        .is_ok()
+}
 
 #[async_trait]
-impl PeerAddressRepositoryPort for KnownPeers {
+impl PeerAddressRepositoryPort for FlakyReads {
     async fn get(
         &self,
         _device: &DeviceId,
@@ -132,8 +149,13 @@ impl PeerAddressRepositoryPort for KnownPeers {
     async fn list(
         &self,
     ) -> Result<Vec<uc_core::ports::PeerAddressRecord>, uc_core::ports::PeerAddressError> {
+        if take_failure(&self.failing_peer_lists) {
+            return Err(uc_core::ports::PeerAddressError::Internal(
+                "injected".into(),
+            ));
+        }
         Ok(self
-            .0
+            .peers
             .iter()
             .map(|device_id| uc_core::ports::PeerAddressRecord {
                 device_id: *device_id,
@@ -145,6 +167,42 @@ impl PeerAddressRepositoryPort for KnownPeers {
 
     async fn remove(&self, _device: &DeviceId) -> Result<(), uc_core::ports::PeerAddressError> {
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ListClipboardEntriesPort for FlakyReads {
+    async fn list_entries(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ClipboardEntry>, ClipboardRepositoryError> {
+        if take_failure(&self.failing_listings) {
+            return Err(ClipboardRepositoryError::Storage(
+                io::Error::other("PRIVATE_STORAGE_DETAIL").into(),
+            ));
+        }
+        Entries(self.entries.clone())
+            .list_entries(limit, offset)
+            .await
+    }
+}
+
+#[async_trait]
+impl ClipboardEventRepositoryPort for FlakyReads {
+    async fn get_representation(
+        &self,
+        _id: &EventId,
+        _representation_id: &str,
+    ) -> anyhow::Result<uc_core::ObservedClipboardRepresentation> {
+        Err(anyhow::anyhow!("not used by delivery recovery"))
+    }
+
+    async fn get_source_device(&self, event_id: &EventId) -> anyhow::Result<Option<DeviceId>> {
+        if take_failure(&self.failing_sources) {
+            return Err(anyhow::anyhow!("PRIVATE_STORAGE_DETAIL"));
+        }
+        Ok(self.sources.get(event_id).cloned())
     }
 }
 
@@ -165,6 +223,7 @@ pub(in super::super) struct RetryHarness {
     pub(in super::super) deliveries: Arc<Deliveries>,
     pub(in super::super) delivery: Arc<ScriptedDelivery>,
     pub(in super::super) reachability: Arc<SwitchablePeerReachability>,
+    pub(in super::super) reads: Arc<FlakyReads>,
     pub(in super::super) entry: ClipboardEntry,
     pub(in super::super) older: ClipboardEntry,
     pub(in super::super) target: DeviceId,
@@ -226,21 +285,28 @@ impl RetryHarness {
             entries.push(other.clone());
             sources.insert(other.event_id.clone(), DeviceId::new("local"));
         }
-        let mut deps = recovery_deps(
-            true,
+        let mut usable = vec![target];
+        usable.extend(others.iter().map(|(device, _)| *device));
+        let known = scenario.known_target || !others.is_empty();
+        let reads = Arc::new(FlakyReads {
+            peers: if known { usable.clone() } else { Vec::new() },
             entries,
             sources,
+            ..FlakyReads::default()
+        });
+        let mut deps = recovery_deps(
+            true,
+            Vec::new(),
+            HashMap::new(),
             Arc::clone(&deliveries),
             Arc::new(RecordingDispatch {
                 commands: Mutex::new(Vec::new()),
                 result: DispatchResult::Delivered,
             }),
         );
-        let mut usable = vec![target];
-        usable.extend(others.iter().map(|(device, _)| *device));
-        if scenario.known_target || !others.is_empty() {
-            deps.known_peers = Arc::new(KnownPeers(usable.clone()));
-        }
+        deps.known_peers = Arc::clone(&reads) as Arc<dyn PeerAddressRepositoryPort>;
+        deps.entries = Arc::clone(&reads) as Arc<dyn ListClipboardEntriesPort>;
+        deps.events = Arc::clone(&reads) as Arc<dyn ClipboardEventRepositoryPort>;
         deps.member_scope = Arc::new(FixedMemberScope {
             usable,
             paused: Vec::new(),
@@ -254,6 +320,7 @@ impl RetryHarness {
             deliveries,
             delivery,
             reachability,
+            reads,
             entry,
             older,
             target,

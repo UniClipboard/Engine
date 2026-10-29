@@ -237,7 +237,10 @@ impl OfflineDeliveryRecovery {
                         Err(RecvError::Closed) => return,
                     },
                     _ = tokio::time::sleep_until(next_due.unwrap_or_else(Instant::now)), if next_due.is_some() => {
-                        if let Some(target) = schedule.take_due(Instant::now()) {
+                        let now = Instant::now();
+                        if schedule.take_due_reconcile(now) {
+                            reconcile_lost_results(&task_deps, &mut schedule, &task_cancel).await;
+                        } else if let Some(target) = schedule.take_due(now) {
                             retry_due_target(&task_deps, target, &mut schedule, &task_cancel).await;
                         }
                     }
@@ -325,7 +328,8 @@ async fn recover_currently_online(
 /// 结果通知积压丢失后，按持久记录核对丢失的通知：在线目标的最新内容仍未结束时，像收到它的
 /// 可恢复结果一样记入既有退避，由到期重试补发。核对只读取、不补发，因此不会产生新的结果通知、
 /// 也不会再次让通知超出缓冲上限；它沿用已累计的次数与已用尽标记（同一条目已用尽时不再排期），
-/// 不清除任何目标的状态。离线目标等待下一次上线事件。
+/// 不清除任何目标的状态。离线目标等待下一次上线事件。读取失败时不放弃其余目标，并按退避
+/// 再核对一次（见 [`RetrySchedule::reconcile_later`]）。
 async fn reconcile_lost_results(
     deps: &OfflineDeliveryRecoveryDeps,
     schedule: &mut RetrySchedule,
@@ -338,9 +342,11 @@ async fn reconcile_lost_results(
                 error_kind = "peer_listing",
                 "clipboard delivery recovery: lost result reconciliation skipped"
             );
+            schedule.reconcile_later(Instant::now());
             return;
         }
     };
+    let mut complete = true;
     for peer in peers {
         if cancel.is_cancelled() {
             return;
@@ -354,8 +360,14 @@ async fn reconcile_lost_results(
                 schedule.record_recoverable(peer.device_id, Some(entry), Instant::now());
             }
             Ok(None) => {}
-            Err(ScanStopped::Cancelled | ScanStopped::ListingFailed) => return,
+            Err(ScanStopped::Cancelled) => return,
+            Err(ScanStopped::ListingFailed) => complete = false,
         }
+    }
+    if complete {
+        schedule.reconciled();
+    } else {
+        schedule.reconcile_later(Instant::now());
     }
 }
 
