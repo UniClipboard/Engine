@@ -33,7 +33,8 @@ const MAX_CONCURRENT_PEERS: usize = 4;
 
 /// 在成员历史完成验证后，或已认证且获准的对端经 presence 联系本机后，刷新其可复用网络地址。
 ///
-/// 只记录本次连接正在使用的路径；没有已保存记录、没有使用中路径或结果不变时不写入。
+/// 只记录本次连接正在使用的路径；没有已保存记录、没有使用中路径或结果不变时不写入。实现须按对端
+/// 串行并合并并发请求，使较早的刷新不会覆盖较新的地址；请求可能在合并后立即返回。
 #[async_trait]
 pub trait RefreshVerifiedPeerAddressPort: Send + Sync {
     async fn refresh_verified_peer_address(&self, peer: &DeviceId);

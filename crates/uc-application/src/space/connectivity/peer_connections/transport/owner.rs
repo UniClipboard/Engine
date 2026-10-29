@@ -219,7 +219,8 @@ impl Runner {
     ///
     /// 对端本机地址变化时，其连接协调器借既有的网络变化机会向每个配对设备重新确认在线；本机作为
     /// 应答方据此学到对端的新地址，不新增线上消息、不轮询、不转发第三方地址。刷新只在路径确有
-    /// 变化时写入，失败不影响在线结论；在后台执行，不延迟应答。
+    /// 变化时写入，失败不影响在线结论；在后台执行，不延迟应答。刷新负责人按对端串行并合并请求
+    /// （每个对端最多一次运行、一次待运行），运行期间到达的请求立即结束，未完成工作不随联系次数增长。
     pub fn refresh_contact_address(&self, peer: DeviceId) {
         let refresh = Arc::clone(&self.ports.address_refresh);
         self.spawn(async move { refresh.refresh_verified_peer_address(&peer).await });
