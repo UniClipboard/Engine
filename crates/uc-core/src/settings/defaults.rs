@@ -202,6 +202,7 @@ impl Default for NetworkSettings {
     /// - `allow_overlay_network_addrs`: false
     /// - `custom_relay_urls`: 空列表（使用产品内置 relay）
     /// - `bind_port`: `None`（随机端口）
+    /// - `peer_addresses`: 空（没有用户配置的设备地址）
     ///
     // 默认 true = 允许 fallback。
     // 改成 false 会让所有跨网段老用户突然离线，属于 breaking change。
@@ -213,6 +214,7 @@ impl Default for NetworkSettings {
             custom_relay_urls: Vec::new(),
             congestion_controller: CongestionController::default(),
             bind_port: None,
+            peer_addresses: Default::default(),
         }
     }
 }
@@ -347,6 +349,32 @@ mod tests {
         let written = serde_json::to_string(&pinned).expect("serialize");
         let reread: Settings = serde_json::from_str(&written).expect("reparse");
         assert_eq!(reread.network.bind_port, Some(51821));
+    }
+
+    /// 用户配置的设备地址默认为空：缺字段的旧 settings.json 读回为空，显式条目原样往返，
+    /// `Debug` 不泄露主机与端口。
+    #[test]
+    fn peer_addresses_default_to_empty_round_trip_and_redact_debug() {
+        assert!(NetworkSettings::default().peer_addresses.is_empty());
+        let old: Settings =
+            serde_json::from_str(r#"{ "network": { "bind_port": 51821 } }"#).expect("parse old");
+        assert!(old.network.peer_addresses.is_empty());
+
+        let configured: Settings = serde_json::from_str(
+            r#"{ "network": { "peer_addresses": { "device-a": { "host": "laptop.wg", "port": 51821 } } } }"#,
+        )
+        .expect("parse configured");
+        let entry = &configured.network.peer_addresses["device-a"];
+        assert_eq!((entry.host.as_str(), entry.port), ("laptop.wg", 51821));
+        let written = serde_json::to_string(&configured).expect("serialize");
+        let reread: Settings = serde_json::from_str(&written).expect("reparse");
+        assert_eq!(
+            reread.network.peer_addresses,
+            configured.network.peer_addresses
+        );
+        let debug = format!("{:?}", configured.network);
+        assert!(!debug.contains("laptop.wg"));
+        assert!(!debug.contains("51821"));
     }
 
     /// 默认值：默认过滤 overlay 网络地址，保持 v0.6.x 起的现行行为。

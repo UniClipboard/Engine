@@ -11,12 +11,13 @@ use crate::{
     CongestionControllerSummary, CustomRelayMutation, CustomRelayMutationOutcome,
     CustomRelayRejection, CustomRelaySummary, EngineError, EngineErrorCategory,
     FileSyncSettingsSummary, GeneralSettingsSummary, NetworkSettingsSummary, OperationResult,
-    PairingSettingsSummary, RelayCredentialEdit, RelayCredentialInput, RelayCredentialStatus,
-    RelayEntrySource, RelayOverview, RelayOverviewEntry, RelayProbeCredential, RelayProbeInput,
-    RelayProbeOutcome, RelayRoutingMode, RetentionPolicySummary, RetentionRulePatch,
-    RetentionRuleSummary, RuleEvaluationSummary, SaveRelayInput, SaveRelayOutcome,
-    SecuritySettingsSummary, SettingsContentTypes, SettingsContentTypesPatch, SettingsPatch,
-    SettingsSummary, SettingsUpdateOutcome, SyncFrequencySummary, SyncSettingsSummary,
+    PairingSettingsSummary, PeerAddressSetting, RelayCredentialEdit, RelayCredentialInput,
+    RelayCredentialStatus, RelayEntrySource, RelayOverview, RelayOverviewEntry,
+    RelayProbeCredential, RelayProbeInput, RelayProbeOutcome, RelayRoutingMode,
+    RetentionPolicySummary, RetentionRulePatch, RetentionRuleSummary, RuleEvaluationSummary,
+    SaveRelayInput, SaveRelayOutcome, SecuritySettingsSummary, SettingsContentTypes,
+    SettingsContentTypesPatch, SettingsPatch, SettingsSummary, SettingsUpdateOutcome,
+    SyncFrequencySummary, SyncSettingsSummary,
 };
 
 pub(crate) async fn execute_query_custom_relays(
@@ -369,6 +370,20 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
                 settings.network.congestion_controller,
             ),
             bind_port: settings.network.bind_port,
+            peer_addresses: settings
+                .network
+                .peer_addresses
+                .into_iter()
+                .map(|(device, address)| {
+                    (
+                        device,
+                        PeerAddressSetting {
+                            host: address.host,
+                            port: address.port,
+                        },
+                    )
+                })
+                .collect(),
         },
     }
 }
@@ -433,6 +448,20 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
             custom_relay_urls: value.custom_relay_urls,
             congestion_controller: value.congestion_controller.map(unmap_congestion_controller),
             bind_port: value.bind_port,
+            peer_addresses: value.peer_addresses.map(|changes| {
+                changes
+                    .into_iter()
+                    .map(|(device, address)| {
+                        (
+                            device,
+                            address.map(|address| app::PeerAddressView {
+                                host: address.host,
+                                port: address.port,
+                            }),
+                        )
+                    })
+                    .collect()
+            }),
         }),
     })
 }
