@@ -631,3 +631,23 @@ Direct 对精确用例设置 `UC_BRANCH_RECOVERY_EXPECT_PATH=direct`，旧端角
 `UC_BRANCH_RECOVERY_OLD_HOST` 和 `UC_BRANCH_RECOVERY_OLD_SIDE=issuer|recipient` 指定；
 Relay 将该测试二进制与 `current|issuer|recipient` 角色交给上述原脚本。
 这批结果补齐当前候选的AC07版本对应证据，不代替完整远端CI或未执行的物理设备矩阵。
+
+### 交付候选 #350 的首次网络失败
+
+候选 `b34ebcda` 的 [Blob job 123488506315](https://github.com/UniClipboard/Engine/actions/runs/40885582891/job/123488506315)
+在必需进度矩阵中失败，完整Blob步骤跳过；不能以原 #345 attempt 2 的成功替代当前候选结果。
+实际GitHub合并预演为 `69aa6caf53a4b5de7b721585d7867d96debad1b7`，tree为
+`1a0e9105bbfc995b520014b800750c2dc3867c50`，包含更新后的main；这与本地 `b34ebcda` 六格矩阵来源不同。
+
+失败单元为 `history-relay-side0`，原JSON只包含失败的
+`P00-prepaired-upgrade-old-pairing`：升级前的两个冻结a07宿主双向文本与A到B文件通过，
+B到A文件返回 `peer_rejected`，接收方A报告 `apply_failed`。当前版本宿主尚未启动，
+不是本次1104关闭错误的复现，也不能据此推断当前迁移代码失败。
+冻结旧端revision为 `f6f305d9689e4e79e7ab6d0e4921061f9416e4a6`，CI二进制SHA-256为
+`f45cdd92cccb4c6e3e897684bbed61e2348a2312d131c0aeb779d88ef2300ade`。
+
+本轮artifact `12904068475` 的ZIP SHA-256为
+`bbdca0d2e25938fee29386ff41e790707f80b0e95f5b04a0d137300b90150757`，下载重算匹配。
+原结果保留 `failed=true`、`cleaned=true`、`plaintext_clean=true`，证明驱动现在能在真实失败时保留证据，
+不证明旧端接收拒绝已修复。相同症状此前已在 #332／#335 出现，继续由原技术债跟踪；
+当前候选的必需网络验收仍未通过。
