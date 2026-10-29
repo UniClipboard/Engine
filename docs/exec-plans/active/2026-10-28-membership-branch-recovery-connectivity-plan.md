@@ -678,3 +678,8 @@ B到A文件返回 `peer_rejected`，接收方A报告 `apply_failed`。当前版�
 原结果保留 `failed=true`、`cleaned=true`、`plaintext_clean=true`，证明驱动现在能在真实失败时保留证据，
 不证明旧端接收拒绝已修复。相同症状此前已在 #332／#335 出现，继续由原技术债跟踪；
 当前候选的必需网络验收仍未通过。
+
+同一候选的Engine job `123488506373` 中，`Run workspace tests` 于14:55:28 UTC结束，
+实际结论为 `failure`；后续恢复进程组因配置 `success() || failure()` 继续执行，不能据步骤推进判断前组通过。
+作业仍在运行，日志下载API暂返回BlobNotFound，check注解尚空；具体失败身份与原因须等原日志／JUnit发布后核对，
+不提前归因于历史间歇失败，也不把本机较早完整通过替代这轮失败。
