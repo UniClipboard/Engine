@@ -12,6 +12,7 @@ import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, relayTransportReadyAt, term
 import { receiveFailureKind, verifyDelivery } from './clipboard-delivery-evidence.mjs'
 import { verifyTransferProgress } from './transfer-progress-evidence.mjs'
 import { ensureSessionReady } from './connection-recovery-session.mjs'
+import { connectHostCommands } from './connection-recovery-host.mjs'
 
 const options = new Map()
 for (let i = 2; i < process.argv.length; i += 2) options.set(process.argv[i], process.argv[i + 1])
@@ -136,21 +137,8 @@ class Host {
       : peerBinary && this.label === String.fromCharCode(65 + peerSide) ? resolve(peerBinary) : binary)
     this.child = spawn('ip', ['netns', 'exec', this.namespace, selected], { stdio: ['pipe', 'pipe', 'pipe'] })
     this.child.stderr.resume()
-    createInterface({ input: this.child.stdout }).on('line', line => {
-      let response
-      try { response = JSON.parse(line) } catch { return }
-      if (response.uc_connectivity !== 1) return
-      const pending = this.pending.shift()
-      if (!pending) return
-      clearTimeout(pending.timer)
-      pending.resolve(response)
-    })
-    this.child.on('exit', () => {
-      for (const pending of this.pending.splice(0)) {
-        clearTimeout(pending.timer)
-        pending.reject(new Error('test host exited before replying'))
-      }
-    })
+    this.channel = connectHostCommands(this.child)
+    this.pending = this.channel.pending
     const ready = await this.raw({ root: this.root, rendezvous: `http://10.233.0.1:${server.address().port}`, secure_storage: this.secureStorage, relay: mode === 'relay', bind_port: this.bindPort, reject_presence_endpoint_ids: this.rejectPresenceEndpointIds, reject_inbound_presence_endpoint_ids: this.rejectInboundPresenceEndpointIds })
     assert.equal(ready.ready, true)
     this.version = ready.version
@@ -159,11 +147,7 @@ class Host {
   }
   raw(request) {
     if (interrupted || !this.child || this.child.exitCode !== null || this.child.signalCode !== null) return Promise.reject(new Error('test host is not running'))
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.child.kill('SIGTERM'); reject(new Error('test host command timed out')) }, 130_000)
-      this.pending.push({ resolve, reject, timer })
-      this.child.stdin.write(`${JSON.stringify(request)}\n`)
-    })
+    return this.channel.raw(request)
   }
   async call(command, fields = {}) {
     this.commands.push(command)
