@@ -134,6 +134,15 @@ Engine，使用真实 SQLite、MLS 与本机回环 Iroh QUIC，配对 rendezvous
 同时更新 dev-tools 的内容拨号选择。真实故障测试必须核对实际拒绝计数，不能只启用开关就假定
 目标交换已经受影响；已有连接的复用与新拨号拒绝分别验收。
 
+组更新 G4 验证真实多节点的收件人隔离、持续故障时队首不变与解除故障、真实重新认证后的连续 epoch 恢复。
+真实网络在观察期间仍可能产生新认证证据，不能把固定睡眠视为“无证据窗口”。退避次数合同由
+`space_security_store::tests::unavailable_recipient_has_at_most_one_due_retry_in_a_quiet_25_second_window`
+在真实 SQLite、明确时钟与重开仓储后严格验证；Application 的
+`each_fresh_online_evidence_allows_one_early_retry_but_quiet_rounds_do_not` 验证证据消费与安静轮次。
+这两项属于 workspace 门禁，G4 仍属于 membership-e2e 门禁。G1 继续覆盖不重启的自动恢复；G4 的接收方
+重启提供真实新认证证据，不清除发送队列。解除接收方本机故障不会自动通知发送方，不能假定任意次数失败后的
+下一次退避仍小于测试固定恢复预算。
+
 场景按类别放在 `crates/uc-engine/tests/space_membership_auto_pairing_e2e/` 的模块中（`admission`、`topology`、
 `removal_convergence`、`space_switch`、`membership_history`、`automatic_connections` 等），共享测试台位于其
 `harness/`。`topology::` 下的多节点拓扑另属 `membership-topology` 测试组，并发更低。每个场景第一行是
@@ -182,6 +191,9 @@ A03、A04 在仅局域网模式下只经 mDNS 解析邀请码并发现对端，�
 登记不一致（包括登记为已知不兼容却通过、未登记的跳过）时测试失败；不得通过修改登记掩盖产品失败。旧版公开接口的
 差异由宿主按能力划分的 feature 表达，锚点与能力的对应见 `tests/upgrade-matrix/host-features.json`；只有能力分层
 无法覆盖时才为锚点新增 `tests/upgrade-matrix/anchors/<锚点>.patch`，且只能改宿主与工作区成员声明。
+`automatic-sync-control` 表达 Engine 1.0.0-rc.8（`ef3ccc2d`）起的独立自动同步开关，a03 起启用；
+a01/rc.1 与 a02/rc.6 不支持时必须明确拒绝 `auto_sync_enabled`，不能映射到语义不同的旧 `auto_sync`。
+`sync_on_restore` 保持独立可用，缺少本地网络配置能力的旧宿主仍在启动时返回 `local_network_unavailable`。
 
 `real-network` 会转交现有 Linux 网络脚本；`device` 要求明确平台与设备，不会自动运行。cargo-nextest 必须为脚本声明的固定版本；脚本不会静默退回语义不同的 runner。
 

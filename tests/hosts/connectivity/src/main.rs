@@ -9,6 +9,7 @@ mod content;
 #[cfg(feature = "current-engine")]
 mod network_faults;
 mod observe;
+mod sync_preferences;
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -33,7 +34,7 @@ use uc_engine::{
     HostCapabilityErrorCategory, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
     HostSecureStorage, JoinSpaceInput, ListHistoryEntriesInput, Operation, OperationResult,
     RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendTextInput,
-    SettingsPatch, SyncSettingsPatch, UnlockSpaceInput,
+    UnlockSpaceInput,
 };
 #[cfg(feature = "transfer-progress")]
 use uc_engine::{EntryReceiveProgressInput, OutboundProgressInput, ReconcileOutboundProgressInput};
@@ -482,18 +483,7 @@ async fn operation(
         "unlock" => Operation::UnlockSpace(UnlockSpaceInput {
             passphrase: SecretString::new(PASSPHRASE),
         }),
-        "sync_preference" => Operation::UpdateSettings(Box::new(SettingsPatch {
-            sync: Some(SyncSettingsPatch {
-                auto_sync_enabled: request["auto_sync_enabled"].as_bool(),
-                sync_on_restore: Some(
-                    request["sync_on_restore"]
-                        .as_bool()
-                        .context("missing sync preference")?,
-                ),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })),
+        "sync_preference" => sync_preferences::operation(request)?,
         "active" => Operation::QueryActiveClipboard,
         "delete" => Operation::DeleteHistoryEntry(HistoryEntryInput {
             entry_id: string(request, "entry")?.into(),
@@ -640,6 +630,10 @@ fn host_identity() -> Value {
         "clipboard",
     ];
     for (enabled, name) in [
+        (
+            cfg!(feature = "automatic-sync-control"),
+            "automatic-sync-control",
+        ),
         (cfg!(feature = "test-network-config"), "local-network"),
         (cfg!(feature = "network-recovery"), "network-recovery"),
         (
