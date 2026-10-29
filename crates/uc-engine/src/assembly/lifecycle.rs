@@ -17,7 +17,7 @@ use uc_application::facade::settings::AppliedRelayRouting;
 use uc_application::facade::ApplicationAssembly;
 use uc_core::settings::relay_routing::RelayRouting;
 use uc_infra_p2p::network::iroh::{
-    IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder,
+    ConfiguredPeerAddresses, IrohIdentityStore, IrohNode, IrohNodeBuilder, IrohSessionBuilder,
 };
 use uc_infra_profile::security::Sha256IdentityFingerprintFactory;
 use uc_observability_contract::{
@@ -69,6 +69,12 @@ pub async fn build_network_runtime(
         iroh_config.bind_port = Some(port);
     }
     iroh_config.network_partition_gate = network_partition_gate;
+    // 用户为配对设备配置的地址：成员身份目录随当前 Space 绑定，设置在每次查询时读取。
+    iroh_config.configured_peer_addresses = Some(Arc::new(ConfiguredPeerAddresses::new(
+        space_setup.peer_access.clone(),
+        Arc::clone(&space_setup.fingerprint),
+        Arc::clone(&space_setup.settings),
+    )));
     crate::assembly::network::apply_congestion_controller_from_env(&mut iroh_config);
 
     uc_info!(

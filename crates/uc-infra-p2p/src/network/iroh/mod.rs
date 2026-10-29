@@ -62,6 +62,7 @@ pub use admission_transport_material::IrohAdmissionTransportMaterial;
 pub use blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 pub(crate) use connect::connect_with_staggered_retry;
 pub use connection_channel_adapter::IrohConnectionChannelAdapter;
+pub use discovery::ConfiguredPeerAddresses;
 pub use group_update_adapter::{
     IrohGroupUpdateAdapter, IrohGroupUpdateHandler, GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN,
 };

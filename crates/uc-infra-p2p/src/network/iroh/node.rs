@@ -47,7 +47,9 @@ use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
 
 use super::admitted_connections::AdmittedConnections;
-use super::discovery::{DirectoryAddressLookupBuilder, DiscoveryRuntime, LifetimeMdns};
+use super::discovery::{
+    ConfiguredPeerAddresses, DirectoryAddressLookupBuilder, DiscoveryRuntime, LifetimeMdns,
+};
 use super::protocol_router::ProtocolRouterBuilder;
 use super::session_generation::{
     SessionProtocolGenerationHandle, SessionProtocolHandlers, SessionProtocolHandlersBuilder,
@@ -396,6 +398,8 @@ pub struct IrohNodeConfig {
     pub public_addr: Option<SocketAddr>,
     /// 测试专用的认证 peer 网络分区门；生产组装始终为 `None`。
     pub network_partition_gate: Option<IrohNetworkPartitionGate>,
+    /// 用户为配对设备配置的地址来源；`None` 时不装配该发现来源。
+    pub configured_peer_addresses: Option<Arc<ConfiguredPeerAddresses>>,
 }
 
 impl Default for IrohNodeConfig {
@@ -411,6 +415,7 @@ impl Default for IrohNodeConfig {
             bind_port: None,
             public_addr: None,
             network_partition_gate: None,
+            configured_peer_addresses: None,
         }
     }
 }
@@ -979,6 +984,7 @@ impl IrohNodeBuilder {
                 .address_lookup(DirectoryAddressLookupBuilder {
                     mdns: mdns.clone(),
                     lan_only: config.disable_relays,
+                    configured: config.configured_peer_addresses.clone(),
                     recorder: recorder.clone(),
                     manager: discovery_slot.clone(),
                 })

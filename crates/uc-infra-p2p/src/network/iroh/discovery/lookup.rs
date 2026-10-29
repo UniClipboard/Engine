@@ -16,7 +16,10 @@ use uc_observability_contract::diagnostics::connectivity::{DiscoverySource, Netw
 
 use super::super::addr_filter::restrict_to_local_network;
 use super::super::observed_address_lookup::ObservedAddressLookupBuilder;
-use super::{cloud::CloudDiscoveryProvider, mdns::MdnsDiscoveryProvider, LifetimeMdns};
+use super::{
+    cloud::CloudDiscoveryProvider, configured::ConfiguredAddressProvider,
+    mdns::MdnsDiscoveryProvider, ConfiguredPeerAddresses, LifetimeMdns,
+};
 use super::{decode, peer_id};
 
 pub(in super::super) struct DirectoryAddressLookupBuilder {
@@ -24,6 +27,8 @@ pub(in super::super) struct DirectoryAddressLookupBuilder {
     pub(in super::super) mdns: LifetimeMdns,
     /// LAN-only Mode：不装配云端解析，地址发现结果只交出本地网络范围内的直连地址。
     pub(in super::super) lan_only: bool,
+    /// 用户为配对设备配置的地址；两种模式都装配，LAN-only 下结果同样经过本地网络范围收敛。
+    pub(in super::super) configured: Option<Arc<ConfiguredPeerAddresses>>,
     pub(in super::super) recorder: NetworkRecorder,
     pub(in super::super) manager: Arc<OnceLock<Arc<DiscoveryManager>>>,
 }
@@ -53,6 +58,9 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
             lookup: lookup.clone(),
         }));
         let mdns = Some(lookup);
+        if let Some(configured) = self.configured {
+            providers.push(Arc::new(ConfiguredAddressProvider(configured)));
+        }
         if !self.lan_only {
             let cloud = ObservedAddressLookupBuilder::new(
                 DnsAddressLookup::n0_dns(),

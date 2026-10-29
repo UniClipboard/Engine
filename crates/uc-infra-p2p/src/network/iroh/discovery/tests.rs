@@ -222,6 +222,7 @@ async fn endpoint_builds_and_dials_explicit_addresses_without_local_mdns() {
         .address_lookup(DirectoryAddressLookupBuilder {
             mdns: mdns.clone(),
             lan_only: true,
+            configured: None,
             recorder: NetworkRecorder::current(),
             manager: manager.clone(),
         })

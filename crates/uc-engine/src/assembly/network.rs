@@ -75,6 +75,7 @@ pub fn relay_policy_to_iroh_config(
         bind_port: bind_port.filter(|port| *port != 0),
         public_addr: None,
         network_partition_gate: None,
+        configured_peer_addresses: None,
     }
 }
 
