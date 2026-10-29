@@ -103,9 +103,13 @@ impl IrohSpaceAdmissionHandler {
             canonical_digest,
             attempt_contract,
             _work,
-        } = self
-            .authenticate(connection, lease, deadline, connection_started, attempt)
-            .await?;
+        } = tokio::select! {
+            biased;
+            result = self.authenticate(connection, lease, deadline, connection_started, attempt) => result?,
+            source = connection.closed() => return Err(HandlerError::Transport {
+                source: anyhow::Error::new(source),
+            }),
+        };
         let span = server_operation_span();
         let _ = set_remote_parent(&span, wire.trace_context.as_ref());
         let started = std::time::Instant::now();
@@ -343,12 +347,7 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
                 .get()
                 .map_or_else(|| "none".to_owned(), ToString::to_string)
         };
-        let result = tokio::select! {
-            biased;
-            result = self.run(&connection, &attempt, &lease) => result,
-            _ = connection.closed() => return Ok(()),
-        };
-        match result {
+        match self.run(&connection, &attempt, &lease).await {
             Ok(()) => {}
             Err(
                 error @ (HandlerError::Authentication { .. }

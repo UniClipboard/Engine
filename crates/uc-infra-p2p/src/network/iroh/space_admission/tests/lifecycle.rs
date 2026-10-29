@@ -1,6 +1,9 @@
 //! 真实连接验证非成员资源隔离、取消与停止；不借成员目录授予权限。
 use super::*;
-use tokio::sync::Semaphore;
+use tokio::sync::{oneshot, Semaphore};
+use uc_application::deps::{
+    HandleAuthenticatedSpaceAdmissionMessageError, SpaceAdmissionMessageReply,
+};
 
 struct StalledCredentials {
     entered: Semaphore,
@@ -203,4 +206,132 @@ async fn dropping_initial_authentication_closes_its_managed_connection() {
     router.shutdown().await.expect("router shutdown");
     joiner.close().await;
     sponsor.close().await;
+}
+
+struct PausedAdmissionEndpoint {
+    inner: Arc<PersistingLoopbackEndpoint>,
+    entered: Notify,
+    release: Semaphore,
+}
+
+#[async_trait]
+impl HandleAuthenticatedSpaceAdmissionMessagePort for PausedAdmissionEndpoint {
+    async fn handle(
+        &self,
+        message: AuthenticatedSpaceAdmissionMessage,
+    ) -> Result<SpaceAdmissionMessageReply, HandleAuthenticatedSpaceAdmissionMessageError> {
+        self.entered.notify_one();
+        self.release.acquire().await.expect("处理放行信号").forget();
+        self.inner.handle(message).await
+    }
+}
+
+#[tokio::test]
+async fn authenticated_handling_survives_peer_disconnect_until_completion_or_original_deadline() {
+    for finish_processing in [true, false] {
+        let sponsor = bound_endpoint().await;
+        wait_for_direct_addrs(&sponsor).await;
+        let joiner = bound_endpoint().await;
+        let invitation = InvitationId::from_bytes([0x73; 32]).expect("邀请标识");
+        let admission = admission_id();
+        let derived =
+            SpaceAdmissionAuth::derive_password_equivalent(b"disconnect-test", invitation);
+        let setup = SpaceAdmissionAuth::generate_server_setup();
+        let registration =
+            SpaceAdmissionAuth::register_password_equivalent(&setup, &derived).expect("注册凭据");
+        let credentials = Arc::new(LoopbackCredentials {
+            initial: Mutex::new(Some(SponsorOpaqueMaterial::new(setup, registration))),
+            continuation: Mutex::new(None),
+        });
+        let route_bytes =
+            encode_space_admission_route(&sponsor.addr(), Some(invitation)).expect("路由编码");
+        let route = SpaceAdmissionRoute::from_bytes(route_bytes.clone()).expect("路由");
+        let endpoint = Arc::new(PausedAdmissionEndpoint {
+            inner: Arc::new(PersistingLoopbackEndpoint {
+                credentials: credentials.clone(),
+                candidate_state: Mutex::new(None),
+                calls: AtomicUsize::new(0),
+                completed: AtomicUsize::new(0),
+                continuation_route: route_bytes,
+            }),
+            entered: Notify::new(),
+            release: Semaphore::new(0),
+        });
+        let handler = Arc::new(
+            IrohSpaceAdmissionHandler::new(
+                Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+                endpoint.clone(),
+                credentials,
+            )
+            .expect("handler")
+            .with_exchange_deadline(Duration::from_secs(2)),
+        );
+        let (connected, connection) = oneshot::channel();
+        let accepting_endpoint = sponsor.clone();
+        let accepting_handler = handler.clone();
+        let mut handling = tokio::spawn(async move {
+            let connection = accepting_endpoint
+                .accept()
+                .await
+                .expect("入站连接")
+                .await
+                .expect("握手完成");
+            connected.send(connection.clone()).expect("交接观察连接");
+            accepting_handler.accept(connection).await
+        });
+        let transport = IrohSpaceAdmissionTransport::new(joiner.clone());
+        let password =
+            AdmissionEncryptedPasswordEquivalent::from_bytes(derived.as_bytes().to_vec())
+                .expect("口令材料");
+        let initial = transport
+            .establish_initial(
+                admission,
+                AdmissionAttemptTimeline::start(1_000).expect("时间线"),
+                &route,
+                &password,
+            )
+            .await
+            .expect("初次认证");
+        let server_connection = connection.await.expect("服务端连接");
+        let request = join_request(admission, invitation);
+        let mut exchanging = Box::pin(initial.exchange(&request));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                _ = endpoint.entered.notified() => {},
+                _ = &mut exchanging => panic!("业务处理应等待放行"),
+            }
+        })
+        .await
+        .expect("已认证消息进入处理");
+        drop(exchanging);
+        tokio::time::timeout(Duration::from_secs(3), server_connection.closed())
+            .await
+            .expect("服务端确认对端已断开");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut handling)
+                .await
+                .is_err(),
+            "断线不能取消已经认证的业务处理"
+        );
+        if finish_processing {
+            endpoint.release.add_permits(1);
+        }
+        tokio::time::timeout(Duration::from_secs(3), handling)
+            .await
+            .expect("处理完成或原总截止后退出")
+            .expect("处理任务正常退出")
+            .expect("传输失败由原处理器结算");
+        assert_eq!(
+            endpoint.inner.completed.load(Ordering::SeqCst),
+            usize::from(finish_processing)
+        );
+        assert_eq!(
+            endpoint.inner.candidate_state.lock().await.is_some(),
+            finish_processing
+        );
+        handler.shutdown().await;
+        transport.manager.shutdown().await.expect("客户端排空");
+        joiner.close().await;
+        sponsor.close().await;
+    }
 }

@@ -1,7 +1,6 @@
 use super::connection::ConnectionRecord;
 use super::retention::ActivityGuard;
-use super::ConnectionKey;
-use super::ConnectivityError;
+use super::{ConnectionKey, ConnectivityError};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::time::Duration;
