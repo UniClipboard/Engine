@@ -557,7 +557,7 @@ Blob job 的旧旧 a07 Relay 前置内容场景通过，但 A 关闭返回 `1104
 本机按冻结 a07 和原 Relay 入口复验通过，不能认定关闭根因已修复。驱动补充 stdin／进程错误统一结算，
 确定性 EPIPE 用例通过；真实旧端包装夹具注入关闭 `1104` 时仍退出失败，但清理及脱敏 JSON 正常保存。
 该修复只防止二次错误丢失证据，不修改旧端库、关闭预算或业务成功断言。
-原 run 的失败／取消 job 已启动 attempt 2，结果尚待核对；当前不得勾选 AC11／AC12 或提前归档。
+原 run 的失败／取消 job 已启动 attempt 2；网络 job 已完成下述核验，Engine job 仍在执行，当前不得勾选 AC11／AC12 或提前归档。
 
 ### 驱动修复后的本地完整复验
 
@@ -577,3 +577,21 @@ Blob job 的旧旧 a07 Relay 前置内容场景通过，但 A 关闭返回 `1104
 `c2ef0374a0065e6a6c3fb277102520ddc1ede8ab` 与已合并 main 的 `05320d98` 精确一致。
 该关系通过 GitHub Git commit API、本地 merged commit tree 和原 artifact 的 current-revision 核对；
 后续 attempt 仍须读取各自工件，不能只凭运行的 head 字段推断二进制来源。
+
+
+### Attempt 2 网络作业结算
+
+[Blob job 123463843272](https://github.com/UniClipboard/Engine/actions/runs/40827495920/job/123463843272)
+已成功结束，原14格进度／固定旧端步骤与完整10格Blob步骤均实际success。
+新 artifact `12900549434` 的 ZIP SHA-256 为
+`f39450f219da3188c3d5b69caf88c2a985dbe5ab338422152843a82180561710`，下载重算匹配。
+
+原进度校验器重新核对14格，并与原summary的JSON内容完全一致；10份Blob及4份固定旧旧原始JSON
+逐份验证原摘要、当前／旧端角色、精确内容、实际握手与路径、Relay双栈封锁、清理和明文检查。
+24格实际原证据全部通过，没有替换旧SHA或缩减原矩阵。实际checkout为上述 `1ccc04b1`，
+仍与已合并 `05320d98` 的Git tree一致。进度summary SHA-256为
+`598334a3b8d9819cd1bbe714c938ddfddf81c6dad9b3e783b80fd6d6e287a773`，
+Blob summary为 `de84c4fe1226221067665152afe9a2ea239cb1fda3a35f40f797f01fc0a17adf`。
+
+本次成功补齐首轮网络作业的未完成范围，原旧端关闭失败及驱动丢失证据继续保留。
+Engine作业及剩余必需步骤尚未终结，不能据网络作业成功提前归档本片。

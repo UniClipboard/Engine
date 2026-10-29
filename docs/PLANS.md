@@ -24,7 +24,7 @@
 
 - [Space 加入受管通信](exec-plans/completed/2026-10-29-space-admission-connectivity-plan.md)：实现与本地验收完成；初次加入、续接和入站流接入统一连接管理器，保留非成员专属认证与原协议，修复单端点占尽准入额度；历史发布二进制、Relay 和真机矩阵跳过。
 
-- Issue #34 第九切片：[成员分支恢复受管连接执行计划](exec-plans/active/2026-10-28-membership-branch-recovery-connectivity-plan.md)，对应[实现规格](exec-plans/active/2026-10-28-membership-branch-recovery-connectivity-spec.md)。实现与本地验证进行中：受管出入站、会话围栏及恢复流程已接线，完整工作区、真实新旧 Direct／Relay 和进程故障组已有通过证据；最终候选远端 CI、未执行平台与剩余竞态／资源验收尚待结算。
+- Issue #34 第九切片：[成员分支恢复受管连接执行计划](exec-plans/active/2026-10-28-membership-branch-recovery-connectivity-plan.md)，对应[实现规格](exec-plans/active/2026-10-28-membership-branch-recovery-connectivity-spec.md)。实现已合并，本地完整验证已有证据；原最终候选attempt 2的14格进度／固定旧端与10格Blob网络已核验通过，Engine最终CI仍在执行；剩余验收与平台边界按计划结算。
 
 - Issue #34 第八切片：[反向进度与发送侧状态投影执行计划](exec-plans/completed/2026-10-24-transfer-progress-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-24-transfer-progress-connectivity-spec.md)及[验收结论](exec-plans/completed/2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)。实施与验收结算完成，同head主CI13项及Windows双架构通过；物理挂起／设备后台按用户要求跳过，历史旧端Relay／成员F2间歇失败与远端日志丢弃边界保留。归档PR #342已合并至main（`80bda137`，2026-10-28北京时间）；合并不代表发布，也不关闭整个#34。
 

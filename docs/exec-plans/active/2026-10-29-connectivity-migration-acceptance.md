@@ -26,7 +26,7 @@
 | 6：设备可达性 | 已完成；设备和额外历史矩阵跳过 | [计划](../completed/2026-10-14-peer-reachability-connectivity-plan.md) |
 | 7：文件／blob | 后续#340统一候选补齐原安全阻塞，48项计划／13项验收已结算归档 | [计划](../completed/2026-10-21-blob-connectivity-plan.md) |
 | 8：反向进度 | 已完成并归档；物理挂起／设备后台按原授权跳过 | [最终结算](../completed/2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论) |
-| 9：成员分支恢复 | #345 已合并；最终 CI 首轮失败／取消，attempt 2 待结算 | [计划](2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29) |
+| 9：成员分支恢复 | #345 已合并；attempt 2 网络24格已核验通过，Engine最终CI待结算 | [计划](2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29) |
 | Space 加入／续接 | #346 已合并并归档；旧发布二进制、Relay 和设备矩阵跳过 | [计划](../completed/2026-10-29-space-admission-connectivity-plan.md) |
 
 ## Definition of Done 逐项对应
@@ -81,6 +81,29 @@ D15 的结论是“证据不足”：现有Direct完整同步可以使用已有�
 或由issue维护者明确接受范围边界；本次没有将其勾为完成。
 
 ## 补充分层合同与覆盖边界
+
+### 关联议题的责任与结算边界
+
+2026-10-29重新读取原#34列出的关联议题与#169／#172／#173合并记录。下列GitHub状态只说明议题是否关闭，
+不单独证明代码完成或仍缺实现；本次不代替这些议题逐项验收，也不自动关闭它们。
+
+| 关联范围 | 已有实现或明确边界 | 仍须独立结算 |
+| --- | --- | --- |
+| [#68](https://github.com/UniClipboard/Engine/issues/68)（open） | 会话代次与长期网络owner已有接缝；[043规格](043-engine-network-runtime-and-space-session-handover.md)将网络寿命限定为Engine活跃期，挂起不无限保活endpoint | 完整生命周期、安全、性能与设备矩阵按043计划核验，不能用本片连接租约证明整项已完成 |
+| [#70](https://github.com/UniClipboard/Engine/issues/70)（open） | 第三／四片的历史恢复与逐页ACK保持原业务退避，不引入批量协议 | 取消周期积压发送、连接后完整拉取及旧版上线发送的全部合同须另行核验，不把历史通信迁移等同#70完成 |
+| [#170](https://github.com/UniClipboard/Engine/issues/170)（open） | 第二／四／八片按协议专属连接复用；presence健康连接不直接借给内容协议 | 原议题要求的Direct／Relay／高延迟／丢包握手次数与首条延迟对照，及收益结论须按其原验收结算 |
+| [#140](https://github.com/UniClipboard/Engine/issues/140)（open） | 第三片及当前总审已证明组更新的完整Application接收负责人和受管入站；不是仍缺owner | 源码／切片证据可用于议题结算，GitHub开放状态不自动改变本片已完成事实 |
+| [#141](https://github.com/UniClipboard/Engine/issues/141)（open） | 第三／四／六片及协议向量已有framing、ALPN和旧字节兼容证据 | 按原协议清单逐项核对余项与记录，不仅凭统一crate存在就关闭议题 |
+| [#142](https://github.com/UniClipboard/Engine/issues/142)（open）、[#171](https://github.com/UniClipboard/Engine/issues/171)（closed） | [#172](https://github.com/UniClipboard/Engine/pull/172)已合并，区分明确拒绝／暂不可用／旧端未分类，处理历史sticky rejection；#171已关闭 | #142提出的其余拒绝粒度与发送行为须按原合同核对，不把两项完全等同，也不再次实现已合并分类 |
+| [#166](https://github.com/UniClipboard/Engine/issues/166)（open） | [#169](https://github.com/UniClipboard/Engine/pull/169)已合并，Joiner／Sponsor生成材料时采样当前地址；Relay延迟及双角色互通已有独立证据 | 现场后台／蜂窝等边界保持原PR限制；议题仍开放不代表仍使用启动地址快照 |
+| [#167](https://github.com/UniClipboard/Engine/issues/167)（open） | 对端握手失败与本机Relay健康是不同事实；不能直接推断全局endpoint重建 | 按原现场失效层、有限恢复与真实前后台证据结算，不由#166地址修复或单次Relay成功覆盖 |
+| [#134](https://github.com/UniClipboard/Engine/issues/134)（open） | 与#167分开；现有Relay恢复矩阵只证明各自固定场景和预算 | 底层退避及三秒目标按[专属计划](2026-09-18-relay-only-three-second-recovery.md)与原议题逐项结算，不能推广为所有公网／设备场景 |
+| [#104](https://github.com/UniClipboard/Engine/issues/104)、[#72](https://github.com/UniClipboard/Engine/issues/72)（均open） | 当前已有逻辑时间规则、真实网络分层和并行模式入口；不改生产期限 | 原各项性能、固定等待移除与重复压力要求继续由各自测试计划核验，不通过减少必需网络矩阵完成本次CI收尾 |
+
+[#173](https://github.com/UniClipboard/Engine/pull/173)也已合并，覆盖当时连接生命周期计划的1／2／4／5项；
+原问题3明确转#170。关联计划仍有未结算矩阵，不能把其active状态解释成上述四项都未实现。
+
+### 分层合同
 
 | 要求 | 验收入口与边界 |
 | --- | --- |
