@@ -47,13 +47,13 @@ use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
 
 use super::admitted_connections::AdmittedConnections;
-use super::discovery::{DirectoryAddressLookupBuilder, DiscoveryRuntime};
+use super::discovery::{DirectoryAddressLookupBuilder, DiscoveryRuntime, LifetimeMdns};
 use super::protocol_router::ProtocolRouterBuilder;
 use super::session_generation::{
     SessionProtocolGenerationHandle, SessionProtocolHandlers, SessionProtocolHandlersBuilder,
     SessionProtocolRegistry, SessionProtocolRegistryError,
 };
-use iroh::address_lookup::{AddrFilter, AddressLookupBuilderError};
+use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::protocol::Router;
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
@@ -818,25 +818,6 @@ impl IrohSessionBuilder {
     }
 }
 
-/// 本机 mDNS 是可降级的发现来源：组播套接字无法建立（例如两种地址族都无法加入
-/// 组播）时只记录一次警告，节点在没有 mDNS 的情况下继续启动。显式地址、已保存的
-/// 直连线索与启用时的云端发现仍然可用；不让本机发现失败中止整个网络节点。
-fn local_peer_discovery(
-    built: Result<MdnsAddressLookup, AddressLookupBuilderError>,
-) -> Option<MdnsAddressLookup> {
-    match built {
-        Ok(mdns) => Some(mdns),
-        Err(error) => {
-            uc_warn!(
-                error_kind = "mdns_unavailable",
-                io_error_kind = io_error_kind(&error),
-                "local peer discovery unavailable; continuing without mDNS"
-            );
-            None
-        }
-    }
-}
-
 fn session_protocol_alpns() -> [&'static [u8]; 16] {
     [
         SPACE_ADMISSION_ALPN,
@@ -878,13 +859,21 @@ impl IrohNodeBuilder {
 
         let secret = identity_store.ensure_secret_key()?;
         let relay_mode = relay_mode_from_config(&config)?;
-        // 长期设备发现与配对发现使用同一接口策略，在全部可用 IPv4 接口上收发。
-        let mdns = local_peer_discovery(
-            MdnsAddressLookup::builder()
-                .multicast_interfaces_v4(MulticastInterfacesV4::new(|| {
-                    MdnsInterfaceSnapshot::capture().into_parts().1
-                }))
-                .build(secret.public()),
+        let recorder =
+            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
+        // 本机 mDNS 是可降级的发现来源：组播套接字无法建立时节点照常启动，显式地址、已保存的
+        // 直连线索与启用时的云端发现仍然可用，长期 mDNS 在后台按有界退避重试。长期设备发现与
+        // 配对发现使用同一接口策略，在全部可用 IPv4 接口上收发。
+        let local_id = secret.public();
+        let mdns = LifetimeMdns::start(
+            move || {
+                MdnsAddressLookup::builder()
+                    .multicast_interfaces_v4(MulticastInterfacesV4::new(|| {
+                        MdnsInterfaceSnapshot::capture().into_parts().1
+                    }))
+                    .build(local_id)
+            },
+            recorder.clone(),
         );
         // Snapshot the overlay flag before consuming `config` into `Self`.
         let allow_overlay = config.allow_overlay_network_addrs;
@@ -893,8 +882,6 @@ impl IrohNodeBuilder {
             allow_overlay = allow_overlay,
             "addr filter configured for overlay-network addresses (Tailscale 100.64/10 + fd7a:115c:a1e0::/48)"
         );
-        let recorder =
-            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
         let connection_observations =
             super::observed_connections::ObservedConnections::new(recorder.clone());
         let session_protocols = Arc::new(SessionProtocolRegistry::new());
@@ -987,7 +974,6 @@ impl IrohNodeBuilder {
         }
 
         let discovery_slot = Arc::new(OnceLock::new());
-        let local_discovery_available = mdns.is_some();
         let endpoint = async {
             endpoint_builder
                 .address_lookup(DirectoryAddressLookupBuilder {
@@ -1018,7 +1004,8 @@ impl IrohNodeBuilder {
             recorder.register_source(
                 Source::MdnsDiscovery,
                 SourceCapability::Partial,
-                if local_discovery_available {
+                // 后台重试成功时由重试任务改记为可用。
+                if mdns.is_available() {
                     SourceCollection::Enabled
                 } else {
                     SourceCollection::Unavailable
@@ -1775,26 +1762,6 @@ mod tests {
     fn free_udp_port() -> u16 {
         let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("probe socket");
         probe.local_addr().expect("probe addr").port()
-    }
-
-    /// mDNS 组播套接字无法建立时降级为“没有本机发现”，只记一条固定警告，不中止节点。
-    #[test]
-    fn local_discovery_setup_failure_degrades_instead_of_aborting() {
-        let logs = uc_testkit::log_capture::CapturedLogs::default();
-        let _guard = logs.install();
-
-        let degraded = local_peer_discovery(Err(AddressLookupBuilderError::from_err(
-            "mdns",
-            std::io::Error::other("PRIVATE 192.0.2.7:5353"),
-        )));
-
-        assert!(degraded.is_none());
-        assert_eq!(
-            logs.count("local peer discovery unavailable; continuing without mDNS"),
-            1
-        );
-        assert!(!logs.output().contains("192.0.2.7"));
-        assert!(!logs.output().contains("PRIVATE"));
     }
 
     /// UniClipboard#900: `bind_port` 把 IPv4 与（可用时的）IPv6 都固定到同一端口。

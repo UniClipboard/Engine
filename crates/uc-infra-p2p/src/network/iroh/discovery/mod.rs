@@ -1,10 +1,12 @@
 //! 将已有发现服务转换为 Uni 候选，并在 iroh 的实际地址查找入口消费目录。
 
 mod cloud;
+mod lifetime_mdns;
 mod lookup;
 mod mdns;
 mod runtime;
 
+pub(super) use lifetime_mdns::LifetimeMdns;
 pub(super) use lookup::DirectoryAddressLookupBuilder;
 pub(super) use runtime::DiscoveryRuntime;
 

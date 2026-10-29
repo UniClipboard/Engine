@@ -11,18 +11,17 @@ use iroh::{
     },
     Endpoint, EndpointId,
 };
-use iroh_mdns_address_lookup::MdnsAddressLookup;
 use uc_application::deps::{DiscoveryError, DiscoveryManager, DiscoveryProvider, PeerDirectory};
 use uc_observability_contract::diagnostics::connectivity::{DiscoverySource, NetworkRecorder};
 
 use super::super::addr_filter::restrict_to_local_network;
 use super::super::observed_address_lookup::ObservedAddressLookupBuilder;
-use super::{cloud::CloudDiscoveryProvider, mdns::MdnsDiscoveryProvider};
+use super::{cloud::CloudDiscoveryProvider, mdns::MdnsDiscoveryProvider, LifetimeMdns};
 use super::{decode, peer_id};
 
 pub(in super::super) struct DirectoryAddressLookupBuilder {
-    /// `None` 表示本机 mDNS 无法建立：目录只使用其余来源，endpoint 仍然启动。
-    pub(in super::super) mdns: Option<MdnsAddressLookup>,
+    /// 长期 mDNS；启动时无法建立则由其在后台重试，目录在此期间只使用其余来源。
+    pub(in super::super) mdns: LifetimeMdns,
     /// LAN-only Mode：不装配云端解析，地址发现结果只交出本地网络范围内的直连地址。
     pub(in super::super) lan_only: bool,
     pub(in super::super) recorder: NetworkRecorder,
@@ -41,24 +40,19 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
         endpoint: &Endpoint,
     ) -> Result<impl AddressLookup, AddressLookupBuilderError> {
         let mut providers: Vec<Arc<dyn DiscoveryProvider>> = Vec::new();
-        let mdns = match self.mdns {
-            Some(service) => {
-                let lookup: Arc<dyn AddressLookup> = Arc::new(
-                    ObservedAddressLookupBuilder::new(
-                        service.clone(),
-                        DiscoverySource::Mdns,
-                        self.recorder.clone(),
-                    )
-                    .into_address_lookup(endpoint)?,
-                );
-                providers.push(Arc::new(MdnsDiscoveryProvider {
-                    mdns: service,
-                    lookup: lookup.clone(),
-                }));
-                Some(lookup)
-            }
-            None => None,
-        };
+        let lookup: Arc<dyn AddressLookup> = Arc::new(
+            ObservedAddressLookupBuilder::new(
+                self.mdns.clone(),
+                DiscoverySource::Mdns,
+                self.recorder.clone(),
+            )
+            .into_address_lookup(endpoint)?,
+        );
+        providers.push(Arc::new(MdnsDiscoveryProvider {
+            mdns: self.mdns,
+            lookup: lookup.clone(),
+        }));
+        let mdns = Some(lookup);
         if !self.lan_only {
             let cloud = ObservedAddressLookupBuilder::new(
                 DnsAddressLookup::n0_dns(),

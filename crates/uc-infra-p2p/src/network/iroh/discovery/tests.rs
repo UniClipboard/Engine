@@ -206,10 +206,21 @@ async fn endpoint_builds_and_dials_explicit_addresses_without_local_mdns() {
         .await
         .unwrap();
     let manager = Arc::new(OnceLock::new());
+    let mdns = super::LifetimeMdns::start_with_backoff(
+        || {
+            Err(iroh::address_lookup::AddressLookupBuilderError::from_err(
+                "mdns",
+                std::io::Error::other("unavailable"),
+            ))
+        },
+        NetworkRecorder::current(),
+        Duration::from_secs(3600),
+        Duration::from_secs(3600),
+    );
     let client = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
         .address_lookup(DirectoryAddressLookupBuilder {
-            mdns: None,
+            mdns: mdns.clone(),
             lan_only: true,
             recorder: NetworkRecorder::current(),
             manager: manager.clone(),
@@ -237,6 +248,7 @@ async fn endpoint_builds_and_dials_explicit_addresses_without_local_mdns() {
             .expect("explicit address still connects without mDNS");
     drop(connection);
     accepting.abort();
+    mdns.abort();
     client.close().await;
     server.close().await;
 }
