@@ -59,10 +59,11 @@ const STAGGERED_DELAYS: [Duration; 3] = [
 ///
 /// 当 [`super::runtime_consts::lan_only`] 为 `true` 时，按
 /// [`restrict_to_local_network`] 只保留本地网络范围内的直连地址（私网、环回、
-/// link-local、CGNAT 与 ULA 隧道地址），relay 与公网地址全部去掉。保留的直连线索
-/// （例如固定端口的隧道地址）交给 iroh，与经过同一规则过滤的地址发现结果**并行**
-/// 使用，任何一条可用路径胜出；陈旧线索不会阻塞新发现的地址。没有可用的本地
-/// 网络线索、也发现不了对端时，connect 自然失败，这正是 LAN-only 的设计意图。
+/// link-local、CGNAT 与 ULA 隧道地址，以及本机接口当前子网内的地址），relay 与
+/// 其余公网地址全部去掉。保留的直连线索（例如固定端口的隧道地址）交给 iroh，与经过
+/// 同一规则过滤的地址发现结果**并行**使用，任何一条可用路径胜出；陈旧线索不会阻塞
+/// 新发现的地址。没有可用的本地网络线索、也发现不了对端时，connect 自然失败，这正是
+/// LAN-only 的设计意图。
 ///
 /// 非 LAN-only 时原样返回，relay 与全部直连线索都交给 iroh。
 pub(super) fn restrict_dial_addr_if_lan_only(addr: EndpointAddr) -> EndpointAddr {

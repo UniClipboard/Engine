@@ -17,9 +17,10 @@
 //! [`restrict_to_local_network`]）也在这里定义：存储线索、邀请路由与地址发现结果
 //! 进入 iroh 前统一按同一份规则收敛，不在各条拨号路径上各写一份。
 
+use if_addrs::IfAddr;
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use uc_observability_contract::uc_debug;
+use uc_observability_contract::{error_source::io_error_kind, uc_debug};
 
 use iroh::{EndpointAddr, TransportAddr};
 
@@ -157,17 +158,67 @@ fn is_local_network_ipv6(ip: Ipv6Addr) -> bool {
     ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
 }
 
-/// LAN-only Mode 的拨号候选：只保留 [`is_local_network_ip`] 范围内的直连地址，
-/// 去掉 relay 与其他传输地址。身份保持不变；结果为空时由 iroh 的地址发现补充
-/// （同样经过本函数），都没有时拨号自然失败。
+/// 本机接口当前配置的一个子网：接口地址与掩码。
+type LocalSubnet = (IpAddr, IpAddr);
+
+/// 读取本机接口当前配置的子网；读取失败时只按固定范围判定。
+fn local_subnets() -> Vec<LocalSubnet> {
+    match if_addrs::get_if_addrs() {
+        Ok(interfaces) => interfaces
+            .into_iter()
+            .filter_map(|interface| match interface.addr {
+                IfAddr::V4(v4) if v4.prefixlen > 0 => {
+                    Some((IpAddr::V4(v4.ip), IpAddr::V4(v4.netmask)))
+                }
+                IfAddr::V6(v6) if v6.prefixlen > 0 => {
+                    Some((IpAddr::V6(v6.ip), IpAddr::V6(v6.netmask)))
+                }
+                _ => None,
+            })
+            .collect(),
+        Err(error) => {
+            uc_debug!(
+                target: "iroh.addr_filter",
+                error_kind = "address_enumeration",
+                io_error_kind = io_error_kind(&error),
+                "local subnets unavailable; LAN-only dialing uses fixed ranges only",
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// 地址是否落在本机某个接口当前所在的子网内（例如没有 ULA 的 IPv6 局域网中对端的
+/// 全局地址）。Clash fake-ip 198.18/15 即使有本机接口也不算本地网络。
+fn in_local_subnet(ip: IpAddr, subnets: &[LocalSubnet]) -> bool {
+    let ip = ip.to_canonical();
+    !is_virtual_nic_ip(ip, true)
+        && subnets.iter().any(|(net, mask)| match (ip, net, mask) {
+            (IpAddr::V4(ip), IpAddr::V4(net), IpAddr::V4(mask)) => {
+                u32::from(ip) & u32::from(*mask) == u32::from(*net) & u32::from(*mask)
+            }
+            (IpAddr::V6(ip), IpAddr::V6(net), IpAddr::V6(mask)) => {
+                u128::from(ip) & u128::from(*mask) == u128::from(*net) & u128::from(*mask)
+            }
+            _ => false,
+        })
+}
+
+/// LAN-only Mode 的拨号候选：只保留 [`is_local_network_ip`] 范围内、或落在本机接口
+/// 当前子网内的直连地址，去掉 relay 与其他传输地址。身份保持不变；结果为空时由
+/// iroh 的地址发现补充（同样经过本函数），都没有时拨号自然失败。
 pub(crate) fn restrict_to_local_network(addr: EndpointAddr) -> EndpointAddr {
+    restrict_to_local_network_within(addr, &local_subnets())
+}
+
+fn restrict_to_local_network_within(addr: EndpointAddr, subnets: &[LocalSubnet]) -> EndpointAddr {
     let EndpointAddr { id, addrs } = addr;
     let mut dropped = 0usize;
     let kept: Vec<TransportAddr> = addrs
         .into_iter()
         .filter(|addr| {
-            let keep =
-                matches!(addr, TransportAddr::Ip(socket) if is_local_network_ip(socket.ip()));
+            let keep = matches!(addr, TransportAddr::Ip(socket)
+                if is_local_network_ip(socket.ip()) || in_local_subnet(socket.ip(), subnets));
             dropped += usize::from(!keep);
             keep
         })
@@ -272,6 +323,48 @@ mod tests {
         assert_eq!(
             restricted,
             EndpointAddr::from_parts(id, [wireguard, lan, tailscale, link_local])
+        );
+    }
+
+    /// 没有 ULA 的 IPv6 局域网：对端的全局地址落在本机接口子网内时保留，同族但不在
+    /// 本机任何子网内的全局地址仍然丢弃。
+    #[test]
+    fn global_addresses_on_a_local_interface_subnet_stay_dialable() {
+        let id = iroh::SecretKey::from_bytes(&[0x43; 32]).public();
+        let subnets: Vec<LocalSubnet> = vec![
+            (
+                "2001:db8:1:2::10".parse().expect("ipv6"),
+                "ffff:ffff:ffff:ffff::".parse().expect("mask"),
+            ),
+            (
+                "203.0.113.10".parse().expect("ipv4"),
+                "255.255.255.0".parse().expect("mask"),
+            ),
+            (
+                "198.18.0.1".parse().expect("fake-ip"),
+                "255.254.0.0".parse().expect("mask"),
+            ),
+        ];
+        let on_link_v6 = ip("[2001:db8:1:2::20]:50754");
+        let on_link_v4 = ip("203.0.113.20:50754");
+
+        let restricted = restrict_to_local_network_within(
+            EndpointAddr::from_parts(
+                id,
+                [
+                    on_link_v6.clone(),
+                    ip("[2001:db8:1:3::20]:50754"),
+                    on_link_v4.clone(),
+                    ip("203.0.114.20:50754"),
+                    ip("198.18.0.2:50754"),
+                ],
+            ),
+            &subnets,
+        );
+
+        assert_eq!(
+            restricted,
+            EndpointAddr::from_parts(id, [on_link_v6, on_link_v4])
         );
     }
 }
