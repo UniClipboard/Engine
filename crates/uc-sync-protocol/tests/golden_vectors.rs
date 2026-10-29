@@ -10,7 +10,6 @@ use uc_core::file_transfer::OutboundProgressStatus;
 use uc_core::ids::EntryId;
 use uc_core::membership::{
     MemberInstanceId, MembershipBranchId, MembershipBranchRecoveryPackageV1, MembershipConflictId,
-    SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind,
 };
 use uc_core::ports::ClipboardHeader;
 use uc_sync_protocol::active_clipboard_pull::{self, PullResponse};

@@ -266,7 +266,7 @@ mod tests {
         assert!(old.check_current().await.is_ok());
 
         members.active.store(false, Ordering::SeqCst);
-        connections.close_device(&peer, b"test retirement");
+        connections.close_device(&peer);
         members.active.store(true, Ordering::SeqCst);
         let (new_connection, _) = recovery_connection_pair(2, key);
         let new_fence = admission.inbound_fence();
@@ -338,7 +338,7 @@ mod tests {
             .unwrap()
             .forget();
         members.active.store(false, Ordering::SeqCst);
-        connections.close_device(&peer, b"test retirement");
+        connections.close_device(&peer);
         members.active.store(true, Ordering::SeqCst);
         directory.release.add_permits(1);
         assert!(matches!(old.await.unwrap(), Err(ConnectivityError::Denied)));
@@ -433,14 +433,14 @@ mod tests {
             revision: connections.revision(),
         };
         assert!(old.check_current(&peer).is_ok());
-        connections.close_device(&peer, b"test retirement");
+        connections.close_device(&peer);
         let current = Fence {
             connections: connections.clone(),
             revision: connections.revision(),
         };
         assert!(old.check_current(&peer).is_err());
         assert!(current.check_current(&peer).is_ok());
-        connections.close_all(b"test session shutdown");
+        connections.close_all();
         assert!(old.check_current(&peer).is_err());
         assert!(current.check_current(&peer).is_err());
     }

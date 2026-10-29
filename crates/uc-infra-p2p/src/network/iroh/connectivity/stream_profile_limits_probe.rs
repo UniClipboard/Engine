@@ -299,7 +299,7 @@ async fn real_recovery_identity_read_keeps_original_revocation_fence() -> anyhow
             .await?;
         timeout(BUDGET, delayed.started.acquire()).await??.forget();
         directory.allowed.store(false, Ordering::SeqCst);
-        ledger.close_device(&peer, b"test retirement");
+        ledger.close_device(&peer);
         directory.allowed.store(true, Ordering::SeqCst);
         delayed.release.add_permits(1);
         let old_result = timeout(BUDGET, received.recv())
@@ -432,7 +432,7 @@ async fn real_recovery_dial_does_not_adopt_connection_after_rejoin() -> anyhow::
             .await?
             .ok_or_else(|| anyhow::anyhow!("missing old connection"))?;
         directory.allowed.store(false, Ordering::SeqCst);
-        ledger.close_device(&peer, b"test retirement");
+        ledger.close_device(&peer);
         directory.allowed.store(true, Ordering::SeqCst);
         backend.release.add_permits(1);
         let error = match old.await? {
@@ -868,7 +868,7 @@ async fn direction_capacity_and_progress_retirement_are_isolated_but_member_revo
         drop(wrong_remote);
         assert!(!clip.is_closed());
         directory.allowed.store(false, Ordering::SeqCst);
-        client_ledger.close_device(&peer, b"test_revoked");
+        client_ledger.close_device(&peer);
         assert!(next.check_current().await.is_err());
         assert!(clip.check_current().await.is_err());
         timeout(BUDGET, raw_next.closed()).await?;
