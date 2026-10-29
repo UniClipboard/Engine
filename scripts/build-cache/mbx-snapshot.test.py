@@ -4,6 +4,8 @@ import importlib.util
 import io
 import json
 import os
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 import subprocess
 import tarfile
@@ -26,8 +28,9 @@ class Store:
         body = self.objects[Key]
         return dict(Body=io.BytesIO(body), ContentLength=len(body))
 
-    def upload_file(self, path, bucket, key):
+    def upload_file(self, path, bucket, key, *, Config):
         self.calls.append(('archive', key))
+        self.transfer_config = Config
         self.objects[key] = Path(path).read_bytes()
 
     def put_object(self, Bucket, Key, Body, **kwargs):
@@ -133,9 +136,44 @@ class SnapshotTests(unittest.TestCase):
         env = dict(GITHUB_REF='refs/heads/main', GITHUB_REF_PROTECTED='true', GITHUB_EVENT_NAME='push',
                    UC_MBX_SNAPSHOT_WRITER='true', GITHUB_SHA='a'*40)
         store = Store()
-        with patch.dict(os.environ, env, clear=True), patch.object(snapshot, 'mbx'), patch.object(snapshot, 'compact_bundle', side_effect=compact):
+        # 普通边界测试无需安装网络 SDK；另用真实 SDK 的 Stubber 验证分片请求。
+        transfer_module = SimpleNamespace(TransferConfig=SimpleNamespace)
+        with patch.dict(os.environ, env, clear=True), patch.object(snapshot, 'mbx'), patch.object(snapshot, 'compact_bundle', side_effect=compact), patch.dict(sys.modules, {'boto3.s3.transfer': transfer_module}):
             snapshot.save(store, self.key, self.root, {}, 'test')
         self.assertEqual([c[0] for c in store.calls], ['archive', 'index'])
+        self.assertEqual(store.transfer_config.multipart_threshold, 64 * 1024**2)
+        self.assertEqual(store.transfer_config.multipart_chunksize, 64 * 1024**2)
+        self.assertEqual(store.transfer_config.max_concurrency, 4)
+        self.assertEqual(store.transfer_config.preferred_transfer_client, 'classic')
+
+    @unittest.skipUnless(importlib.util.find_spec('boto3'), 'Snapshot SDK is not installed')
+    def test_real_sdk_uploads_129_mib_in_three_parts_before_index(self):
+        import boto3
+        from botocore.stub import Stubber
+
+        archive = self.root / 'snapshot.tar.gz'
+        with archive.open('wb') as output:
+            output.truncate(129 * 1024**2)
+        bundle = self.root / 'bundle'
+        bundle.mkdir()
+        s3 = boto3.client('s3', region_name='auto', endpoint_url='https://example.invalid',
+                          aws_access_key_id='test', aws_secret_access_key='test')
+        env = dict(GITHUB_REF='refs/heads/main', GITHUB_REF_PROTECTED='true',
+                   GITHUB_EVENT_NAME='push', UC_MBX_SNAPSHOT_WRITER='true', GITHUB_SHA='a'*40)
+        report = {}
+        with Stubber(s3) as stub:
+            stub.add_response('create_multipart_upload', {'UploadId': 'test-upload'})
+            for part in range(3):
+                stub.add_response('upload_part', {'ETag': f'part-{part}'})
+            stub.add_response('complete_multipart_upload', {})
+            stub.add_response('put_object', {})
+            with patch.dict(os.environ, env, clear=True), patch.object(snapshot, 'mbx'), \
+                    patch.object(snapshot, 'compact_bundle'), patch.object(snapshot.tarfile, 'open'), \
+                    patch.object(snapshot, 'digest_file', return_value='1'*64):
+                snapshot.save(s3, self.key, self.root, report, 'test')
+            stub.assert_no_pending_responses()
+        self.assertEqual(report['status'], 'saved')
+        self.assertEqual(report['uploaded_bytes'], 129 * 1024**2)
 
     def test_no_credentials_and_transport_failure_are_local_only(self):
         env = dict(RUNNER_TEMP=str(self.root), UC_ENGINE_MBX_STATS_DIR=str(self.root),
