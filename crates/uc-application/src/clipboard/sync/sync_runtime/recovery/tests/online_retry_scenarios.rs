@@ -248,3 +248,95 @@ async fn a_late_result_for_an_older_entry_does_not_restart_the_newer_entrys_retr
     assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
     harness.recovery.shutdown().await.unwrap();
 }
+
+/// 多于结果通知缓冲上限（64）的一批结果，在恢复负责人处理之前一次写入。
+const OVERFLOWING_RESULTS: usize = 80;
+
+/// 其他目标的大量结果让通知积压丢失：恢复负责人按持久记录核对丢失的通知，只把仍有未送达
+/// 内容的目标排入原有退避，不立即补发，也不清除已用尽标记，因此已用尽 3 次的条目不再补发。
+#[tokio::test(start_paused = true)]
+async fn lagged_results_do_not_resend_to_a_target_that_exhausted_its_retries() {
+    let harness = RetryHarness::start_with(
+        None,
+        &[
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Accepted,
+        ],
+        RetryScenario {
+            known_target: true,
+            ..RetryScenario::default()
+        },
+    );
+    settle().await;
+    harness
+        .record_dispatch(EntryDeliveryStatus::Unreachable)
+        .await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), RETRY_BACKOFF.len());
+
+    harness
+        .record_results((0..OVERFLOWING_RESULTS).map(|index| {
+            (
+                EntryId::from(format!("unrelated-entry-{index}").as_str()),
+                DeviceId::new(&format!("unrelated-target-{index}")),
+                EntryDeliveryStatus::Delivered,
+            )
+        }))
+        .await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    settle().await;
+    assert_eq!(
+        harness.delivery.calls(),
+        RETRY_BACKOFF.len(),
+        "lost notifications give an exhausted entry no new send"
+    );
+
+    harness
+        .reachability
+        .announce(harness.target, ReachabilityState::Online);
+    settle().await;
+    assert_eq!(harness.delivery.calls(), RETRY_BACKOFF.len() + 1);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    harness.recovery.shutdown().await.unwrap();
+}
+
+/// 大量在线目标的可恢复结果同时积压丢失：核对只排期、不在核对时补发；之后的重试一次只处理
+/// 一个到期目标，其结果在下一个到期前就被处理，不会再次超出缓冲上限，每个目标仍只有 3 次计时重试。
+#[tokio::test(start_paused = true)]
+async fn reconciling_lagged_results_does_not_sustain_another_overflow() {
+    let harness = RetryHarness::start_with(
+        None,
+        &[Attempt::Interrupted; OVERFLOWING_RESULTS * RETRY_BACKOFF.len()],
+        RetryScenario {
+            other_targets: OVERFLOWING_RESULTS,
+            ..RetryScenario::default()
+        },
+    );
+    // 暂停时钟下 sleep 只在其余任务都空闲后推进，启动扫描在此之前结束。
+    tokio::time::sleep(JUST_BEFORE).await;
+
+    harness
+        .record_results((0..OVERFLOWING_RESULTS).map(|index| {
+            let (target, entry) = other_target(index);
+            (entry.entry_id, target, EntryDeliveryStatus::Unreachable)
+        }))
+        .await;
+    tokio::time::sleep(JUST_BEFORE).await;
+    assert_eq!(
+        harness.delivery.calls(),
+        0,
+        "reconciling lost notifications sends nothing by itself"
+    );
+
+    tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+    settle().await;
+    assert_eq!(
+        harness.delivery.calls(),
+        OVERFLOWING_RESULTS * RETRY_BACKOFF.len(),
+        "every target keeps exactly three timed retries"
+    );
+    harness.recovery.shutdown().await.unwrap();
+}

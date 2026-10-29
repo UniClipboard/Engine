@@ -208,7 +208,7 @@ pub(crate) fn classify_dispatch_result(
     }
 }
 
-/// 投递结果通知的缓冲上限；恢复负责人落后时按丢失处理并重新扫描在线目标。
+/// 投递结果通知的缓冲上限；恢复负责人落后时按丢失处理，按持久记录核对在线目标并排入退避。
 const DELIVERY_RESULT_CAPACITY: usize = 64;
 
 /// 一条投递结果对自动恢复的含义。

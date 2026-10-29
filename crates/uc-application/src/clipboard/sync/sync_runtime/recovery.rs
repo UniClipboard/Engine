@@ -38,9 +38,8 @@ wire_enum! {
         /// 设备刚刚上线。
         PeerOnline => "peer_online",
         /// 设备仍在线，但此前留下了可恢复结果，按退避到期再试；同一条目最多 3 次。
+        /// 结果通知积压丢失后按持久记录核对出的目标同样经由这里重试。
         Retry => "retry",
-        /// 可恢复结果通知积压丢失，重新扫描当前在线设备。
-        ResultsLagged => "results_lagged",
     }
 }
 
@@ -178,7 +177,7 @@ pub(super) struct OfflineDeliveryRecoveryDeps {
 /// 只恢复持久状态仍未结束（`Pending`/`Unreachable`）的发送。触发来源有三类：启动扫描、
 /// 设备上线事件，以及设备保持在线期间记录负责人通知的投递结果：可恢复或未能落库时按目标
 /// 有界退避重试（同一条目最多计时重试 3 次，之后只等下一次上线事件），已结算时清除该目标的
-/// 退避，均不依赖新的上线事件。
+/// 退避，均不依赖新的上线事件。通知积压丢失时只按持久记录核对并排入同一退避，不立即补发。
 pub(super) struct OfflineDeliveryRecovery {
     cancel: CancellationToken,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
@@ -196,13 +195,7 @@ impl OfflineDeliveryRecovery {
         let mut results = deps.delivery_results.subscribe();
         let task = tokio::spawn(async move {
             let mut schedule = RetrySchedule::default();
-            recover_currently_online(
-                &task_deps,
-                RecoveryTrigger::Startup,
-                &mut schedule,
-                &task_cancel,
-            )
-            .await;
+            recover_currently_online(&task_deps, &mut schedule, &task_cancel).await;
             loop {
                 let next_due = schedule.next_due();
                 tokio::select! {
@@ -239,13 +232,7 @@ impl OfflineDeliveryRecovery {
                         }
                         Err(RecvError::Lagged(missed)) => {
                             uc_warn!(missed = missed, "clipboard delivery recovery: delivery results lagged");
-                            recover_currently_online(
-                                &task_deps,
-                                RecoveryTrigger::ResultsLagged,
-                                &mut schedule,
-                                &task_cancel,
-                            )
-                            .await;
+                            reconcile_lost_results(&task_deps, &mut schedule, &task_cancel).await;
                         }
                         Err(RecvError::Closed) => return,
                     },
@@ -297,9 +284,9 @@ impl Drop for OfflineDeliveryRecovery {
     }
 }
 
+/// 启动扫描：订阅之后对已在线设备各执行一轮恢复，与上线事件相同。
 async fn recover_currently_online(
     deps: &OfflineDeliveryRecoveryDeps,
-    trigger: RecoveryTrigger,
     schedule: &mut RetrySchedule,
     cancel: &CancellationToken,
 ) {
@@ -323,7 +310,51 @@ async fn recover_currently_online(
         if deps.peer_reachability.current_state(&peer.device_id).await == ReachabilityState::Online
         {
             schedule.clear(&peer.device_id);
-            recover_and_schedule(deps, peer.device_id, trigger, schedule, cancel).await;
+            recover_and_schedule(
+                deps,
+                peer.device_id,
+                RecoveryTrigger::Startup,
+                schedule,
+                cancel,
+            )
+            .await;
+        }
+    }
+}
+
+/// 结果通知积压丢失后，按持久记录核对丢失的通知：在线目标的最新内容仍未结束时，像收到它的
+/// 可恢复结果一样记入既有退避，由到期重试补发。核对只读取、不补发，因此不会产生新的结果通知、
+/// 也不会再次让通知超出缓冲上限；它沿用已累计的次数与已用尽标记（同一条目已用尽时不再排期），
+/// 不清除任何目标的状态。离线目标等待下一次上线事件。
+async fn reconcile_lost_results(
+    deps: &OfflineDeliveryRecoveryDeps,
+    schedule: &mut RetrySchedule,
+    cancel: &CancellationToken,
+) {
+    let peers = match deps.known_peers.list().await {
+        Ok(peers) => peers,
+        Err(_) => {
+            uc_warn!(
+                error_kind = "peer_listing",
+                "clipboard delivery recovery: lost result reconciliation skipped"
+            );
+            return;
+        }
+    };
+    for peer in peers {
+        if cancel.is_cancelled() {
+            return;
+        }
+        if deps.peer_reachability.current_state(&peer.device_id).await != ReachabilityState::Online
+        {
+            continue;
+        }
+        match newest_recoverable_entry(deps, &peer.device_id, cancel).await {
+            Ok(Some(entry)) => {
+                schedule.record_recoverable(peer.device_id, Some(entry), Instant::now());
+            }
+            Ok(None) => {}
+            Err(ScanStopped::Cancelled | ScanStopped::ListingFailed) => return,
         }
     }
 }
