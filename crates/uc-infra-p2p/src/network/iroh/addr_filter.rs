@@ -158,23 +158,25 @@ fn is_local_network_ipv6(ip: Ipv6Addr) -> bool {
     ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
 }
 
-/// 本机接口当前配置的一个子网：接口地址与掩码。
-type LocalSubnet = (IpAddr, IpAddr);
+/// 本机接口当前配置的一个子网：接口地址与前缀长度。
+type LocalSubnet = (IpAddr, u8);
+
+/// 接口地址所在的子网只按前缀长度判定：Windows 上 if-addrs 的 `netmask` 可能取自主机
+/// 前缀（例如 /128），与表示链路前缀的 `prefixlen`（例如 /64）不一致。
+fn local_subnet(addr: IfAddr) -> LocalSubnet {
+    let prefix = match &addr {
+        IfAddr::V4(v4) => v4.prefixlen,
+        IfAddr::V6(v6) => v6.prefixlen,
+    };
+    (addr.ip(), prefix)
+}
 
 /// 读取本机接口当前配置的子网；读取失败时只按固定范围判定。
 fn local_subnets() -> Vec<LocalSubnet> {
     match if_addrs::get_if_addrs() {
         Ok(interfaces) => interfaces
             .into_iter()
-            .filter_map(|interface| match interface.addr {
-                IfAddr::V4(v4) if v4.prefixlen > 0 => {
-                    Some((IpAddr::V4(v4.ip), IpAddr::V4(v4.netmask)))
-                }
-                IfAddr::V6(v6) if v6.prefixlen > 0 => {
-                    Some((IpAddr::V6(v6.ip), IpAddr::V6(v6.netmask)))
-                }
-                _ => None,
-            })
+            .map(|interface| local_subnet(interface.addr))
             .collect(),
         Err(error) => {
             uc_debug!(
@@ -189,16 +191,17 @@ fn local_subnets() -> Vec<LocalSubnet> {
 }
 
 /// 地址是否落在本机某个接口当前所在的子网内（例如没有 ULA 的 IPv6 局域网中对端的
-/// 全局地址）。Clash fake-ip 198.18/15 即使有本机接口也不算本地网络。
+/// 全局地址）。Clash fake-ip 198.18/15 即使有本机接口也不算本地网络。前缀长度只接受
+/// IPv4 1..=32、IPv6 1..=128，其余（含 0）不匹配任何地址。
 fn in_local_subnet(ip: IpAddr, subnets: &[LocalSubnet]) -> bool {
     let ip = ip.to_canonical();
     !is_virtual_nic_ip(ip, true)
-        && subnets.iter().any(|(net, mask)| match (ip, net, mask) {
-            (IpAddr::V4(ip), IpAddr::V4(net), IpAddr::V4(mask)) => {
-                u32::from(ip) & u32::from(*mask) == u32::from(*net) & u32::from(*mask)
+        && subnets.iter().any(|&(net, prefix)| match (ip, net) {
+            (IpAddr::V4(ip), IpAddr::V4(net)) if (1..=32).contains(&prefix) => {
+                (u32::from(ip) ^ u32::from(net)) >> (32 - prefix) == 0
             }
-            (IpAddr::V6(ip), IpAddr::V6(net), IpAddr::V6(mask)) => {
-                u128::from(ip) & u128::from(*mask) == u128::from(*net) & u128::from(*mask)
+            (IpAddr::V6(ip), IpAddr::V6(net)) if (1..=128).contains(&prefix) => {
+                (u128::from(ip) ^ u128::from(net)) >> (128 - prefix) == 0
             }
             _ => false,
         })
@@ -332,18 +335,9 @@ mod tests {
     fn global_addresses_on_a_local_interface_subnet_stay_dialable() {
         let id = iroh::SecretKey::from_bytes(&[0x43; 32]).public();
         let subnets: Vec<LocalSubnet> = vec![
-            (
-                "2001:db8:1:2::10".parse().expect("ipv6"),
-                "ffff:ffff:ffff:ffff::".parse().expect("mask"),
-            ),
-            (
-                "203.0.113.10".parse().expect("ipv4"),
-                "255.255.255.0".parse().expect("mask"),
-            ),
-            (
-                "198.18.0.1".parse().expect("fake-ip"),
-                "255.254.0.0".parse().expect("mask"),
-            ),
+            ("2001:db8:1:2::10".parse().expect("ipv6"), 64),
+            ("203.0.113.10".parse().expect("ipv4"), 24),
+            ("198.18.0.1".parse().expect("fake-ip"), 15),
         ];
         let on_link_v6 = ip("[2001:db8:1:2::20]:50754");
         let on_link_v4 = ip("203.0.113.20:50754");
@@ -366,5 +360,40 @@ mod tests {
             restricted,
             EndpointAddr::from_parts(id, [on_link_v6, on_link_v4])
         );
+    }
+
+    /// 子网只由前缀长度构造：Windows 上报告的 `netmask` 可能是主机前缀 /128。
+    #[test]
+    fn the_subnet_mask_comes_from_the_prefix_length() {
+        let windows = local_subnet(IfAddr::V6(if_addrs::Ifv6Addr {
+            ip: "2001:db8:1:2::10".parse().expect("ipv6"),
+            netmask: Ipv6Addr::from(u128::MAX),
+            prefixlen: 64,
+            broadcast: None,
+        }));
+        let on_link: IpAddr = "2001:db8:1:2::20".parse().expect("ipv6");
+        assert!(in_local_subnet(on_link, &[windows]));
+
+        for (net, prefix, inside, outside) in [
+            ("203.0.113.10", 24, Some("203.0.113.200"), "203.0.114.1"),
+            ("203.0.113.10", 32, Some("203.0.113.10"), "203.0.113.11"),
+            ("203.0.113.10", 0, None, "203.0.113.11"),
+            ("203.0.113.10", 33, None, "203.0.113.10"),
+            ("2001:db8::1", 128, Some("2001:db8::1"), "2001:db8::2"),
+            ("2001:db8::1", 48, Some("2001:db8:0:ffff::1"), "2001:db9::1"),
+            ("2001:db8::1", 129, None, "2001:db8::1"),
+        ] {
+            let subnet = [(net.parse().expect("net"), prefix)];
+            if let Some(inside) = inside {
+                assert!(
+                    in_local_subnet(inside.parse().expect("ip"), &subnet),
+                    "{inside}/{prefix}"
+                );
+            }
+            assert!(
+                !in_local_subnet(outside.parse().expect("ip"), &subnet),
+                "{outside}/{prefix}"
+            );
+        }
     }
 }
