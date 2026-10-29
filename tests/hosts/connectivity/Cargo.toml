@@ -14,6 +14,7 @@ default = ["current-engine", "inbound-network-faults", "transfer-progress"]
 transfer-progress = []
 inbound-network-faults = ["current-engine"]
 current-engine = [
+  "automatic-sync-control",
   "connectivity-opportunity",
   "device-group-choices",
   "join-status",
@@ -22,6 +23,7 @@ current-engine = [
   "startup-progress",
   "test-network-config",
 ]
+automatic-sync-control = []
 connectivity-opportunity = []
 device-group-choices = []
 branch-recovery-tests = ["device-group-choices"]

@@ -4,16 +4,16 @@
   "anchors": {
     "a01": [],
     "a02": ["network-recovery"],
-    "a03": ["network-recovery", "test-network-config"],
-    "a04": ["network-recovery", "test-network-config"],
-    "a05": ["device-group-choices", "join-status", "network-recovery", "process-observability", "test-network-config"],
-    "a06": ["device-group-choices", "join-status", "network-recovery", "process-observability", "test-network-config"],
-    "a07": ["connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
-    "a08": ["connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
-    "a09": ["connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
-    "a10": ["connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
-    "a11": ["connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
-    "a12": ["connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
-    "a13": ["connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"]
+    "a03": ["automatic-sync-control", "network-recovery", "test-network-config"],
+    "a04": ["automatic-sync-control", "network-recovery", "test-network-config"],
+    "a05": ["automatic-sync-control", "device-group-choices", "join-status", "network-recovery", "process-observability", "test-network-config"],
+    "a06": ["automatic-sync-control", "device-group-choices", "join-status", "network-recovery", "process-observability", "test-network-config"],
+    "a07": ["automatic-sync-control", "connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
+    "a08": ["automatic-sync-control", "connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
+    "a09": ["automatic-sync-control", "connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
+    "a10": ["automatic-sync-control", "connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
+    "a11": ["automatic-sync-control", "connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
+    "a12": ["automatic-sync-control", "connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"],
+    "a13": ["automatic-sync-control", "connectivity-opportunity", "device-group-choices", "join-status", "network-recovery", "process-observability", "startup-progress", "test-network-config"]
   }
 }
