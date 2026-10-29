@@ -209,19 +209,25 @@ fn in_local_subnet(ip: IpAddr, subnets: &[LocalSubnet]) -> bool {
 
 /// LAN-only Mode 的拨号候选：只保留 [`is_local_network_ip`] 范围内、或落在本机接口
 /// 当前子网内的直连地址，去掉 relay 与其他传输地址。身份保持不变；结果为空时由
-/// iroh 的地址发现补充（同样经过本函数），都没有时拨号自然失败。
+/// iroh 的地址发现补充（同样经过本函数），都没有时拨号自然失败。只有存在固定范围之外的
+/// 直连候选时才读取本机接口，不缓存。
 pub(crate) fn restrict_to_local_network(addr: EndpointAddr) -> EndpointAddr {
-    restrict_to_local_network_within(addr, &local_subnets())
+    restrict_to_local_network_within(addr, local_subnets)
 }
 
-fn restrict_to_local_network_within(addr: EndpointAddr, subnets: &[LocalSubnet]) -> EndpointAddr {
+fn restrict_to_local_network_within(
+    addr: EndpointAddr,
+    load_subnets: impl Fn() -> Vec<LocalSubnet>,
+) -> EndpointAddr {
     let EndpointAddr { id, addrs } = addr;
     let mut dropped = 0usize;
+    let mut subnets = None;
     let kept: Vec<TransportAddr> = addrs
         .into_iter()
         .filter(|addr| {
             let keep = matches!(addr, TransportAddr::Ip(socket)
-                if is_local_network_ip(socket.ip()) || in_local_subnet(socket.ip(), subnets));
+                if is_local_network_ip(socket.ip())
+                    || in_local_subnet(socket.ip(), subnets.get_or_insert_with(&load_subnets)));
             dropped += usize::from(!keep);
             keep
         })
@@ -353,13 +359,30 @@ mod tests {
                     ip("198.18.0.2:50754"),
                 ],
             ),
-            &subnets,
+            || subnets.clone(),
         );
 
         assert_eq!(
             restricted,
             EndpointAddr::from_parts(id, [on_link_v6, on_link_v4])
         );
+    }
+
+    #[test]
+    fn local_interfaces_are_read_only_for_candidates_outside_the_fixed_ranges() {
+        let id = iroh::SecretKey::from_bytes(&[0x44; 32]).public();
+        let reads = std::cell::Cell::new(0);
+        let load = || {
+            reads.set(reads.get() + 1);
+            Vec::new()
+        };
+        let fixed = EndpointAddr::from_parts(id, [ip("10.8.0.2:51820"), ip("[fe80::1]:1")]);
+        assert_eq!(restrict_to_local_network_within(fixed.clone(), load), fixed);
+        assert_eq!(reads.get(), 0);
+
+        let public = [ip("203.0.113.7:1"), ip("[2001:db8::1]:1")];
+        restrict_to_local_network_within(EndpointAddr::from_parts(id, public), load);
+        assert_eq!(reads.get(), 1, "read once per filter call");
     }
 
     /// 子网只由前缀长度构造：Windows 上报告的 `netmask` 可能是主机前缀 /128。
