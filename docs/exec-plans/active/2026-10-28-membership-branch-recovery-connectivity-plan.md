@@ -551,3 +551,22 @@ Blob job 的旧旧 a07 Relay 前置内容场景通过，但 A 关闭返回 `1104
 确定性 EPIPE 用例通过；真实旧端包装夹具注入关闭 `1104` 时仍退出失败，但清理及脱敏 JSON 正常保存。
 该修复只防止二次错误丢失证据，不修改旧端库、关闭预算或业务成功断言。
 原 run 的失败／取消 job 已启动 attempt 2，结果尚待核对；当前不得勾选 AC11／AC12 或提前归档。
+
+### 驱动修复后的本地完整复验
+
+受测驱动提交为 `7648476a`，当前宿主构建来源为 `6b6a9e68fa61464efda1eee4767ce9658b3a7bf7`。
+使用原 `run-progress-connectivity.sh`、固定旧端和相同断言完成14格全矩阵，0项跳过；
+四个旧旧、两个新新及八个新旧双角色 Direct／Relay 全部通过。
+原校验器检查精确文件、实际 blob／进度 ALPN 与路径、保守旧端状态和清理／明文边界；
+逐份原 JSON 另行重算摘要匹配。汇总 SHA-256 为
+`9dbf14eca2831f1b98c10fd880350cdddc99b482196349d8dbf2fb325a067f7a`。
+完整矩阵后的根六项门禁全部通过；后续改动仅文档，测试驱动与 Rust 输入保持一致。
+
+这证明驱动修复在完整原矩阵中保持正常行为，不说明冻结旧端关闭 `1104` 已修复；
+关闭失败注入仍返回失败并保留清理证据。远端 attempt 2 与新交付 PR #350 的检查继续单独结算。
+
+原 #345 CI 的 GitHub head 为 `3a5dc1bc`，实际 checkout 为合并预演
+`1ccc04b12f7c0e4ac0c1a74723b4b4e797ca70b6`；其 tree
+`c2ef0374a0065e6a6c3fb277102520ddc1ede8ab` 与已合并 main 的 `05320d98` 精确一致。
+该关系通过 GitHub Git commit API、本地 merged commit tree 和原 artifact 的 current-revision 核对；
+后续 attempt 仍须读取各自工件，不能只凭运行的 head 字段推断二进制来源。
