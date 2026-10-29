@@ -54,7 +54,8 @@
 
 ## 当前生产入口总审
 
-源码基线 `d000f5fa`；本次修复只修改测试驱动、CI测试登记和文档，没有修改 Rust 生产实现。
+入口总审源码基线为 `d000f5fa`；后续 `d421a10d` 修复公共manager跨worker的既有观测关联，
+未新增业务网络入口或改变下表所有权。测试驱动、故障注入与CI报告修复另按原失败结算。
 [Engine 组装](../../../crates/uc-engine/src/assembly/sync_engine.rs)创建或安装完整领域能力，
 [节点](../../../crates/uc-infra-p2p/src/network/iroh/node.rs)的 `session_protocol_alpns` 列出16个生产ALPN，
 全部进入会话 dispatcher 后交当前 handler；旧版本ALPN仍是同一领域边界的兼容编解码入口。
