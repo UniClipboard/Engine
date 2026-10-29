@@ -125,10 +125,10 @@ pub struct NetworkSettingsView {
     pub peer_addresses: BTreeMap<String, PeerAddressView>,
 }
 
-/// 用户为一个已配对设备配置的地址：IP 字面量或主机名，加端口。属于明文配置，`Debug` 不输出。
+/// 用户为一个已配对设备配置的地址：IP 字面量加端口（不接受主机名）。属于明文配置，`Debug` 不输出。
 #[derive(Clone, PartialEq, Eq)]
 pub struct PeerAddressView {
-    pub host: String,
+    pub ip: String,
     pub port: u16,
 }
 
@@ -141,7 +141,7 @@ impl fmt::Debug for PeerAddressView {
 impl From<core::ConfiguredPeerAddress> for PeerAddressView {
     fn from(value: core::ConfiguredPeerAddress) -> Self {
         Self {
-            host: value.host,
+            ip: value.ip,
             port: value.port,
         }
     }
@@ -574,7 +574,7 @@ pub(crate) fn apply_settings_patch(
                         existing.network.peer_addresses.insert(
                             device,
                             core::ConfiguredPeerAddress {
-                                host: normalize_peer_host(&address.host),
+                                ip: normalize_peer_ip(&address.ip),
                                 port: address.port,
                             },
                         );
@@ -598,12 +598,12 @@ fn normalize_relay_urls(urls: Vec<String>) -> Vec<String> {
 }
 
 /// 去掉首尾空白；带方括号的 IPv6 字面量保存为不带方括号的规范形态。
-fn normalize_peer_host(host: &str) -> String {
-    let host = host.trim();
-    host.strip_prefix('[')
+fn normalize_peer_ip(ip: &str) -> String {
+    let ip = ip.trim();
+    ip.strip_prefix('[')
         .and_then(|inner| inner.strip_suffix(']'))
         .filter(|inner| inner.parse::<std::net::Ipv6Addr>().is_ok())
-        .unwrap_or(host)
+        .unwrap_or(ip)
         .to_string()
 }
 
@@ -612,7 +612,7 @@ pub(crate) fn validate_settings(settings: &core::Settings) -> Result<(), String>
     validate_peer_addresses(&settings.network.peer_addresses)
 }
 
-/// 拒绝原因只说明哪一类不合法，不回显设备标识、主机或端口。
+/// 拒绝原因只说明哪一类不合法，不回显设备标识、IP 或端口。
 fn validate_peer_addresses(
     addresses: &BTreeMap<String, core::ConfiguredPeerAddress>,
 ) -> Result<(), String> {
@@ -620,10 +620,8 @@ fn validate_peer_addresses(
         if device.is_empty() || DeviceId::try_new(device).is_none() {
             return Err("invalid peer address: the device id is not valid".to_string());
         }
-        if !is_valid_peer_host(&address.host) {
-            return Err(
-                "invalid peer address: host must be an IP address or a hostname".to_string(),
-            );
+        if !is_valid_peer_ip(&address.ip) {
+            return Err("invalid peer address: ip must be an IPv4 or IPv6 address".to_string());
         }
         if address.port == 0 {
             return Err("invalid peer address: port must not be zero".to_string());
@@ -632,23 +630,10 @@ fn validate_peer_addresses(
     Ok(())
 }
 
-/// 单播 IP 字面量，或按 DNS 标签规则（每段 1 到 63 个字母、数字、`-`、`_`）组成的主机名。
-fn is_valid_peer_host(host: &str) -> bool {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return !ip.is_unspecified() && !ip.is_multicast();
-    }
-    let name = host.strip_suffix('.').unwrap_or(host);
-    !name.is_empty()
-        && name.len() <= 253
-        && name.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-        })
+/// 只接受单播 IPv4/IPv6 字面量；主机名会让查询走系统 DNS，LAN-only 下可能离开本地网络，不接受。
+fn is_valid_peer_ip(ip: &str) -> bool {
+    ip.parse::<IpAddr>()
+        .is_ok_and(|ip| !ip.is_unspecified() && !ip.is_multicast())
 }
 
 fn validate_custom_relay_urls(urls: &[String]) -> Result<(), String> {
@@ -754,26 +739,21 @@ mod network_settings_apply_patch_tests {
     }
 
     /// 设备地址 patch：未带字段不修改；只修改列出的设备，`Some` 设置或替换，`None` 删除；
-    /// 主机去掉空白，带方括号的 IPv6 保存为规范形态。
+    /// IP 去掉空白，带方括号的 IPv6 保存为规范形态。
     #[test]
     fn peer_addresses_patch_sets_replaces_removes_and_keeps() {
         let mut existing = baseline_with_network(false);
-        existing.network.peer_addresses.insert(
-            "device-a".into(),
-            core::ConfiguredPeerAddress {
-                host: "10.8.0.2".into(),
-                port: 51821,
-            },
-        );
-        existing.network.peer_addresses.insert(
-            "device-b".into(),
-            core::ConfiguredPeerAddress {
-                host: "laptop.wg".into(),
-                port: 51821,
-            },
-        );
-        let address = |host: &str, port| PeerAddressView {
-            host: host.into(),
+        for (device, ip) in [("device-a", "10.8.0.2"), ("device-b", "10.8.0.3")] {
+            existing.network.peer_addresses.insert(
+                device.into(),
+                core::ConfiguredPeerAddress {
+                    ip: ip.into(),
+                    port: 51821,
+                },
+            );
+        }
+        let address = |ip: &str, port| PeerAddressView {
+            ip: ip.into(),
             port,
         };
         let patch = |peer_addresses| SettingsPatch {
@@ -792,7 +772,7 @@ mod network_settings_apply_patch_tests {
             patch(Some(BTreeMap::from([
                 ("device-a".to_string(), Some(address(" [fd00::2] ", 40000))),
                 ("device-b".to_string(), None),
-                ("device-c".to_string(), Some(address("desk.wg", 51822))),
+                ("device-c".to_string(), Some(address("192.168.1.9", 51822))),
             ]))),
         );
         let view = SettingsView::from(changed.clone()).network.peer_addresses;
@@ -800,48 +780,44 @@ mod network_settings_apply_patch_tests {
             view,
             BTreeMap::from([
                 ("device-a".to_string(), address("fd00::2", 40000)),
-                ("device-c".to_string(), address("desk.wg", 51822)),
+                ("device-c".to_string(), address("192.168.1.9", 51822)),
             ])
         );
         validate_settings(&changed).expect("normalized entries are valid");
     }
 
-    /// 设备地址校验：拒绝空主机、非法主机名、未指定或组播地址、端口 0 与非法设备标识，
-    /// 且拒绝原因不回显主机。
+    /// 设备地址校验只接受单播 IP 字面量：拒绝主机名、空值、未指定或组播地址、端口 0 与非法设备
+    /// 标识，且拒绝原因不回显该值。
     #[test]
-    fn validate_peer_addresses_rejects_invalid_entries_without_echoing_them() {
-        let check = |device: &str, host: &str, port| {
+    fn validate_peer_addresses_accepts_only_ip_literals_without_echoing_them() {
+        let check = |device: &str, ip: &str, port| {
             let mut settings = baseline_with_network(false);
             settings.network.peer_addresses.insert(
                 device.into(),
                 core::ConfiguredPeerAddress {
-                    host: host.into(),
+                    ip: ip.into(),
                     port,
                 },
             );
             validate_settings(&settings)
         };
-        for host in [
-            "10.8.0.2",
-            "fd00::2",
-            "laptop.wg",
-            "laptop.wg.",
-            "my_host-1",
-        ] {
-            check("device-a", host, 51821).expect("valid host");
+        for ip in ["10.8.0.2", "fd00::2", "fe80::1", "127.0.0.1"] {
+            check("device-a", ip, 51821).expect("valid ip");
         }
-        for host in [
+        for value in [
             "",
+            "laptop.wg",
+            "localhost",
             "0.0.0.0",
+            "::",
             "224.0.0.251",
-            "bad host",
-            "-bad.example",
-            "a..b",
+            "10.8.0.2:51821",
+            "[fd00::2]",
         ] {
-            let reason = check("device-a", host, 51821).expect_err("invalid host");
-            assert!(reason.contains("host"));
-            if !host.is_empty() {
-                assert!(!reason.contains(host));
+            let reason = check("device-a", value, 51821).expect_err("not an ip literal");
+            assert!(reason.contains("ip must be an IPv4 or IPv6 address"));
+            if !value.is_empty() {
+                assert!(!reason.contains(value));
             }
         }
         assert!(check("device-a", "10.8.0.2", 0)

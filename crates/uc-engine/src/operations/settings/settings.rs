@@ -378,7 +378,7 @@ fn map_settings(settings: app::SettingsView) -> SettingsSummary {
                     (
                         device,
                         PeerAddressSetting {
-                            host: address.host,
+                            ip: address.ip,
                             port: address.port,
                         },
                     )
@@ -455,7 +455,7 @@ fn map_patch(patch: SettingsPatch) -> Result<app::SettingsPatch, String> {
                         (
                             device,
                             address.map(|address| app::PeerAddressView {
-                                host: address.host,
+                                ip: address.ip,
                                 port: address.port,
                             }),
                         )

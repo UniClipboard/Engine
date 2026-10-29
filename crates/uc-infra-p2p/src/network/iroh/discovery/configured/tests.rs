@@ -45,14 +45,14 @@ impl SettingsPort for FixedSettings {
 fn configured(
     endpoint: iroh::EndpointId,
     device: &str,
-    host: &str,
+    ip: &str,
     port: u16,
 ) -> Arc<ConfiguredPeerAddresses> {
     let mut settings = Settings::default();
     settings.network.peer_addresses.insert(
         device.to_string(),
         ConfiguredPeerAddress {
-            host: host.to_string(),
+            ip: ip.to_string(),
             port,
         },
     );
@@ -84,8 +84,8 @@ async fn resolved(
         .await
 }
 
-/// 按传输身份找到设备并在查询时解析其配置条目：IP 字面量与主机名都交出该身份的直连候选；
-/// 不属于已知设备或没有条目的身份没有候选。
+/// 按传输身份找到设备并在查询时读取其配置条目：IP 字面量交出该身份的直连候选；
+/// 主机名、不属于已知设备或没有条目的身份没有候选。
 #[tokio::test]
 async fn resolves_the_configured_entry_of_the_identified_device_at_query_time() {
     let id = SecretKey::generate().public();
@@ -100,20 +100,16 @@ async fn resolves_the_configured_entry_of_the_identified_device_at_query_time() 
     let stranger = SecretKey::generate().public();
     assert!(resolved(&literal, stranger).await.is_empty());
 
+    // 主机名不是 IP 字面量：不解析、不产生 DNS 查询，也不交出候选。
     let hostname = ConfiguredAddressProvider(configured(id, "device-a", "localhost", 51821));
-    let found = resolved(&hostname, id).await;
-    assert_eq!(found.len(), 1);
-    assert!(found[0]
-        .ip_addrs()
-        .all(|addr| addr.ip().is_loopback() && addr.port() == 51821));
-    assert!(found[0].ip_addrs().next().is_some());
+    assert!(resolved(&hostname, id).await.is_empty());
 
     let other_device = ConfiguredAddressProvider(configured(id, "device-a", "10.8.0.2", 51821));
     let mut settings = Settings::default();
     settings.network.peer_addresses.insert(
         "device-b".into(),
         ConfiguredPeerAddress {
-            host: "10.8.0.3".into(),
+            ip: "10.8.0.3".into(),
             port: 51821,
         },
     );
@@ -124,13 +120,13 @@ async fn resolves_the_configured_entry_of_the_identified_device_at_query_time() 
     );
 }
 
-/// LAN-only 下配置地址与其他来源一样经过目录 lookup 的本地网络范围收敛：解析到公网地址时不交给 iroh。
+/// LAN-only 下配置地址与其他来源一样经过目录 lookup 的本地网络范围收敛：公网地址不交给 iroh。
 #[tokio::test]
 async fn lan_only_directory_lookup_drops_a_configured_public_address() {
     use iroh::address_lookup::AddressLookup;
 
     let id = SecretKey::generate().public();
-    for (host, lan_only, expected) in [
+    for (ip, lan_only, expected) in [
         ("203.0.113.7", true, EndpointAddr::new(id)),
         (
             "203.0.113.7",
@@ -149,7 +145,7 @@ async fn lan_only_directory_lookup_drops_a_configured_public_address() {
         let manager = Arc::new(
             DiscoveryManager::new(
                 vec![Arc::new(ConfiguredAddressProvider(configured(
-                    id, "device-a", host, 51821,
+                    id, "device-a", ip, 51821,
                 )))],
                 Arc::new(PeerDirectory::new(8)),
             )

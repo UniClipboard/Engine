@@ -291,22 +291,22 @@ pub struct NetworkSettings {
     /// 用户为已配对设备配置的直连地址，键为该设备的 `DeviceId` 字符串（不是设备名）。
     ///
     /// 用于没有组播、也不使用 relay 的网络（例如 WireGuard 隧道）：连接需要该设备的地址时，
-    /// 发现负责人在查询时解析这里的 IP 或主机名，结果只是拨号线索，连接后仍验证身份；
-    /// LAN-only 下与其他发现结果一样只交出本地网络范围内的地址。这是明文配置，
-    /// 不得写入日志。缺省为空；修改即时生效，无需重启。
+    /// 发现负责人在查询时读取这里的 IP 字面量，结果只是拨号线索，连接后仍验证身份；
+    /// LAN-only 下与其他发现结果一样只交出本地网络范围内的地址。只接受 IP 字面量、不接受主机名，
+    /// 因此不产生 DNS 查询。这是明文配置，不得写入日志。缺省为空；修改即时生效，无需重启。
     pub peer_addresses: BTreeMap<String, ConfiguredPeerAddress>,
 }
 
-/// 用户为一个已配对设备配置的地址：IP 字面量或主机名，加端口。
+/// 用户为一个已配对设备配置的地址：IP 字面量加端口。
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfiguredPeerAddress {
-    /// IPv4/IPv6 字面量或主机名；IPv6 不带方括号。
-    pub host: String,
+    /// IPv4 或 IPv6 字面量；IPv6 不带方括号。保存前已校验，手工改坏的值在查询时被忽略。
+    pub ip: String,
     /// 对端的 P2P UDP 端口（通常是对端的 `bind_port`）。
     pub port: u16,
 }
 
-/// 地址属于不得进入日志的材料，`Debug` 不输出主机与端口。
+/// 地址属于不得进入日志的材料，`Debug` 不输出 IP 与端口。
 impl fmt::Debug for ConfiguredPeerAddress {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ConfiguredPeerAddress([REDACTED])")

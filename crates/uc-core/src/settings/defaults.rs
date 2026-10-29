@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// 用户配置的设备地址默认为空：缺字段的旧 settings.json 读回为空，显式条目原样往返，
-    /// `Debug` 不泄露主机与端口。
+    /// `Debug` 不泄露 IP 与端口。
     #[test]
     fn peer_addresses_default_to_empty_round_trip_and_redact_debug() {
         assert!(NetworkSettings::default().peer_addresses.is_empty());
@@ -361,11 +361,11 @@ mod tests {
         assert!(old.network.peer_addresses.is_empty());
 
         let configured: Settings = serde_json::from_str(
-            r#"{ "network": { "peer_addresses": { "device-a": { "host": "laptop.wg", "port": 51821 } } } }"#,
+            r#"{ "network": { "peer_addresses": { "device-a": { "ip": "10.8.0.2", "port": 51821 } } } }"#,
         )
         .expect("parse configured");
         let entry = &configured.network.peer_addresses["device-a"];
-        assert_eq!((entry.host.as_str(), entry.port), ("laptop.wg", 51821));
+        assert_eq!((entry.ip.as_str(), entry.port), ("10.8.0.2", 51821));
         let written = serde_json::to_string(&configured).expect("serialize");
         let reread: Settings = serde_json::from_str(&written).expect("reparse");
         assert_eq!(
@@ -373,7 +373,7 @@ mod tests {
             configured.network.peer_addresses
         );
         let debug = format!("{:?}", configured.network);
-        assert!(!debug.contains("laptop.wg"));
+        assert!(!debug.contains("10.8.0.2"));
         assert!(!debug.contains("51821"));
     }
 
