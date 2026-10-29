@@ -6,6 +6,7 @@ mod checks;
 mod connection;
 mod elapsed_clock;
 mod error;
+mod identity;
 mod inbound;
 mod lifetime;
 mod manager;
@@ -26,6 +27,7 @@ pub use backend::{
 pub use connection::ConnectionLease;
 pub use elapsed_clock::{ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal};
 pub use error::{ConnectivityError, StreamCapabilityRefusal};
+pub use identity::ConnectionKey;
 pub use inbound::InboundAdmissionPolicy;
 pub use manager::{ConnectivityManager, ConnectivityPolicy};
 pub use pending::PendingInboundLease;

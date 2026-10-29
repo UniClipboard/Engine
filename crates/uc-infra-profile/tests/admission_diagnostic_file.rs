@@ -150,8 +150,12 @@ async fn missing_stored_credential_produces_diagnosable_client_and_server_record
     let sponsor = endpoint().await;
     let joiner = endpoint().await;
     let handler = Arc::new(
-        IrohSpaceAdmissionHandler::new(&sponsor, Arc::new(MustNotHandle), credentials)
-            .expect("handler"),
+        IrohSpaceAdmissionHandler::new(
+            Arc::new(IrohSpaceAdmissionTransport::new(sponsor.clone())),
+            Arc::new(MustNotHandle),
+            credentials,
+        )
+        .expect("handler"),
     );
     let router = Router::builder((*sponsor).clone())
         .accept(SPACE_ADMISSION_ALPN, handler)

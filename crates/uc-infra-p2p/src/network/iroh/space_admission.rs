@@ -6,6 +6,7 @@ mod crypto;
 mod diagnostics;
 mod errors;
 mod exchange;
+mod managed;
 mod route;
 mod server;
 

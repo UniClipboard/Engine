@@ -3,15 +3,14 @@ use super::lifetime::ConnectionLifetime;
 use super::manager::PeerState;
 use super::pending::UnboundConnection;
 use super::{
-    ConnectivityError, ConnectivityManager, InboundAdmissionFence, InboundConnectionError,
-    InboundIdentityReservation, PeerConnection,
+    ConnectionKey, ConnectivityError, ConnectivityManager, InboundAdmissionFence,
+    InboundConnectionError, InboundIdentityReservation, PeerConnection,
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use uc_core::ids::DeviceId;
 
 #[derive(Clone, Copy)]
 pub struct InboundAdmissionPolicy {
@@ -20,28 +19,28 @@ pub struct InboundAdmissionPolicy {
     pub timeout: Duration,
 }
 
-struct IdentifiedPeer {
-    peer: DeviceId,
+struct IdentifiedPeer<K: ConnectionKey> {
+    peer: K,
     _state: Arc<PeerState>,
     _capacity: Option<OwnedSemaphorePermit>,
 }
-struct Capacity {
-    identified: Option<IdentifiedPeer>,
+struct Capacity<K: ConnectionKey> {
+    identified: Option<IdentifiedPeer<K>>,
 }
-pub(super) struct InboundReservation {
-    pub manager: ConnectivityManager,
+pub(super) struct InboundReservation<K: ConnectionKey> {
+    pub manager: ConnectivityManager<K>,
     pub raw: UnboundConnection,
     pub lifetime: Arc<ConnectionLifetime>,
     pub session: CancellationToken,
     pub deadline: Option<Instant>,
     pub started_at: Option<Instant>,
-    fence: Option<Box<dyn InboundAdmissionFence>>,
-    capacity: Mutex<Capacity>,
+    fence: Option<Box<dyn InboundAdmissionFence<K>>>,
+    capacity: Mutex<Capacity<K>>,
 }
-impl InboundReservation {
+impl<K: ConnectionKey> InboundReservation<K> {
     /// 同步执行，因此尚未 poll 的连接不能跨会话重获准入资格。
     pub fn new(
-        manager: ConnectivityManager,
+        manager: ConnectivityManager<K>,
         connection: Arc<dyn PeerConnection>,
     ) -> Result<Self, ConnectivityError> {
         let raw = UnboundConnection {
@@ -81,7 +80,7 @@ impl InboundReservation {
             capacity: Mutex::new(Capacity { identified: None }),
         })
     }
-    pub fn verify(&self, peer: DeviceId) -> Result<(), ConnectivityError> {
+    pub fn verify(&self, peer: K) -> Result<(), ConnectivityError> {
         if self.session.is_cancelled() {
             return Err(ConnectivityError::Stopped);
         }
@@ -118,8 +117,8 @@ impl InboundReservation {
         }
     }
 }
-impl InboundIdentityReservation for InboundReservation {
-    fn identified(&self, peer: DeviceId) -> Result<(), ConnectivityError> {
+impl<K: ConnectionKey> InboundIdentityReservation<K> for InboundReservation<K> {
+    fn identified(&self, peer: K) -> Result<(), ConnectivityError> {
         if self.session.is_cancelled() {
             return Err(ConnectivityError::Stopped);
         }

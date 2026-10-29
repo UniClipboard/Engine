@@ -601,6 +601,7 @@ macro_rules! diagnostic_task_kinds {
 
 diagnostic_task_kinds! {
     /// 普通剪贴板共享拨号任务异常退出。
+    SpaceAdmissionConnectivityWorker => "space_admission_connectivity_worker",
     ClipboardConnectivityWorker => "clipboard_connectivity_worker",
     BlobTransportWorker => "blob_transport_worker",
     /// 进度受管连接任务异常退出。

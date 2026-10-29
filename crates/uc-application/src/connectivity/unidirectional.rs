@@ -2,25 +2,26 @@
 use super::checks::checked;
 use super::connection::ConnectionRecord;
 use super::{
-    ConnectionLease, ConnectivityError, PeerReceiveStream, PeerSendStream, StreamCapabilityRefusal,
-    StreamWorkLease,
+    ConnectionKey, ConnectionLease, ConnectivityError, PeerReceiveStream, PeerSendStream,
+    StreamCapabilityRefusal, StreamWorkLease,
 };
 use std::sync::Arc;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
+use uc_core::ids::DeviceId;
 
 /// 单向流与完整工作使用权一起移交；底层工作可在网络停止后保留许可。
-pub struct UniStreamLease<S> {
+pub struct UniStreamLease<S, K: ConnectionKey = DeviceId> {
     pub stream: S,
     pub received_at: Option<Instant>,
-    work: StreamWorkLease,
+    work: StreamWorkLease<K>,
 }
 
-impl<S> UniStreamLease<S> {
+impl<S, K: ConnectionKey> UniStreamLease<S, K> {
     fn new(
         stream: S,
-        connection: Arc<ConnectionRecord>,
+        connection: Arc<ConnectionRecord<K>>,
         permits: Vec<OwnedSemaphorePermit>,
         received_at: Option<Instant>,
     ) -> Result<Self, ConnectivityError> {
@@ -31,29 +32,29 @@ impl<S> UniStreamLease<S> {
         })
     }
 
-    pub fn into_parts(self) -> (S, StreamWorkLease) {
+    pub fn into_parts(self) -> (S, StreamWorkLease<K>) {
         (self.stream, self.work)
     }
 }
 
-impl UniStreamLease<Box<dyn PeerSendStream>> {
+impl<K: ConnectionKey> UniStreamLease<Box<dyn PeerSendStream>, K> {
     pub fn stop(mut self) -> Result<(), ConnectivityError> {
         self.stream.reset(0)
     }
 }
 
-impl UniStreamLease<Box<dyn PeerReceiveStream>> {
+impl<K: ConnectionKey> UniStreamLease<Box<dyn PeerReceiveStream>, K> {
     pub fn stop(mut self) -> Result<(), ConnectivityError> {
         self.stream.stop(0)
     }
 }
 
-impl ConnectionLease {
+impl<K: ConnectionKey> ConnectionLease<K> {
     pub async fn open_uni(
         &self,
         deadline: Instant,
         cancel: &CancellationToken,
-    ) -> Result<UniStreamLease<Box<dyn PeerSendStream>>, ConnectivityError> {
+    ) -> Result<UniStreamLease<Box<dyn PeerSendStream>, K>, ConnectivityError> {
         let connection =
             self.record
                 .connection
@@ -75,7 +76,7 @@ impl ConnectionLease {
         &self,
         deadline: Instant,
         cancel: &CancellationToken,
-    ) -> Result<UniStreamLease<Box<dyn PeerReceiveStream>>, ConnectivityError> {
+    ) -> Result<UniStreamLease<Box<dyn PeerReceiveStream>, K>, ConnectivityError> {
         if Instant::now() >= deadline {
             return Err(ConnectivityError::DeadlineExpired);
         }

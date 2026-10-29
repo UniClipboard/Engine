@@ -1,6 +1,8 @@
 //! 有界空闲保留与实际交换活动；入站 accept 等待不延长空闲期限。
 use super::connection::ConnectionRecord;
-use super::{ConnectivityError, ElapsedClockError, ElapsedClockPort, PeerConnection};
+use super::{
+    ConnectionKey, ConnectivityError, ElapsedClockError, ElapsedClockPort, PeerConnection,
+};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -133,7 +135,7 @@ impl ConnectionActivity {
         self.remaining(&mut self.state.lock().unwrap_or_else(PoisonError::into_inner))
     }
     /// 同一锁内核对活动与原截止，不能在检查后新取得活动再被旧计时关闭。
-    pub fn expire_if_idle(&self, record: &ConnectionRecord) -> bool {
+    pub fn expire_if_idle<K: ConnectionKey>(&self, record: &ConnectionRecord<K>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         match self.remaining(&mut state) {
             Ok(None) => false,
@@ -145,7 +147,11 @@ impl ConnectionActivity {
             }
         }
     }
-    pub fn retire_if_idle(&self, record: &ConnectionRecord, before: Instant) -> bool {
+    pub fn retire_if_idle<K: ConnectionKey>(
+        &self,
+        record: &ConnectionRecord<K>,
+        before: Instant,
+    ) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.users != 0 || state.idle.as_ref().is_none_or(|idle| idle.since > before) {
             return false;

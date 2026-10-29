@@ -1,5 +1,11 @@
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use super::super::connectivity::IrohPeerConnection;
+use super::managed::{AdmissionEndpoint, AdmissionManager};
+use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
+use std::error::Error;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
+use uc_application::deps::{ConnectionLease, ConnectivityError};
 use uc_observability_contract::diagnostics::connectivity::{
     ConnectionFailurePhase, ConnectionFailureReason, ConnectionObservation, ConnectionOutcome,
     ConnectionPurpose, DialFailure,
@@ -74,12 +80,34 @@ pub(super) async fn connect(
     result
 }
 
-pub(super) async fn open_stream(
-    connection: &Connection,
-) -> Result<(SendStream, RecvStream), uc_application::deps::SpaceAdmissionTransportError> {
-    tokio::time::timeout(IO_DEADLINE, connection.open_bi())
-        .await
-        // discarded-source[timeout]: `Elapsed`: the timeout itself is the classification
-        .map_err(|_| uc_application::deps::SpaceAdmissionTransportError::deferred())?
-        .map_err(uc_application::deps::SpaceAdmissionTransportError::deferred_from)
+pub(super) async fn acquire(
+    manager: &AdmissionManager,
+    addr: EndpointAddr,
+) -> Result<(Connection, ConnectionLease<AdmissionEndpoint>), ConnectivityError> {
+    let target = AdmissionEndpoint(*addr.id.as_bytes());
+    let address = postcard::to_stdvec(&addr)
+        .map_err(|source| ConnectivityError::AddressLookup(Box::new(source)))?;
+    let request = manager.request(target).with_address_hint(address);
+    let lease = request
+        .connect(Instant::now() + IO_DEADLINE, &CancellationToken::new())
+        .await?;
+    let native = IrohPeerConnection::native(lease.transport())?;
+    Ok((native, lease))
+}
+
+pub(super) fn dial_failure(error: &ConnectivityError) -> DialFailure {
+    let mut source: Option<&(dyn Error + 'static)> = Some(error);
+    while let Some(current) = source {
+        if let Some(error) = current.downcast_ref::<AdmissionConnectError>() {
+            return error.category();
+        }
+        if matches!(
+            current.downcast_ref::<ConnectivityError>(),
+            Some(ConnectivityError::TimedOut(_) | ConnectivityError::DeadlineExpired)
+        ) {
+            return DialFailure::TimedOut;
+        }
+        source = current.source();
+    }
+    DialFailure::TransportFailed
 }
