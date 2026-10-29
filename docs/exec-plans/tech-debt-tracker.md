@@ -5,6 +5,7 @@
 | 项目 | 状态 | 依赖/退出条件 | 计划 |
 | --- | --- | --- | --- |
 | 冻结 a07 Relay 互通完成后关闭返回 1104 | #345 首轮 CI 已证实，本机两次原场景复验通过，根因未明 | 网络／关闭负责人保留冻结旧 SHA、15 秒关闭预算与完整内容断言，定位实际未结算参与者；驱动 EPIPE 已有独立修复，不能将证据留存修复当成旧端关闭修复 | [原失败及后续结算](active/2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29) |
+| 网络日志目录故障验收的子进程间歇退出 | #350首轮workspace失败；本地两核第11轮复现DirectoryNotEmpty，已定位并修正故障注入竞态，12项与相同两核100轮通过，最终CI待结算 | 网络日志与夹具负责人核对最终完整CI，已完成的相同两核100轮及原12项报告仍保留；保持目录删除、阻塞恢复与业务日志隔离断言，保留首轮及本地红转绿证据，不把原CI缺失的stderr写成已取回 | [首轮证据与诊断修复](active/2026-10-28-membership-branch-recovery-connectivity-plan.md#首轮交付候选的观测失败与主动取消) |
 | 成员收敛、Space 切换与分支冲突恢复间歇失败 | 第九片本地全集分别出现失败，后续全集复验通过，根因未明 | 成员／会话及恢复负责人分别定位原收敛超时、激活后恢复超时和冲突未清零；保留各次原日志与同代码复验结果，不把三个现象认定为同一原因，不增加期限掩盖 | [第九片执行记录](active/2026-10-28-membership-branch-recovery-connectivity-plan.md) |
 | 冻结a07旧旧Relay文件接收间歇拒绝 | #332／#335原CI失败，后续完整原矩阵通过；#350候选CI在升级前旧旧阶段再次出现相同拒绝，根因未定 | 网络／接收及兼容验收负责人定位原B到A文件`peer_rejected`／A的`apply_failed`；旧版已丢失部分source chain，须保留固定旧SHA、原文件断言和失败证据，建立实际反馈环并明确兼容处置；不以通过重跑称修复 | [历史失败](completed/2026-10-24-transfer-progress-connectivity-feasibility.md#映射期间发现的旧旧relay失败)、[本次候选失败](active/2026-10-28-membership-branch-recovery-connectivity-plan.md#交付候选-350-的首次网络失败) |
 | 成员F2恢复场景偶发多一个issue | 本片首次完整回归失败，隔离及后续完整56项通过；根因未定 | 成员恢复及测试负责人定位实际产生多一个issue的时序，在原全并发场景验证原计数和恢复断言；保留首次结果，不增加超时或将smoke代替全集 | [首次失败与完整回归](completed/2026-10-24-transfer-progress-connectivity-feasibility.md#当前候选完整回归与首次失败保留) |
