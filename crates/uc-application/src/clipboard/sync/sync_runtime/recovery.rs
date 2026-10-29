@@ -48,7 +48,8 @@ wire_enum! {
     /// 一轮恢复的结局：每个提前返回都对应一个固定类别，不记录条目、设备或错误正文。
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum RecoveryOutcome: &'static str {
-        /// 向目标补发了一条待恢复内容，对端已确认收下（含重复确认）。
+        /// 向目标补发了一条待恢复内容，对端已确认收下（含重复确认）。确认不等于结算：
+        /// 退避仍等待记录负责人的结果通知，最终写入失败时按同一条目的次数继续。
         Delivered => "delivered",
         /// 向目标补发了一条待恢复内容，但尚未得到确认；可恢复结果会再次排期。
         Dispatched => "dispatched",
@@ -85,12 +86,12 @@ wire_enum! {
 
 /// 一轮恢复结束后，按目标退避应如何继续。
 enum RetryAfterRound {
-    /// 已送达、进入终态或不再适合自动恢复：清除该目标的退避。
+    /// 没有发出补发，且已进入终态或不再适合自动恢复：清除该目标的退避。
     Clear,
     /// 恢复轮次自身失败且没有落下新的投递结果：按退避再试。
     Again,
-    /// 补发已经发出但尚未结算：记录负责人在每次写入结束后通知结果，
-    /// 可恢复或未能落库时再次排期，已结算时清除。
+    /// 补发已经发出（无论对端是否已确认）：记录负责人在每次写入结束后通知结果，
+    /// 已结算通知是清除退避的唯一依据；可恢复或未能落库时沿用同一条目已用的次数再次排期。
     AwaitResult,
 }
 
@@ -112,13 +113,12 @@ impl From<RecoveryOutcome> for RecoveryRound {
 impl RecoveryOutcome {
     fn retry_after_round(self) -> RetryAfterRound {
         match self {
-            Self::Dispatched => RetryAfterRound::AwaitResult,
+            Self::Delivered | Self::Dispatched => RetryAfterRound::AwaitResult,
             Self::ListingFailed
             | Self::SupersedeFailed
             | Self::ScopeUnavailable
             | Self::DeliveryFailed => RetryAfterRound::Again,
-            Self::Delivered
-            | Self::NothingToRecover
+            Self::NothingToRecover
             | Self::Cancelled
             | Self::SyncDisabled
             | Self::MemberInactive
@@ -355,8 +355,8 @@ async fn retry_due_target(
     recover_and_schedule(deps, target, RecoveryTrigger::Retry, schedule, cancel).await;
 }
 
-/// 执行一轮恢复，并按结局决定该目标的退避：送达或终态清除，自身失败再排期，
-/// 已发出的补发记下所等待的条目，由记录负责人随后通知的结果决定再排期或清除。
+/// 执行一轮恢复，并按结局决定该目标的退避：未补发的终态清除，自身失败再排期，
+/// 已发出的补发（含已确认的）记下所等待的条目，由记录负责人随后通知的结果决定再排期或清除。
 async fn recover_and_schedule(
     deps: &OfflineDeliveryRecoveryDeps,
     target: DeviceId,
@@ -535,14 +535,16 @@ async fn recover_for_target(
                         pending = report.pending,
                         "clipboard delivery recovery dispatched"
                     );
-                    if report.accepted + report.duplicate > 0 {
-                        RecoveryOutcome::Delivered.into()
+                    let outcome = if report.accepted + report.duplicate > 0 {
+                        RecoveryOutcome::Delivered
                     } else {
-                        // 结果（可恢复、终态、写入失败或后台收尾）由记录负责人另行通知。
-                        RecoveryRound {
-                            outcome: RecoveryOutcome::Dispatched,
-                            awaiting: Some(entry.entry_id),
-                        }
+                        RecoveryOutcome::Dispatched
+                    };
+                    // 结算（送达、终态）、可恢复结果、写入失败或后台收尾都由记录负责人另行通知；
+                    // 确认后最终写入失败时持久状态仍未结束，不能据确认提前清除退避。
+                    RecoveryRound {
+                        outcome,
+                        awaiting: Some(entry.entry_id),
                     }
                 }
                 Err(ResendEntryError::EntryNotResendable { reason, .. }) => {

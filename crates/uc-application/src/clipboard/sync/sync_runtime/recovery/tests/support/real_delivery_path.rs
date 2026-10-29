@@ -14,7 +14,7 @@ use uc_core::ports::{
     DispatchReport, SyncPayload,
 };
 
-/// 下一次写入失败的种类；命中一次后存储即恢复。
+/// 写入失败的种类：`fail_next` 命中一次后存储即恢复，`fail_every` 一直失败。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) enum BrokenWrite {
     /// 发送前的 `Pending` 意图写入。
@@ -23,15 +23,20 @@ pub(in super::super) enum BrokenWrite {
     Final,
 }
 
-/// 可注入一次写入失败的投递记录仓库；读取与其余写入照常经内存仓库。
+/// 可注入写入失败的投递记录仓库；读取与其余写入照常经内存仓库。
 pub(in super::super) struct FlakyDeliveries {
     pub(in super::super) inner: Deliveries,
     pub(in super::super) next_failure: Mutex<Option<BrokenWrite>>,
+    pub(in super::super) persistent_failure: Mutex<Option<BrokenWrite>>,
 }
 
 impl FlakyDeliveries {
     pub(in super::super) fn fail_next(&self, write: BrokenWrite) {
         *self.next_failure.lock().unwrap() = Some(write);
+    }
+
+    pub(in super::super) fn fail_every(&self, write: BrokenWrite) {
+        *self.persistent_failure.lock().unwrap() = Some(write);
     }
 }
 
@@ -46,14 +51,18 @@ impl EntryDeliveryRepositoryPort for FlakyDeliveries {
         } else {
             BrokenWrite::Final
         };
-        {
+        let failed = {
             let mut next_failure = self.next_failure.lock().unwrap();
-            if *next_failure == Some(write) {
+            let once = *next_failure == Some(write);
+            if once {
                 *next_failure = None;
-                return Err(uc_core::clipboard::EntryDeliveryError::Storage {
-                    source: anyhow::anyhow!("PRIVATE_STORAGE_DETAIL"),
-                });
             }
+            once || *self.persistent_failure.lock().unwrap() == Some(write)
+        };
+        if failed {
+            return Err(uc_core::clipboard::EntryDeliveryError::Storage {
+                source: anyhow::anyhow!("PRIVATE_STORAGE_DETAIL"),
+            });
         }
         self.inner.record_attempt(record).await
     }
@@ -207,6 +216,7 @@ impl RealPathHarness {
                 records: Mutex::new(HashMap::new()),
             },
             next_failure: Mutex::new(None),
+            persistent_failure: Mutex::new(None),
         });
         let peer = ScriptedPeer::new(steps);
         // presence 始终在线，整个测试不产生任何上线事件。

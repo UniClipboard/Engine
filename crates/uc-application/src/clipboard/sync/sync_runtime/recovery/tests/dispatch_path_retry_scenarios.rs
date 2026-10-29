@@ -154,3 +154,47 @@ async fn a_retry_completed_by_the_deferred_drain_clears_the_target_backoff() {
     assert_eq!(harness.peer.copies(), 1);
     harness.shutdown().await;
 }
+
+/// 对端每次都确认收下，但最终结果写入一直失败（持久状态停在 `Pending`）：已确认不等于已结算，
+/// 恢复负责人只按记录负责人的结算通知清除退避，因此同一条目仍只有 3 次计时重试，
+/// 不会因每次确认后又收到“未能落库”而无限重新开始计时。
+#[tokio::test(start_paused = true)]
+async fn acknowledged_retries_whose_result_write_keeps_failing_stop_after_three() {
+    let harness = RealPathHarness::start(&[
+        PeerStep::Interrupted,
+        PeerStep::Receive,
+        PeerStep::Receive,
+        PeerStep::Receive,
+    ]);
+    drain().await;
+    harness.copy().await;
+    drain().await;
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Unreachable));
+
+    harness.deliveries.fail_every(BrokenWrite::Final);
+    let mut due = Instant::now();
+    for (retry, delay) in RETRY_BACKOFF.iter().enumerate() {
+        due += *delay;
+        tokio::time::sleep_until(due - JUST_BEFORE).await;
+        drain().await;
+        assert_eq!(
+            harness.peer.dials(),
+            retry + 1,
+            "retry {retry} waits for its interval"
+        );
+        tokio::time::sleep_until(due + JUST_BEFORE).await;
+        drain().await;
+        assert_eq!(harness.peer.dials(), retry + 2);
+        assert_eq!(harness.status(), Some(EntryDeliveryStatus::Pending));
+    }
+
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    drain().await;
+    assert_eq!(
+        harness.peer.dials(),
+        RETRY_BACKOFF.len() + 1,
+        "no fourth timed retry while the result write keeps failing"
+    );
+    assert_eq!(harness.peer.copies(), 1);
+    harness.shutdown().await;
+}
