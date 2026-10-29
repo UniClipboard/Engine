@@ -608,6 +608,8 @@ diagnostic_task_kinds! {
     /// presence 完整收发与保留连接任务异常退出。
     PresenceConnectivityWorker => "presence_connectivity_worker",
     MembershipHistoryConnectivityWorker => "membership_history_connectivity_worker",
+    /// 成员分支恢复受管连接任务异常退出。
+    MembershipBranchRecoveryConnectivityWorker => "membership_branch_recovery_connectivity_worker",
     ClipboardDeliveryRecord => "clipboard_delivery_record",
     ClipboardInboundOsWrite => "clipboard_inbound_os_write",
     ActiveClipboardConverge => "active_clipboard_converge",

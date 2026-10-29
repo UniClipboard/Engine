@@ -14,6 +14,7 @@ use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
 use uc_core::ports::ConnectionChannel;
+use uc_observability_contract::diagnostics::connectivity::record_maintenance_connection;
 
 pub(super) struct ConnectionRecord {
     pub connection: Arc<dyn PeerConnection>,
@@ -63,6 +64,12 @@ impl ConnectionLease {
         request: Arc<dyn AdmissionAttempt>,
     ) -> Result<Self, ConnectivityError> {
         let activity = record.activity.acquire(record.connection.as_ref())?;
+        if record.connection.protocol() == ConnectionProtocol::MembershipBranchRecovery {
+            record_maintenance_connection(
+                record.connection.authenticated_key(),
+                record.connection.id() as u64,
+            );
+        }
         Ok(Self {
             record,
             request: Some(request),
@@ -95,6 +102,16 @@ impl ConnectionLease {
     }
     pub async fn closed(&self) {
         self.record.connection.closed().await;
+    }
+    pub(crate) fn check_frozen(&self) -> Result<(), ConnectivityError> {
+        if self.record.stop.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
+        self.record.grant.check_frozen()?;
+        if self.record.stop.is_cancelled() {
+            return Err(ConnectivityError::Stopped);
+        }
+        Ok(())
     }
     pub async fn check_current(&self) -> Result<(), ConnectivityError> {
         if self.record.stop.is_cancelled() {

@@ -649,8 +649,13 @@ impl ConnectivityManager {
         tokio::select! {
             _ = self.inner.stop.cancelled() => Err(ConnectivityError::Stopped),
             result = timeout_at(deadline, async {
-                let global = self.inner.inbound.clone().acquire_owned().await
-                    .map_err(ConnectivityError::ResourceClosed)?;
+                let global = if self.inner.policy.reject_excess_inbound {
+                    self.inner.inbound.clone().try_acquire_owned()
+                        .map_err(ConnectivityError::Busy)?
+                } else {
+                    self.inner.inbound.clone().acquire_owned().await
+                        .map_err(ConnectivityError::ResourceClosed)?
+                };
                 let grant = self.inner.admission.adopt_inbound(raw.raw.clone(), &fence).await?;
                 if let Some(fence) = &fence { fence.check_current(&grant.peer())?; }
                 grant.check_current().await?;

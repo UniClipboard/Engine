@@ -62,7 +62,7 @@ const INBOUND_HANDLERS: [&str; 9] = [
     "crates/uc-infra-p2p/src/network/iroh/active_clipboard/receiver_adapter.rs",
     "crates/uc-infra-p2p/src/network/iroh/active_clipboard/pull_serve_adapter.rs",
     "crates/uc-infra-p2p/src/network/iroh/connectivity/progress_handler.rs",
-    "crates/uc-infra-p2p/src/network/iroh/membership_branch_recovery_adapter.rs",
+    "crates/uc-infra-p2p/src/network/iroh/connectivity/branch_recovery_admission.rs",
     "crates/uc-infra-p2p/src/network/iroh/membership_history_exchange_adapter.rs",
     "crates/uc-infra-p2p/src/network/iroh/node.rs",
 ];
@@ -71,7 +71,8 @@ const INBOUND_HANDLERS: [&str; 9] = [
 fn identity_resolution_has_a_single_implementation() {
     let gate = production("crates/uc-infra-p2p/src/network/iroh/inbound_peer.rs");
     assert!(gate.contains("struct PeerIdentityResolver"));
-    assert!(gate.contains("struct InboundPeerGate"));
+    assert!(gate.contains("impl PeerIdentityResolver"));
+    assert!(gate.contains("pub(crate) async fn resolve("));
     for handler in INBOUND_HANDLERS {
         let code = production(handler);
         for forbidden in [

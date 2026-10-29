@@ -64,8 +64,8 @@ use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::instrument::WithSubscriber;
 use tracing::{dispatcher, instrument, Dispatch};
 use uc_application::deps::{
-    ConnectionHint, DiscoveryError, DiscoveryManager, IssueMembershipBranchRecoveryPort,
-    PeerReachabilityEnvironmentPort, PeerReachabilityTransport,
+    BranchRecoveryPeerPort, BranchRecoveryReceiver, ConnectionHint, DiscoveryError,
+    DiscoveryManager, PeerReachabilityEnvironmentPort, PeerReachabilityTransport,
 };
 use uc_core::settings::model::CongestionController;
 use uc_core::settings::relay_routing::RelayRouting;
@@ -109,14 +109,14 @@ const LEGACY_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard/0";
 use super::connection_channel_adapter::IrohConnectionChannelAdapter;
 use super::connectivity::IrohTransferProgressHandler;
 use super::connectivity::{
-    ConnectivityProfile, IrohClipboardHandler, IrohConnectionAdmission, IrohConnectivityBackend,
+    BranchRecoveryAdmission, ConnectivityProfile, IrohBranchRecoveryHandler, IrohClipboardHandler,
+    IrohConnectionAdmission, IrohConnectivityBackend,
 };
 use super::group_update_adapter::{
     IrohGroupUpdateHandler, GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN,
 };
 use super::identity_store::IrohIdentityStore;
 use super::inbound_peer::{PeerIdentityError, PeerIdentityResolver};
-use super::membership_branch_recovery_adapter::IrohMembershipBranchRecoveryHandler;
 use super::membership_history_exchange_adapter::{
     HistoryConnectionAdmission, IrohMembershipHistoryExchangeHandler,
     IrohVerifiedPeerAddressRefresh, MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
@@ -271,6 +271,37 @@ impl IrohNode {
             .map_err(IrohNodeError::session_protocol)?;
         self.session_generation = Some(generation);
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn has_active_protocol_for_test(&self, alpn: &[u8]) -> bool {
+        self.session_protocols.has_active_handler_for_test(alpn)
+    }
+
+    /// 测试匿名连接是否在完成协议协商后被准入拒绝。
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn rejects_anonymous_protocol_for_test(&self, alpn: &[u8]) -> bool {
+        let client = match Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+        {
+            Ok(client) => client,
+            Err(_) => return false,
+        };
+        let rejected = match tokio::time::timeout(
+            Duration::from_secs(5),
+            client.connect(self.session_context.endpoint.addr(), alpn),
+        )
+        .await
+        {
+            Ok(Ok(connection)) => tokio::time::timeout(Duration::from_secs(2), connection.closed())
+                .await
+                .is_ok(),
+            Ok(Err(_)) | Err(_) => false,
+        };
+        client.close().await;
+        rejected
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -1304,15 +1335,37 @@ impl IrohSessionBuilder {
         )
     }
 
-    pub fn install_membership_branch_recovery(
-        &mut self,
+    pub fn branch_recovery_connectivity_deps(
+        &self,
+        addresses: Arc<dyn PeerAddressRepositoryPort>,
         identities: Arc<dyn PeerIdentityDirectoryPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-        endpoint: Arc<dyn IssueMembershipBranchRecoveryPort>,
+        membership: Arc<dyn BranchRecoveryPeerPort>,
+        fingerprint: Arc<dyn IdentityFingerprintFactoryPort>,
+    ) -> ConnectivityDeps {
+        ConnectivityDeps {
+            backend: Arc::new(IrohConnectivityBackend::new(
+                self.context.endpoint.clone(),
+                addresses,
+                None,
+                ConnectivityProfile::MembershipBranchRecovery,
+            )),
+            admission: Arc::new(BranchRecoveryAdmission::new(
+                identities,
+                membership,
+                fingerprint,
+                self.admitted_connections.clone(),
+            )),
+        }
+    }
+
+    pub fn install_managed_branch_recovery(
+        &mut self,
+        manager: ConnectivityManager,
+        receiver: Arc<BranchRecoveryReceiver>,
     ) -> Result<(), IrohNodeError> {
         self.install_session_handler(
             [MEMBERSHIP_BRANCH_RECOVERY_ALPN],
-            IrohMembershipBranchRecoveryHandler::new(identities, fingerprint_factory, endpoint),
+            IrohBranchRecoveryHandler::new(manager, receiver),
         )
     }
 
@@ -1341,16 +1394,6 @@ impl IrohSessionBuilder {
             Arc::clone(&self.context.endpoint),
             peer_addr_repo,
             clock,
-        ))
-    }
-
-    pub fn build_membership_branch_recovery_channel(
-        &self,
-        peer_addr_repo: Arc<dyn PeerAddressRepositoryPort>,
-    ) -> Arc<super::IrohMembershipBranchRecoveryChannel> {
-        Arc::new(super::IrohMembershipBranchRecoveryChannel::new(
-            Arc::clone(&self.context.endpoint),
-            peer_addr_repo,
         ))
     }
 
@@ -2042,6 +2085,8 @@ mod tests {
         .expect("install first session");
         let mut node = spawn_session(network, first).await;
         let endpoint_id = node.session_context.endpoint.id();
+        assert!(node.has_active_protocol_for_test(PEER_REACHABILITY_ALPN));
+        assert!(!node.has_active_protocol_for_test(b"unknown/test"));
         assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
 
         let mut second = node.prepare_session();
@@ -2057,12 +2102,14 @@ mod tests {
         .expect("install second session");
 
         node.quiesce_session().await.expect("quiesce first session");
+        assert!(!node.has_active_protocol_for_test(PEER_REACHABILITY_ALPN));
         assert!(!node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         node.activate_session(second.finish())
             .await
             .expect("activate second session");
 
         assert_eq!(node.session_context.endpoint.id(), endpoint_id);
+        assert!(node.has_active_protocol_for_test(PEER_REACHABILITY_ALPN));
         assert!(node.accepts_protocol_for_test(PEER_REACHABILITY_ALPN).await);
         node.shutdown().await.unwrap();
     }

@@ -55,6 +55,14 @@ fn connectivity_diagnostics_survive_the_export_file_without_private_fields() {
     );
     blob.negotiated(NegotiatedProtocol::Blob);
     blob.closed(ConnectionCloseReason::LocalClosed);
+    let recovery = NetworkRecorder::current().connection_established(
+        [9; 32],
+        44,
+        ConnectionDirection::Outbound,
+        NetworkPathKind::Direct,
+    );
+    recovery.negotiated(NegotiatedProtocol::MembershipBranchRecovery);
+    recovery.closed(ConnectionCloseReason::LocalClosed);
     // 网络库的非受控原文不能绕过同一实际导出过滤器。
     tracing::event!(target: "quinn_proto", tracing::Level::WARN, reason = "PRIVATE_NATIVE_REASON", "PRIVATE_NETWORK_BODY");
     assert_eq!(
@@ -71,7 +79,7 @@ fn connectivity_diagnostics_survive_the_export_file_without_private_fields() {
         .map(|l| serde_json::from_str(l).expect("JSON"))
         .filter(|row: &serde_json::Value| row["target"] != "uc.diagnostics")
         .collect();
-    assert_eq!(rows.len(), 14);
+    assert_eq!(rows.len(), 17);
     assert!(rows
         .iter()
         .all(|row| row["environment"] == "test" && row["app_channel"] == "test"));
@@ -98,4 +106,6 @@ fn connectivity_diagnostics_survive_the_export_file_without_private_fields() {
     assert_eq!(rows[7]["fields"]["error.reason"], "unavailable");
     assert_eq!(rows[9]["fields"]["protocol"], "peer_reachability_v2");
     assert_eq!(rows[12]["fields"]["protocol"], "blob");
+    assert_eq!(rows[15]["fields"]["protocol"], "membership_branch_recovery");
+    assert_eq!(rows[15]["fields"]["initial_path"], "direct");
 }

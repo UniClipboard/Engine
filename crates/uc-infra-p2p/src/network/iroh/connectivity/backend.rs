@@ -18,6 +18,7 @@ use uc_sync_protocol::clipboard::{
     ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
 };
 use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
+use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
@@ -35,6 +36,7 @@ pub enum ConnectivityProfile {
     ActiveClipboardPull,
     Clipboard,
     MembershipHistory,
+    MembershipBranchRecovery,
     GroupUpdate,
     /// 仅供固定旧端互通验收；实际能力仍由协商结果决定。
     LegacyGroupUpdate,
@@ -126,6 +128,11 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
                 "membership-history",
             ),
+            ConnectivityProfile::MembershipBranchRecovery => (
+                MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+                MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+                "membership-branch-recovery",
+            ),
             ConnectivityProfile::Clipboard => (
                 ATTRIBUTED_CLIPBOARD_ALPN,
                 MULTIPLEXED_CLIPBOARD_ALPN,
@@ -144,8 +151,16 @@ impl ConnectivityBackend for IrohConnectivityBackend {
         if matches!(self.profile, ConnectivityProfile::Clipboard) {
             additional.push(CLIPBOARD_ALPN.to_vec());
         }
-        let result = if matches!(self.profile, ConnectivityProfile::Blob) {
-            // blob 的每轮只发起一次原生建连；恢复次数与退避由完整接收负责人统一计算。
+        let result = if matches!(
+            self.profile,
+            ConnectivityProfile::Blob | ConnectivityProfile::MembershipBranchRecovery
+        ) {
+            // 每轮只发起一次原生建连；恢复次数与退避由对应业务负责人统一计算。
+            let address = if matches!(self.profile, ConnectivityProfile::MembershipBranchRecovery) {
+                strip_relay_if_lan_only(address)
+            } else {
+                address
+            };
             tokio::select! {
                 _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
                 result = self.endpoint.connect(address, preferred) => result.map_err(|source| ConnectivityError::Backend(Box::new(source))),

@@ -14,7 +14,7 @@ use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
 use uc_core::security::IdentityFingerprint;
 
 use super::{
-    HistoryConnectionRetentionPort, MembershipLedgerError, MembershipOwner,
+    BranchRecoveryPeerPort, HistoryConnectionRetentionPort, MembershipLedgerError, MembershipOwner,
     MembershipProjectionPlan, MembershipView,
 };
 
@@ -110,6 +110,19 @@ fn admission_error(error: MembershipLedgerError) -> PeerAdmissionError {
 #[async_trait]
 impl HistoryConnectionRetentionPort for PeerAccess {
     async fn may_retain(&self, peer: &DeviceId) -> Result<bool, MembershipLedgerError> {
+        let view = self.view().await?;
+        Ok(view
+            .space()
+            .is_some_and(|space| space.history().effective_member_for_device(peer).is_some()))
+    }
+}
+
+#[async_trait]
+impl BranchRecoveryPeerPort for PeerAccess {
+    async fn is_current_recovery_peer(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<bool, MembershipLedgerError> {
         let view = self.view().await?;
         Ok(view
             .space()

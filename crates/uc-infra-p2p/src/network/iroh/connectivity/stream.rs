@@ -146,3 +146,7 @@ mod rejection_probe;
 #[cfg(test)]
 #[path = "stream_memory_backend_probe.rs"]
 mod memory_backend_probe;
+
+#[cfg(test)]
+#[path = "stream_memory_backend_fixture.rs"]
+pub(super) mod memory_backend_fixture;

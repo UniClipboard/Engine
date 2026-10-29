@@ -55,10 +55,10 @@ impl PeerReachabilityEnvironmentPort for PresenceEnvironment {
         self.recovery.recover_for_demand().await;
     }
     fn forget(&self, peer: &DeviceId) {
-        self.connections.close_device(peer, b"forgotten");
+        self.connections.close_device(peer);
     }
     fn disconnect_all(&self) {
-        self.connections.close_all(b"space_left");
+        self.connections.close_all();
     }
     fn communication_failed(&self, peer: DeviceId) {
         self.observations

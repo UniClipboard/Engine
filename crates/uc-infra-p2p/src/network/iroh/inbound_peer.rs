@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use uc_application::deps::{MembershipLedgerError, PeerIdentityDirectoryPort};
 use uc_core::ids::DeviceId;
-use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::security::IdentityFingerprint;
 use uc_observability_contract::diagnostics::connectivity::{
@@ -74,15 +73,6 @@ impl PeerIdentityResolver {
         }
     }
 
-    pub(crate) async fn identify(
-        &self,
-        remote_public_key: &[u8; 32],
-    ) -> Result<DeviceId, InboundPeerRejection> {
-        self.resolve(remote_public_key)
-            .await
-            .map_err(|error| error.rejection())
-    }
-
     pub(crate) async fn resolve(
         &self,
         remote_public_key: &[u8; 32],
@@ -119,53 +109,6 @@ impl PeerIdentityResolver {
         self.fingerprint_factory
             .from_public_key(remote_public_key)
             .is_ok_and(|derived| derived == *fingerprint)
-    }
-}
-
-pub(crate) struct InboundPeerGate {
-    protocol: InboundPeerProtocol,
-    identity: PeerIdentityResolver,
-    peer_admission: Arc<dyn PeerAdmissionPort>,
-}
-
-impl InboundPeerGate {
-    pub(crate) fn new(
-        protocol: InboundPeerProtocol,
-        identities: Arc<dyn PeerIdentityDirectoryPort>,
-        peer_admission: Arc<dyn PeerAdmissionPort>,
-        fingerprint_factory: Arc<dyn IdentityFingerprintFactoryPort>,
-    ) -> Self {
-        Self {
-            protocol,
-            identity: PeerIdentityResolver::new(identities, fingerprint_factory),
-            peer_admission,
-        }
-    }
-
-    pub(crate) async fn identify(
-        &self,
-        remote_public_key: &[u8; 32],
-    ) -> Result<DeviceId, InboundPeerRejection> {
-        self.identity.identify(remote_public_key).await
-    }
-
-    pub(crate) async fn authorize(&self, device: &DeviceId) -> Result<(), InboundPeerRejection> {
-        match self.peer_admission.is_admitted(device).await {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(InboundPeerRejection::LedgerDenied),
-            Err(_) => Err(InboundPeerRejection::LedgerUnavailable),
-        }
-    }
-
-    #[cfg(test)]
-    async fn admit(&self, remote_public_key: &[u8; 32]) -> Result<DeviceId, InboundPeerRejection> {
-        let device = self.identify(remote_public_key).await?;
-        self.authorize(&device).await?;
-        Ok(device)
-    }
-
-    pub(crate) fn record_rejection(&self, rejection: InboundPeerRejection) {
-        record_inbound_rejection(self.protocol, rejection);
     }
 }
 

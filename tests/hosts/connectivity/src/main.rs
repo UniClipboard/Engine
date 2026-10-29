@@ -23,6 +23,8 @@ use uc_engine::observability::{
     DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityResource,
     OperatingSystem, ProcessObservabilityRuntime,
 };
+#[cfg(feature = "branch-recovery-tests")]
+use uc_engine::ChooseDeviceGroupInput;
 #[cfg(feature = "connectivity-opportunity")]
 use uc_engine::ConnectivityOpportunity;
 use uc_engine::{
@@ -455,6 +457,8 @@ async fn operation(
         return Ok(json!(true));
     }
     let op = match command {
+        #[cfg(feature = "branch-recovery-fault-tests")]
+        "reset_space" => Operation::ResetSpace,
         "create" => Operation::CreateSpace(CreateSpaceInput {
             device_name: Some(string(request, "name")?.into()),
             passphrase: SecretString::new(PASSPHRASE),
@@ -503,6 +507,15 @@ async fn operation(
         "peers" => Operation::QueryPeerConnections,
         #[cfg(feature = "device-group-choices")]
         "eligibility" => Operation::QueryDeviceGroupChoices,
+        #[cfg(feature = "branch-recovery-tests")]
+        "choose_device_group" => Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+            issue_id: string(request, "issue_id")?.into(),
+            choice_id: string(request, "choice_id")?.into(),
+            expected_revision: request["revision"]
+                .as_u64()
+                .context("missing or invalid revision")?,
+            confirm_local_removal: request["confirm_local_removal"].as_bool().unwrap_or(false),
+        }),
         #[cfg(feature = "current-engine")]
         "membership_diagnostics" => Operation::QueryMembershipDiagnostics,
         #[cfg(feature = "connectivity-opportunity")]
@@ -590,6 +603,8 @@ async fn operation(
         OperationResult::PeerConnections(peers) => serde_json::to_value(peers)?,
         #[cfg(feature = "device-group-choices")]
         OperationResult::DeviceGroupChoices(choices) => serde_json::to_value(choices)?,
+        #[cfg(feature = "branch-recovery-tests")]
+        OperationResult::DeviceGroupChosen(result) => serde_json::to_value(result)?,
         #[cfg(feature = "current-engine")]
         OperationResult::MembershipDiagnostics(summary) => serde_json::to_value(summary)?,
         #[cfg(feature = "transfer-progress")]
@@ -630,6 +645,10 @@ fn host_identity() -> Value {
         (
             cfg!(feature = "device-group-choices"),
             "device-group-choices",
+        ),
+        (
+            cfg!(feature = "branch-recovery-tests"),
+            "branch-recovery-tests",
         ),
         (cfg!(feature = "join-status"), "join-status"),
         (
@@ -833,6 +852,18 @@ async fn main() -> Result<()> {
         let request: Value = serde_json::from_str(&line?)?;
         let command = string(&request, "command")?;
         let result = match command {
+            #[cfg(feature = "branch-recovery-fault-tests")]
+            "reset_space" => {
+                let mut reset = Box::pin(operation(&engine, &clipboard, &files, &request));
+                tokio::select! {
+                    biased;
+                    result = &mut reset => result,
+                    _ = tokio::task::yield_now() => {
+                        respond(json!({"reset_polled": true}))?;
+                        reset.await
+                    }
+                }
+            }
             "flush" => {
                 #[cfg(feature = "process-observability")]
                 observability.force_flush(Duration::from_secs(2));

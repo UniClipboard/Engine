@@ -286,6 +286,18 @@ jobs:
         if: always()
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/workspace.xml || true
 
+      - name: Run branch recovery process and checkpoint tests
+        if: success() || failure()
+        id: branch_recovery_process
+        run: |
+          rm -f target/nextest/ci/junit.xml
+          cargo nextest run --profile ci --locked -p uc-connectivity-host \
+            --features branch-recovery-fault-tests,uc-engine/branch-recovery-fault-tests --test branch_recovery
+
+      - name: Keep branch recovery process report
+        if: always() && steps.branch_recovery_process.outcome != 'skipped'
+        run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/branch-recovery-process.xml || true
+
       - name: Install just for current-authority registration proof
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
         with:

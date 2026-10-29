@@ -24,6 +24,7 @@ fn negotiated_protocol_only_exports_the_closed_known_kinds() {
         "blob",
         "transfer_progress_v1",
         "transfer_progress_v2",
+        "membership_branch_recovery",
         "other",
     ] {
         let payload = format!(

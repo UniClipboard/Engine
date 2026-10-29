@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use uc_observability_contract::diagnostics::connectivity::{
     ConnectionFailurePhase, ConnectionFailureReason, ConnectionObservation, ConnectionPurpose,
-    DialFailure,
 };
 
 use iroh::endpoint::ConnectOptions;
@@ -75,15 +74,8 @@ pub(super) fn strip_relay_if_lan_only(addr: EndpointAddr) -> EndpointAddr {
 #[derive(Debug, thiserror::Error)]
 #[error("all staggered connection attempts failed")]
 pub(crate) struct StaggeredDialError {
-    failure: DialFailure,
     #[source]
     attempt: DialAttemptError,
-}
-
-impl StaggeredDialError {
-    pub(crate) fn failure(&self) -> DialFailure {
-        self.failure
-    }
 }
 
 /// 单次拨号尝试的失败来源。
@@ -108,6 +100,7 @@ impl DialAttemptError {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn connect_with_staggered_retry(
     endpoint: Arc<Endpoint>,
     addr: EndpointAddr,
@@ -188,7 +181,6 @@ pub(super) async fn connect_with_staggered_retry_classified(
     }
 
     let mut reported: Option<DialAttemptError> = None;
-    let mut all_timed_out = true;
     let mut last_failure = super::connection_diagnostics::failed(
         ConnectionFailurePhase::Unknown,
         ConnectionFailureReason::Internal,
@@ -201,12 +193,10 @@ pub(super) async fn connect_with_staggered_retry_classified(
                 return Ok(connection);
             }
             Ok(Err((err, outcome))) => {
-                all_timed_out &= err.timed_out();
                 last_failure = outcome;
                 reported = Some(prefer_informative(reported, err));
             }
             Err(err) => {
-                all_timed_out = false;
                 last_failure = super::connection_diagnostics::failed(
                     ConnectionFailurePhase::Unknown,
                     ConnectionFailureReason::Internal,
@@ -217,13 +207,7 @@ pub(super) async fn connect_with_staggered_retry_classified(
     }
 
     observation.finish(last_failure);
-    let failure = if all_timed_out {
-        DialFailure::TimedOut
-    } else {
-        DialFailure::TransportFailed
-    };
     Err(StaggeredDialError {
-        failure,
         attempt: reported.unwrap_or(DialAttemptError::NotStarted),
     })
 }
@@ -569,11 +553,9 @@ mod tests {
         assert!(matches!(replaced, DialAttemptError::NotStarted));
 
         let error = StaggeredDialError {
-            failure: DialFailure::TimedOut,
             attempt: DialAttemptError::TimedOut(elapsed().await),
         };
         let source = std::error::Error::source(&error).expect("attempt source");
         assert!(source.downcast_ref::<DialAttemptError>().is_some());
-        assert!(matches!(error.failure(), DialFailure::TimedOut));
     }
 }

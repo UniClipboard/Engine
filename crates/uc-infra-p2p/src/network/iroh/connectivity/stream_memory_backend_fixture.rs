@@ -97,6 +97,8 @@ impl PeerReceiveStream for MemoryReceiveStream {
 }
 struct MemoryConnection {
     id: usize,
+    mode: ConnectionMode,
+    protocol: ConnectionProtocol,
     remote_key: [u8; 32],
     closed: watch::Sender<bool>,
     streams: Arc<AtomicU64>,
@@ -112,10 +114,10 @@ impl PeerConnection for MemoryConnection {
         self.remote_key
     }
     fn mode(&self) -> ConnectionMode {
-        ConnectionMode::Multiplexed
+        self.mode
     }
     fn protocol(&self) -> ConnectionProtocol {
-        ConnectionProtocol::TransferProgressV2
+        self.protocol
     }
     fn channel(&self) -> ConnectionChannel {
         ConnectionChannel::Unknown
@@ -177,6 +179,21 @@ fn pair(
     left_remote: [u8; 32],
     right_remote: [u8; 32],
 ) -> (Arc<MemoryConnection>, Arc<MemoryConnection>) {
+    pair_with_protocol(
+        id,
+        left_remote,
+        right_remote,
+        ConnectionMode::Multiplexed,
+        ConnectionProtocol::TransferProgressV2,
+    )
+}
+fn pair_with_protocol(
+    id: usize,
+    left_remote: [u8; 32],
+    right_remote: [u8; 32],
+    mode: ConnectionMode,
+    protocol: ConnectionProtocol,
+) -> (Arc<MemoryConnection>, Arc<MemoryConnection>) {
     let (left, left_incoming) = mpsc::channel(16);
     let (right, right_incoming) = mpsc::channel(16);
     let (closed, _) = watch::channel(false);
@@ -184,6 +201,8 @@ fn pair(
     (
         Arc::new(MemoryConnection {
             id,
+            mode,
+            protocol,
             remote_key: left_remote,
             closed: closed.clone(),
             streams: streams.clone(),
@@ -192,6 +211,8 @@ fn pair(
         }),
         Arc::new(MemoryConnection {
             id,
+            mode,
+            protocol,
             remote_key: right_remote,
             closed,
             streams,
@@ -199,6 +220,20 @@ fn pair(
             incoming: Mutex::new(right_incoming),
         }),
     )
+}
+
+pub(in crate::network::iroh::connectivity) fn recovery_connection_pair(
+    id: usize,
+    remote_key: [u8; 32],
+) -> (Arc<dyn PeerConnection>, Arc<dyn PeerConnection>) {
+    let (left, right) = pair_with_protocol(
+        id,
+        remote_key,
+        [1; 32],
+        ConnectionMode::SingleExchange,
+        ConnectionProtocol::MembershipBranchRecovery,
+    );
+    (left, right)
 }
 struct MemoryBackend {
     target: DeviceId,
@@ -224,10 +259,10 @@ impl ConnectivityBackend for MemoryBackend {
     }
 }
 #[derive(Clone)]
-struct Members {
-    peer: DeviceId,
-    key: [u8; 32],
-    allowed: Arc<AtomicBool>,
+pub(in crate::network::iroh::connectivity) struct Members {
+    pub peer: DeviceId,
+    pub key: [u8; 32],
+    pub allowed: Arc<AtomicBool>,
 }
 impl InboundAdmissionFence for Members {
     fn check_current(&self, peer: &DeviceId) -> Result<(), ConnectivityError> {

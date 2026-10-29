@@ -6,6 +6,7 @@ cd "$repo"
 source scripts/build-cache/env.sh
 # 后续连接切片可复用同一冻结构建机制；默认锚点保持第六切片原值。
 rev=$(git rev-parse "${UC_CONNECTIVITY_BASELINE_REV:-b6fa0ce6b2efd1c1764e76c0a76537bdeead4e1b}^{commit}")
+features="${UC_CONNECTIVITY_BASELINE_FEATURES:-current-engine}"
 root="${UC_CONNECTIVITY_BASELINE_ROOT:-$repo/target/peer-reachability-connectivity-evidence/frozen-main}"
 mkdir -p "$root" "${XDG_CACHE_HOME:-$HOME/.cache}"
 source_dir=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/uc-peer-reachability-source.XXXXXX")
@@ -65,12 +66,12 @@ PYLOCK
 sha256sum "$source_dir/tests/hosts/connectivity/Cargo.toml" "$source_dir/Cargo.lock" > "$root/driver-build-inputs-sha256.txt"
 sha256sum tests/hosts/connectivity/src/*.rs > "$root/driver-sha256.txt"
 sha256sum tests/hosts/connectivity/tests/active_clipboard_connectivity.rs tests/hosts/connectivity/tests/common/process.rs tests/hosts/connectivity/tests/fixtures/* > "$root/matrix-driver-sha256.txt"
-printf '%s\n' 'features=current-engine,uc-engine/dev-tools' 'profile=dev,debug=0' > "$root/build-profile.txt"
+printf '%s\n' "features=$features,uc-engine/dev-tools" 'profile=dev,debug=0' > "$root/build-profile.txt"
 printf '%s\n' "$rev" > "$root/engine-revision.txt"
 git archive "$rev" | sha256sum > "$root/engine-archive-sha256.txt"
 CARGO_TARGET_DIR="$repo/target" CARGO_PROFILE_DEV_DEBUG=0 UC_ENGINE_SOURCE_COMMIT="$rev" UC_ENGINE_SOURCE_STATE=clean \
 UC_HOST_ENGINE_REV="$rev" UC_HOST_ANCHOR="${UC_CONNECTIVITY_BASELINE_LABEL:-peer-reachability-baseline}" \
-  cargo build --locked --manifest-path "$source_dir/Cargo.toml" -p uc-connectivity-host --no-default-features --features current-engine
+  cargo build --locked --manifest-path "$source_dir/Cargo.toml" -p uc-connectivity-host --no-default-features --features "$features"
 cp target/debug/uc-connectivity-host "$root/uc-connectivity-host"
 sha256sum "$root/uc-connectivity-host" > "$root/binary-sha256.txt"
 if [[ -f "$backup" ]]; then cp "$backup" target/debug/uc-connectivity-host; fi

@@ -86,10 +86,14 @@ impl RecoverMembershipConflictUseCase {
     #[tracing::instrument(name = "usecase.recover_membership_conflict.execute", skip_all)]
     pub(crate) async fn execute(&self) -> RecoverMembershipConflictOutcome {
         let _guard = self.execution_lock.lock().await;
+        let generation = self.owner.generation();
         let view = match self.owner.load().await {
             Ok(view) => view,
             Err(error) => return map_ledger_error(error),
         };
+        if self.owner.generation() != generation {
+            return RecoverMembershipConflictOutcome::Deferred;
+        }
         let Some(space) = view.space() else {
             return RecoverMembershipConflictOutcome::Completed;
         };
@@ -129,11 +133,23 @@ impl RecoverMembershipConflictUseCase {
         let Some(peer_device_id) = conflict.evidence_peer_device_ids.iter().next().cloned() else {
             return RecoverMembershipConflictOutcome::Corrupt;
         };
+        let scope = match self.recovery_channel.freeze(peer_device_id) {
+            Ok(scope) => scope,
+            Err(error) => return map_channel_error(error),
+        };
+        // 如果读取成员事实与冻结撤销基线之间发生了发布，旧意图不能借新基线继续。
+        match self.owner.load().await {
+            Ok(current)
+                if Arc::ptr_eq(&view, &current) && self.owner.generation() == generation => {}
+            Ok(_) => return RecoverMembershipConflictOutcome::Deferred,
+            Err(error) => return map_ledger_error(error),
+        }
         let request = MembershipBranchRecoveryRequest {
             peer_device_id,
             conflict_id,
             target_branch_id,
             recipient_member,
+            scope: scope.clone(),
         };
         let existing_session = record.recovery_sessions.get(&transition_id).cloned();
         let package = if let Some(session) = existing_session.as_ref() {
@@ -148,6 +164,7 @@ impl RecoverMembershipConflictUseCase {
                         request.clone(),
                         transition_id,
                         external_commit.to_vec(),
+                        generation,
                     )
                     .await
                 {
@@ -164,6 +181,12 @@ impl RecoverMembershipConflictUseCase {
                 Ok(group_info) => group_info,
                 Err(error) => return map_channel_error(error),
             };
+            if self.owner.generation() != generation {
+                return RecoverMembershipConflictOutcome::Deferred;
+            }
+            if scope.check_frozen().is_err() {
+                return RecoverMembershipConflictOutcome::Deferred;
+            }
             let prepared = match self
                 .recipient_preparer
                 .prepare_membership_branch_recovery_recipient(group_info)
@@ -172,6 +195,12 @@ impl RecoverMembershipConflictUseCase {
                 Ok(prepared) => prepared,
                 Err(error) => return map_recipient_error(error),
             };
+            if self.owner.generation() != generation {
+                return RecoverMembershipConflictOutcome::Deferred;
+            }
+            if scope.check_frozen().is_err() {
+                return RecoverMembershipConflictOutcome::Deferred;
+            }
             let Some(session) = MembershipBranchRecoverySession::new_recipient_prepared(
                 transition_id,
                 conflict_id,
@@ -182,9 +211,13 @@ impl RecoverMembershipConflictUseCase {
             ) else {
                 return stable_failure("recipient_session", "invalid_session");
             };
+            let commit_scope = scope.clone();
             let persisted = self
                 .owner
-                .commit(move |draft| {
+                .commit_in_generation(generation, move |draft| {
+                    commit_scope
+                        .check_frozen()
+                        .map_err(MembershipLedgerError::unavailable_from)?;
                     let record = draft.branch_recovery_mut()?;
                     let current = record
                         .conflicts
@@ -214,13 +247,21 @@ impl RecoverMembershipConflictUseCase {
                 return map_ledger_error(error);
             }
             match self
-                .submit_and_persist_package(request, transition_id, prepared.external_commit)
+                .submit_and_persist_package(
+                    request,
+                    transition_id,
+                    prepared.external_commit,
+                    generation,
+                )
                 .await
             {
                 Ok(package) => package,
                 Err(outcome) => return outcome,
             }
         };
+        if scope.check_frozen().is_err() {
+            return RecoverMembershipConflictOutcome::Deferred;
+        }
         if package
             .validate(
                 conflict_id,
@@ -263,7 +304,10 @@ impl RecoverMembershipConflictUseCase {
 
         match self
             .owner
-            .commit(move |draft| {
+            .commit_in_generation(generation, move |draft| {
+                scope
+                    .check_frozen()
+                    .map_err(MembershipLedgerError::unavailable_from)?;
                 let record = draft.branch_recovery_mut()?;
                 if let Some(consuming_conflict) = record.consumed_recovery_nonces.get(&nonce) {
                     if consuming_conflict != &conflict_id {
@@ -472,10 +516,17 @@ impl RecoverMembershipConflictUseCase {
         request: MembershipBranchRecoveryRequest,
         transition_id: [u8; 32],
         external_commit: Vec<u8>,
+        generation: u64,
     ) -> Result<
         uc_core::membership::MembershipBranchRecoveryPackageV1,
         RecoverMembershipConflictOutcome,
     > {
+        if self.owner.generation() != generation {
+            return Err(RecoverMembershipConflictOutcome::Deferred);
+        }
+        if request.scope.check_frozen().is_err() {
+            return Err(RecoverMembershipConflictOutcome::Deferred);
+        }
         let package = self
             .recovery_channel
             .submit_membership_branch_external_commit(MembershipBranchRecoveryCommit {
@@ -484,6 +535,12 @@ impl RecoverMembershipConflictUseCase {
             })
             .await
             .map_err(map_channel_error)?;
+        if self.owner.generation() != generation {
+            return Err(RecoverMembershipConflictOutcome::Deferred);
+        }
+        if request.scope.check_frozen().is_err() {
+            return Err(RecoverMembershipConflictOutcome::Deferred);
+        }
         if package
             .validate(
                 request.conflict_id,
@@ -497,8 +554,12 @@ impl RecoverMembershipConflictUseCase {
             return Err(stable_failure("package_validation", "invalid"));
         }
         let persisted_package = package.clone();
+        let scope = request.scope.clone();
         self.owner
-            .commit(move |draft| {
+            .commit_in_generation(generation, move |draft| {
+                scope
+                    .check_frozen()
+                    .map_err(MembershipLedgerError::unavailable_from)?;
                 let session = draft
                     .branch_recovery_mut()?
                     .recovery_sessions

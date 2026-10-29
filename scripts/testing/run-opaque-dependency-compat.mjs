@@ -42,13 +42,14 @@ try {
   execFileSync('tar', ['-x', '-C', source], { input: archive })
   const submodule = git(['rev-parse', `${oldRevision}:third_party/iroh`])
   // 旧版 gitlink 与当前子模块可以不同。只按旧版提交归档，不切换当前工作树。
-  if (spawnSync('git', ['-C', 'third_party/iroh', 'cat-file', '-e', `${submodule}^{commit}`], { cwd: root, stdio: 'ignore' }).status !== 0) {
-    execFileSync('git', ['-C', 'third_party/iroh', 'fetch', '--no-tags', 'origin', submodule], { cwd: root, stdio: 'inherit' })
+  const networkSource = join(root, 'third_party/iroh')
+  if (spawnSync('git', ['-C', networkSource, 'cat-file', '-e', `${submodule}^{commit}`], { stdio: 'ignore' }).status !== 0) {
+    execFileSync('git', ['-C', networkSource, 'fetch', '--no-tags', 'origin', submodule], { stdio: 'inherit' })
   }
-  const networkArchive = execFileSync('git', ['-C', 'third_party/iroh', 'archive', submodule], { cwd: root, maxBuffer: 512 * 1024 * 1024 })
   const oldNetwork = join(source, 'third_party/iroh')
   rmSync(oldNetwork, { recursive: true, force: true })
   mkdirSync(oldNetwork, { recursive: true })
+  const networkArchive = execFileSync('git', ['-C', networkSource, 'archive', submodule], { maxBuffer: 512 * 1024 * 1024 })
   execFileSync('tar', ['-x', '-C', oldNetwork], { input: networkArchive })
   mkdirSync(join(source, 'crates/uc-infra-crypto/tests'), { recursive: true })
   copyFileSync(join(root, testPath), join(source, testPath))

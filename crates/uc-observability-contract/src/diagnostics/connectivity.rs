@@ -33,7 +33,8 @@ pub use local_work::{
     LocalWorkObservation, LocalWorkOutcome, LocalWorkStep,
 };
 pub use maintenance::{
-    record_pending_group_updates, MaintenanceDisposition, MaintenanceObservation,
+    record_maintenance_connection, record_pending_group_updates, MaintenanceDisposition,
+    MaintenanceObservation,
 };
 
 pub use address_record::{

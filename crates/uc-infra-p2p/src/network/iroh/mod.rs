@@ -20,7 +20,6 @@ mod discovery;
 pub mod group_update_adapter;
 pub mod identity_store;
 pub(crate) mod inbound_peer;
-mod membership_branch_recovery_adapter;
 pub mod membership_history_exchange_adapter;
 mod membership_identity_adapter;
 mod net_recovery;
@@ -60,13 +59,11 @@ pub use active_clipboard::{
 pub(crate) use addr_filter::filter_endpoint_addr;
 pub use admission_transport_material::IrohAdmissionTransportMaterial;
 pub use blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
-pub(crate) use connect::connect_with_staggered_retry;
 pub use connection_channel_adapter::IrohConnectionChannelAdapter;
 pub use group_update_adapter::{
     IrohGroupUpdateAdapter, IrohGroupUpdateHandler, GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN,
 };
 pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
-pub use membership_branch_recovery_adapter::IrohMembershipBranchRecoveryChannel;
 pub use membership_history_exchange_adapter::{
     HistoryConnectionAdmission, IrohMembershipHistoryExchangeHandler,
     IrohVerifiedPeerAddressRefresh, MembershipHistoryWire, SessionMembershipHistoryLocalWork,

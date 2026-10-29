@@ -18,6 +18,7 @@ wire_enum! {
         Blob => "blob",
         TransferProgressV1 => "transfer_progress_v1",
         TransferProgressV2 => "transfer_progress_v2",
+        MembershipBranchRecovery => "membership_branch_recovery",
         Other => "other",
     }
 }

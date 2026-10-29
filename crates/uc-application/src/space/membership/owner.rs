@@ -11,6 +11,7 @@ mod tests;
 mod view;
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -32,7 +33,7 @@ use crate::space::lifecycle::{SpaceMembershipRebuildError, SpaceMembershipResetP
 pub(crate) use draft::MembershipDraft;
 pub(crate) use retirement::{MemberScopeRetirement, MemberScopeRetirementPort};
 use uc_observability_contract::uc_warn;
-pub(crate) use view::{pause_reason, MembershipView};
+pub(crate) use view::{pause_reason, MembershipView, SpaceMembershipView};
 
 pub(crate) struct MembershipOwner {
     store: Arc<dyn MembershipRecordStorePort>,
@@ -115,6 +116,11 @@ impl MembershipOwner {
         self.clock.now_ms()
     }
 
+    /// 供持久流程识别其读取的数据库是否已被替换；提交仍须使用存储的条件写入。
+    pub(crate) fn generation(&self) -> u64 {
+        self.store.generation()
+    }
+
     /// 当前已发布的成员状态。首次读取、提交失败后或记录所在数据库被替换后，从持久记录重新加载并校验。
     pub(crate) async fn load(&self) -> Result<Arc<MembershipView>, MembershipLedgerError> {
         if let Some(view) = self.published_at(self.store.generation())? {
@@ -129,8 +135,61 @@ impl MembershipOwner {
         &self,
         change: impl FnOnce(&mut MembershipDraft) -> Result<T, MembershipLedgerError>,
     ) -> Result<MembershipCommitted<T>, MembershipLedgerError> {
+        self.commit_scoped(None, change).await
+    }
+
+    /// 原业务操作必须仍属于最初读取的数据库，不能在新库重新加载后继续提交。
+    pub(crate) async fn commit_in_generation<T>(
+        &self,
+        generation: u64,
+        change: impl FnOnce(&mut MembershipDraft) -> Result<T, MembershipLedgerError>,
+    ) -> Result<MembershipCommitted<T>, MembershipLedgerError> {
+        self.commit_scoped(Some(generation), change).await
+    }
+
+    /// 在成员事实写入边界内核验并执行已监督的本地工作。
+    /// 工作不得重入 Owner；调用方必须监督已开始的工作至实际结算。
+    pub(crate) async fn run_and_commit_in_generation<E>(
+        &self,
+        expected_generation: u64,
+        validate: impl FnOnce(&MembershipView) -> Result<(), MembershipLedgerError>,
+        work: impl Future<Output = Result<(), E>>,
+        change: impl FnOnce(&mut MembershipDraft) -> Result<(), MembershipLedgerError>,
+    ) -> Result<Result<(), E>, MembershipLedgerError> {
         let _operation = self.operation.lock().await;
         let (generation, current) = self.load_exclusive().await?;
+        if generation != expected_generation || self.store.generation() != generation {
+            return Err(MembershipLedgerError::unavailable());
+        }
+        validate(&current)?;
+        if let Err(error) = work.await {
+            return Ok(Err(error));
+        }
+        self.commit_exclusive(generation, current, change).await?;
+        Ok(Ok(()))
+    }
+
+    async fn commit_scoped<T>(
+        &self,
+        expected_generation: Option<u64>,
+        change: impl FnOnce(&mut MembershipDraft) -> Result<T, MembershipLedgerError>,
+    ) -> Result<MembershipCommitted<T>, MembershipLedgerError> {
+        let _operation = self.operation.lock().await;
+        let (generation, current) = self.load_exclusive().await?;
+        if expected_generation.is_some_and(|expected| expected != generation)
+            || self.store.generation() != generation
+        {
+            return Err(MembershipLedgerError::unavailable());
+        }
+        self.commit_exclusive(generation, current, change).await
+    }
+
+    async fn commit_exclusive<T>(
+        &self,
+        generation: u64,
+        current: Arc<MembershipView>,
+        change: impl FnOnce(&mut MembershipDraft) -> Result<T, MembershipLedgerError>,
+    ) -> Result<MembershipCommitted<T>, MembershipLedgerError> {
         let mut draft = MembershipDraft::new(Arc::clone(&current), self.clock.now_ms());
         let output = change(&mut draft)?;
         let Some(finished) = draft.finish()? else {
@@ -147,6 +206,7 @@ impl MembershipOwner {
         let committed = self
             .store
             .commit(MembershipRecordCommit {
+                expected_generation: generation,
                 expected_revision: current.revision(),
                 replacement: finished.view.to_record(),
                 projection,

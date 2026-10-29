@@ -1,7 +1,5 @@
 //! 同一真实codec和Application动作使用第二backend；不把内存字节流当作真实网络或密码握手证据。
 use uuid::Uuid;
-#[path = "stream_memory_backend_fixture.rs"]
-mod fixture;
 #[path = "stream_memory_backend_queued_query_probe.rs"]
 mod queued_query_probe;
 #[path = "stream_memory_backend_request_end_probe.rs"]
@@ -10,10 +8,10 @@ mod request_end_probe;
 mod retirement_probe;
 #[path = "stream_memory_backend_session_probe.rs"]
 mod session_probe;
+use super::memory_backend_fixture::MemoryPair;
 use super::progress_probe::{progress_budget, UnusedSnapshotProvider};
 use crate::network::iroh::transfer_progress_v2::{TransferProgressInbound, TransferProgressWire};
 use async_trait::async_trait;
-use fixture::MemoryPair;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

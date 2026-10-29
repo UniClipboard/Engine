@@ -1,10 +1,13 @@
 //! 实际普通模式文件验收：阶段关联、耗时、原始错误保留、中断与去重。
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::Instrument;
 use uc_observability_contract::diagnostics::connectivity::{
-    observe_local_result, scope_pairing_work, AdmissionExchangeSide, LocalWorkOutcome,
-    LocalWorkStep, MaintenanceDisposition, MaintenanceObservation, RecoveryTrigger,
+    observe_local_result, record_maintenance_connection, scope_pairing_work, AdmissionExchangeSide,
+    ConnectionCloseReason, ConnectionDirection, LocalWorkOutcome, LocalWorkStep,
+    MaintenanceDisposition, MaintenanceObservation, NetworkPathKind, NetworkRecorder,
+    RecoveryTrigger,
 };
 use uc_observability_contract::diagnostics::{
     operation_span, AdmissionObservationAction, DiagnosticDomain, DiagnosticOperation,
@@ -14,6 +17,96 @@ use uc_observability_runtime::{
     DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityResource,
     OperatingSystem, ProcessObservabilityRuntime, SignalResult,
 };
+
+#[tokio::test]
+async fn maintenance_connections_use_exact_anonymous_references_without_raw_keys() {
+    let logs = tempfile::tempdir().expect("logs");
+    let _runtime = ProcessObservabilityRuntime::install(
+        ObservabilityConfig::new(
+            ObservabilityResource::new(
+                "1.1.0",
+                DeploymentEnvironment::Test,
+                OperatingSystem::Linux,
+                "test",
+            )
+            .expect("resource"),
+        )
+        .with_local_logs(LocalLogConfig::new(logs.path())),
+    )
+    .expect("runtime");
+    let recorder = NetworkRecorder::current();
+    let first = recorder.connection_established(
+        [0x91; 32],
+        987654,
+        ConnectionDirection::Outbound,
+        NetworkPathKind::Direct,
+    );
+    let second = recorder.connection_established(
+        [0x92; 32],
+        987655,
+        ConnectionDirection::Outbound,
+        NetworkPathKind::Direct,
+    );
+    record_maintenance_connection([0x93; 32], 987656);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let run = |trigger, peer, key| {
+        let barrier = barrier.clone();
+        async move {
+            let mut round = MaintenanceObservation::request(trigger);
+            round.start();
+            round
+                .scope(async move {
+                    barrier.wait().await;
+                    record_maintenance_connection(peer, key);
+                })
+                .await;
+            round.finish(LocalWorkOutcome::Ok);
+        }
+    };
+    tokio::join!(
+        run(RecoveryTrigger::Startup, [0x91; 32], 987654),
+        run(RecoveryTrigger::Resume, [0x92; 32], 987655)
+    );
+    first.closed(ConnectionCloseReason::LocalClosed);
+    second.closed(ConnectionCloseReason::LocalClosed);
+    assert_eq!(
+        ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(5)),
+        SignalResult::Completed
+    );
+    let output = std::fs::read_dir(logs.path())
+        .expect("files")
+        .map(|entry| std::fs::read_to_string(entry.expect("entry").path()).expect("file"))
+        .collect::<String>();
+    assert!(!output.contains("987654") && !output.contains("987655"));
+    assert!(!output.contains(&"91".repeat(32)) && !output.contains(&"92".repeat(32)));
+    let records: Vec<Value> = output
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let established: Vec<_> = records
+        .iter()
+        .filter(|row| row["fields"]["event.name"] == "connection.established")
+        .collect();
+    let bound: Vec<_> = records
+        .iter()
+        .filter(|row| row["fields"]["event.name"] == "membership.maintenance.connection_bound")
+        .collect();
+    assert_eq!(established.len(), 2);
+    assert_eq!(bound.len(), 2);
+    assert_ne!(bound[0]["connection_id"], bound[1]["connection_id"]);
+    assert_ne!(
+        bound[0]["fields"]["maintenance_round"],
+        bound[1]["fields"]["maintenance_round"]
+    );
+    for (connection, trigger) in established.iter().zip(["startup", "resume"]) {
+        let relation = bound
+            .iter()
+            .find(|row| row["fields"]["trigger"] == trigger)
+            .expect("matching maintenance trigger");
+        assert!(relation["connection_id"].is_string());
+        assert_eq!(connection["connection_id"], relation["connection_id"]);
+    }
+}
 
 #[tokio::test]
 async fn local_work_records_duration_failure_cancellation_and_queue_in_standard_files() {

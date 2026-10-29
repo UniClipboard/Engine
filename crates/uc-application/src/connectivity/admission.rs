@@ -6,6 +6,10 @@ use uc_core::ids::DeviceId;
 #[async_trait]
 pub trait AdmissionGrant: Send + Sync {
     fn peer(&self) -> DeviceId;
+    /// 核对本连接原始撤销基线；缺少同步围栏时禁止跨步骤提交。
+    fn check_frozen(&self) -> Result<(), ConnectivityError> {
+        Err(ConnectivityError::Denied)
+    }
     async fn check_current(&self) -> Result<(), ConnectivityError>;
     /// 由准入负责人读取当前权威；默认不允许跨轮保留。
     async fn can_retain(&self) -> Result<bool, ConnectivityError> {
@@ -15,6 +19,10 @@ pub trait AdmissionGrant: Send + Sync {
 
 #[async_trait]
 pub trait AdmissionAttempt: Send + Sync {
+    /// 同步核对冻结的撤销基线；未提供围栏的实现不能用于跨步骤的提交保护。
+    fn check_frozen(&self) -> Result<(), ConnectivityError> {
+        Err(ConnectivityError::Denied)
+    }
     /// 校验本请求在排队之前冻结的撤销基线；复用连接不替换该基线。
     async fn check_current(&self) -> Result<(), ConnectivityError>;
     async fn adopt(

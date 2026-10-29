@@ -12,6 +12,7 @@ use uc_observability_contract::diagnostics::connectivity::{
     ConnectionCloseReason, ConnectionDirection, NegotiatedProtocol, NetworkPathKind,
     NetworkRecorder, ObserverFailure, PathObservationKind,
 };
+use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 
 use uc_sync_protocol::transfer_progress::{
@@ -132,14 +133,7 @@ impl EndpointHooks for ObservedConnections {
                 direction,
                 initial,
             );
-            observation.negotiated(match conn.alpn() {
-                LEGACY_PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV1,
-                PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV2,
-                BLOBS_ALPN => NegotiatedProtocol::Blob,
-                LEGACY_TRANSFER_PROGRESS_ALPN => NegotiatedProtocol::TransferProgressV1,
-                TRANSFER_PROGRESS_ALPN => NegotiatedProtocol::TransferProgressV2,
-                _ => NegotiatedProtocol::Other,
-            });
+            observation.negotiated(negotiated_protocol(conn.alpn()));
             if let Some(path) = selected {
                 observation.path(
                     path_key(path.id()),
@@ -192,6 +186,18 @@ impl EndpointHooks for ObservedConnections {
     }
 }
 
+fn negotiated_protocol(alpn: &[u8]) -> NegotiatedProtocol {
+    match alpn {
+        LEGACY_PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV1,
+        PEER_REACHABILITY_ALPN => NegotiatedProtocol::PeerReachabilityV2,
+        BLOBS_ALPN => NegotiatedProtocol::Blob,
+        LEGACY_TRANSFER_PROGRESS_ALPN => NegotiatedProtocol::TransferProgressV1,
+        TRANSFER_PROGRESS_ALPN => NegotiatedProtocol::TransferProgressV2,
+        MEMBERSHIP_BRANCH_RECOVERY_ALPN => NegotiatedProtocol::MembershipBranchRecovery,
+        _ => NegotiatedProtocol::Other,
+    }
+}
+
 fn path_key(id: iroh::endpoint::PathId) -> [u8; 32] {
     // PathId 只公开 Display/Hash；签名仅用作内存 key，运行时输出另分配的随机编号。
     sha2::Sha256::digest(id.to_string().as_bytes()).into()
@@ -221,7 +227,22 @@ pub(super) fn close_reason(reason: &iroh::endpoint::ConnectionError) -> Connecti
 #[cfg(test)]
 mod tests {
     use super::super::blobs::BLOBS_ALPN;
-    use super::{Arc, Duration, Instant, NetworkRecorder, ObservedConnections};
+    use super::{
+        negotiated_protocol, Arc, Duration, Instant, NegotiatedProtocol, NetworkRecorder,
+        ObservedConnections, MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+    };
+
+    #[test]
+    fn recovery_alpn_uses_a_fixed_diagnostic_protocol_kind() {
+        assert!(matches!(
+            negotiated_protocol(MEMBERSHIP_BRANCH_RECOVERY_ALPN),
+            NegotiatedProtocol::MembershipBranchRecovery
+        ));
+        assert!(matches!(
+            negotiated_protocol(b"private-unknown-alpn"),
+            NegotiatedProtocol::Other
+        ));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn expired_deadline_does_not_start_another_observer_grace_period() {

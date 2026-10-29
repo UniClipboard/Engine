@@ -1,17 +1,15 @@
 //! 统一入站身份门的判定表（切片 S2 暂存验收；落地路径即本文件在仓库中的相对路径）。
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    MemberRepositoryPort, MemberSyncPreferences, MembershipError, PeerAdmissionError,
-    PeerAdmissionPort, SpaceMember,
+    MemberRepositoryPort, MemberSyncPreferences, MembershipError, SpaceMember,
 };
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_core::security::IdentityFingerprint;
-use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
 
-use super::{InboundPeerGate, InboundPeerRejection, PeerIdentityResolver};
+use super::{InboundPeerRejection, PeerIdentityResolver};
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
 const KEY: [u8; 32] = [0x11; 32];
@@ -35,28 +33,6 @@ impl MemberRepositoryPort for Members {
     }
     async fn remove(&self, _: &DeviceId) -> Result<bool, MembershipError> {
         panic!("read-only fixture")
-    }
-}
-
-struct Admission {
-    answer: Result<bool, ()>,
-    checked: Mutex<Vec<DeviceId>>,
-}
-
-impl Admission {
-    fn new(answer: Result<bool, ()>) -> Arc<Self> {
-        Arc::new(Self {
-            answer,
-            checked: Mutex::new(Vec::new()),
-        })
-    }
-}
-
-#[async_trait]
-impl PeerAdmissionPort for Admission {
-    async fn is_admitted(&self, device_id: &DeviceId) -> Result<bool, PeerAdmissionError> {
-        self.checked.lock().unwrap().push(device_id.clone());
-        self.answer.map_err(|()| PeerAdmissionError::Unavailable)
     }
 }
 
@@ -87,28 +63,26 @@ fn resolver(members: Result<Vec<SpaceMember>, ()>) -> PeerIdentityResolver {
     )
 }
 
-fn gate(members: Result<Vec<SpaceMember>, ()>, admission: Arc<Admission>) -> InboundPeerGate {
-    InboundPeerGate::new(
-        InboundPeerProtocol::Presence,
-        Arc::new(Members(members)),
-        admission,
-        Arc::new(Sha256IdentityFingerprintFactory),
-    )
+async fn identify(resolver: &PeerIdentityResolver) -> Result<DeviceId, InboundPeerRejection> {
+    resolver
+        .resolve(&KEY)
+        .await
+        .map_err(|error| error.rejection())
 }
 
 #[tokio::test]
 async fn a_unique_fingerprint_identifies_its_device() {
-    let found = resolver(Ok(vec![member("a", &KEY), member("b", &OTHER_KEY)]))
-        .identify(&KEY)
-        .await;
+    let found = identify(&resolver(Ok(vec![
+        member("a", &KEY),
+        member("b", &OTHER_KEY),
+    ])))
+    .await;
     assert_eq!(found, Ok(DeviceId::new("a")));
 }
 
 #[tokio::test]
 async fn an_unknown_fingerprint_is_unresolved() {
-    let found = resolver(Ok(vec![member("b", &OTHER_KEY)]))
-        .identify(&KEY)
-        .await;
+    let found = identify(&resolver(Ok(vec![member("b", &OTHER_KEY)]))).await;
     assert_eq!(found, Err(InboundPeerRejection::IdentityUnresolved));
 }
 
@@ -119,7 +93,7 @@ async fn a_fingerprint_shared_by_two_devices_is_ambiguous_in_any_order() {
         vec![member("active", &KEY), member("stale", &KEY)],
     ] {
         assert_eq!(
-            resolver(Ok(members)).identify(&KEY).await,
+            identify(&resolver(Ok(members))).await,
             Err(InboundPeerRejection::IdentityAmbiguous)
         );
     }
@@ -128,7 +102,7 @@ async fn a_fingerprint_shared_by_two_devices_is_ambiguous_in_any_order() {
 #[tokio::test]
 async fn a_member_read_failure_is_not_reported_as_unknown() {
     assert_eq!(
-        resolver(Err(())).identify(&KEY).await,
+        identify(&resolver(Err(()))).await,
         Err(InboundPeerRejection::MemberReadFailed)
     );
 }
@@ -140,7 +114,7 @@ async fn a_fingerprint_derivation_failure_is_its_own_reason() {
         Arc::new(BrokenFingerprints),
     );
     assert_eq!(
-        resolver.identify(&KEY).await,
+        identify(&resolver).await,
         Err(InboundPeerRejection::FingerprintUnavailable)
     );
 }
@@ -176,55 +150,4 @@ async fn resolution_failures_keep_their_typed_source() {
         std::error::Error::source(&derivation).map(ToString::to_string),
         Some("fixture".to_owned())
     );
-}
-
-#[tokio::test]
-async fn admission_distinguishes_denial_from_unavailability() {
-    let denied = Admission::new(Ok(false));
-    assert_eq!(
-        gate(Ok(vec![member("a", &KEY)]), Arc::clone(&denied))
-            .admit(&KEY)
-            .await,
-        Err(InboundPeerRejection::LedgerDenied)
-    );
-    let unavailable = Admission::new(Err(()));
-    assert_eq!(
-        gate(Ok(vec![member("a", &KEY)]), Arc::clone(&unavailable))
-            .admit(&KEY)
-            .await,
-        Err(InboundPeerRejection::LedgerUnavailable)
-    );
-}
-
-#[tokio::test]
-async fn admission_asks_the_ledger_once_and_only_after_identity_succeeds() {
-    let admitted = Admission::new(Ok(true));
-    assert_eq!(
-        gate(Ok(vec![member("a", &KEY)]), Arc::clone(&admitted))
-            .admit(&KEY)
-            .await,
-        Ok(DeviceId::new("a"))
-    );
-    assert_eq!(*admitted.checked.lock().unwrap(), vec![DeviceId::new("a")]);
-
-    let untouched = Admission::new(Ok(true));
-    for members in [
-        Ok(vec![member("b", &OTHER_KEY)]),
-        Ok(vec![member("x", &KEY), member("y", &KEY)]),
-        Err(()),
-    ] {
-        assert!(gate(members, Arc::clone(&untouched))
-            .admit(&KEY)
-            .await
-            .is_err());
-    }
-    assert!(untouched.checked.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn authorize_uses_the_ledger_for_an_already_identified_device() {
-    let admitted = Admission::new(Ok(true));
-    let gate = gate(Ok(Vec::new()), Arc::clone(&admitted));
-    assert_eq!(gate.authorize(&DeviceId::new("a")).await, Ok(()));
-    assert_eq!(*admitted.checked.lock().unwrap(), vec![DeviceId::new("a")]);
 }

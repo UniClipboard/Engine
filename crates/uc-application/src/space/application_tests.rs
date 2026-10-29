@@ -676,6 +676,15 @@ impl MembershipNetworkActivityPort for PassivePorts {
 
 #[async_trait]
 impl MembershipBranchRecoveryChannelPort for PassivePorts {
+    fn freeze(
+        &self,
+        _peer: DeviceId,
+    ) -> Result<Arc<dyn BranchRecoveryOperationScopePort>, MembershipBranchRecoveryChannelError>
+    {
+        Err(MembershipBranchRecoveryChannelError::Unavailable {
+            source: anyhow::anyhow!("passive recovery source"),
+        })
+    }
     async fn request_membership_branch_group_info(
         &self,
         _request: MembershipBranchRecoveryRequest,

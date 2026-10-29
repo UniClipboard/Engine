@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::{
-    emit_local, millis, record::LocalEvent, LocalWorkOutcome, ObservationContext, RecoveryTrigger,
+    connection::peer_context, emit_local, millis, physical::with_connection_key,
+    record::LocalEvent, LocalWorkOutcome, ObservationContext, RecoveryTrigger,
 };
 
 static NEXT_ROUND: AtomicU64 = AtomicU64::new(1);
@@ -72,6 +73,9 @@ pub(super) enum MaintenanceEvent {
         outcome: LocalWorkOutcome,
         duration_ms: u64,
     },
+    ConnectionBound {
+        context: MaintenanceContext,
+    },
     Updates {
         context: Option<MaintenanceContext>,
         pending_count: u64,
@@ -88,6 +92,7 @@ impl MaintenanceEvent {
             Self::Coalesced { .. } => "membership.maintenance.coalesced",
             Self::NotExecuted { .. } => "membership.maintenance.not_executed",
             Self::Finished { .. } => "membership.maintenance.finished",
+            Self::ConnectionBound { .. } => "membership.maintenance.connection_bound",
             Self::Updates { .. } => "membership.maintenance.updates",
         }
     }
@@ -117,7 +122,8 @@ impl MaintenanceEvent {
             | Self::Started { context, .. }
             | Self::Coalesced { context, .. }
             | Self::NotExecuted { context, .. }
-            | Self::Finished { context, .. } => Some(*context),
+            | Self::Finished { context, .. }
+            | Self::ConnectionBound { context } => Some(*context),
             Self::Updates { context, .. } => *context,
         };
         if let Some(context) = context {
@@ -163,6 +169,20 @@ impl MaintenanceEvent {
         }
         fields
     }
+}
+
+/// 仅在维护轮次内记录匿名连接关联；原始连接键只存于内存上下文。
+pub fn record_maintenance_connection(peer: [u8; 32], connection_key: u64) {
+    let Some(context) = MaintenanceContext::capture() else {
+        return;
+    };
+    let parent = with_connection_key(&peer_context(peer), connection_key);
+    emit_local(
+        LocalEvent::Maintenance {
+            record: MaintenanceEvent::ConnectionBound { context },
+        },
+        &parent,
+    );
 }
 
 pub struct MaintenanceObservation {
@@ -293,6 +313,24 @@ mod tests {
         ] {
             let mut invalid = valid.clone();
             invalid["record"][field] = value;
+            assert!(decode_local_record(name, &invalid.to_string(), "INFO").is_none());
+        }
+    }
+
+    #[test]
+    fn connection_binding_rejects_raw_identity_and_unrelated_event_names() {
+        let valid = json!({"kind": "maintenance", "record": {"event": "connection_bound", "context": {"round": 3, "trigger": "state_changed"}}});
+        let name = "membership.maintenance.connection_bound";
+        assert!(decode_local_record(name, &valid.to_string(), "INFO").is_some());
+        assert!(decode_local_record(
+            "membership.maintenance.finished",
+            &valid.to_string(),
+            "INFO"
+        )
+        .is_none());
+        for field in ["peer", "connection_id", "public_key"] {
+            let mut invalid = valid.clone();
+            invalid["record"][field] = json!("PRIVATE");
             assert!(decode_local_record(name, &invalid.to_string(), "INFO").is_none());
         }
     }

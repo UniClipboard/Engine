@@ -7,18 +7,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use iroh::endpoint::Connection;
 use uc_application::deps::PeerConnection;
 use uc_core::ids::DeviceId;
 
-enum CloseHandle {
-    Native(Connection),
-    Managed(Arc<dyn PeerConnection>),
-}
-
 struct Tracked {
     stable_id: usize,
-    connection: CloseHandle,
+    connection: Arc<dyn PeerConnection>,
 }
 
 #[derive(Default)]
@@ -60,16 +54,6 @@ pub(crate) struct ConnectionRegistration {
 }
 
 impl AdmittedConnections {
-    /// 登记 `connection`。入站先登记再授权，保证撤销与授权并发时至少一方生效。
-    pub(crate) fn register(
-        &self,
-        device: &DeviceId,
-        connection: &Connection,
-    ) -> ConnectionRegistration {
-        let mut state = self.lock();
-        self.insert(&mut state, device, connection)
-    }
-
     /// 出站拨号开始前调用，记下此刻的撤销状态。
     pub(crate) fn epoch(&self, device: &DeviceId) -> RevocationEpoch {
         let state = self.lock();
@@ -101,7 +85,7 @@ impl AdmittedConnections {
         let stable_id = connection.id();
         state.connections.entry(*device).or_default().push(Tracked {
             stable_id,
-            connection: CloseHandle::Managed(connection),
+            connection,
         });
         Some(ConnectionRegistration {
             owner: self.clone(),
@@ -111,7 +95,7 @@ impl AdmittedConnections {
     }
 
     /// 关闭并移除 `device` 的全部登记连接，并使进行中的拨号失效。
-    pub(crate) fn close_device(&self, device: &DeviceId, reason: &'static [u8]) {
+    pub(crate) fn close_device(&self, device: &DeviceId) {
         let closing = {
             let mut state = self.lock();
             state.revision += 1;
@@ -119,11 +103,11 @@ impl AdmittedConnections {
             state.revoked.insert(*device, revision);
             state.connections.remove(device).unwrap_or_default()
         };
-        Self::close(closing, reason);
+        Self::close(closing);
     }
 
     /// 关闭并移除所有登记连接，并使进行中的拨号失效。
-    pub(crate) fn close_all(&self, reason: &'static [u8]) {
+    pub(crate) fn close_all(&self) {
         let closing: Vec<Tracked> = {
             let mut state = self.lock();
             state.revision += 1;
@@ -134,33 +118,12 @@ impl AdmittedConnections {
                 .flat_map(|(_, tracked)| tracked)
                 .collect()
         };
-        Self::close(closing, reason);
+        Self::close(closing);
     }
 
-    fn insert(
-        &self,
-        state: &mut State,
-        device: &DeviceId,
-        connection: &Connection,
-    ) -> ConnectionRegistration {
-        let stable_id = connection.stable_id();
-        state.connections.entry(*device).or_default().push(Tracked {
-            stable_id,
-            connection: CloseHandle::Native(connection.clone()),
-        });
-        ConnectionRegistration {
-            owner: self.clone(),
-            device: *device,
-            stable_id,
-        }
-    }
-
-    fn close(tracked: Vec<Tracked>, reason: &'static [u8]) {
+    fn close(tracked: Vec<Tracked>) {
         for entry in tracked {
-            match entry.connection {
-                CloseHandle::Native(connection) => connection.close(0u32.into(), reason),
-                CloseHandle::Managed(connection) => connection.close(),
-            }
+            entry.connection.close();
         }
     }
 

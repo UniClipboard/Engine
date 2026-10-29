@@ -76,6 +76,8 @@ struct ScopeWork {
     reconcile_slot: Arc<Semaphore>,
     tasks: JoinSet<()>,
     failure: Option<JoinError>,
+    #[cfg(test)]
+    after_send: Option<Arc<Semaphore>>,
 }
 
 impl Default for ScopeWork {
@@ -84,6 +86,8 @@ impl Default for ScopeWork {
             reconcile_slot: Arc::new(Semaphore::new(1)),
             tasks: JoinSet::new(),
             failure: None,
+            #[cfg(test)]
+            after_send: None,
         }
     }
 }
@@ -649,16 +653,25 @@ async fn read_scope(
             }
         }
         let observation = ObservationContext::capture();
+        #[cfg(test)]
+        let after_send = work.after_send.take();
         work.tasks.spawn(observation.scope(async move {
             let _capacity = capacity;
-            let _reconcile_capacity = reconcile_capacity;
             let result = scope.snapshot().await;
+            // 读取实际结束后先归还单槽，再通知调用方，避免新刷新误判繁忙。
+            drop(reconcile_capacity);
             if let Err(Err(source)) = send.send(result) {
                 uc_warn!(
                     error_kind = "scope_read_settled_after_cancellation",
                     io_error_kind = io_error_kind(&source),
                     "peer scope work settled after cancellation"
                 );
+            }
+            #[cfg(test)]
+            if let Some(after_send) = after_send {
+                if let Ok(permit) = after_send.acquire().await {
+                    permit.forget();
+                }
             }
         }));
     }
@@ -668,3 +681,7 @@ async fn read_scope(
         .map_err(PeerConnectionError::Response)?
         .map_err(PeerConnectionError::Scope)
 }
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;

@@ -24,6 +24,9 @@ current-engine = [
 ]
 connectivity-opportunity = []
 device-group-choices = []
+branch-recovery-tests = ["device-group-choices"]
+# 旧版 Engine 不认识注入 feature；当前端测试命令同时显式启用 uc-engine 对应 feature。
+branch-recovery-fault-tests = ["branch-recovery-tests"]
 join-status = []
 network-recovery = []
 process-observability = []
