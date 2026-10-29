@@ -850,21 +850,7 @@ mod tests {
     /// early-return paths; only the required methods are implemented).
     struct StubOrigin;
     #[async_trait]
-    impl uc_core::ports::clipboard::SelfWriteLedgerPort for StubOrigin {
-        async fn record_self_write(
-            &self,
-            _matching: uc_core::ports::clipboard::SelfWriteMatch,
-            _attribution: uc_core::ports::clipboard::SelfWriteAttribution,
-            _ttl: std::time::Duration,
-        ) {
-        }
-        async fn attribute_observed_change(
-            &self,
-            _snapshot_hash: &str,
-        ) -> uc_core::ClipboardChangeOrigin {
-            uc_core::ClipboardChangeOrigin::LocalCapture
-        }
-    }
+    impl uc_core::ports::clipboard::SelfWriteLedgerPort for StubOrigin {}
 
     /// Reconstructor ports that all panic — none should be reached on an
     /// early-return path.

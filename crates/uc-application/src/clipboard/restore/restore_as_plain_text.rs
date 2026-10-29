@@ -13,11 +13,8 @@
 //!   返回 `PlainRestoreOutcome::NoPlainTextAvailable` 让 facade 决定降级。
 //!   本用例**不**自己回退——降级是编排职责，留给 facade。
 //!
-//! 自写抑制：复用 `ClipboardWriteCoordinator` + `ClipboardWriteIntent::LocalRestore`。
-//! `origin_guard_key` 在仅含 plain rep 的 snapshot 上计算结果为 `text:<hash>`，
-//! 与 watcher 回声端口计算结果一致，内容守卫（`SelfWriteMatch::ByContent`）稳定命中；
-//! 即便遇到极端 hash miss，coordinator 写成功后登记的 next-change 兜底记录
-//! （`SelfWriteMatch::ByNextChange`）兜底，watcher 不会把这次恢复重新当作新条目落库。
+//! 自写归因：复用 `ClipboardWriteCoordinator`。只有宿主提供可靠写入身份时，
+//! 观察才能归因为恢复。身份不可用时，观察保留为本机复制。
 //!
 //! payload 读取：必须通过 `ClipboardPayloadResolverPort.resolve()`——Staged 状态
 //! 下 `rep.inline_data` 是 normalizer 留下的 500 字符预览截断版，直接读会粘出
@@ -465,19 +462,17 @@ mod tests {
     use anyhow::Result as AnyResult;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
     use uc_core::clipboard::ActiveClipboardState;
     use uc_core::clipboard::{
-        ClipboardChangeOrigin, ClipboardEntry, ClipboardIntegrationMode, ClipboardRepositoryError,
-        ClipboardSelection, ClipboardSelectionDecision, MimeType, PersistedClipboardRepresentation,
+        ClipboardEntry, ClipboardIntegrationMode, ClipboardRepositoryError, ClipboardSelection,
+        ClipboardSelectionDecision, MimeType, PersistedClipboardRepresentation,
         SelectionPolicyVersion, SystemClipboardSnapshot,
     };
     use uc_core::ids::{DeviceId, EntryId, EventId, FormatId, RepresentationId};
     use uc_core::ports::clipboard::{
         ActiveClipboardRegisterError, AdvanceActiveClipboardPort, ClipboardPayloadResolverPort,
         GetClipboardEntryPort, GetEntrySnapshotHashPort, GetRepresentationPort,
-        PayloadResolveError, ResolvedClipboardPayload, SelfWriteAttribution, SelfWriteLedgerPort,
-        SelfWriteMatch, SystemClipboardPort,
+        PayloadResolveError, ResolvedClipboardPayload, SelfWriteLedgerPort, SystemClipboardPort,
     };
     use uc_core::ports::{ClipboardSelectionRepositoryPort, ClockPort, DeviceIdentityPort};
     use uc_core::BlobId;
@@ -592,15 +587,7 @@ mod tests {
     mockall::mock! {
         ChangeOrigin {}
         #[async_trait]
-        impl SelfWriteLedgerPort for ChangeOrigin {
-            async fn record_self_write(
-                &self,
-                matching: SelfWriteMatch,
-                attribution: SelfWriteAttribution,
-                ttl: Duration,
-            );
-            async fn attribute_observed_change(&self, snapshot_hash: &str) -> ClipboardChangeOrigin;
-        }
+        impl SelfWriteLedgerPort for ChangeOrigin {}
     }
 
     /// 把 `payload_resolver.resolve` 配置成"按 inline_data 直读"——所有测试 rep
@@ -630,7 +617,7 @@ mod tests {
     /// 细节（coordinator 自身已在 `clipboard_write/coordinator.rs` 测过），
     /// 这里只让所有相关方法以 default 行为通过。
     fn expect_permissive_origin(origin: &mut MockChangeOrigin) {
-        origin.expect_record_self_write().returning(|_, _, _| ());
+        let _ = origin;
     }
 
     /// 用 mockall 把每次 `write_snapshot` 收到的 snapshot 累计起来供断言查阅，

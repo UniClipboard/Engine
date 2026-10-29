@@ -621,3 +621,13 @@ The settings schema version does not change.
 `expected_attempt_id` 已被替换时返回Superseded，宿主无需自行比较协议对象。
 `OutboundProgressChanged` 只提示缓存失效，事件丢失或滞后后可以重读列表；网络采用及ACK不等待宿主渲染。
 UniFFI与HarmonyOS绑定调用同一完整操作；HarmonyOS的字节数及修订号使用十进制字符串，避免JavaScript整数精度损失。
+
+### Clipboard write and observation identity
+
+Engine owns clipboard write attribution. A host may return an opaque identity in the write receipt only when it can prove that the identity belongs to that successful native write. The host must attach the same identity to each snapshot captured from that write. The identity must differ for every distinct user or application write during the Engine lifetime. It must not contain clipboard data, file names, paths, or business identifiers. The identity is local to the host and must not be persisted or logged.
+
+The host must attach the identity at capture time. A delayed captured snapshot must retain its original identity. A later read of the current clipboard must not assign its identity to that snapshot. The host must return no identity when atomic association is unavailable or ambiguous. A timestamp, a content type, and a time window do not prove identity. A native counter is valid only if the host also proves that its receipt and snapshot refer to the same write, including batching, races, resets, and reuse.
+
+Engine waits for in-flight writes before attributing an identified observation. A failed write does not register an identity. A successful write with no identity leaves subsequent observations as local captures. The host must not synchronously wait for an observation to finish inside its write callback. Engine retains at most 256 identities per runtime; an observation whose identity has been evicted is treated as local. Duplicate observations with a retained matching identity have the same origin. This conservative fallback may resend an echo, but does not suppress an unproven user copy.
+
+Existing hosts use the default methods and return no identity. UniFFI hosts must populate `BindingClipboardSnapshot.identity` for a captured observation and return the matching optional identity from `clipboard_write`. Android captured handoff must carry the capture-time identity with the captured data. Swift and Kotlin adapters must prove a platform-specific association before returning an identity. HarmonyOS and Desktop adapters remain on the conservative path until their host boundaries support this contract. Generated declarations do not establish native clipboard acceptance.

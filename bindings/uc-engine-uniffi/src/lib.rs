@@ -398,6 +398,7 @@ impl std::fmt::Debug for BindingClipboardRepresentation {
 
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BindingClipboardSnapshot {
+    pub identity: Option<Vec<u8>>,
     pub observed_at_ms: i64,
     pub representations: Vec<BindingClipboardRepresentation>,
 }
@@ -576,7 +577,10 @@ pub trait BindingHost: Send + Sync {
     ) -> Result<(), HostBindingError>;
     fn file_finish_write(&self, handle: String) -> Result<(), HostBindingError>;
     fn clipboard_read(&self) -> Result<BindingClipboardSnapshot, HostBindingError>;
-    fn clipboard_write(&self, snapshot: BindingClipboardSnapshot) -> Result<(), HostBindingError>;
+    fn clipboard_write(
+        &self,
+        snapshot: BindingClipboardSnapshot,
+    ) -> Result<Option<Vec<u8>>, HostBindingError>;
 }
 
 #[uniffi::export(with_foreign)]

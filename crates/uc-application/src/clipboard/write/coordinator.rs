@@ -1,18 +1,6 @@
-//! `ClipboardWriteCoordinator` — single write boundary for all
-//! programmatic clipboard writes, with per-intent guard TTL handling so
-//! the daemon's clipboard watcher can attribute the change to the
-//! originating intent (LocalRestore / RemotePush) and
-//! avoid write-back loops.
-//!
-//! ## History
-//!
-//! Originally lived at
-//! `uc-app/src/usecases/clipboard/clipboard_write_coordinator.rs`. Moved
-//! here in Slice 2 Phase 3 (T0b) so `uc-application` use cases (e.g.
-//! `ApplyInboundClipboardUseCase`) can depend on it without a reverse
-//! `uc-application → uc-app` import (forbidden per `docs/design-docs/layers/application.md`).
-//! The old path keeps a deprecated re-export shim until Slice 5 deletes
-//! `uc-app`.
+//! 系统剪贴板写入的唯一负责人。
+//! 写入前登记未完成动作。写入结束后登记宿主确认的身份或无身份结果。
+//! 未完成的写入由独立任务持有，调用方取消等待不会中断清理。
 
 use anyhow::{Error, Result};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -24,15 +12,11 @@ use tracing::Instrument;
 use tracing::{info_span, Span};
 
 use uc_core::clipboard::SystemClipboardSnapshot;
-use uc_core::ports::clipboard::{
-    SelfWriteAttribution, SelfWriteLedgerPort, SelfWriteMatch, SystemClipboardPort,
-};
+use uc_core::ports::clipboard::{SelfWriteAttribution, SelfWriteLedgerPort, SystemClipboardPort};
 use uc_observability_contract::diagnostics::ObservationContext;
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_vocab_debug, uc_error, uc_info, uc_warn,
 };
-
-use super::timing::{LOCAL_ECHO_RTT_MAX, REMOTE_ECHO_RTT_MAX};
 
 /// Number of consecutive OS-write failures that trip the circuit.
 ///
@@ -54,14 +38,7 @@ const CIRCUIT_FAILURE_THRESHOLD: u32 = 5;
 /// without literally sleeping 30 seconds.
 const DEFAULT_CIRCUIT_OPEN_DURATION: Duration = Duration::from_secs(30);
 
-/// Represents the intent behind a programmatic clipboard write.
-///
-/// Each variant arms a self-write record under a named echo budget from
-/// [`super::timing`] (`LOCAL_ECHO_RTT_MAX` / `REMOTE_ECHO_RTT_MAX`), never as
-/// inline literals. The budget is a GC backstop; the next watcher event is what
-/// consumes the record:
-/// - `LocalRestore`: content record + next-change fallback, local budget
-/// - `RemotePush`: content record + next-change fallback, remote budget (OS re-encoding guard)
+/// 表示系统剪贴板写入的来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipboardWriteIntent {
     /// A local clipboard history restore (user clicked "restore" in history).
@@ -70,18 +47,7 @@ pub enum ClipboardWriteIntent {
     RemotePush,
 }
 
-/// Single write boundary for all programmatic clipboard writes.
-///
-/// Centralises the guard-registration + write + cleanup-on-error pattern
-/// that was previously duplicated across `restore_clipboard_selection.rs`
-/// and `copy_file_to_clipboard.rs` (and the now-deleted libp2p-era
-/// `sync_inbound.rs`).
-///
-/// # Contract
-///
-/// `write(snapshot, intent)` is the ONLY caller of `snapshot.origin_guard_key()`.
-/// Callers build the snapshot and choose the intent; the coordinator handles
-/// all guard lifecycle operations.
+/// 为每次写入持有顺序锁，并在观察归因前发布写入结果。
 #[derive(Clone)]
 pub struct ClipboardWriteCoordinator {
     system_clipboard: Arc<dyn SystemClipboardPort>,
@@ -223,28 +189,7 @@ impl ClipboardWriteCoordinator {
         self.writing.load(Ordering::Acquire)
     }
 
-    /// Write a snapshot to the system clipboard with the given intent.
-    ///
-    /// # Intent semantics
-    ///
-    /// Each record uses a named echo budget from [`super::timing`]
-    /// (`LOCAL_ECHO_RTT_MAX` / `REMOTE_ECHO_RTT_MAX`), never inline, armed via
-    /// `SelfWriteLedgerPort::record_self_write`.
-    ///
-    /// - `LocalRestore`: records a `ByContent`/`Local` self-write under the local
-    ///   budget, writes, then records a `ByNextChange`/`Local` fallback to cover
-    ///   file URI/path rewrites that change bytes between write and watcher callback.
-    /// - `RemotePush`: records a `ByContent`/`Remote` self-write under the remote
-    ///   budget, writes, then records a `ByNextChange`/`Remote` fallback to guard
-    ///   against OS re-encoding loopback (e.g., Windows DIB→PNG re-encode yields
-    ///   bytes the content record won't match). The remote budget is generous
-    ///   because that fallback is the sole suppression for a re-encoded echo.
-    ///
-    /// # Error handling
-    ///
-    /// On `write_snapshot` failure, the just-armed content record is consumed via
-    /// `attribute_observed_change` to prevent stale record accumulation. The
-    /// `ByNextChange` fallback is NOT armed on failure.
+    /// 写入快照并发布宿主回执。没有可靠身份时不能推定回声。
     pub async fn write(
         &self,
         snapshot: SystemClipboardSnapshot,
@@ -272,8 +217,6 @@ impl ClipboardWriteCoordinator {
         snapshot: SystemClipboardSnapshot,
         intent: ClipboardWriteIntent,
     ) -> Result<()> {
-        let origin_guard_key = snapshot.origin_guard_key();
-
         // Circuit breaker check — when the OS clipboard is unavailable
         // (typically held by AV / IME / RDP), keep hammering it produces
         // nothing but Sentry noise (see UNICLIPBOARD-RUST-F: 50 failed
@@ -296,46 +239,26 @@ impl ClipboardWriteCoordinator {
         }
 
         async {
-            // Arm a content-keyed self-write record before writing.
-            match intent {
-                ClipboardWriteIntent::LocalRestore => {
-                    self.clipboard_change_origin
-                        .record_self_write(
-                            SelfWriteMatch::ByContent(origin_guard_key.clone()),
-                            SelfWriteAttribution::Local,
-                            LOCAL_ECHO_RTT_MAX,
-                        )
-                        .await;
-                }
-                ClipboardWriteIntent::RemotePush => {
-                    self.clipboard_change_origin
-                        .record_self_write(
-                            SelfWriteMatch::ByContent(origin_guard_key.clone()),
-                            SelfWriteAttribution::Remote,
-                            REMOTE_ECHO_RTT_MAX,
-                        )
-                        .await;
-                }
-            }
+            let attribution = match intent {
+                ClipboardWriteIntent::LocalRestore => SelfWriteAttribution::Local,
+                ClipboardWriteIntent::RemotePush => SelfWriteAttribution::Remote,
+            };
+            self.clipboard_change_origin.begin_identified_write().await;
 
-            // Attempt the write. Log and unwind the guard on failure so subsequent
-            // writes start from a clean slate (and so outages surface in Seq/stdout
-            // instead of being hidden in the `Err` bubbling back up the call chain).
             let clipboard = Arc::clone(&self.system_clipboard);
             let span = Span::current();
             let observation = ObservationContext::capture();
             let written = spawn_blocking(move || {
-                observation.sync_scope(|| span.in_scope(|| clipboard.write_snapshot(snapshot)))
+                observation.sync_scope(|| span.in_scope(|| clipboard.write_with_receipt(snapshot)))
             })
             .await
             .map_err(|source| Error::new(source).context("system clipboard writer failed"))
             .and_then(|result| result);
+            let identity = written.as_ref().ok().and_then(|receipt| receipt.clone());
+            self.clipboard_change_origin
+                .finish_identified_write(identity, attribution)
+                .await;
             if let Err(err) = written {
-                // Unwind the just-armed content record so a later unrelated
-                // change is not mis-attributed to this failed write.
-                self.clipboard_change_origin
-                    .attribute_observed_change(&origin_guard_key)
-                    .await;
                 // Record failure first so the error event below can include
                 // the post-increment count and `circuit_tripped` derived state.
                 // Whoever reads Sentry can pair `error_kind=os_write_failed`
@@ -358,43 +281,11 @@ impl ClipboardWriteCoordinator {
 
             self.record_success();
 
-            match intent {
-                ClipboardWriteIntent::LocalRestore => {
-                    // File restores can come back from the platform clipboard with rewritten
-                    // URI/path bytes, so the content record alone is not sufficient. Pair the
-                    // fallback to this write via its guard key so a repeat write of the same
-                    // snapshot coalesces instead of leaving a stray fallback behind.
-                    self.clipboard_change_origin
-                        .record_self_write(
-                            SelfWriteMatch::ByNextChange(origin_guard_key.clone()),
-                            SelfWriteAttribution::Local,
-                            LOCAL_ECHO_RTT_MAX,
-                        )
-                        .await;
-                }
-                ClipboardWriteIntent::RemotePush => {
-                    // Some platforms (e.g. Windows clipboard-rs) re-encode images (PNG→DIB→PNG),
-                    // producing different bytes than the original. The content record above won't
-                    // match the re-encoded content, so we arm a next-change record: the NEXT
-                    // clipboard change is treated as RemotePush regardless of hash. The guard key
-                    // pairs the fallback to this write so a duplicated push of the same snapshot
-                    // coalesces instead of leaking a fallback that would swallow a later copy.
-                    self.clipboard_change_origin
-                        .record_self_write(
-                            SelfWriteMatch::ByNextChange(origin_guard_key.clone()),
-                            SelfWriteAttribution::Remote,
-                            REMOTE_ECHO_RTT_MAX,
-                        )
-                        .await;
-                }
-            }
-
             Ok(())
         }
         .instrument(info_span!(
             "clipboard_write_coordinator.write",
-            intent = ?intent,
-            origin_guard_key = %origin_guard_key
+            intent = ?intent
         ))
         .await
     }
@@ -424,7 +315,6 @@ mod tests {
     use tokio::sync::{oneshot, Notify};
     use tokio::task::JoinError;
     use tokio::time::timeout;
-    use uc_core::clipboard::ClipboardChangeOrigin;
     use uc_core::ids::{FormatId, RepresentationId};
     use uc_core::{MimeType, ObservedClipboardRepresentation};
 
@@ -440,15 +330,7 @@ mod tests {
     mock! {
         ChangeOrigin {}
         #[async_trait]
-        impl SelfWriteLedgerPort for ChangeOrigin {
-            async fn record_self_write(
-                &self,
-                matching: SelfWriteMatch,
-                attribution: SelfWriteAttribution,
-                ttl: Duration,
-            );
-            async fn attribute_observed_change(&self, snapshot_hash: &str) -> ClipboardChangeOrigin;
-        }
+        impl SelfWriteLedgerPort for ChangeOrigin {}
     }
 
     fn make_snapshot() -> SystemClipboardSnapshot {
@@ -466,14 +348,7 @@ mod tests {
     }
 
     fn permissive_origin_mock() -> MockChangeOrigin {
-        // Origin port is exercised but its specific calls are not what we're
-        // testing here — accept any call count, return defaults.
-        let mut origin = MockChangeOrigin::new();
-        origin.expect_record_self_write().returning(|_, _, _| ());
-        origin
-            .expect_attribute_observed_change()
-            .returning(|_| ClipboardChangeOrigin::LocalCapture);
-        origin
+        MockChangeOrigin::new()
     }
 
     #[tokio::test]

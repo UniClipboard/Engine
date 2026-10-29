@@ -120,13 +120,17 @@ impl BindingHost for DirectoryHost {
 
     fn clipboard_read(&self) -> Result<BindingClipboardSnapshot, HostBindingError> {
         Ok(BindingClipboardSnapshot {
+            identity: None,
             observed_at_ms: 0,
             representations: Vec::new(),
         })
     }
 
-    fn clipboard_write(&self, _snapshot: BindingClipboardSnapshot) -> Result<(), HostBindingError> {
-        Ok(())
+    fn clipboard_write(
+        &self,
+        _snapshot: BindingClipboardSnapshot,
+    ) -> Result<Option<Vec<u8>>, HostBindingError> {
+        Ok(None)
     }
 }
 
