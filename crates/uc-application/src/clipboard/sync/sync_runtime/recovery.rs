@@ -233,7 +233,10 @@ impl OfflineDeliveryRecovery {
                         Err(RecvError::Closed) => return,
                     },
                     result = results.recv() => match result {
-                        Ok(result) => apply_delivery_result(&mut schedule, result),
+                        Ok(result) => {
+                            apply_delivery_result(&task_deps, &mut schedule, result, &task_cancel)
+                                .await;
+                        }
                         Err(RecvError::Lagged(missed)) => {
                             uc_warn!(missed = missed, "clipboard delivery recovery: delivery results lagged");
                             recover_currently_online(
@@ -327,16 +330,41 @@ async fn recover_currently_online(
 
 /// 记录负责人每次写入结束后的结果通知是恢复负责人唯一的结果来源：未结束或未能落库的
 /// 投递按目标退避再试，已结算的内容清除对应目标的退避。
-fn apply_delivery_result(schedule: &mut RetrySchedule, result: DeliveryResult) {
+///
+/// 通知不携带先后：较旧条目的结果可能在较新条目之后才到（例如仍在后台收尾，仓库写入也会
+/// 覆盖其已取代状态）。因此只有目标尚无退避状态或通知属于正在跟踪的条目时直接记录；
+/// 属于另一条目时按恢复轮次同一来源（[`newest_recoverable_entry`]）判断目标当前的最新内容，
+/// 只有最新内容不是正在跟踪的条目时才把它作为新内容记录，较旧内容的迟到结果不重置次数或
+/// 已用尽标记。
+async fn apply_delivery_result(
+    deps: &OfflineDeliveryRecoveryDeps,
+    schedule: &mut RetrySchedule,
+    result: DeliveryResult,
+    cancel: &CancellationToken,
+) {
+    let target = result.target_device_id;
     match result.kind {
-        DeliveryResultKind::Recoverable | DeliveryResultKind::NotPersisted => schedule
-            .record_recoverable(
-                result.target_device_id,
-                Some(result.entry_id),
-                Instant::now(),
-            ),
+        DeliveryResultKind::Recoverable | DeliveryResultKind::NotPersisted => {
+            let tracked = match schedule.tracked_entry(&target) {
+                Some(tracked) if *tracked != result.entry_id => tracked.clone(),
+                _ => {
+                    schedule.record_recoverable(target, Some(result.entry_id), Instant::now());
+                    return;
+                }
+            };
+            match newest_recoverable_entry(deps, &target, cancel).await {
+                Ok(Some(newest)) if newest != tracked => {
+                    schedule.record_recoverable(target, Some(newest), Instant::now());
+                }
+                Ok(_) | Err(ScanStopped::Cancelled) => {}
+                // 无法判断先后时按恢复轮次自身失败处理：照常排期，但不重置次数。
+                Err(ScanStopped::ListingFailed) => {
+                    schedule.record_recoverable(target, None, Instant::now());
+                }
+            }
+        }
         DeliveryResultKind::Settled => {
-            schedule.settle(&result.target_device_id, &result.entry_id);
+            schedule.settle(&target, &result.entry_id);
         }
     }
 }
@@ -431,11 +459,119 @@ async fn recover_for_target(
         return RecoveryOutcome::TargetPaused.into();
     }
 
+    let (entry_id, record) = match newest_delivery_for_target(deps, &target, cancel).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return RecoveryOutcome::NothingToRecover.into(),
+        Err(ScanStopped::Cancelled) => return RecoveryOutcome::Cancelled.into(),
+        Err(ScanStopped::ListingFailed) => return RecoveryOutcome::ListingFailed.into(),
+    };
+    if !target_is_current {
+        supersede_delivery(deps, &entry_id, &target).await;
+        return RecoveryOutcome::TargetNotCurrent.into();
+    }
+    // 旧内容失效是一项完整动作，必须完成后才处理停止，避免重启后补发旧内容。
+    if !supersede_older_recoverable_entries(deps, &entry_id, &target).await {
+        uc_warn!(
+            entry_id = log_id(&entry_id),
+            "clipboard delivery recovery: unable to replace older offline content"
+        );
+        return RecoveryOutcome::SupersedeFailed.into();
+    }
+    if cancel.is_cancelled() {
+        return RecoveryOutcome::Cancelled.into();
+    }
+    if !matches!(
+        record.status,
+        EntryDeliveryStatus::Pending | EntryDeliveryStatus::Unreachable
+    ) {
+        return RecoveryOutcome::StatusChanged.into();
+    }
+    if !automatic_sync_enabled(deps.settings.as_ref()).await {
+        return RecoveryOutcome::SyncDisabled.into();
+    }
+    if cancel.is_cancelled() {
+        return RecoveryOutcome::Cancelled.into();
+    }
+    match deps
+        .delivery
+        .deliver_existing_local_entry(entry_id.clone(), vec![target])
+        .await
+    {
+        Ok(report) => {
+            uc_info!(
+                entry_id = log_id(&entry_id),
+                accepted = report.accepted,
+                duplicate = report.duplicate,
+                offline = report.offline,
+                errored = report.errored,
+                pending = report.pending,
+                "clipboard delivery recovery dispatched"
+            );
+            let outcome = if report.accepted + report.duplicate > 0 {
+                RecoveryOutcome::Delivered
+            } else {
+                RecoveryOutcome::Dispatched
+            };
+            // 结算（送达、终态）、可恢复结果、写入失败或后台收尾都由记录负责人另行通知；
+            // 确认后最终写入失败时持久状态仍未结束，不能据确认提前清除退避。
+            RecoveryRound {
+                outcome,
+                awaiting: Some(entry_id),
+            }
+        }
+        Err(ResendEntryError::EntryNotResendable { reason, .. }) => {
+            if matches!(reason, NotResendableReason::PayloadLost) {
+                uc_info!(
+                    entry_id = log_id(&entry_id),
+                    reason = "payload_lost",
+                    "clipboard delivery recovery stopped: entry payload is gone"
+                );
+                stop_automatic_recovery(deps, &entry_id, &target).await;
+                RecoveryOutcome::PayloadLost.into()
+            } else {
+                RecoveryOutcome::NotResendable.into()
+            }
+        }
+        Err(error @ (ResendEntryError::Storage(_) | ResendEntryError::Dispatch(_))) => {
+            uc_warn!(
+                error_kind = "delivery",
+                reason = error.kind(),
+                entry_id = log_id(&entry_id),
+                "clipboard delivery recovery skipped entry"
+            );
+            RecoveryOutcome::DeliveryFailed.into()
+        }
+        Err(error) => {
+            uc_debug!(
+                error_kind = "delivery",
+                reason = error.kind(),
+                entry_id = log_id(&entry_id),
+                "clipboard delivery recovery skipped entry"
+            );
+            RecoveryOutcome::DeliverySkipped.into()
+        }
+    }
+}
+
+/// 扫描为什么提前结束。
+enum ScanStopped {
+    Cancelled,
+    ListingFailed,
+}
+
+/// 目标当前的最新内容：按新到旧扫描本机发出且跟踪投递的条目，第一条带有该目标投递记录的
+/// 条目及其记录。恢复轮次只补发它，较旧内容随后被标记为已取代；结果通知的先后也只按它判断，
+/// 不另建条目顺序。读取单条条目失败时跳过该条目，列举失败时中止扫描。
+async fn newest_delivery_for_target(
+    deps: &OfflineDeliveryRecoveryDeps,
+    target: &DeviceId,
+    cancel: &CancellationToken,
+) -> Result<Option<(EntryId, EntryDeliveryRecord)>, ScanStopped> {
     let local_device = deps.device_identity.current_device_id();
     let mut offset = 0;
     loop {
         if cancel.is_cancelled() {
-            return RecoveryOutcome::Cancelled.into();
+            return Err(ScanStopped::Cancelled);
         }
         let entries = match deps.entries.list_entries(RECOVERY_PAGE_SIZE, offset).await {
             Ok(entries) => entries,
@@ -444,16 +580,16 @@ async fn recover_for_target(
                     error_kind = "entry_listing",
                     "clipboard delivery recovery: scan stopped"
                 );
-                return RecoveryOutcome::ListingFailed.into();
+                return Err(ScanStopped::ListingFailed);
             }
         };
         if entries.is_empty() {
-            return RecoveryOutcome::NothingToRecover.into();
+            return Ok(None);
         }
         let count = entries.len();
         for entry in entries {
             if cancel.is_cancelled() {
-                return RecoveryOutcome::Cancelled.into();
+                return Err(ScanStopped::Cancelled);
             }
             if !entry.delivery_tracked {
                 continue;
@@ -469,7 +605,7 @@ async fn recover_for_target(
                 }
             };
             if cancel.is_cancelled() {
-                return RecoveryOutcome::Cancelled.into();
+                return Err(ScanStopped::Cancelled);
             }
             if source.as_ref() != Some(&local_device) {
                 continue;
@@ -485,106 +621,33 @@ async fn recover_for_target(
                 }
             };
             if cancel.is_cancelled() {
-                return RecoveryOutcome::Cancelled.into();
+                return Err(ScanStopped::Cancelled);
             }
-            let Some(record) = records
-                .iter()
-                .find(|record| record.target_device_id == target)
-            else {
-                continue;
-            };
-            if !target_is_current {
-                supersede_delivery(deps, &entry.entry_id, &target).await;
-                return RecoveryOutcome::TargetNotCurrent.into();
-            }
-            // 旧内容失效是一项完整动作，必须完成后才处理停止，避免重启后补发旧内容。
-            if !supersede_older_recoverable_entries(deps, &entry.entry_id, &target).await {
-                uc_warn!(
-                    entry_id = log_id(&entry.entry_id),
-                    "clipboard delivery recovery: unable to replace older offline content"
-                );
-                return RecoveryOutcome::SupersedeFailed.into();
-            }
-            if cancel.is_cancelled() {
-                return RecoveryOutcome::Cancelled.into();
-            }
-            if !matches!(
-                record.status,
-                EntryDeliveryStatus::Pending | EntryDeliveryStatus::Unreachable
-            ) {
-                return RecoveryOutcome::StatusChanged.into();
-            }
-            if !automatic_sync_enabled(deps.settings.as_ref()).await {
-                return RecoveryOutcome::SyncDisabled.into();
-            }
-            if cancel.is_cancelled() {
-                return RecoveryOutcome::Cancelled.into();
-            }
-            return match deps
-                .delivery
-                .deliver_existing_local_entry(entry.entry_id.clone(), vec![target.clone()])
-                .await
+            if let Some(record) = records
+                .into_iter()
+                .find(|record| record.target_device_id == *target)
             {
-                Ok(report) => {
-                    uc_info!(
-                        entry_id = log_id(&entry.entry_id),
-                        accepted = report.accepted,
-                        duplicate = report.duplicate,
-                        offline = report.offline,
-                        errored = report.errored,
-                        pending = report.pending,
-                        "clipboard delivery recovery dispatched"
-                    );
-                    let outcome = if report.accepted + report.duplicate > 0 {
-                        RecoveryOutcome::Delivered
-                    } else {
-                        RecoveryOutcome::Dispatched
-                    };
-                    // 结算（送达、终态）、可恢复结果、写入失败或后台收尾都由记录负责人另行通知；
-                    // 确认后最终写入失败时持久状态仍未结束，不能据确认提前清除退避。
-                    RecoveryRound {
-                        outcome,
-                        awaiting: Some(entry.entry_id),
-                    }
-                }
-                Err(ResendEntryError::EntryNotResendable { reason, .. }) => {
-                    if matches!(reason, NotResendableReason::PayloadLost) {
-                        uc_info!(
-                            entry_id = log_id(&entry.entry_id),
-                            reason = "payload_lost",
-                            "clipboard delivery recovery stopped: entry payload is gone"
-                        );
-                        stop_automatic_recovery(deps, &entry.entry_id, &target).await;
-                        RecoveryOutcome::PayloadLost.into()
-                    } else {
-                        RecoveryOutcome::NotResendable.into()
-                    }
-                }
-                Err(error @ (ResendEntryError::Storage(_) | ResendEntryError::Dispatch(_))) => {
-                    uc_warn!(
-                        error_kind = "delivery",
-                        reason = error.kind(),
-                        entry_id = log_id(&entry.entry_id),
-                        "clipboard delivery recovery skipped entry"
-                    );
-                    RecoveryOutcome::DeliveryFailed.into()
-                }
-                Err(error) => {
-                    uc_debug!(
-                        error_kind = "delivery",
-                        reason = error.kind(),
-                        entry_id = log_id(&entry.entry_id),
-                        "clipboard delivery recovery skipped entry"
-                    );
-                    RecoveryOutcome::DeliverySkipped.into()
-                }
-            };
+                return Ok(Some((entry.entry_id, record)));
+            }
         }
         if count < RECOVERY_PAGE_SIZE {
-            return RecoveryOutcome::NothingToRecover.into();
+            return Ok(None);
         }
         offset += count;
     }
+}
+
+/// 目标当前最新内容仍未结束（`Pending`/`Unreachable`）时返回该条目；最新内容已结算或没有
+/// 记录时返回 `None`。
+async fn newest_recoverable_entry(
+    deps: &OfflineDeliveryRecoveryDeps,
+    target: &DeviceId,
+    cancel: &CancellationToken,
+) -> Result<Option<EntryId>, ScanStopped> {
+    Ok(newest_delivery_for_target(deps, target, cancel)
+        .await?
+        .filter(|(_, record)| is_recovery_eligible(record, target))
+        .map(|(entry_id, _)| entry_id))
 }
 
 /// 仅保留当前条目向目标自动发送的资格。

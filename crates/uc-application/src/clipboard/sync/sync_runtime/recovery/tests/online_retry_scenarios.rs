@@ -198,3 +198,53 @@ async fn an_online_target_gets_exactly_three_timed_retries_for_the_same_entry() 
     assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
     harness.recovery.shutdown().await.unwrap();
 }
+
+/// 较旧条目 A 的结果迟到：A 仍在后台收尾时，较新的条目 B 已发出并用尽 3 次计时重试；仓库对 A 的
+/// 写入覆盖其“已取代”状态并发布可恢复结果。A 不是该目标当前最新的未送达内容，
+/// 它的结果既不重新开始计时，也不让 B 再获得任何计时重试；之后只有上线事件再补发 B 一次。
+#[tokio::test(start_paused = true)]
+async fn a_late_result_for_an_older_entry_does_not_restart_the_newer_entrys_retries() {
+    let harness = RetryHarness::start_with(
+        None,
+        &[
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Interrupted,
+            Attempt::Accepted,
+        ],
+        RetryScenario {
+            older_entry: Some(EntryDeliveryStatus::Superseded),
+            ..RetryScenario::default()
+        },
+    );
+    settle().await;
+    harness
+        .record_dispatch(EntryDeliveryStatus::Unreachable)
+        .await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    settle().await;
+    assert_eq!(harness.delivery.calls(), RETRY_BACKOFF.len());
+
+    harness
+        .record_results([(
+            harness.older.entry_id.clone(),
+            harness.target,
+            EntryDeliveryStatus::Unreachable,
+        )])
+        .await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    settle().await;
+    assert_eq!(
+        harness.delivery.calls(),
+        RETRY_BACKOFF.len(),
+        "a late result for older content gives the exhausted newer entry no retry"
+    );
+
+    harness
+        .reachability
+        .announce(harness.target, ReachabilityState::Online);
+    settle().await;
+    assert_eq!(harness.delivery.calls(), RETRY_BACKOFF.len() + 1);
+    assert_eq!(harness.status(), Some(EntryDeliveryStatus::Delivered));
+    harness.recovery.shutdown().await.unwrap();
+}

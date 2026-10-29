@@ -43,6 +43,8 @@ struct TargetRetry {
 impl RetrySchedule {
     /// 记录目标留下了可恢复结果。已排期时不推迟；新内容把退避重置为首项，
     /// 且到期时间只会提前。`entry` 为空表示恢复轮次自身失败，没有新的投递结果。
+    /// 与正在跟踪的条目不同的 `entry` 一律视为较新内容：调用方只能传入目标当前最新的
+    /// 未结束内容（见恢复负责人对结果通知的先后判断），不能传入较旧内容的迟到结果。
     /// 当前条目的计时重试已用尽时不再排期：每次失败的重试都会发布一条可恢复结果，
     /// 若据此重新开始计时就会变成无限重试。
     pub(super) fn record_recoverable(
@@ -69,6 +71,14 @@ impl RetrySchedule {
         if retry.due.is_none() {
             retry.due = retry_at(retry.rounds, now);
         }
+    }
+
+    /// 目标正在跟踪的条目：最近一次被记录为可恢复或等待结果的条目；没有退避状态或只有
+    /// 未产生结果的失败轮次时返回 `None`。
+    pub(super) fn tracked_entry(&self, target: &DeviceId) -> Option<&EntryId> {
+        self.targets
+            .get(target)
+            .and_then(|retry| retry.entry.as_ref())
     }
 
     /// 最早的到期时间；没有排期时返回 `None`。已用尽的目标没有排期。
