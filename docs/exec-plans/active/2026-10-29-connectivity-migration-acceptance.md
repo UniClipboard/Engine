@@ -43,14 +43,42 @@
 | D06 | mDNS 消失不删除 Cloud | 已有证据：目录来源测试及真实 QUIC lookup 用例的 Cloud 候选保留断言；后者 Cloud 是测试 MemoryLookup |
 | D07 | 发现仅作线索，连接后密码认证 | 已有证据：逻辑成员与认证公钥映射、未知／歧义／错 peer／撤销拒绝；不是由 mDNS 宣称成员身份 |
 | D08 | PeerDirectory 是发现／连接边界 | 已有证据：生产 DirectoryAddressLookup 消费 DiscoveryManager，provider 不拨业务连接 |
-| D09 | 全部出站通过统一管理 | 各业务迁移已实现，包括 #345 恢复及 #346 非成员准入；待总审当前所有生产调用点与最终 CI，不按新增 trait 数量结项 |
-| D10 | 全部入站经同一连接边界 | 各协议已有受管 handler／租约及准入；待总审 Router 装配与最终回归，不能用 presence 的健康连接代替内容验收 |
+| D09 | 全部出站通过统一管理 | 当前生产入口源码总审完成，见下表；包括 #345 恢复及 #346 非成员准入，运行验收仍待最终 CI，不按新增 trait 数量结项 |
+| D10 | 全部入站经同一连接边界 | Router 的16个当前／兼容 ALPN 已逐类对应受管 handler，源码总审完成；最终回归仍待结算，不能用 presence 的健康连接代替内容验收 |
 | D11 | 当前唯一生产 backend 为 Iroh | 已有证据：生产 Iroh backend；第二 backend 仅测试使用，不增加产品配置或 Nearby 实现 |
 | D12 | Direct／NAT／Relay 路径由 Iroh 负责 | 已有证据：业务连接实际 selected path 和 Direct／强制 Relay 矩阵；不把候选存在当成送达，也不据局域网拓扑宣称全部 NAT 类型已测 |
-| D13 | 业务／领域不依赖 Iroh 类型 | 已有代码与架构门禁；待总审全部生产边界。Core 注释中的历史类型说明不作为生产依赖 |
+| D13 | 业务／领域不依赖 Iroh 类型 | 源码与依赖总审完成：Core／Application／协议生产源码未引入 Iroh／noq 类型，架构门禁及负fixture通过；Core 注释中的历史类型说明不作为生产依赖 |
 | D14 | 原剪贴板／文件／Space 行为保持 | 各切片 workspace、真实 SQLite／MLS、内容读回、取消与重启证据；#345 首轮未闭合步骤须补齐，历史失败保留 |
-| D15 | 云发现故障时已配对 LAN 设备仍可发现并同步 | 已有“慢／失败 Cloud 不阻塞本地候选”、LAN-only 无 Cloud 装配、实际 Direct 同步等分层证据；待总审明确端到端是否排除了持久地址缓存等替代路径，不合并这些证据冒称真实云故障下的 mDNS 专属同步已证明 |
+| D15 | 云发现故障时已配对 LAN 设备仍可发现并同步 | 已有“慢／失败 Cloud 不阻塞本地候选”、LAN-only 无 Cloud 装配、实际 Direct 同步等分层证据；总审核实尚缺排除持久地址缓存等替代路径的端到端证明，保持未完成 |
 | D16 | 第二 provider／backend 不改业务即可接入 | 已有证据：发现测试 provider、第二内存 backend 经真实 Application 恢复 transport／receiver／wire 完成两次交换；签发方为替身，不作真实 MLS／网络证明 |
+
+## 当前生产入口总审
+
+源码基线 `d000f5fa`；本次修复只修改测试驱动、CI测试登记和文档，没有修改 Rust 生产实现。
+[Engine 组装](../../../crates/uc-engine/src/assembly/sync_engine.rs)创建或安装完整领域能力，
+[节点](../../../crates/uc-infra-p2p/src/network/iroh/node.rs)的 `session_protocol_alpns` 列出16个生产ALPN，
+全部进入会话 dispatcher 后交当前 handler；旧版本ALPN仍是同一领域边界的兼容编解码入口。
+
+| 完整能力 | 出站及入站管理边界 |
+| --- | --- |
+| 普通剪贴板3个ALPN | 专属manager、完整dispatch和receiver；单流／多流／归属扩展仍经同一受管边界 |
+| 组更新2个ALPN | group manager与Application完整endpoint；旧wire保持业务分类，不独立拨号 |
+| 成员历史2个ALPN | history manager、完整exchange／receiver，按实际协商选择复用或单次连接 |
+| 当前状态与按需拉取2个ALPN | active／pull各自完整能力与独立容量，入站交既有owner |
+| 可达性2个ALPN | presence manager及完整探测owner，不借给内容传输 |
+| 文件／blob | Application BlobTransport及独立manager；SDK只消费受管流，不拥有第二拨号池 |
+| 反向进度2个ALPN | Application完整双版本endpoint及独立manager，旧reporter原生旁路已删除 |
+| 成员分支恢复 | branch manager、transport与receiver；原生旧adapter不存在 |
+| Space加入／续接 | [专属manager](../../../crates/uc-infra-p2p/src/network/iroh/space_admission/managed.rs)在非成员认证前以QUIC公钥为资源键；不伪造DeviceId，不授予普通成员能力 |
+
+原生拨号实际保留在 Iroh backend、上述非成员准入 backend 及底层 Relay 诊断；诊断探针不作业务发送。
+节点测试辅助方法、测试模块和协议探针中的直接原生连接明确为测试，不算生产旁路。
+Core／Application／协议的生产包依赖与源码由[仓库检查](../../../scripts/architecture/check-engine-repository.mjs)
+核对；故意加入恢复原生拨号的负fixture也被拒绝。静态边界正确不替代各协议真实网络回归。
+
+D15 的结论是“证据不足”：现有Direct完整同步可以使用已有地址材料；目录里的本地候选与慢Cloud替身测试
+不能证明真实Engine在排除所有缓存后仅依赖mDNS完成发现、认证和同步。该项应在后续补齐独立进程证明，
+或由issue维护者明确接受范围边界；本次没有将其勾为完成。
 
 ## 补充分层合同与覆盖边界
 
@@ -69,7 +97,7 @@
 - [ ] 结算 #345 原最终 head 的失败／取消 CI；保存首轮失败、重跑结果与每一步跳过原因。
 - [x] 第七片逐项回填 48 项计划／13 项验收与后续安全修复证据，按后续统一候选结算归档。
 - [ ] 第九片逐项回填 AC01–AC12、最终候选及平台范围；满足原退出条件后归档。
-- [ ] 完成 D09／D10／D13 的当前生产入口总审与 D15 的证据边界核对。
+- [x] 完成 D09／D10／D13 的当前生产入口总审与 D15 的证据边界核对；D15 端到端缺口继续明确保留。
 - [ ] 最终文档相对链接、根六项门禁及交付候选检查通过。
 
 原失败与债务不能通过勾选总清单消除：旧旧 a07 Relay 接收拒绝、#345 旧端关闭 `1104`、成员 F2／G2、
