@@ -992,7 +992,7 @@ impl IrohNodeBuilder {
             endpoint_builder
                 .address_lookup(DirectoryAddressLookupBuilder {
                     mdns: mdns.clone(),
-                    cloud_enabled: !config.disable_relays,
+                    lan_only: config.disable_relays,
                     recorder: recorder.clone(),
                     manager: discovery_slot.clone(),
                 })

@@ -43,6 +43,53 @@ fn locator_cannot_redirect_a_candidate_to_another_transport_identity() {
     assert!(decode(&peer, &postcard::to_stdvec(&address).unwrap()).is_err());
 }
 
+/// LAN-only 时，对端经 mDNS 发布的公网或 relay 地址不交给 iroh 拨号；relay 开启时原样交出。
+#[tokio::test]
+async fn lan_only_directory_lookup_yields_only_local_network_candidates() {
+    use iroh::address_lookup::AddressLookup;
+    use iroh::TransportAddr;
+
+    let id = SecretKey::generate().public();
+    let relay = TransportAddr::Relay("https://relay.example.com/".parse().unwrap());
+    let public = TransportAddr::Ip("203.0.113.7:50754".parse().unwrap());
+    let lan = TransportAddr::Ip("192.168.1.5:50754".parse().unwrap());
+    let tunnel = TransportAddr::Ip("10.8.0.2:51820".parse().unwrap());
+    let announced = EndpointAddr::from_parts(id, [relay, public, lan.clone(), tunnel.clone()]);
+    let directory = Arc::new(PeerDirectory::new(8));
+    directory
+        .observe(
+            MDNS,
+            DiscoveryEvent::Found(DiscoveredPeer {
+                peer: peer_id(id),
+                locator: postcard::to_stdvec(&announced).unwrap(),
+                ttl: Duration::from_secs(30),
+            }),
+            Instant::now(),
+        )
+        .unwrap();
+    let manager = Arc::new(DiscoveryManager::new(Vec::new(), directory).unwrap());
+
+    for (lan_only, expected) in [
+        (true, EndpointAddr::from_parts(id, [lan, tunnel])),
+        (false, announced.clone()),
+    ] {
+        let lookup = DirectoryAddressLookup {
+            manager: manager.clone(),
+            mdns: None,
+            lan_only,
+        };
+        let item = lookup
+            .resolve(id)
+            .expect("directory resolves")
+            .next()
+            .await
+            .expect("one candidate")
+            .expect("candidate decodes");
+        assert_eq!(item.into_endpoint_addr(), expected, "lan_only={lan_only}");
+    }
+    manager.shutdown().unwrap();
+}
+
 #[tokio::test]
 async fn directory_lookup_establishes_real_multistream_connection_with_bidirectional_bytes() {
     const ALPN: &[u8] = b"uni-test/discovery";
@@ -80,6 +127,7 @@ async fn directory_lookup_establishes_real_multistream_connection_with_bidirecti
         .address_lookup(DirectoryAddressLookup {
             manager: manager.clone(),
             mdns: Some(Arc::new(MemoryLookup::new())),
+            lan_only: false,
         })
         .bind()
         .await
@@ -162,7 +210,7 @@ async fn endpoint_builds_and_dials_explicit_addresses_without_local_mdns() {
         .relay_mode(RelayMode::Disabled)
         .address_lookup(DirectoryAddressLookupBuilder {
             mdns: None,
-            cloud_enabled: false,
+            lan_only: true,
             recorder: NetworkRecorder::current(),
             manager: manager.clone(),
         })
