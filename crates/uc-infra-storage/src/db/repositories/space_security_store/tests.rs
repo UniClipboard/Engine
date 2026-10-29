@@ -484,6 +484,82 @@ async fn delivery_status_exposes_the_persisted_retry_deadline() {
     );
 }
 
+// G4 的退避合同在真实持久仓储上用明确的证据与时钟验证，不依赖网络恰好安静。
+#[tokio::test]
+async fn unavailable_recipient_has_at_most_one_due_retry_in_a_quiet_25_second_window() {
+    let (repo, pool, _tempdir) = make_repo();
+    let space_id = SpaceId::from_str("space-sensitive");
+    let mut material = seed_current_space(&repo).await;
+    let first = pending_update("recovering-peer", 1);
+    let later = pending_update("recovering-peer", 2);
+    let healthy = pending_update("healthy-peer", 1);
+    let peer = *first.recipient();
+    material.add_pending_group_updates([first.clone(), later.clone(), healthy.clone()], 100);
+    repo.save_space_material(&material).await.unwrap();
+    repo.due_group_updates(&space_id, 100, None, None)
+        .await
+        .unwrap();
+    for now_ms in [100, 200, 300] {
+        let due = repo
+            .due_group_updates(&space_id, now_ms, Some(peer), None)
+            .await
+            .unwrap();
+        assert!(due.contains(&first));
+        assert!(due.contains(&healthy));
+        repo.record_group_update_failures(
+            &space_id,
+            &[(
+                first.update_id().to_owned(),
+                GroupUpdateDispatchError::ReceiverUnavailable,
+            )],
+            now_ms,
+        )
+        .await
+        .unwrap();
+    }
+    let reopened = reopen_repo(&pool);
+    let before = reopened.group_update_deliveries(&space_id).await.unwrap();
+    let blocked = before.iter().find(|item| item.recipient == peer).unwrap();
+    assert_eq!(blocked.attempts, 3);
+    assert_eq!(blocked.next_attempt_at_ms, 30_100);
+    // 窗口跨过已持久化的到期点；每百毫秒轮询，无上线或历史确认参数。
+    let mut retries = 0;
+    for now_ms in (20_000..=45_000).step_by(100) {
+        let due = reopened
+            .due_group_updates(&space_id, now_ms, None, None)
+            .await
+            .unwrap();
+        assert!(due.contains(&healthy), "失败收件人不能阻塞健康收件人");
+        if due.contains(&first) {
+            assert_eq!(now_ms, 30_100, "不能提前或紧循环重试");
+            // 到期批次可以包含后序；仓储保证排序，Application 在队首失败后停止该收件人。
+            if let Some(later_index) = due.iter().position(|update| update == &later) {
+                let first_index = due.iter().position(|update| update == &first).unwrap();
+                assert!(first_index < later_index);
+            }
+            retries += 1;
+            reopened
+                .record_group_update_failures(
+                    &space_id,
+                    &[(
+                        first.update_id().to_owned(),
+                        GroupUpdateDispatchError::ReceiverUnavailable,
+                    )],
+                    now_ms,
+                )
+                .await
+                .unwrap();
+        } else {
+            assert!(!due.contains(&later), "后序 epoch 不能越过等待中的队首");
+        }
+    }
+    assert_eq!(retries, 1);
+    let after = reopened.group_update_deliveries(&space_id).await.unwrap();
+    let blocked = after.iter().find(|item| item.recipient == peer).unwrap();
+    assert_eq!(blocked.attempts, 4);
+    assert_eq!(blocked.next_attempt_at_ms, 270_100);
+}
+
 #[tokio::test]
 async fn early_unavailable_retries_do_not_postpone_the_persisted_retry() {
     let (repo, pool, _tempdir) = make_repo();
