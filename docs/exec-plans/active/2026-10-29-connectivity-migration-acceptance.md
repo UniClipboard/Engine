@@ -1,0 +1,77 @@
+# Issue #34 总验收清单
+
+状态：**结算中，议题保持开放**（2026-10-29）。本清单对应
+[Issue #34](https://github.com/UniClipboard/Engine/issues/34) 的 Definition of Done 和补充分层合同，
+不把切片合并、平台编译或重跑通过当作整项完成。
+
+## 完整负责人和退出条件
+
+各业务仍由其 Application 完整负责人执行，Engine 只组装现有完整能力；本计划只统一验收与交付状态。
+调用方继续发起复制、发送、加入或恢复等完整动作，不拼装协议步骤。
+成功以相应业务持久结果和真实内容读回为准；错误、重启和重试仍归各业务负责人。
+
+总验收须逐项给出代码／运行证据、确切候选及覆盖范围，保持首次失败和跳过项。
+第四、七、九片达到各自退出条件后才归档；真实设备与完整历史矩阵未跑时仍列为跳过。
+本次不关闭远端 issue、不合并交付 PR、不发布或更改产品仓依赖。
+
+## 切片交付状态
+
+| 范围 | 当前状态 | 唯一证据入口 |
+| --- | --- | --- |
+| 1：发现与目录 | 已完成；公网解析与设备验证跳过 | [计划](../completed/2026-10-11-peer-discovery-slice.md)、[稳定合同](../../design-docs/peer-discovery.md) |
+| 2：普通剪贴板 | 已完成；G2 历史间歇失败保留 | [计划](../completed/2026-10-11-clipboard-connectivity-plan.md) |
+| 3：组更新 | 已完成；设备和跨网络扩展矩阵跳过 | [计划](../completed/2026-10-11-group-update-connectivity-plan.md) |
+| 4：成员历史 | #180 最终同 head PR／Windows CI 成功，已结算归档 | [最终结算](../completed/2026-10-12-membership-history-connectivity-plan.md#最终线上验收与归档结算2026-10-29) |
+| 5：当前剪贴板与按需拉取 | 已完成 | [计划](../completed/2026-10-14-active-clipboard-connectivity-plan.md) |
+| 6：设备可达性 | 已完成；设备和额外历史矩阵跳过 | [计划](../completed/2026-10-14-peer-reachability-connectivity-plan.md) |
+| 7：文件／blob | 后续#340统一候选补齐原安全阻塞，48项计划／13项验收已结算归档 | [计划](../completed/2026-10-21-blob-connectivity-plan.md) |
+| 8：反向进度 | 已完成并归档；物理挂起／设备后台按原授权跳过 | [最终结算](../completed/2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论) |
+| 9：成员分支恢复 | #345 已合并；最终 CI 首轮失败／取消，attempt 2 待结算 | [计划](2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29) |
+| Space 加入／续接 | #346 已合并并归档；旧发布二进制、Relay 和设备矩阵跳过 | [计划](../completed/2026-10-29-space-admission-connectivity-plan.md) |
+
+## Definition of Done 逐项对应
+
+“已有证据”表示所属切片已证明该范围，不表示当前候选全部回归完成；“待总审”必须补齐后才能关闭 #34。
+
+| 编号 | 原要求 | 当前证据与结论 |
+| --- | --- | --- |
+| D01 | DiscoveryProvider 是正式抽象 | 已有证据：Application discovery 的 provider／manager 与第一片定向测试；[发现合同](../../design-docs/peer-discovery.md) |
+| D02 | Cloud 包装为 provider | 已有证据：Infra CloudDiscoveryProvider 适配 DNS／PKARR，按需解析；真实公网成功解析仍跳过 |
+| D03 | mDNS 发现已配对 LAN 设备 | 已有证据：实际 mDNS adapter 订阅／更新／快照与第一片独立进程 Direct 同步；不据此断言所有平台网络栈 |
+| D04 | 同 peer 多来源并存 | 已有证据：`sources_coexist_update_and_expire_independently`，每来源独立额度 |
+| D05 | TTL／生命周期正确 | 已有证据：原观察时间不因读取续期，来源结束／掉包／节点关闭不得永久保留或复活候选 |
+| D06 | mDNS 消失不删除 Cloud | 已有证据：目录来源测试及真实 QUIC lookup 用例的 Cloud 候选保留断言；后者 Cloud 是测试 MemoryLookup |
+| D07 | 发现仅作线索，连接后密码认证 | 已有证据：逻辑成员与认证公钥映射、未知／歧义／错 peer／撤销拒绝；不是由 mDNS 宣称成员身份 |
+| D08 | PeerDirectory 是发现／连接边界 | 已有证据：生产 DirectoryAddressLookup 消费 DiscoveryManager，provider 不拨业务连接 |
+| D09 | 全部出站通过统一管理 | 各业务迁移已实现，包括 #345 恢复及 #346 非成员准入；待总审当前所有生产调用点与最终 CI，不按新增 trait 数量结项 |
+| D10 | 全部入站经同一连接边界 | 各协议已有受管 handler／租约及准入；待总审 Router 装配与最终回归，不能用 presence 的健康连接代替内容验收 |
+| D11 | 当前唯一生产 backend 为 Iroh | 已有证据：生产 Iroh backend；第二 backend 仅测试使用，不增加产品配置或 Nearby 实现 |
+| D12 | Direct／NAT／Relay 路径由 Iroh 负责 | 已有证据：业务连接实际 selected path 和 Direct／强制 Relay 矩阵；不把候选存在当成送达，也不据局域网拓扑宣称全部 NAT 类型已测 |
+| D13 | 业务／领域不依赖 Iroh 类型 | 已有代码与架构门禁；待总审全部生产边界。Core 注释中的历史类型说明不作为生产依赖 |
+| D14 | 原剪贴板／文件／Space 行为保持 | 各切片 workspace、真实 SQLite／MLS、内容读回、取消与重启证据；#345 首轮未闭合步骤须补齐，历史失败保留 |
+| D15 | 云发现故障时已配对 LAN 设备仍可发现并同步 | 已有“慢／失败 Cloud 不阻塞本地候选”、LAN-only 无 Cloud 装配、实际 Direct 同步等分层证据；待总审明确端到端是否排除了持久地址缓存等替代路径，不合并这些证据冒称真实云故障下的 mDNS 专属同步已证明 |
+| D16 | 第二 provider／backend 不改业务即可接入 | 已有证据：发现测试 provider、第二内存 backend 经真实 Application 恢复 transport／receiver／wire 完成两次交换；签发方为替身，不作真实 MLS／网络证明 |
+
+## 补充分层合同与覆盖边界
+
+| 要求 | 验收入口与边界 |
+| --- | --- |
+| 多流、独立取消、复用与撤销 | 第二、四、七、八、九片；协议专属池，授权和会话代次在每次使用前重检，不跨协议借用健康状态 |
+| 字节与协商兼容 | 固定旧向量、新旧角色 Direct／Relay、长度／FIN／超限拒绝；版本和二进制摘要按各份原工件保留 |
+| 本地成功／远端保存／系统写入分别结算 | 第七、八片真实输出、接收权威、ACK 与 Collector／Jaeger；发送 ACK 不表示系统剪贴板写入成功 |
+| 重启、积压和事务边界 | 第三、四、七、九片真实 SQLite／MLS、强杀与幂等；第二 backend 的虚拟时间不能代替网络及持久证明 |
+| 设备网络运行期与 Space 会话 | 原 generation／迟到结果／切 Space／关闭测试；#68 的完整 endpoint 生命周期仍按其所属计划独立验收，不因 #34 切片完成自动关闭 |
+| 有界资源与关闭 | 两轮各 1GiB、SDK worker／tag／staging、连接／任务／FD；第九片跨进程容量不执行 MLS，不能外推全部真实恢复压力 |
+| 平台 | 原 CI 按实际 macOS／Windows／iOS／Android／HarmonyOS 编译步骤结算；编译成功不代表设备运行 |
+
+## 首次失败与未完成清单
+
+- [ ] 结算 #345 原最终 head 的失败／取消 CI；保存首轮失败、重跑结果与每一步跳过原因。
+- [x] 第七片逐项回填 48 项计划／13 项验收与后续安全修复证据，按后续统一候选结算归档。
+- [ ] 第九片逐项回填 AC01–AC12、最终候选及平台范围；满足原退出条件后归档。
+- [ ] 完成 D09／D10／D13 的当前生产入口总审与 D15 的证据边界核对。
+- [ ] 最终文档相对链接、根六项门禁及交付候选检查通过。
+
+原失败与债务不能通过勾选总清单消除：旧旧 a07 Relay 接收拒绝、#345 旧端关闭 `1104`、成员 F2／G2、
+成员收敛和 Space 切换的间歇失败分别保留，由[技术债跟踪](../tech-debt-tracker.md)及所属计划维护。
+目录再次激活触发重复拉取、完整升级非 smoke、物理切网／睡眠／后台和产品宿主采用也不能从本表推导完成。

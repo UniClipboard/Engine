@@ -2,6 +2,10 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [Issue #34 第四切片：成员历史完整迁移与连接复用](2026-10-12-membership-history-connectivity-plan.md)（#180 最终同 head PR／Windows CI 通过并结算；设备及扩展矩阵跳过；[规格](2026-10-12-membership-history-connectivity-spec.md)）
+
+- [Issue #34 第七切片：文件／blob受管传输](2026-10-21-blob-connectivity-plan.md)（后续#340统一候选补齐安全审计与完整CI，48项计划／13项验收结算；[规格](2026-10-21-blob-connectivity-spec.md)，[方案](2026-10-21-blob-connectivity-feasibility.md)）
+
 - [Issue #34 第八切片：反向进度与发送侧状态投影](2026-10-24-transfer-progress-connectivity-plan.md)（同head主CI13项及Windows双架构通过；物理挂起／设备后台按用户要求跳过，历史间歇失败保留；[规格](2026-10-24-transfer-progress-connectivity-spec.md)，[验收结论](2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)）
 
 - [Issue #34 第六切片：设备可达性、准入与存活检查](2026-10-14-peer-reachability-connectivity-plan.md)（完整 Uni 迁移、20 轮恢复及旧新矩阵完成；本地回归与九项必需 CI 通过，真机和额外历史格跳过；[规格](2026-10-14-peer-reachability-connectivity-spec.md)）

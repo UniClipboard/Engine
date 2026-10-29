@@ -1,6 +1,6 @@
 # Issue #34 第九切片：成员分支恢复受管连接实现规格
 
-状态：设计草案，待实现（2026-10-28）。本文定义实现合同与实施顺序，不表示新增行为已经验证。
+状态：**实现已合并，最终 CI 与验收结算中**（2026-10-29）。逐项证据及首轮失败见[执行计划](2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29)；未结项不视为已通过。
 核对基线：`80bda137541f1a054897f8d1474634dac9d752e8`（第八切片归档PR #342合并提交）。实施前重新固定实际main、候选及兼容端SHA，不以本文基线自动代表未来发布版本。
 
 ## 1. 概述（Overview）
@@ -38,7 +38,9 @@
 - 不顺带修复旧旧Relay文件拒绝、成员F2间歇失败等历史技术债；原失败仍须记录。
 - 不把本片通过等同整个Issue #34完成、产品宿主采用或发布验收。
 
-## 4. 当前架构上下文（Current Architecture Context）
+## 4. 设计前架构上下文（2026-10-28基线）
+
+本节保留设计前的责任断点；受管实现已替换原生 adapter，当前证据见执行计划，不将下列旧状态当作当前实现。
 
 ### 恢复与签发业务
 
@@ -50,7 +52,7 @@ Relationship: 接收方持久保存RecipientPrepared后提交external commit；�
 ### 现有传输实现
 
 Component: 原生分支恢复adapter。
-Path: [membership_branch_recovery_adapter.rs](../../../crates/uc-infra-p2p/src/network/iroh/membership_branch_recovery_adapter.rs)。
+Path: 基线中的 `membership_branch_recovery_adapter.rs`（已删除）；现有受管入口为[branch_recovery_handler.rs](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/branch_recovery_handler.rs)。
 Responsibility: 出站地址解析、重试拨号、framing、入站身份解析和业务dispatch。
 Relationship: 目前同时承担连接操作和协议交换；逐步骤使用10秒超时。请求／响应为u32长度前缀、编码体和发送方向FIN，每条连接处理一次交换。
 

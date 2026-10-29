@@ -1,6 +1,6 @@
 # Issue #34 第九切片执行计划
 
-状态：实施中（2026-10-28）；设计与验收合同见[实现规格](2026-10-28-membership-branch-recovery-connectivity-spec.md)。基线为 `80bda137541f1a054897f8d1474634dac9d752e8`。工作区已包含第八片状态修订和第九片规格，须保留。
+状态：实现已合并，最终 CI 验收结算中（2026-10-29）；设计与验收合同见[实现规格](2026-10-28-membership-branch-recovery-connectivity-spec.md)。基线为 `80bda137541f1a054897f8d1474634dac9d752e8`。工作区已包含第八片状态修订和第九片规格，须保留。
 
 完整业务由 `RecoverMembershipConflictUseCase` 与签发侧 `IssueMembershipBranchRecoveryUseCase` 分别负责；维护调用方只触发原恢复动作。成功是持久转换完成；延期、稳定失败与损坏沿用业务结果，网络错误保留来源。重启和重试由现有加密恢复记录及业务负责人承担。
 
@@ -532,3 +532,22 @@ CI选择范围核对：Linux PR工作流的workspace组排除基准、Engine成�
 为核实该偶发失败后的完整选测，已再次启动同一生产代码与新增测试的Linux workspace全组，日志 `target/branch-recovery-cross-process-workspace-rerun.log`；结束前不计通过。
 
 上述workspace全组复验通过（run `7e14abdd-7b3f-4feb-85fe-c874d935d466`，4987项通过，42项测试及4个binary跳过，1572.557秒；日志和JUnit为 `target/branch-recovery-cross-process-workspace-rerun.log` 与 `target/branch-recovery-cross-process-workspace-rerun.xml`，原JUnit已恢复）。前轮成员收敛超时及其未知根因仍保留；复验通过不代表该间歇问题已修复，也不代替远端候选CI。
+
+
+## 合并后最终 CI 结算（2026-10-29）
+
+[PR #345](https://github.com/UniClipboard/Engine/pull/345) 已合并为 `05320d984f3624878417d83f7aa5d2eef6f8c98e`，
+原最终 head 为 `3a5dc1bc356bf480925918dd1c19aaaddfa71521`。此前“远端未执行”仅描述当时状态，
+现以 [PR Check 40827495920](https://github.com/UniClipboard/Engine/actions/runs/40827495920) 的实际步骤为准。
+
+首轮中 workspace、恢复故障进程组、实际接收权威登记、blob 生命周期资源与 testkit 均成功；
+Engine job 在成员 smoke 阶段取消，之后的 Relay 历史复用、Direct／Relay 主动内容和隔离配对未执行。
+Blob job 的旧旧 a07 Relay 前置内容场景通过，但 A 关闭返回 `1104`，驱动清理随后发生未处理 `EPIPE`，
+最终 JSON 因此缺失；完整 blob 矩阵没有执行。原 artifact `12877976947` 的 ZIP SHA-256 为
+`113c3e7de34285833bf8f201a479418ec9cca89bc12c5502aad1151b12f30987`。
+其他仓库、升级、presence、移动编译及 Windows 运行通过，不用它们覆盖这两个未完成 job。
+
+本机按冻结 a07 和原 Relay 入口复验通过，不能认定关闭根因已修复。驱动补充 stdin／进程错误统一结算，
+确定性 EPIPE 用例通过；真实旧端包装夹具注入关闭 `1104` 时仍退出失败，但清理及脱敏 JSON 正常保存。
+该修复只防止二次错误丢失证据，不修改旧端库、关闭预算或业务成功断言。
+原 run 的失败／取消 job 已启动 attempt 2，结果尚待核对；当前不得勾选 AC11／AC12 或提前归档。
