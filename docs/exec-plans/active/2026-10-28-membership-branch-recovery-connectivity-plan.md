@@ -372,7 +372,7 @@ PR进程测试组在本地CI profile全部通过（run `3028254a-137d-4df1-be12-
 | AC04 | 单元测试覆盖冻结与提交边界，真实进程覆盖旧GroupInfo响应期间切Space及同设备移除重加；另有真实Iroh身份读取和握手后准入交接围栏测试，其他时序不能由此推定。 |
 | AC05 | 第二backend覆盖取消隔离、30秒跨受控出站准入／拨号／排队／前缀／正文和10秒首流，已开始签发的监督有真实重置测试；真实身份读取耗时、网络和其他本地工作边界不能由受控准入测试推定。 |
 | AC06 | 入站8、拨号4、单peer等待4和全局等待16的受控测试通过；拨号与等待同时占满时关闭等待实际结算、归还等待额度并关闭连接的组合测试通过。独立进程真实Iroh入站饱和、拒绝超额和替换连接后，服务端handler及两端各10个原生连接弱句柄归零，Linux两端文件描述符回到网络启动前基线；该场景不覆盖真实MLS恢复工作负载或所有进程资源类别。 |
-| AC07 | 最终生产候选三角色Direct／Relay矩阵与逐连接路径通过；协议及wire定向8项覆盖正文尾随、短／超长帧和FIN期限。五类消息固定字节向量在当前编码器和单独编译的旧协议源码上均通过；旧源码测试使用当前Core及依赖，源码与锁定版本对照见下文。 |
+| AC07 | 原生产候选及包含后续公共manager变更的 `b34ebcda` 均完成三角色Direct／Relay六格矩阵和逐连接路径验证，当前复验来源与范围见文末；协议及wire定向8项覆盖正文尾随、短／超长帧和FIN期限。五类消息固定字节向量在当前编码器和单独编译的旧协议源码上均通过；旧源码测试使用当前Core及依赖，源码与锁定版本对照见下文。 |
 | AC08 | 11项真实进程组通过，覆盖持久检查点崩溃、原包重试和不同commit；加密SQLite重开及敏感哨兵扫描已有定向证据。 |
 | AC09 | 内存第二backend经实际Application transport／receiver与恢复wire完成GroupInfo和external commit两次交换，核对输入输出及两次独立拨号；签发方为替身。Application／Core／协议包清单和恢复源码未见Iroh依赖，仓库架构检查及其恢复旁路负fixture通过。 |
 | AC10 | 来源保留、签发日志脱敏、JSONL导出及新路径未创建网络业务root有定向测试或源码证据；受控测试验证网络成功后持久提交失败返回延期而非完成。新增封闭诊断关联后，真实Direct恢复按匿名连接引用与维护轮次明确匹配；两个并发轮次的JSONL隔离及原始键不输出通过。尚待完整回归与远端CI。 |
@@ -600,3 +600,34 @@ Blob summary为 `de84c4fe1226221067665152afe9a2ea239cb1fda3a35f40f797f01fc0a17ad
 
 本次成功补齐首轮网络作业的未完成范围，原旧端关闭失败及驱动丢失证据继续保留。
 Engine作业及剩余必需步骤尚未终结，不能据网络作业成功提前归档本片。
+
+### 当前交付候选的分支恢复矩阵
+
+为覆盖 #346 合并后的公共连接管理器，另在交付候选
+`b34ebcdae736af0f9edd2b0c25051868a22db87e`（tree
+`0ceb79d58abfa850ca9797731a60212cb988e4b2`）复验原三角色矩阵，6格通过、0格跳过。
+使用现有 `branch_recovery` 集成测试的
+`separate_processes_restore_selected_membership_branch`，保持真实五进程恢复与路径断言；
+Relay 使用原 [隔离脚本](../../../scripts/testing/run-branch-recovery-relay.sh)，保留600秒外层保护、
+双栈UDP封锁及实际丢包检查，没有放宽产品期限或添加重试。
+
+| 旧端角色 | Direct | 强制 Relay | Relay 实际丢弃 UDP 包 |
+| --- | --- | --- | --- |
+| 无，全部当前版本 | 通过，39.633秒 | 通过，36.220秒 | 2253 |
+| 签发方 | 通过，38.614秒 | 通过，36.187秒 | 2179 |
+| 接收方 | 通过，37.957秒 | 通过，38.405秒 | 2579 |
+
+旧端仍固定 `5cbca8fc24a278fa7b01ae611bf4b925914bef13`，二进制SHA-256为
+`2afe38dab2b80348f592e11afc518cc3fe01889298adc52f126db9406c89ee55`；
+当前宿主SHA-256为 `2d90515cf23e41c58dff03a679fe0c42f9bb6ee76af2a0b1f3e050c23d3b7bcf`。
+四个实际测试／宿主／Relay二进制及六份原日志摘要均独立重算匹配；来源清单SHA-256为
+`1e1a58212553bcee7decfc655fd9ba9e491413907ec062481c8aea54c175d349`。
+结束后按实际可执行文件路径核对，无相关活动进程。
+
+复跑时先按本计划原冻结旧端步骤准备二进制，再从仓库根目录通过 `just cargo nextest`
+构建 `uc-connectivity-host` 的 `branch_recovery` 测试与
+`branch-recovery-fault-tests,uc-engine/branch-recovery-fault-tests` 特性。
+Direct 对精确用例设置 `UC_BRANCH_RECOVERY_EXPECT_PATH=direct`，旧端角色分别用
+`UC_BRANCH_RECOVERY_OLD_HOST` 和 `UC_BRANCH_RECOVERY_OLD_SIDE=issuer|recipient` 指定；
+Relay 将该测试二进制与 `current|issuer|recipient` 角色交给上述原脚本。
+这批结果补齐当前候选的AC07版本对应证据，不代替完整远端CI或未执行的物理设备矩阵。
