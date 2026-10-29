@@ -139,3 +139,68 @@ async fn shutdown_cancels_a_pending_retry() {
     assert_eq!(attempts.load(Ordering::SeqCst), after_shutdown);
     assert!(!lifetime.is_available());
 }
+
+/// 首次建立失败、后台重试进入建立并阻塞在其中的 `LifetimeMdns`；返回放行该次建立的发送端。
+///
+/// 同步建立占住一个工作线程，测试侧只用标准库线程原语等待，不依赖 tokio 定时器。
+fn blocked_in_retry() -> (LifetimeMdns, std::sync::mpsc::Sender<()>) {
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = std::sync::Mutex::new(released);
+    let (entered, entering) = std::sync::mpsc::channel::<()>();
+    let entered = std::sync::Mutex::new(entered);
+    let attempts = AtomicUsize::new(0);
+    let service = service_name();
+    let lifetime = LifetimeMdns::start_with_backoff(
+        move || {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(AddressLookupBuilderError::from_err(
+                    "mdns",
+                    std::io::Error::other("unavailable"),
+                ));
+            }
+            // 同步建立期间无法被 abort 打断，模拟关闭与一次耗时的建立重叠。
+            let _ = entered.lock().unwrap().send(());
+            let _ = released.lock().unwrap().recv();
+            MdnsAddressLookup::builder()
+                .service_name(service.clone())
+                .advertise(false)
+                .build(SecretKey::generate().public())
+        },
+        NetworkRecorder::current(),
+        Duration::from_millis(10),
+        Duration::from_millis(10),
+    );
+    entering
+        .recv_timeout(Duration::from_secs(5))
+        .expect("retry reaches the build");
+    (lifetime, release)
+}
+
+/// 关闭与正在执行的建立重叠时，关闭等待该次建立结束，建立出的服务不会在关闭之后安装。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_waits_for_an_in_flight_build_and_never_installs_afterwards() {
+    let (lifetime, release) = blocked_in_retry();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        release.send(()).unwrap();
+    });
+    let started = std::time::Instant::now();
+    lifetime.shutdown().await.unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "关闭必须等待正在执行的建立"
+    );
+    releaser.join().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!lifetime.is_available(), "关闭之后不得安装服务");
+}
+
+/// 同步中止与正在执行的建立重叠时，建立结束后的服务被停止标记拦下，不会安装。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abort_fences_a_build_that_finishes_afterwards() {
+    let (lifetime, release) = blocked_in_retry();
+    lifetime.abort();
+    release.send(()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!lifetime.is_available(), "中止之后不得安装服务");
+}

@@ -38,9 +38,17 @@ pub(in super::super) struct LifetimeMdns {
 
 struct Inner {
     service: watch::Sender<Option<MdnsAddressLookup>>,
-    /// 最近一次本机发布；同一把锁串行化发布与安装，安装后补发的总是最新地址。
-    published: Mutex<Option<EndpointData>>,
+    /// 同一把锁串行化发布、安装与停止：安装后补发的总是最新地址，停止后不再安装。
+    state: Mutex<State>,
     retry: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Default)]
+struct State {
+    /// 最近一次本机发布。
+    published: Option<EndpointData>,
+    /// 已关闭或中止；此后建立的服务立即中止，不再安装。
+    stopped: bool,
 }
 
 impl fmt::Debug for LifetimeMdns {
@@ -68,12 +76,14 @@ impl LifetimeMdns {
         let lifetime = Self {
             inner: Arc::new(Inner {
                 service: watch::channel(None).0,
-                published: Mutex::new(None),
+                state: Mutex::new(State::default()),
                 retry: Mutex::new(None),
             }),
         };
         match build() {
-            Ok(service) => lifetime.install(service),
+            Ok(service) => {
+                lifetime.install(service);
+            }
             Err(error) => {
                 uc_warn!(
                     error_kind = "mdns_unavailable",
@@ -100,16 +110,23 @@ impl LifetimeMdns {
         self.inner.service.borrow().clone()
     }
 
-    fn install(&self, service: MdnsAddressLookup) {
-        let published = self
+    /// 安装建立好的服务；已停止时中止该服务并返回 `false`。
+    fn install(&self, service: MdnsAddressLookup) -> bool {
+        let state = self
             .inner
-            .published
+            .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(data) = published.as_ref() {
+        if state.stopped {
+            drop(state);
+            service.abort();
+            return false;
+        }
+        if let Some(data) = state.published.as_ref() {
             service.publish(data);
         }
         self.inner.service.send_replace(Some(service));
+        true
     }
 
     /// 发现事件流：未建立时等待建立，之后转交原服务的订阅。
@@ -132,44 +149,54 @@ impl LifetimeMdns {
         )
     }
 
-    /// 取消重试并等待已建立的服务结束。
+    /// 停止并取消重试，等待重试任务真正退出（包括正在执行的建立），再等待已安装的服务结束。
     pub(in super::super) async fn shutdown(&self) -> Result<(), anyhow::Error> {
-        self.abort_retry();
+        if let Some(task) = self.stop() {
+            task.abort();
+            match task.await {
+                Err(error) if error.is_panic() => return Err(error.into()),
+                Ok(()) | Err(_) => {}
+            }
+        }
         match self.current() {
             Some(service) => service.shutdown().await.map_err(Into::into),
             None => Ok(()),
         }
     }
 
-    /// 不等待地取消重试与服务；用于未完整构建或被丢弃的节点。
+    /// 不等待地停止重试与服务；用于未完整构建或被丢弃的节点。仍在建立的服务由停止标记拦下。
     pub(in super::super) fn abort(&self) {
-        self.abort_retry();
+        if let Some(task) = self.stop() {
+            task.abort();
+        }
         if let Some(service) = self.current() {
             service.abort();
         }
     }
 
-    fn abort_retry(&self) {
-        if let Some(task) = self
-            .inner
+    /// 标记停止并取出重试任务；标记与安装共用一把锁，此后完成的建立不会再安装。
+    fn stop(&self) -> Option<JoinHandle<()>> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stopped = true;
+        self.inner
             .retry
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
-        {
-            task.abort();
-        }
     }
 }
 
 impl AddressLookup for LifetimeMdns {
     fn publish(&self, data: &EndpointData) {
-        let mut published = self
+        let mut state = self
             .inner
-            .published
+            .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        *published = Some(data.clone());
+        state.published = Some(data.clone());
         if let Some(service) = self.current() {
             service.publish(data);
         }
@@ -195,7 +222,9 @@ async fn retry(
         };
         match build() {
             Ok(service) => {
-                LifetimeMdns { inner }.install(service);
+                if !(LifetimeMdns { inner }).install(service) {
+                    return;
+                }
                 recorder.register_source(
                     LocalDiagnosticSource::MdnsDiscovery,
                     SourceCapability::Partial,
