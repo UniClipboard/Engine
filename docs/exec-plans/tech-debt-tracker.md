@@ -6,6 +6,8 @@
 | --- | --- | --- | --- |
 | 冻结 a07 Relay 互通完成后关闭返回 1104 | #345 首轮 CI 已证实，本机两次原场景复验通过，根因未明 | 网络／关闭负责人保留冻结旧 SHA、15 秒关闭预算与完整内容断言，定位实际未结算参与者；驱动 EPIPE 已有独立修复，不能将证据留存修复当成旧端关闭修复 | [原失败及后续结算](completed/2026-10-28-membership-branch-recovery-connectivity-plan.md#合并后最终-ci-结算2026-10-29) |
 | 网络日志目录故障验收的子进程间歇退出 | 已修复：#350首轮workspace失败后，本地两核第11轮复现DirectoryNotEmpty并修正故障注入竞态；12项、同两核100轮及33dc6f03完整workspace4990项均通过 | 网络日志与夹具负责人已核对本轮完整Engine原XML；相同两核100轮及原12项报告继续保留；保持目录删除、阻塞恢复与业务日志隔离断言，保留首轮及本地红转绿证据，不把原CI缺失的stderr写成已取回 | [首轮证据与诊断修复](completed/2026-10-28-membership-branch-recovery-connectivity-plan.md#首轮交付候选的观测失败与主动取消) |
+| 管理下载1GiB大流资源原场景超时 | 本轮首次工作区91.723秒超时，隔离70.170秒及最终完整工作区78.520秒通过，根因未定 | Blob传输完整负责人定位原超时的实际阶段，保留内容、SDK tags与连接结算断言，在原90秒预算和完整工作区环境复验；不以隔离通过认定修复 | [首次全量反馈](completed/2026-10-30-issue-34-followups.md#全量首次反馈) |
+| 成员证据验证跨控制数据库切换继续使用旧结果 | 已复现并完成本地修复验收：四项首红转绿、原成员56通过、最终工作区5004通过 | 成员证据完整负责人保留最初数据库代号；验证中／提交排队时切换返回暂不可用，分歧写入、一致更新、无写回复四项首红转绿；原F2／G2等间歇异常根因仍独立保留 | [后续计划](completed/2026-10-30-issue-34-followups.md) |
 | 成员收敛、Space 切换与分支冲突恢复间歇失败 | 第九片本地全集分别出现失败，后续全集复验通过，根因未明 | 成员／会话及恢复负责人分别定位原收敛超时、激活后恢复超时和冲突未清零；保留各次原日志与同代码复验结果，不把三个现象认定为同一原因，不增加期限掩盖 | [第九片执行记录](completed/2026-10-28-membership-branch-recovery-connectivity-plan.md) |
 | 冻结a07旧旧Relay文件接收间歇拒绝 | #332／#335原CI失败，后续完整原矩阵通过；#350首轮及SQLite修复候选33dc6f03的CI均在升级前旧旧阶段再次出现相同拒绝，根因未定 | 网络／接收及兼容验收负责人定位原B到A文件`peer_rejected`／A的`apply_failed`；旧版已丢失部分source chain，须保留固定旧SHA、原文件断言和失败证据，建立实际反馈环并明确兼容处置；不以通过重跑称修复 | [历史失败](completed/2026-10-24-transfer-progress-connectivity-feasibility.md#映射期间发现的旧旧relay失败)、[本次候选失败](completed/2026-10-28-membership-branch-recovery-connectivity-plan.md#交付候选-350-的首次网络失败) |
 | 成员F2恢复场景偶发多一个issue | 本片首次完整回归失败，隔离及后续完整56项通过；根因未定 | 成员恢复及测试负责人定位实际产生多一个issue的时序，在原全并发场景验证原计数和恢复断言；保留首次结果，不增加超时或将smoke代替全集 | [首次失败与完整回归](completed/2026-10-24-transfer-progress-connectivity-feasibility.md#当前候选完整回归与首次失败保留) |
@@ -22,12 +24,10 @@
 | Core 规则外泄、效果义务无约束力、存储格式与运行时依赖在 Core | 已盘点，修复未开始 | 清单逐项修复或登记为规范例外；Core 自动检查在 CI 阻断 | [计划](active/2026-09-23-core-boundary-remediation.md) |
 | 新会话发布前的出站连接被本机拒绝，每次加入的最终确认多等约 1 秒 | 已定位，候选方案因暴露重启补传问题暂缓 | 先修复同身份重启后握手超时及投递恢复只尝试一次的问题；`interrupted_file_transfer_recovers_after_receiver_process_restart` 连续 10 次通过，且最终确认首连不再 `locally_rejected` | [发现记录](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
 | 接收方以同一身份、同一端口重启后，文件续传偶发等不到投递 | 已复现，原因即上一行记录的两个既有问题；该测试已进入 PR 必需门禁 | 本机 nextest 全工作区构建下 `interrupted_file_transfer_recovers_after_receiver_process_restart` 失败 2/10（1381 修复前）与 3/10（修复后），单包构建 1/10，均为等待投递超时；网络与投递恢复负责人修复同身份重启握手超时及投递恢复只尝试一次，之后连续 10 次通过 | [发现记录](../../.planning/2026-09-26-session-outbound-before-publish/findings.md) |
-
 | 跨内容自动替换的迟到投递结果可覆盖 Superseded | 静态审查确认既有写入断点，未做独立故障复现 | Application 发送与恢复负责人把 supersede/停止恢复直接写入纳入同一尝试围栏；阻塞旧 deferred、标记 Superseded 后释放旧结果，状态仍终止自动恢复；新意图写失败不得丢失旧有效回执 | [审查记录](completed/2026-10-11-clipboard-connectivity-review.md) |
-
 | 成员 G2 密码学拒绝场景偶发未投影拒绝 | 最新全套失败一次、同源码隔离与此前全套通过；实际原因未证实 | 成员验收负责人记录 tamper 消费、投递结果及接收方 epoch 顺序；以确定性 gate 保证真实拒绝边界，原拒绝/重启/后序 epoch 断言在完整并发全套稳定通过；不增加篡改次数或超时掩盖 | [审查记录](completed/2026-10-11-clipboard-connectivity-review.md) |
-
-| 已完整接收目录的再次激活触发重复 pull 并存储失败 | 独立进程复现两次；冻结 main 可用性实现与当前一致 | Application 内容可用性负责人和 Infra 存储负责人统一目录完整性判断与重复接收结算；真实目录包含嵌套文件及空目录，首次物化后再次激活不重复拉取，缺失成员仍不得判定可用；不得仅把根目录存在当作成员完整 | [发现记录](../../.planning/2026-10-14-active-clipboard-connectivity/findings.md) |
+| 已完整接收目录的再次激活触发重复 pull 并存储失败 | 已修复并本地验收：本轮独立进程首红、真实SQLite首红均红转绿，四种内容Direct／Relay共8项通过；存储全集283通过、3忽略；最终工作区5004项及根交付门禁通过 | 完整流程负责人不变；Infra复用已认证清单实时核对实际成员、内容及结构，不新增存储格式或调用方步骤；固定旧端和真机不据此扩张验收 | [后续处理计划](completed/2026-10-30-issue-34-followups.md) |
+| 目录旧v1身份不能区分根类型及同名根分组 | 已由真实SQLite回归确认；本轮复用检查保守拒绝歧义清单，身份格式本身尚未修复 | 内容身份负责人先确认发布冻结边界并设计兼容与存量演进方案；不得静默改变v1字节或从根路径类型推断原始意图；普通无歧义完整目录仍可直接复用 | [ADR-010复用边界](../design-docs/decisions/010-directory-sync-as-file-set-manifest.md#旧v1身份的复用边界) |
 
 
 关闭项目时记录验证证据，更新稳定文档，并将对应计划移入 `completed/`。

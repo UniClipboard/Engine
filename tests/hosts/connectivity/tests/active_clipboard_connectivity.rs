@@ -225,6 +225,8 @@ async fn complete_restore(
     requester_binary: PathBuf,
     label: &str,
 ) {
+    let check_reactivation = kind != "directory"
+        || (holder_binary == current_binary() && requester_binary == current_binary());
     let server = mount_rendezvous().await;
     let mut holder = HostProcess::start_binary(&server.uri(), holder_binary, false, None);
     let mut requester = HostProcess::start_binary(&server.uri(), requester_binary, false, None);
@@ -262,8 +264,8 @@ async fn complete_restore(
         );
         std::thread::sleep(Duration::from_millis(50));
     };
-    // 目录首次完整读回仍验收；既有目录可用性仅检查普通文件，重复激活债务另有证据记录。
-    if kind != "directory" {
+    // 当前两端必须复用已完整物化的目录；冻结旧端仍保留原首次内容互通范围。
+    if check_reactivation {
         let initial_pulls = pull_count(
             &network_records(&mut holder),
             &network_records(&mut requester),
@@ -373,7 +375,7 @@ async fn complete_restore(
     }
     std::fs::write(evidence.join(format!("{label}-{kind}.json")), serde_json::to_vec_pretty(&json!({
         "result": "passed", "kind": kind, "selected_path": expected, "path_validation": if expected.is_some() { "passed" } else { "skipped-uncontrolled-network" }, "state_paths": state_paths, "pull_paths": pull_paths,
-        "ordinary_push_disabled": true, "existing_content_did_not_pull_again": kind != "directory", "system_clipboard": clipboard,
+        "ordinary_push_disabled": true, "existing_content_did_not_pull_again": check_reactivation, "system_clipboard": clipboard,
     })).unwrap()).unwrap();
     holder.shutdown();
     requester.shutdown();

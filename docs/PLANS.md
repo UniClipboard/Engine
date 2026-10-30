@@ -20,11 +20,13 @@
 
 ## 当前专项计划
 
+- [Issue #34 后续缺口处理](exec-plans/completed/2026-10-30-issue-34-followups.md)：实现与本地验收完成并归档；目录复用、D15独立发现证明与成员证据数据库代号隔离落地，最终工作区5004项及成员56项通过。原间歇异常和旧格式演进继续由技术债跟踪，远端CI及设备范围由总清单跟踪。
+
 - [Issue #34 总验收清单](exec-plans/active/2026-10-29-connectivity-migration-acceptance.md)：统一核对原 DoD、切片状态、最终 CI、首次失败与跳过边界。
 
 - [Space 加入受管通信](exec-plans/completed/2026-10-29-space-admission-connectivity-plan.md)：实现与本地验收完成；初次加入、续接和入站流接入统一连接管理器，保留非成员专属认证与原协议，修复单端点占尽准入额度；历史发布二进制、Relay 和真机矩阵跳过。
 
-- Issue #34 第九切片：[成员分支恢复受管连接执行计划](exec-plans/completed/2026-10-28-membership-branch-recovery-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-28-membership-branch-recovery-connectivity-spec.md)。实现与验收完成并归档；最终代码候选 `33dc6f03` 的恢复六格、完整Engine、原网络24格及平台编译／Windows门禁均已核验。首轮固定旧旧Relay失败及旧技术债保留；移动编译不代表真机运行，物理切网／睡眠／后台和额外历史矩阵跳过。#350保持草稿，#34的D15端到端证据缺口继续由总清单跟踪。
+- Issue #34 第九切片：[成员分支恢复受管连接执行计划](exec-plans/completed/2026-10-28-membership-branch-recovery-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-28-membership-branch-recovery-connectivity-spec.md)。实现与验收完成并归档；最终代码候选 `33dc6f03` 的恢复六格、完整Engine、原网络24格及平台编译／Windows门禁均已核验。首轮固定旧旧Relay失败及旧技术债保留；移动编译不代表真机运行，物理切网／睡眠／后台和额外历史矩阵跳过。#350保持草稿，#34的D15本地端到端证据已由后续计划补齐，远端CI及设备范围由总清单继续跟踪。
 
 - Issue #34 第八切片：[反向进度与发送侧状态投影执行计划](exec-plans/completed/2026-10-24-transfer-progress-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-24-transfer-progress-connectivity-spec.md)及[验收结论](exec-plans/completed/2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)。实施与验收结算完成，同head主CI13项及Windows双架构通过；物理挂起／设备后台按用户要求跳过，历史旧端Relay／成员F2间歇失败与远端日志丢弃边界保留。归档PR #342已合并至main（`80bda137`，2026-10-28北京时间）；合并不代表发布，也不关闭整个#34。
 

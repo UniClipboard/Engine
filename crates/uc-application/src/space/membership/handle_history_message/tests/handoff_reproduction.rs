@@ -9,6 +9,8 @@ use async_trait::async_trait;
 #[path = "handoff_reproduction/legacy_candidate_convergence_scenario.rs"]
 mod legacy_candidate_convergence_scenario;
 
+mod generation_replacement;
+
 struct QueryStatus;
 
 #[async_trait]

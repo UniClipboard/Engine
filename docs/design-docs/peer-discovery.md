@@ -25,4 +25,8 @@ iroh 的生产 address lookup 消费 DiscoveryManager 输出。缓存候选先�
 
 ## 验证边界
 
-纯目录与测试 provider 证明多来源/期限/取消契约，真实 mDNS adapter 测试证明订阅和地址变更，目录 lookup 的真实 QUIC 测试证明连接桥与双向多流。这些不能代替真实云端、独立 OS 进程的产品同步或设备验收。实施证据与未执行项见[第一个切片计划](../exec-plans/completed/2026-10-11-peer-discovery-slice.md)。
+纯目录与测试provider证明多来源／期限／取消契约，真实mDNS adapter测试证明订阅和地址变更，目录lookup的真实QUIC测试证明连接桥与双向多流。
+
+独立进程的云故障产品验收由[发现网络脚本](../../scripts/testing/run-discovery-connectivity.sh)执行：Cloud保持开启，两端完全退出并更换双栈端口；防火墙持续阻断旧端口且namespace没有公网路由。先阻断mDNS，要求实际Cloud失败终态、无成功路径和内容；再只放行mDNS，要求实际本地候选、Direct连接及合成剪贴板宿主准确读回。该对照排除持久旧地址和已有连接作为成功路径，不要求删除既有身份映射，也不新增测试专用Engine查询。
+
+该场景复用既有合成剪贴板宿主，证明完整Engine到宿主写入口及准确读回；本地独立进程证明不代表原生桌面剪贴板、物理设备、多网段或全部平台网络栈验收。当前执行状态见[后续计划](../exec-plans/completed/2026-10-30-issue-34-followups.md)，原切片实施历史见[第一个切片计划](../exec-plans/completed/2026-10-11-peer-discovery-slice.md)。
