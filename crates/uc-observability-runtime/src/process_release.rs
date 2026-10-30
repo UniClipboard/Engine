@@ -405,6 +405,18 @@ impl ProcessReleaseCoordinator {
         generation.checked_add(1).is_some()
             && matches!(&*lock(&self.state), Phase::Failed { generation: current, resume_failed, retryable_files, .. } if *current == generation && (*resume_failed || *retryable_files || retry_engines))
     }
+    pub(crate) fn failed_without_retry(
+        &self,
+        fence: &Arc<()>,
+        retry_engines: bool,
+        closers_live: bool,
+    ) -> bool {
+        matches!(&*lock(&self.state), Phase::Failed {
+            generation, fence: current, resume_failed, retryable_files, ..
+        } if Arc::ptr_eq(current, fence)
+            && (!closers_live || generation.checked_add(1).is_none()
+                || !(*resume_failed || *retryable_files || retry_engines)))
+    }
     pub(crate) fn record_operation_errors(&self, generation: u64, errors: ProcessReleaseErrors) {
         if let Some(observation) = lock(&self.releases).get(&generation) {
             let mut previous = lock(&observation.operation_errors);

@@ -136,8 +136,9 @@ impl MobileStartupLifecycle {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
-        let phase = phase.clone();
-        match phase {
+        let current = phase.clone();
+        drop(phase);
+        match current {
             Preparation::NotStarted => {
                 return (
                     BindingStartupReleaseState::NotStarted,

@@ -109,6 +109,30 @@ pub(crate) fn installed_network_log() -> Option<Arc<NetworkLogRuntime>> {
     INSTALLED.get().and_then(|state| state.network.clone())
 }
 
+/// 仅对同一封口的不可重试失败拒绝登记，保留封口及其资源责任。
+pub(crate) fn installed_process_failure_blocks_registration(fence: &Arc<()>) -> bool {
+    let Some(state) = INSTALLED.get() else {
+        return false;
+    };
+    let _terminal = match state.terminal_gate.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(TryLockError::WouldBlock) => return false,
+    };
+    let closers_live = !state.shutdown.is_started()
+        && state
+            .local_file
+            .as_ref()
+            .is_none_or(|file| file.queue.has_live_closer())
+        && state
+            .network
+            .as_ref()
+            .is_none_or(|network| network.has_live_closer());
+    state
+        .release
+        .failed_without_retry(fence, has_retryable_engine_closer(), closers_live)
+}
+
 pub(crate) fn notify_engine_closer_changed() {
     if let Some(state) = INSTALLED.get() {
         state.telemetry.notify_span_wait();
@@ -484,7 +508,7 @@ impl ProcessObservabilityHandle {
                         .state
                         .local_file
                         .as_ref()
-                        .is_none_or(|file| file.has_live_closer())
+                        .is_none_or(|file| file.queue.has_live_closer())
                     && self
                         .state
                         .network
@@ -747,7 +771,7 @@ impl ProcessObservabilityHandle {
                     .state
                     .local_file
                     .as_ref()
-                    .is_none_or(|file| file.has_live_closer())
+                    .is_none_or(|file| file.queue.has_live_closer())
                 || !self
                     .state
                     .network
@@ -870,7 +894,7 @@ impl ProcessObservabilityHandle {
                 let local = state
                     .local_file
                     .as_ref()
-                    .is_none_or(|file| file.park(Duration::MAX) == SignalResult::Completed);
+                    .is_none_or(|file| file.queue.park(Duration::MAX) == SignalResult::Completed);
                 let network = state.network.as_ref().is_none_or(|network| {
                     if explicit_retry {
                         network.retry_failed_park();
@@ -1030,7 +1054,7 @@ impl ProcessObservabilityHandle {
                                     return false;
                                 }
                                 if !state.local_file.as_ref().is_none_or(|file| {
-                                    file.unpark(Duration::MAX) == SignalResult::Completed
+                                    file.queue.unpark(Duration::MAX) == SignalResult::Completed
                                 }) {
                                     return false;
                                 }
