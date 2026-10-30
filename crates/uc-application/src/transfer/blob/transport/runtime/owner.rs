@@ -75,6 +75,7 @@ impl BlobTransport {
                 waiters_per_session: ACTIVE_DOWNLOADS,
                 flights_per_session: ACTIVE_DOWNLOADS,
                 idle_retention: Some(IdleRetentionPolicy {
+                    elapsed_clock: None,
                     timeout: CONNECTION_IDLE_TIMEOUT,
                     capacity: RETAINED_BLOB_CONNECTIONS,
                 }),

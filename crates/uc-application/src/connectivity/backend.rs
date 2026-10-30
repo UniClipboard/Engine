@@ -1,5 +1,6 @@
-use super::{ConnectivityError, StreamPair};
+use super::{ConnectionKey, ConnectivityError, PeerReceiveStream, PeerSendStream, StreamPair};
 use async_trait::async_trait;
+use std::any::Any;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
@@ -18,24 +19,29 @@ pub enum ConnectionMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionProtocol {
     Unsupported,
+    SpaceAdmission,
     Blob,
+    TransferProgressV1,
+    TransferProgressV2,
     PeerReachabilityV1,
     PeerReachabilityV2,
     ActiveClipboardState,
     ActiveClipboardPull,
     Clipboard,
     MultiplexedClipboard,
+    AttributedClipboard,
     GroupUpdate,
     LegacyGroupUpdate,
     MembershipHistory,
+    MembershipBranchRecovery,
     MultiplexedMembershipHistory,
 }
 
 #[async_trait]
-pub trait ConnectivityBackend: Send + Sync {
+pub trait ConnectivityBackend<K: ConnectionKey = DeviceId>: Send + Sync {
     async fn connect(
         &self,
-        target: DeviceId,
+        target: K,
         address_hint: Option<Vec<u8>>,
         cancel: CancellationToken,
     ) -> Result<Arc<dyn PeerConnection>, ConnectivityError>;
@@ -43,7 +49,7 @@ pub trait ConnectivityBackend: Send + Sync {
 
 /// 已完成密码握手的传输事实；不代表成员准入。
 #[async_trait]
-pub trait PeerConnection: Send + Sync {
+pub trait PeerConnection: Send + Sync + Any {
     fn id(&self) -> usize;
     fn authenticated_key(&self) -> [u8; 32];
     fn mode(&self) -> ConnectionMode;
@@ -58,4 +64,15 @@ pub trait PeerConnection: Send + Sync {
     async fn closed(&self);
     async fn open_bi(&self) -> Result<StreamPair, ConnectivityError>;
     async fn accept_bi(&self) -> Result<StreamPair, ConnectivityError>;
+    /// 可选的传输能力；只提供双向流的 backend 明确返回无此能力。
+    fn unidirectional(&self) -> Option<&dyn PeerUnidirectionalConnection> {
+        None
+    }
+}
+
+/// 单向流传输能力；容量、期限和当前准入由连接租约统一承担。
+#[async_trait]
+pub trait PeerUnidirectionalConnection: Send + Sync {
+    async fn open_uni(&self) -> Result<Box<dyn PeerSendStream>, ConnectivityError>;
+    async fn accept_uni(&self) -> Result<Box<dyn PeerReceiveStream>, ConnectivityError>;
 }

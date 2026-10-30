@@ -15,6 +15,8 @@ pub enum InboundActivationOwner {
 /// 完整入站动作的调用输入；不依赖 facade 类型。
 #[derive(Debug, Clone)]
 pub struct ApplyInboundInput {
+    /// 已认证激活消息的来源条目标识；不从内容摘要或provider推导。
+    pub source_entry: Option<EntryId>,
     pub from_device: DeviceId,
     pub snapshot_hash: String,
     pub plaintext: Bytes,

@@ -89,12 +89,13 @@ impl<E: DbExecutor> SqliteMembershipRecordStore<E> {
     /// 事务中落实，任一失败时两者都不改变。
     pub(crate) fn commit_record(
         &self,
+        expected_generation: u64,
         expected_revision: u64,
         replacement: &MembershipRecord,
         projection: Option<(&MembershipProjectionWriter, &MembershipProjectionPlan)>,
     ) -> Result<(), MembershipLedgerError> {
         self.executor
-            .run(|conn| {
+            .run_at_generation(expected_generation, |conn| {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     let current = self.load_on(conn).map_err(anyhow::Error::new)?;
                     if current.revision() != expected_revision
@@ -244,10 +245,14 @@ impl<E: DbExecutor + Clone + 'static> MembershipRecordStorePort for SqliteMember
         spawn_blocking(move || {
             span.in_scope(|| {
                 store.commit_record(
+                    commit.expected_generation,
                     commit.expected_revision,
                     &commit.replacement,
                     writer.as_ref().zip(commit.projection.as_ref()),
-                )
+                )?;
+                #[cfg(feature = "branch-recovery-fault-tests")]
+                super::fault_test_gate::after_commit(&commit.replacement)?;
+                Ok(())
             })
         })
         .await

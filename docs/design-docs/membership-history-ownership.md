@@ -168,3 +168,30 @@ Engine 组装独立历史 Uni manager 并装饰完整能力，不管理分页，
 直到工作结算；因此不会在超时后无界积累本地工作，也不新建任务登记。
 原成员 owner 保存恢复债务，历史退避仍为 1、2、4、8…300 秒，成功重置，按 due_at 唤醒。
 撤销、generation 交接与 shutdown 立即关闭网络，既有 local-work 机制结算已经开始的本地提交。
+
+## 成员分支恢复通信边界
+
+分支恢复由 `RecoverMembershipConflictUseCase` 负责接收方的持久转换，
+`IssueMembershipBranchRecoveryUseCase` 负责签发方资格、材料和幂等结果。
+成员模块私有的 [transport](../../crates/uc-application/src/space/membership/recover_conflict/transport.rs)
+实现既有完整信道，[receiver](../../crates/uc-application/src/space/membership/recover_conflict/receiver.rs)
+接收请求并调用签发负责人。Engine 仅装配独立 Uni manager、信道和接收端；Infra 只做身份适配、
+协议 framing 和受管流交接，旧原生恢复 adapter 已删除。
+
+恢复允许合法分叉成员通信，不能借用普通同步要求 Consistent 的准入，也不接受历史介绍中的临时身份降级。
+连接先核对认证公钥到当前设备的唯一映射、原会话和撤销基线；消息仍由签发负责人核验目标分支、
+认证来源与 recipient、本机和接收方有效成员资格。发现候选与在线状态不能授予恢复资格。
+
+两次交换分别获取单次连接，保持现有 ALPN、五类消息、长度前缀、FIN 和 4 MiB 正文上限，不增加 wire 字段。
+每次出站交换从信道入口起共享 30 秒绝对期限；入站从原生交付起共享 30 秒，首流最多等待 10 秒。
+每 peer 出站 1、每会话拨号 4；入站会话 8、每连接 1；等待每 peer 4、每会话 16，超额 Busy。
+通信模块不自行重试，也不做空闲保留；实际本地工作结算前不归还其许可。
+
+整个恢复动作复用不透明业务 scope，网络结果返回后、准备和条件提交前核对原作用域；移除后重加、
+切 Space 和迟到响应不能把旧动作带入新会话。已开始的不可取消提交由原负责人监督到实际结束，
+不能将网络响应成功记为转换完成，也不能承诺回滚已经正式提交的事实。
+原加密恢复记录保存 RecipientPrepared、TargetPrepared／TargetCommitted 等事实；响应丢失或重启后
+复用已保存的相同 external commit 和恢复包，不能生成新包绕过冲突检查，不新增持久格式。
+
+连接记录仅在内存匿名映射内关联维护轮次，遵守[观测合同](observability.md#关联与结束边界)，
+不为两次网络交换新增业务 root，不向 Engine 暴露业务步骤。

@@ -1,0 +1,66 @@
+{
+  "crate": "voprf",
+  "version": "0.5.0",
+  "registry_checksum": "28f59c30c76e2fea54cdece6a054e2662feffa7ab19658a7887524265ee39470",
+  "original_files": {
+    "src/ciphersuite.rs": "41e5013df13c8b082e1a5f96f041eb367a2959465b48fe9494e6dddf6a341a25",
+    "src/common.rs": "728b2ba45fa7ad5ce0a9184f05abca0c459d0ea883ca95d2635afef70a05ae81",
+    "src/error.rs": "6492f7abf7fe8be5e654ab00ec83ad1bd50cac798e39a2866a24d4dc2b4ffab2",
+    "src/lib.rs": "88838c9b2b47b8d11da721847d47cf2c5878bad73e14e71a6d2e93f4b30474d4",
+    "src/oprf.rs": "8a587fa5354b9bcd34d914ca9d19b2ac12d5f35447a69c92e59b5f6744b7b95e",
+    "src/poprf.rs": "dd27263e4d6628426d82396540d6cc72b7136d90784f4ffd872fd8ff41d3017e",
+    "src/serialization.rs": "9e89630dc27dabb926216a9a05aa09888027d3244bd12b604d7a5f930709b28c",
+    "src/voprf.rs": "5b883b7740664d3f8b45386c2d5275a22601b2f8c53e6ee48082c8827fc19ffc",
+    "src/group/elliptic_curve.rs": "1998e110f9f8eff990b7126ede9a07ee6183ee30875728422f26da67d5b59f95",
+    "src/group/mod.rs": "86b5548d7f7ad013f7f0b38b4d5e3ff82507e282aa16b6c2a6be8bc52be1aff9",
+    "src/group/ristretto.rs": "fc992e8ecec56815338ed799ecfc0ee8e4be30251fbab02eda2f71f80a7ab1a9",
+    "src/group/tests.rs": "9a4268c78162aa67fa381d68ac76e51e5af26035d22770990c24ebf93727914f",
+    "src/tests/cfrg_vectors.rs": "8caeb3d929d537d9b4a3050af41787f581d6ba4ba822175dad488518b7de1783",
+    "src/tests/mock_rng.rs": "8fd18f82f16adc82ec2e0eced39b348eeae2cca8d7dd7a2d2b4462b28c71f331",
+    "src/tests/mod.rs": "f12543b02a5e7c91f63bdca36736f5936b3460346cef61b2ac871df82a31ce47",
+    "src/tests/parser.rs": "825c619d86f39a52a77c70523b8c4806ef17dd57327c18ca23a1032d95f4c6f0",
+    "src/tests/test_cfrg_vectors.rs": "da8d1ac6e8d54e5eb59e9db1572cee3255601f8848ed2bc45fe90e3d8a1fe224"
+  },
+  "modified_files": {
+    "src/ciphersuite.rs": "adb1b8213af483271e214283250ebcbf9c223f709963453db9a05a9a96257a02",
+    "src/group/elliptic_curve.rs": null,
+    "src/group/mod.rs": "bc9aa3a5b0afb7d437f60e05a5c4cb0b8cb389ea64dc9990d46fd23857a6d031",
+    "src/group/ristretto.rs": "e4aa62cced7c7037d70532a48559c6d0de7a2af9d2157df18c34ba3a6720188b"
+  },
+  "expand_message_origin": {
+    "crate": "elliptic-curve",
+    "version": "0.13.8",
+    "registry_checksum": "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47",
+    "files": {
+      "expand_msg.rs": "7615b8d2ba958a6d11d0f50143b9c2aa78649ea7c2dd87d16f2da4cf09578e50",
+      "expand_msg/xmd.rs": "5a85d4084395e924bbb2e32640beaba8c8c8476695e70baf0b341155a6a5dd87",
+      "expand_msg/xof.rs": "42bf7796706105e8d521137679a458e0c9e2ed3463adaa0f1c505b5d9bb2804d"
+    }
+  },
+  "local_files": {
+    "Cargo.toml": "fb8d499f53dad5d24b7605dfb7b3b2a033bc5346976b3b52da8a63f7c9557367",
+    "LICENSE-APACHE": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+    "LICENSE-MIT": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+    "RFC9380-LICENSE-APACHE": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+    "RFC9380-LICENSE-MIT": "d27687b51f2874822c1530976b7e837eac4f308d94bf3dd42047011b7d437b47",
+    "src/ciphersuite.rs": "adb1b8213af483271e214283250ebcbf9c223f709963453db9a05a9a96257a02",
+    "src/common.rs": "728b2ba45fa7ad5ce0a9184f05abca0c459d0ea883ca95d2635afef70a05ae81",
+    "src/error.rs": "6492f7abf7fe8be5e654ab00ec83ad1bd50cac798e39a2866a24d4dc2b4ffab2",
+    "src/group/expand_msg/mod.rs": "a52122029476f6a7b4c3fb14547f6109b5f27b4c3bf420f0cb86bb7b9aab3f35",
+    "src/group/expand_msg/xmd.rs": "c9b0fb8a59abad9935a2994a8bf0a6a0397c1440611469be0520c0b4ff3772ac",
+    "src/group/expand_msg/xof.rs": "97a8bdad5c4cbeebce43f7e1a95e0ded88ca46af530fe024079461c8bdb37fdb",
+    "src/group/mod.rs": "bc9aa3a5b0afb7d437f60e05a5c4cb0b8cb389ea64dc9990d46fd23857a6d031",
+    "src/group/ristretto.rs": "e4aa62cced7c7037d70532a48559c6d0de7a2af9d2157df18c34ba3a6720188b",
+    "src/group/tests.rs": "9a4268c78162aa67fa381d68ac76e51e5af26035d22770990c24ebf93727914f",
+    "src/lib.rs": "88838c9b2b47b8d11da721847d47cf2c5878bad73e14e71a6d2e93f4b30474d4",
+    "src/oprf.rs": "8a587fa5354b9bcd34d914ca9d19b2ac12d5f35447a69c92e59b5f6744b7b95e",
+    "src/poprf.rs": "dd27263e4d6628426d82396540d6cc72b7136d90784f4ffd872fd8ff41d3017e",
+    "src/serialization.rs": "9e89630dc27dabb926216a9a05aa09888027d3244bd12b604d7a5f930709b28c",
+    "src/tests/cfrg_vectors.rs": "8caeb3d929d537d9b4a3050af41787f581d6ba4ba822175dad488518b7de1783",
+    "src/tests/mock_rng.rs": "8fd18f82f16adc82ec2e0eced39b348eeae2cca8d7dd7a2d2b4462b28c71f331",
+    "src/tests/mod.rs": "f12543b02a5e7c91f63bdca36736f5936b3460346cef61b2ac871df82a31ce47",
+    "src/tests/parser.rs": "825c619d86f39a52a77c70523b8c4806ef17dd57327c18ca23a1032d95f4c6f0",
+    "src/tests/test_cfrg_vectors.rs": "da8d1ac6e8d54e5eb59e9db1572cee3255601f8848ed2bc45fe90e3d8a1fe224",
+    "src/voprf.rs": "5b883b7740664d3f8b45386c2d5275a22601b2f8c53e6ee48082c8827fc19ffc"
+  }
+}

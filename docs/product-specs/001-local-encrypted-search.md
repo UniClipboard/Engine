@@ -4,6 +4,8 @@
 
 草案。
 
+The current implementation differs from two requirements below. The index adds prefix tokens, so a query can match a prefix of an indexed word. The parser rejects mixed `AND` and `OR`, but the inspected path does not explicitly reject parentheses or negation. Runtime verification of those inputs is pending. Product owners must decide whether to change the requirements or the implementation. See the [search implementation status](../design-docs/features/001-local-encrypted-search.md#current-implementation-status).
+
 ## 背景
 
 用户需要在本机历史中快速找到已复制的内容，同时不能让搜索能力扩大内容的暴露范围。

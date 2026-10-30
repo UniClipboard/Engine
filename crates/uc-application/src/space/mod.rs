@@ -168,7 +168,10 @@ pub use membership::{
     RePairingStateError, RePairingStateStorePort,
 };
 pub use membership::{
-    AdmissionMaintenanceOutcome, BeginMembershipBranchRecoveryInput,
+    AdmissionMaintenanceOutcome, BeginMembershipBranchRecoveryInput, BranchRecoveryLocalWorkPort,
+    BranchRecoveryOperationScopePort, BranchRecoveryPeerPort, BranchRecoveryReceiver,
+    BranchRecoveryRequest, BranchRecoveryResponse, BranchRecoveryTransport,
+    BranchRecoveryWireError, BranchRecoveryWirePort, BranchRecoveryWork,
     IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
     IssueMembershipBranchRecoveryPort, KnownPeerContact, MembershipBranchRecoveryChannelError,
     MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
@@ -197,3 +200,5 @@ pub use connectivity::{
     PeerReachabilityEnvironmentPort, PeerReachabilityTransport, PeerReachabilityTransportError,
     PeerReachabilityTransportPorts, PeerReachabilityWireError, PeerReachabilityWirePort,
 };
+
+pub(crate) use membership::{MemberScopeRetirement, MemberScopeRetirementPort};

@@ -132,6 +132,7 @@ async fn receipt_failures_remain_distinct_in_standard_and_detailed_exports() {
             clipboard_wire::write_frame(
                 &mut send,
                 &ClipboardHeader {
+                    source_entry: None,
                     version: ClipboardHeader::CURRENT_VERSION,
                     snapshot_hash: "private-hash-sentinel".into(),
                     captured_at_ms: 1,

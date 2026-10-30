@@ -2,7 +2,7 @@
 
 ## 状态
 
-已实现。本说明将 [ADR-012](../decisions/012-automatic-shared-device-refresh.md) 的决策转换为稳定行为约定。
+Historical. The request ID, refresh-status query, and refresh event described below are no longer stable Engine interfaces. The [workspace convergence plan](../../exec-plans/completed/016-workspace-wide-convergence.md) records their removal. The current `RefreshPeerConnections` operation checks peer reachability and returns counts; it is not the former shared-device refresh action. See the [current Engine interface](../uc-engine-interface.md) and [automatic peer connections](../automatic-peer-connections.md).
 
 ## 概览
 

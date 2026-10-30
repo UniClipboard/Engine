@@ -3,19 +3,18 @@ use super::connection::ConnectionRecord;
 use super::lifetime::ConnectionLifetime;
 use super::manager::{Inner, PeerState};
 use super::retention::ConnectionActivity;
-use super::ConnectivityManager;
 use super::{
-    AdmissionAttempt, ConnectivityBackend, ConnectivityError, ConnectivityPolicy, PeerConnection,
+    AdmissionAttempt, ConnectionKey, ConnectivityBackend, ConnectivityError, ConnectivityManager,
+    ConnectivityPolicy, PeerConnection,
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use uc_core::ids::DeviceId;
 
-pub(super) struct Acquisition {
-    pub owner: Weak<Inner>,
-    pub backend: Arc<dyn ConnectivityBackend>,
+pub(super) struct Acquisition<K: ConnectionKey> {
+    pub owner: Weak<Inner<K>>,
+    pub backend: Arc<dyn ConnectivityBackend<K>>,
     pub address_hint: Option<Vec<u8>>,
     pub policy: ConnectivityPolicy,
     pub inbound: Arc<Semaphore>,
@@ -35,16 +34,16 @@ impl Drop for PendingConnection {
         }
     }
 }
-impl Acquisition {
+impl<K: ConnectionKey> Acquisition<K> {
     pub async fn connect(
         &self,
-        target: DeviceId,
+        target: K,
         peer: Arc<PeerState>,
-        attempt: Arc<dyn AdmissionAttempt>,
-    ) -> Result<Arc<ConnectionRecord>, ConnectivityError> {
+        attempt: Arc<dyn AdmissionAttempt<K>>,
+    ) -> Result<Arc<ConnectionRecord<K>>, ConnectivityError> {
         // 只在任何负载写出前更新一次已确认失活的连接；仍由原 flight/deadline 约束。
         for refresh in 0..2 {
-            let lifetime = ConnectionLifetime::outbound(peer.clone())?;
+            let lifetime = ConnectionLifetime::outbound(peer.clone(), &self.cancel).await?;
             let record = self
                 .connect_once(target, peer.clone(), attempt.clone(), lifetime)
                 .await?;
@@ -62,11 +61,11 @@ impl Acquisition {
     }
     async fn connect_once(
         &self,
-        target: DeviceId,
+        target: K,
         peer: Arc<PeerState>,
-        attempt: Arc<dyn AdmissionAttempt>,
+        attempt: Arc<dyn AdmissionAttempt<K>>,
         lifetime: Arc<ConnectionLifetime>,
-    ) -> Result<Arc<ConnectionRecord>, ConnectivityError> {
+    ) -> Result<Arc<ConnectionRecord<K>>, ConnectivityError> {
         let mut pending = PendingConnection {
             connection: self
                 .backend
@@ -101,7 +100,7 @@ impl Acquisition {
         Ok(Arc::new(ConnectionRecord {
             connection,
             address_hint: self.address_hint.clone(),
-            activity: Arc::new(ConnectionActivity::default()),
+            activity: Arc::new(ConnectionActivity::new(self.policy.idle_retention.as_ref())),
             stop: self.stop.clone(),
             cache_cancel: CancellationToken::new(),
             supervise_local_work: self.policy.wait_for_local_work(),

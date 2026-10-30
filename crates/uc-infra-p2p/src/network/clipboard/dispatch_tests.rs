@@ -124,6 +124,7 @@ async fn seed_addr(repo: &MemRepo, device: &DeviceId, addr: &EndpointAddr) {
 
 fn sample_header() -> ClipboardHeader {
     ClipboardHeader {
+        source_entry: None,
         version: ClipboardHeader::CURRENT_VERSION,
         snapshot_hash: "c".repeat(64),
         captured_at_ms: 1_700_000_000_000,
@@ -677,7 +678,7 @@ async fn failed_dispatch_makes_at_most_three_dial_attempts() {
 async fn dial_finishing_after_member_removal_sends_nothing() {
     dial_revoked_midway_sends_nothing(|connections, target| {
         // 连接 owner 的 `forget` 即调用这一入口。
-        connections.close_device(target, b"forgotten");
+        connections.close_device(target);
     })
     .await;
 }
@@ -687,7 +688,7 @@ async fn dial_finishing_after_member_removal_sends_nothing() {
 async fn dial_finishing_after_all_connections_closed_sends_nothing() {
     dial_revoked_midway_sends_nothing(|connections, _| {
         // 连接 owner 的 `disconnect_all` 即调用这一入口。
-        connections.close_all(b"space_left");
+        connections.close_all();
     })
     .await;
 }
@@ -881,3 +882,6 @@ async fn acquisition_capability_failures_keep_their_source_in_dispatch_reports()
         );
     }
 }
+
+#[path = "source_identity_tests.rs"]
+mod source_identity_tests;

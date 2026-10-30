@@ -1,0 +1,34 @@
+name: PR scope
+
+on:
+  workflow_call:
+    outputs:
+      scope:
+        value: ${{ jobs.classify.outputs.scope }}
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # 只执行 PR 基线版本；首次引入分类器或缺失历史时完整检查。
+      - id: scope
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          echo 'scope=full' >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_EVENT_NAME" == pull_request && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            if git show "$BASE_SHA:scripts/ci/pr-scope.py" > "$RUNNER_TEMP/pr-scope.py"; then
+              python3 "$RUNNER_TEMP/pr-scope.py"
+            fi
+          fi

@@ -225,7 +225,14 @@ def save(s3, key, temporary, report, scene, *, source_sha=None):
     index = {"version": 1, "sha256": sha, "size": size,
              "key": f"{key}/{sha}.tar.gz", "source_sha": source_sha or os.environ["GITHUB_SHA"]}
     # 完整归档先于索引发布；消费者永远不读取半成品。
-    s3.upload_file(str(archive), BUCKET, index["key"])
+    from boto3.s3.transfer import TransferConfig
+
+    # 大归档使用 64 MiB 分片，减少 R2 A 类请求；限制并发，避免扩大上传资源占用。
+    transfer = TransferConfig(multipart_threshold=64 * 1024**2,
+                              multipart_chunksize=64 * 1024**2,
+                              max_concurrency=4,
+                              preferred_transfer_client="classic")
+    s3.upload_file(str(archive), BUCKET, index["key"], Config=transfer)
     s3.put_object(Bucket=BUCKET, Key=f"{key}/latest.json",
                   Body=json.dumps(index).encode(), ContentType="application/json")
     report.update(status="saved", uploaded_bytes=size, source_sha=index["source_sha"])

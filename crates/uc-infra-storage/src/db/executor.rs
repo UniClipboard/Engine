@@ -26,4 +26,13 @@ impl DbExecutor for DieselSqliteExecutor {
     fn database_generation(&self) -> u64 {
         self.pool.generation()
     }
+
+    fn run_at_generation<T>(
+        &self,
+        generation: u64,
+        f: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut conn = self.pool.get_at_generation(generation)?;
+        f(&mut conn)
+    }
 }

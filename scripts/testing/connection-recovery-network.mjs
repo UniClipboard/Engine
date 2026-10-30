@@ -9,7 +9,10 @@ import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHash } from 'node:crypto'
 import { ONLINE_DEADLINE_MESSAGE, measureRecoveryMs, relayTransportReadyAt, terminateRelay } from './relay-recovery-support.mjs'
+import { receiveFailureKind, verifyDelivery } from './clipboard-delivery-evidence.mjs'
+import { verifyTransferProgress } from './transfer-progress-evidence.mjs'
 import { ensureSessionReady } from './connection-recovery-session.mjs'
+import { connectHostCommands } from './connection-recovery-host.mjs'
 
 const options = new Map()
 for (let i = 2; i < process.argv.length; i += 2) options.set(process.argv[i], process.argv[i + 1])
@@ -49,7 +52,10 @@ const peerSide = Number(options.get('--peer-side') ?? 1)
 // P00 前置只使用旧库正常配对产生的资料；每次运行重新配对并复制，不写入人工资格。
 const prepairedHost = options.get('--prepaired-host')
 const blobBaseline = options.get('--blob-baseline') === '1'
+const progressBaseline = options.get('--progress-baseline') === '1'
+const oldPairOnly = options.get('--old-pair-only') === '1'
 assert(!blobBaseline || prepairedHost)
+assert(!oldPairOnly || (blobBaseline && resolve(prepairedHost) === binary))
 const upgradeSide = Number(options.get('--upgrade-side'))
 const presenceRole = options.get('--presence-role') ?? (upgradeSide === 0 ? 'receive' : 'initiate')
 assert(['receive', 'initiate'].includes(presenceRole))
@@ -70,6 +76,9 @@ const namespaces = []
 const bridge = `${runId}br`.slice(0, 15)
 const root = mkdtempSync(join(tmpdir(), 'uc-connectivity-'))
 const records = []
+const deliveries = []
+const progressTransfers = []
+let activeScenario
 const faults = []
 const timingStartedAt = performance.now()
 let firstScenarioStartedAt
@@ -128,21 +137,8 @@ class Host {
       : peerBinary && this.label === String.fromCharCode(65 + peerSide) ? resolve(peerBinary) : binary)
     this.child = spawn('ip', ['netns', 'exec', this.namespace, selected], { stdio: ['pipe', 'pipe', 'pipe'] })
     this.child.stderr.resume()
-    createInterface({ input: this.child.stdout }).on('line', line => {
-      let response
-      try { response = JSON.parse(line) } catch { return }
-      if (response.uc_connectivity !== 1) return
-      const pending = this.pending.shift()
-      if (!pending) return
-      clearTimeout(pending.timer)
-      pending.resolve(response)
-    })
-    this.child.on('exit', () => {
-      for (const pending of this.pending.splice(0)) {
-        clearTimeout(pending.timer)
-        pending.reject(new Error('test host exited before replying'))
-      }
-    })
+    this.channel = connectHostCommands(this.child)
+    this.pending = this.channel.pending
     const ready = await this.raw({ root: this.root, rendezvous: `http://10.233.0.1:${server.address().port}`, secure_storage: this.secureStorage, relay: mode === 'relay', bind_port: this.bindPort, reject_presence_endpoint_ids: this.rejectPresenceEndpointIds, reject_inbound_presence_endpoint_ids: this.rejectInboundPresenceEndpointIds })
     assert.equal(ready.ready, true)
     this.version = ready.version
@@ -151,11 +147,7 @@ class Host {
   }
   raw(request) {
     if (interrupted || !this.child || this.child.exitCode !== null || this.child.signalCode !== null) return Promise.reject(new Error('test host is not running'))
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.child.kill('SIGTERM'); reject(new Error('test host command timed out')) }, 130_000)
-      this.pending.push({ resolve, reject, timer })
-      this.child.stdin.write(`${JSON.stringify(request)}\n`)
-    })
+    return this.channel.raw(request)
   }
   async call(command, fields = {}) {
     this.commands.push(command)
@@ -269,19 +261,16 @@ async function online(group, budget) {
 async function transfer(left, right, marker) {
   for (const [sender, receiver] of [[left, right], [right, left]]) {
     const text = `synthetic-${marker}-${sender.label}`
-    const result = await sender.call('send', { peer: receiver.id, text })
-    const causes = (result.per_target ?? []).map(target => {
-      const message = target.outcome?.message ?? ''
-      return ['peer rejected', 'stream io', 'internal', 'local policy rejected payload before dispatch', 'peer version is incompatible with confirmed clipboard delivery', 'target device offline or unreachable']
-        .find(prefix => message.startsWith(prefix)) ?? target.outcome?.kind ?? 'unknown'
+    await verifyDelivery(deliveries, {
+      kind: 'text', from: sender.label, to: receiver.label, scenario: activeScenario ?? null,
+    }, () => sender.call('send', { peer: receiver.id, text }), async () => {
+      await until(async () => {
+        for (const entry of await receiver.call('history')) {
+          if ((await receiver.call('entry', { entry: entry.entry_id })).content === text) return true
+        }
+        return false
+      }, 20_000, 'exact content did not arrive')
     })
-    assert.equal(result.total_accepted, 1, `${sender.label} to ${receiver.label}: content not accepted (offline=${result.total_offline}, failed=${result.total_errored}, pending=${result.total_pending}, duplicate=${result.total_duplicate}, causes=${causes.join(',')})`)
-    await until(async () => {
-      for (const entry of await receiver.call('history')) {
-        if ((await receiver.call('entry', { entry: entry.entry_id })).content === text) return true
-      }
-      return false
-    }, 20_000, 'exact content did not arrive')
   }
 }
 
@@ -307,27 +296,35 @@ async function transferFile(left, right, marker) {
     const handle = `managed-${marker}-${sender.label}`
     const displayName = `evidence-${sender.label}.bin`
     const content = `managed-file-payload-${marker}-${sender.label}`
-    const result = await sender.call('send_file', {
+    let sent
+    let receivedEntry
+    await verifyDelivery(deliveries, {
+      kind: 'file', from: sender.label, to: receiver.label, scenario: activeScenario ?? null,
+    }, () => sender.call('send_file', {
       peer: receiver.id,
       handle,
       display_name: displayName,
       mime_type: 'application/octet-stream',
       content,
-    })
-    assert.equal(result.total_accepted, 1, `${sender.label} to ${receiver.label}: file not accepted`)
-    await until(async () => {
-      for (const entry of await receiver.call('history')) {
-        if (entry.content_type !== 'file') continue
-        const response = await receiver.raw({ command: 'read_file', entry: entry.entry_id })
-        if (!response.ok || response.ok.file_name !== displayName) continue
-        if (Buffer.from(response.ok.bytes).equals(Buffer.from(content))) {
-          receiver.expectedFiles ??= []
-          receiver.expectedFiles.push({ entry: entry.entry_id, content, displayName })
-          return true
+    }).then(report => { sent = report; return report }), async () => {
+      await until(async () => {
+        for (const entry of await receiver.call('history')) {
+          if (entry.content_type !== 'file') continue
+          const response = await receiver.raw({ command: 'read_file', entry: entry.entry_id })
+          if (!response.ok || response.ok.file_name !== displayName) continue
+          if (Buffer.from(response.ok.bytes).equals(Buffer.from(content))) {
+            receivedEntry = entry.entry_id
+            receiver.expectedFiles ??= []
+            receiver.expectedFiles.push({ entry: entry.entry_id, content, displayName })
+            return true
+          }
         }
-      }
-      return false
-    }, 60_000, 'exact file bytes did not arrive')
+        return false
+      }, 60_000, 'exact file bytes did not arrive')
+    })
+    if (progressBaseline && [sender, receiver].some(node => node.hostIdentity?.capabilities?.includes('transfer-progress'))) {
+      progressTransfers.push(await verifyTransferProgress({sender, receiver, sent, receivedEntry, until, mode, protocols: observedProgressHandshakes}))
+    }
   }
 }
 
@@ -438,12 +435,14 @@ async function scenario(id, action) {
   const clock = performance.now()
   const record = { id, started, outcome: 'failed' }
   records.push(record)
+  const previousScenario = activeScenario
+  activeScenario = id
   try {
     const proof = await action()
     if (proof !== undefined) record.proof = proof
     record.outcome = 'passed'
   }
-  finally { record.elapsed_ms = Math.round(performance.now() - clock); record.completed = new Date().toISOString() }
+  finally { activeScenario = previousScenario; record.elapsed_ms = Math.round(performance.now() - clock); record.completed = new Date().toISOString() }
   process.stdout.write(`${id}: passed (${record.elapsed_ms} ms)\n`)
   return record
 }
@@ -758,8 +757,10 @@ async function prepairedUpgrade() {
     await online(nodes, 20_000)
     await transfer(nodes[0], nodes[1], 'old-paired-baseline')
     if (blobBaseline) await transferFile(nodes[0], nodes[1], 'old-paired-blob-baseline')
-    return { old_pairing: true, old_profile_reopen: true, exact_bidirectional_content: true, ...(blobBaseline ? { exact_bidirectional_files: true } : {}), paths: await selectedPaths() }
+    return { old_pairing: true, old_profile_reopen: true, exact_bidirectional_content: true, ...(blobBaseline ? { exact_bidirectional_files: true } : {}), hosts: nodes.map(node => node.hostIdentity), paths: await selectedPaths() }
   })
+  // 固定旧端基线在旧旧真实读回后结束，不执行单端升级或借用新端的协议观测。
+  if (oldPairOnly) return
   const before = await Promise.all(nodes.map(node => node.call('observe')))
   const endpoints = await Promise.all(nodes.map(node => node.call('network_endpoint')))
   for (const node of nodes) await node.stop()
@@ -868,7 +869,7 @@ async function prepairedUpgrade() {
 
 }
 
-async function negotiatedProtocol(node, expected) {
+async function observedNegotiatedProtocols(node) {
   await node.call('flush')
   const facts = []
   for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
@@ -879,7 +880,16 @@ async function negotiatedProtocol(node, expected) {
       } catch {}
     }
   }
-  assert(facts.includes(expected), 'actual negotiated protocol was not observed')
+  return facts
+}
+async function observedProgressHandshakes(node) {
+  await node.call('flush')
+  return localDiagnostics(node).filter(row => row.fields?.['event.name'] === 'connection.protocol.negotiated'
+    && ['transfer_progress_v1', 'transfer_progress_v2'].includes(row.fields.protocol))
+    .map(row => ({ protocol: row.fields.protocol, selected_path: row.fields.initial_path }))
+}
+async function negotiatedProtocol(node, expected) {
+  assert((await observedNegotiatedProtocols(node)).includes(expected), 'actual negotiated protocol was not observed')
   return { negotiated_protocol: expected, actual_handshake_observed: true }
 }
 
@@ -1172,6 +1182,7 @@ finally {
   const allowedReasons = new Set(['no_consumer', 'receipt_dropped', 'application_timeout', 'rejected', 'sync_disabled', 'settings_unavailable', 'membership_scope_blocked', 'membership_scope_unavailable', 'member_missing', 'member_lookup_failed', 'receive_disabled', 'content_type_disabled', 'session_locked', 'content_key_missing', 'content_key_epoch_mismatch', 'invalid_transfer_format', 'decryption_failed', 'cipher_unavailable', 'invalid_content', 'apply_failed', 'permission_denied', 'storage_full', 'read_only_filesystem', 'io_failed'])
   for (const node of nodes) {
     node.failureReasons = []
+    node.receiveFailureCounts = { apply_failed: 0, blob_materialize_stopped: 0 }
     node.networkFacts = []
     node.networkDiagnostics = []
     try {
@@ -1179,6 +1190,8 @@ finally {
         for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
           try {
             const row = JSON.parse(line)
+            const receiveKind = receiveFailureKind(row)
+            if (receiveKind) node.receiveFailureCounts[receiveKind]++
             const reason = row.fields?.['error.reason']
             if (allowedReasons.has(reason)) node.failureReasons.push({ timestamp: row.timestamp, reason })
             const fields = row.fields ?? {}
@@ -1187,7 +1200,7 @@ finally {
               node.networkDiagnostics.push({ timestamp: row.timestamp, ...Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'trigger', 'outcome', 'uc.outcome', 'error.phase', 'error.reason', 'error_kind', 'error_class', 'duration_ms', 'connected_count', 'known_count', 'attempt_index', 'protocol', 'direction', 'reason'].includes(key))) })
             }
             if (['relay.status.observed', 'address.loaded', 'address.used', 'connection.protocol.negotiated'].includes(fields['event.name'])) {
-              node.networkFacts.push(Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'connected_count', 'known_count', 'direct_count', 'relay_count', 'other_count', 'protocol'].includes(key))))
+              node.networkFacts.push(Object.fromEntries(Object.entries(fields).filter(([key]) => ['event.name', 'connected_count', 'known_count', 'direct_count', 'relay_count', 'other_count', 'protocol', 'initial_path'].includes(key))))
             }
           } catch {}
         }
@@ -1222,7 +1235,7 @@ finally {
   rmSync(root, { recursive: true, force: true })
   const binaries = [binary, prepairedHost, legacyBinary, peerBinary, relayBinary, relayBinaryB, restartBinary].filter(Boolean).map(path => ({ sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }))
   if (!cleaned) failed = true
-  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}${blobBaseline ? ' --blob-baseline' : ''}${prepairedHost ? ` --prepaired-host ${prepairedHost} --upgrade-side ${upgradeSide} --presence-role ${presenceRole} --presence-protocol ${options.get('--presence-protocol') ?? 'peer_reachability_v1'}` : ''}${peerBinary ? ` --peer-host ${peerBinary} --peer-side ${peerSide}` : ''}`
+  const reproduction = `bash scripts/testing/run-connection-recovery-e2e.sh --suite network --prebuilt --host ${binary} --repeat ${repeat} --mode ${mode}${only ? ` --case ${only}` : ''}${blobBaseline ? ' --blob-baseline' : ''}${progressBaseline ? ' --progress-baseline' : ''}${oldPairOnly ? ' --old-pair-only' : ''}${prepairedHost ? ` --prepaired-host ${prepairedHost} --upgrade-side ${upgradeSide} --presence-role ${presenceRole} --presence-protocol ${options.get('--presence-protocol') ?? 'peer_reachability_v1'}` : ''}${peerBinary ? ` --peer-host ${peerBinary} --peer-side ${peerSide}` : ''}`
   const timingCompletedAt = performance.now()
   const scenarioStartedAt = firstScenarioStartedAt ?? cleanupStartedAt
   const timings = {
@@ -1231,6 +1244,6 @@ finally {
     cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
     total_ms: Math.round(timingCompletedAt - timingStartedAt),
   }
-  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', reproduction, binaries, faults, records, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, progress_baseline: progressBaseline, progress_transfers: progressTransfers, reproduction, binaries, faults, records, deliveries, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, receive_failure_counts: node.receiveFailureCounts, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0

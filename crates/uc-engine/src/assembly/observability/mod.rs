@@ -4,7 +4,9 @@
 
 mod admission;
 mod clipboard;
+mod progress;
 mod receive;
+pub(crate) use progress::observe_progress_reconciliation;
 pub(crate) use receive::{observe_blob_exports, observe_receive_retry};
 mod membership;
 mod storage_upgrade;

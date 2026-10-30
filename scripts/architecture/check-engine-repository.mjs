@@ -28,6 +28,12 @@ const NETWORK_STACK_CONSUMERS = {
   'uc-connectivity-relay': ['iroh-relay'],
 }
 const VENDORED_THIRD_PARTY_PACKAGES = ['iroh-mdns-address-lookup', 'swarm-discovery']
+// 密码兼容来源的路径依赖必须传递给独立Engine消费者，禁止依赖根patch。
+const OPAQUE_COMPAT_CONSUMERS = {
+  'uc-infra-crypto': ['opaque-ke'],
+  'uc-infra-profile': ['opaque-ke'],
+}
+
 
 const EXPECTED_PACKAGES = [
   'openmls-validation',
@@ -363,6 +369,13 @@ function checkLocalDependencies(metadata) {
       if (networkPackages.includes(dependency.name)) {
         if (!dependency.path || resolve(dependency.path) !== join(REPOSITORY_ROOT, 'third_party', 'iroh', dependency.name)) {
           addProblem(problems, 'network stack', `${packageMetadata.name} must use the vendored ${dependency.name}`)
+        }
+        continue
+      }
+      const opaquePackages = OPAQUE_COMPAT_CONSUMERS[packageMetadata.name] ?? []
+      if (opaquePackages.includes(dependency.name)) {
+        if (!dependency.path || resolve(dependency.path) !== join(REPOSITORY_ROOT, 'third_party', dependency.name)) {
+          addProblem(problems, 'OPAQUE compatibility source', `${packageMetadata.name} must use the pinned ${dependency.name} source`)
         }
         continue
       }
@@ -2273,16 +2286,23 @@ function repositorySources() {
       'connectivity/backend.rs',
       'connection_channel_adapter.rs',
       'group_update_adapter.rs',
-      'membership_branch_recovery_adapter.rs',
+      'connectivity/branch_recovery_admission.rs',
+      'connectivity/branch_recovery_handler.rs',
+      'connectivity/branch_recovery_wire.rs',
       'membership_history_exchange_adapter.rs',
       'peer_reachability_adapter.rs',
-      'transfer_progress_adapter.rs',
+      'connectivity/progress_handler.rs',
     ].map(path => read(`crates/uc-infra-p2p/src/network/iroh/${path}`)).join('\n'),
     presenceTransport: productionSources('crates/uc-application/src/space/connectivity/peer_connections/transport'),
     presenceBridge: read('crates/uc-infra-p2p/src/network/iroh/connectivity/presence_handler.rs'),
     retiredPresencePresent: ['peer_reachability_adapter/liveness.rs', 'peer_reachability_protocol.rs'].some(path => existsSync(join(REPOSITORY_ROOT, 'crates/uc-infra-p2p/src/network/iroh', path))),
     activeClipboardTransport: productionSources('crates/uc-application/src/clipboard/active/transport'),
     activeClipboardInfra: productionSources('crates/uc-infra-p2p/src/network/iroh/active_clipboard', ['crates/uc-infra-p2p/src/network/iroh/active_clipboard/testing.rs'], true),
+    branchRecoveryTransport: productionSources('crates/uc-application/src/space/membership/recover_conflict'),
+    branchRecoveryInfra: [
+      'branch_recovery_handler.rs', 'branch_recovery_wire.rs', 'branch_recovery_admission.rs',
+    ].map(path => read(`crates/uc-infra-p2p/src/network/iroh/connectivity/${path}`)).join('\n'),
+    retiredBranchRecoveryPresent: existsSync(join(REPOSITORY_ROOT, 'crates/uc-infra-p2p/src/network/iroh/membership_branch_recovery_adapter.rs')),
     runtimeModule: read('crates/uc-engine/src/runtime/mod.rs'),
     sessionSupervisor: read('crates/uc-engine/src/runtime/session_supervisor.rs'),
     runtimeLifecycleModule: read('crates/uc-application/src/runtime_lifecycle/mod.rs'),
@@ -2362,6 +2382,17 @@ function checkActiveClipboardTransportOwnership(sources) {
   return problems
 }
 
+function checkBranchRecoveryTransportOwnership(sources) {
+  const problems = []
+  if (/\b(?:iroh::|Endpoint|RecvStream|SendStream)\b/.test(sources.branchRecoveryTransport))
+    problems.push('branch recovery Application must remain backend independent')
+  if (/\.(?:connect|open_bi|accept_bi)\s*\(/.test(sources.branchRecoveryInfra))
+    problems.push('branch recovery native bridge must delegate connection handling to Uni')
+  if (sources.retiredBranchRecoveryPresent)
+    problems.push('retired native branch recovery adapter must not return')
+  return problems
+}
+
 // presence 的业务表和完整交换只能由 backend 无关的 Application owner 管理。
 function checkPresenceOwnership(sources) {
   const problems = []
@@ -2426,6 +2457,7 @@ function collectProblems(metadata, sources, { includePlaintext = true } = {}) {
     ...checkRetiredMembershipPersistence(sources),
     ...checkIrohPeerAddressResolution(sources),
     ...checkActiveClipboardTransportOwnership(sources),
+    ...checkBranchRecoveryTransportOwnership(sources),
     ...checkPresenceOwnership(sources),
     ...checkBlobTransferOwnership(metadata, sources),
     ...checkSessionSupervisorOwnership(sources),
@@ -2455,6 +2487,15 @@ function expectRejected(name, mutate, metadata, sources) {
 }
 
 function runNegativeFixtures(metadata, sources) {
+  for (const [consumer, names] of Object.entries(OPAQUE_COMPAT_CONSUMERS)) {
+    for (const name of names) {
+      expectRejected(`${consumer} registry OPAQUE dependency ${name}`, changed => {
+        const dependency = packageByName(changed, consumer).dependencies.find(dep => dep.name === name)
+        delete dependency.path
+        dependency.source = 'registry+https://github.com/rust-lang/crates.io-index'
+      }, metadata, sources)
+    }
+  }
   for (const [consumer, names] of Object.entries(NETWORK_STACK_CONSUMERS)) {
     for (const name of names) {
       expectRejected(`${consumer} registry network dependency ${name}`, changed => {
@@ -2525,6 +2566,15 @@ function runNegativeFixtures(metadata, sources) {
   }, metadata, sources)
   expectRejected('active clipboard native Application dependency', (_metadata, changed) => {
     changed.activeClipboardTransport += '\nuse iroh::Endpoint;\n'
+  }, metadata, sources)
+  expectRejected('branch recovery native dialing bypass', (_metadata, changed) => {
+    changed.branchRecoveryInfra += '\nasync fn bypass() { endpoint.connect(peer, alpn).await; }\n'
+  }, metadata, sources)
+  expectRejected('branch recovery native Application dependency', (_metadata, changed) => {
+    changed.branchRecoveryTransport += '\nuse iroh::Endpoint;\n'
+  }, metadata, sources)
+  expectRejected('retired native branch recovery implementation', (_metadata, changed) => {
+    changed.retiredBranchRecoveryPresent = true
   }, metadata, sources)
 
   expectRejected('membership workflow returned to Core', (_metadata, changed) => {

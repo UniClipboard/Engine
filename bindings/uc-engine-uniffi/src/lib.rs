@@ -20,10 +20,11 @@ pub use runtime::{
     CustomRelayMutationRejection, CustomRelayMutationResult, Device, EntryNotResendableReason,
     InvitationAvailability, InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus,
     JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle,
-    PeerConnectionRefresh, ReceiveItem, ReceiveProgress, ReceiveRetryOutcome, RejectedConfigImport,
-    RelayEntrySource, RelayOverview, RelayOverviewEntry, RelayRoutingMode, RelaySaveResult,
-    ResendEntryOutcome, SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState,
-    WorkspaceConvergence, WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
+    OutboundProgress, OutboundProgressItem, PeerConnectionRefresh, ReceiveItem, ReceiveProgress,
+    ReceiveRetryOutcome, RejectedConfigImport, RelayEntrySource, RelayOverview, RelayOverviewEntry,
+    RelayRoutingMode, RelaySaveResult, ResendEntryOutcome, ResendTargetProgress, SendReport,
+    SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
+    WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();
@@ -403,6 +404,7 @@ impl std::fmt::Debug for BindingClipboardRepresentation {
 
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BindingClipboardSnapshot {
+    pub identity: Option<Vec<u8>>,
     pub observed_at_ms: i64,
     pub representations: Vec<BindingClipboardRepresentation>,
 }
@@ -531,6 +533,7 @@ pub enum BindingEvent {
         completed_bytes: u64,
         total_bytes: Option<u64>,
     },
+    OutboundProgressChanged,
     TransferStatusChanged {
         transfer_id: String,
         entry_id: Option<String>,
@@ -580,7 +583,10 @@ pub trait BindingHost: Send + Sync {
     ) -> Result<(), HostBindingError>;
     fn file_finish_write(&self, handle: String) -> Result<(), HostBindingError>;
     fn clipboard_read(&self) -> Result<BindingClipboardSnapshot, HostBindingError>;
-    fn clipboard_write(&self, snapshot: BindingClipboardSnapshot) -> Result<(), HostBindingError>;
+    fn clipboard_write(
+        &self,
+        snapshot: BindingClipboardSnapshot,
+    ) -> Result<Option<Vec<u8>>, HostBindingError>;
 }
 
 #[uniffi::export(with_foreign)]

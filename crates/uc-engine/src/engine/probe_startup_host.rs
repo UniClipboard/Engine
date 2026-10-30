@@ -11,7 +11,8 @@ use tokio::sync::Notify;
 
 use crate::{
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
-    HostClipboardChange, HostClipboardChangeStream, HostClipboardSnapshot,
+    HostClipboardChange, HostClipboardChangeStream, HostClipboardIdentity, HostClipboardSnapshot,
+    HostClipboardWriteReceipt,
 };
 
 #[derive(Default)]
@@ -29,6 +30,19 @@ struct ProbeClipboard {
 }
 
 impl HostClipboard for ProbeClipboard {
+    fn read_with_identity(
+        &self,
+    ) -> Result<(HostClipboardSnapshot, Option<HostClipboardIdentity>), HostCapabilityError> {
+        self.inner.read_with_identity()
+    }
+
+    fn write_with_receipt(
+        &self,
+        snapshot: HostClipboardSnapshot,
+    ) -> Result<HostClipboardWriteReceipt, HostCapabilityError> {
+        self.inner.write_with_receipt(snapshot)
+    }
+
     fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
         self.inner.read()
     }

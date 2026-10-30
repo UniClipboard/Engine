@@ -4,7 +4,7 @@
 //!
 //! 接收端 fetch blob 时,沿反向 P2P 通道把字节级进度推送回数据来源端
 //! (sender)。`uc-application` 的 fetch sink 旁路调用
-//! [`OutboundProgressReporterPort`](uc_core::file_transfer::OutboundProgressReporterPort),
+//! [`OutboundProgressStatus`](uc_core::file_transfer::OutboundProgressStatus),
 //! 适配器把每次调用打成一帧,通过专用 ALPN 单向流写到 sender。
 //!
 //! ## Frame layout
@@ -49,10 +49,15 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use uc_core::file_transfer::{FileTransferCancellationReason, OutboundProgressStatus};
 
+pub mod v2;
+
 /// Sentinel byte distinguishing transfer-progress frames from any other
 /// stream the receiver might mis-route here. Must NOT collide with
 /// `clipboard_wire::CLIPBOARD_MAGIC` (0xC1).
 pub const PROGRESS_MAGIC: u8 = 0xC2;
+
+/// 已发布的单向进度协议；字节保持不变。
+pub const LEGACY_TRANSFER_PROGRESS_ALPN: &[u8] = b"uniclipboard/transfer-progress/1";
 
 /// Hard-coded fixed frame size (after the magic byte).
 const PAYLOAD_LEN: usize = 16 /* transfer_id */ + 8 /* bytes */ + 8 /* total */ + 1 /* status */;

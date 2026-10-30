@@ -8,7 +8,7 @@ use super::backend::ConnectivityProfile;
 use async_trait::async_trait;
 use std::sync::Arc;
 use uc_application::deps::{
-    AdmissionAttempt, AdmissionGrant, ConnectivityError, InboundAdmissionFence,
+    AdmissionAttempt, AdmissionGrant, ConnectionProtocol, ConnectivityError, InboundAdmissionFence,
     InboundIdentityReservation, PeerConnection, PeerIdentityDirectoryPort,
     SessionConnectionAdmissionPort,
 };
@@ -38,6 +38,7 @@ impl IrohConnectionAdmission {
             connections,
             protocol: match profile {
                 ConnectivityProfile::Blob => InboundPeerProtocol::Blob,
+                ConnectivityProfile::TransferProgress => InboundPeerProtocol::TransferProgress,
                 ConnectivityProfile::Presence => InboundPeerProtocol::Presence,
                 ConnectivityProfile::ActiveClipboardPull => {
                     InboundPeerProtocol::ActiveClipboardPull
@@ -45,6 +46,9 @@ impl IrohConnectionAdmission {
                 ConnectivityProfile::ActiveClipboardState => InboundPeerProtocol::ActiveClipboard,
                 ConnectivityProfile::Clipboard => InboundPeerProtocol::Clipboard,
                 ConnectivityProfile::MembershipHistory => InboundPeerProtocol::MembershipHistory,
+                ConnectivityProfile::MembershipBranchRecovery => {
+                    InboundPeerProtocol::MembershipBranchRecovery
+                }
                 ConnectivityProfile::GroupUpdate | ConnectivityProfile::LegacyGroupUpdate => {
                     InboundPeerProtocol::GroupUpdate
                 }
@@ -87,6 +91,14 @@ impl IrohConnectionAdmission {
         epoch: RevocationEpoch,
         connection: Arc<dyn PeerConnection>,
     ) -> Result<Box<dyn AdmissionGrant>, ConnectivityError> {
+        if self.protocol == InboundPeerProtocol::TransferProgress
+            && !matches!(
+                connection.protocol(),
+                ConnectionProtocol::TransferProgressV1 | ConnectionProtocol::TransferProgressV2
+            )
+        {
+            return Err(ConnectivityError::Denied);
+        }
         let registration = self
             .connections
             .register_managed_since(&peer, connection.clone(), epoch)
@@ -140,7 +152,15 @@ impl AdmissionGrant for Grant {
         self.peer
     }
     async fn can_retain(&self) -> Result<bool, ConnectivityError> {
-        if self.owner.protocol != InboundPeerProtocol::Blob {
+        if !matches!(
+            self.owner.protocol,
+            InboundPeerProtocol::Blob | InboundPeerProtocol::TransferProgress
+        ) {
+            return Ok(false);
+        }
+        if self.owner.protocol == InboundPeerProtocol::TransferProgress
+            && self.connection.protocol() != ConnectionProtocol::TransferProgressV2
+        {
             return Ok(false);
         }
         self.check_current().await?;
@@ -212,5 +232,132 @@ impl SessionConnectionAdmissionPort for IrohConnectionAdmission {
             record_inbound_rejection(self.protocol, rejection);
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use uc_application::deps::{
+        KnownPeerIdentity, MembershipLedgerError, PeerIdentityDirectoryPort,
+        SessionConnectionAdmissionPort,
+    };
+    use uc_core::ids::DeviceId;
+    use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
+    use uc_core::ports::security::IdentityFingerprintFactoryPort;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
+
+    use super::super::stream::memory_backend_fixture::recovery_connection_pair;
+    use super::{
+        AdmittedConnections, ConnectivityError, ConnectivityProfile, IrohConnectionAdmission,
+    };
+
+    struct Directory(Result<Vec<KnownPeerIdentity>, ()>);
+
+    #[async_trait]
+    impl PeerIdentityDirectoryPort for Directory {
+        async fn known_peer_identities(
+            &self,
+        ) -> Result<Vec<KnownPeerIdentity>, MembershipLedgerError> {
+            self.0
+                .clone()
+                .map_err(|()| MembershipLedgerError::unavailable())
+        }
+    }
+
+    struct Ledger {
+        answer: Result<bool, ()>,
+        checked: Mutex<Vec<DeviceId>>,
+    }
+
+    #[async_trait]
+    impl PeerAdmissionPort for Ledger {
+        async fn is_admitted(&self, peer: &DeviceId) -> Result<bool, PeerAdmissionError> {
+            self.checked.lock().unwrap().push(*peer);
+            self.answer.map_err(|()| PeerAdmissionError::Unavailable)
+        }
+    }
+
+    fn identity(peer: &str, key: &[u8; 32]) -> KnownPeerIdentity {
+        KnownPeerIdentity {
+            device_id: DeviceId::new(peer),
+            identity_fingerprint: Sha256IdentityFingerprintFactory
+                .from_public_key(key)
+                .unwrap(),
+        }
+    }
+
+    fn build_admission(directory: Directory, ledger: Arc<Ledger>) -> IrohConnectionAdmission {
+        IrohConnectionAdmission::new(
+            Arc::new(directory),
+            ledger,
+            Arc::new(Sha256IdentityFingerprintFactory),
+            AdmittedConnections::default(),
+            ConnectivityProfile::Presence,
+        )
+    }
+
+    #[tokio::test]
+    async fn inbound_admission_checks_the_ledger_once_after_identity_resolution() {
+        let key = [0x11; 32];
+        let peer = DeviceId::new("peer");
+        let ledger = Arc::new(Ledger {
+            answer: Ok(true),
+            checked: Mutex::new(Vec::new()),
+        });
+        let admission =
+            build_admission(Directory(Ok(vec![identity("peer", &key)])), ledger.clone());
+        let (connection, _) = recovery_connection_pair(1, key);
+        let grant = admission
+            .adopt_inbound(connection, &admission.inbound_fence())
+            .await
+            .unwrap();
+        assert_eq!(grant.peer(), peer);
+        assert_eq!(*ledger.checked.lock().unwrap(), vec![peer]);
+
+        for directory in [
+            Directory(Ok(vec![identity("other", &[0x22; 32])])),
+            Directory(Ok(vec![identity("first", &key), identity("second", &key)])),
+            Directory(Err(())),
+        ] {
+            let ledger = Arc::new(Ledger {
+                answer: Ok(true),
+                checked: Mutex::new(Vec::new()),
+            });
+            let admission = build_admission(directory, ledger.clone());
+            let (connection, _) = recovery_connection_pair(2, key);
+            assert!(matches!(
+                admission
+                    .adopt_inbound(connection, &admission.inbound_fence())
+                    .await,
+                Err(ConnectivityError::Admission(_))
+            ));
+            assert!(ledger.checked.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_admission_distinguishes_ledger_denial_from_failure() {
+        let key = [0x11; 32];
+        for answer in [Ok(false), Err(())] {
+            let ledger = Arc::new(Ledger {
+                answer,
+                checked: Mutex::new(Vec::new()),
+            });
+            let admission =
+                build_admission(Directory(Ok(vec![identity("peer", &key)])), ledger.clone());
+            let (connection, _) = recovery_connection_pair(3, key);
+            let result = admission
+                .adopt_inbound(connection, &admission.inbound_fence())
+                .await;
+            assert!(match answer {
+                Ok(false) => matches!(result, Err(ConnectivityError::Denied)),
+                Err(()) => matches!(result, Err(ConnectivityError::Admission(_))),
+                Ok(true) => false,
+            });
+            assert_eq!(*ledger.checked.lock().unwrap(), vec![DeviceId::new("peer")]);
+        }
     }
 }

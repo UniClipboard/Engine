@@ -5,6 +5,7 @@ use super::super::{
 };
 use super::owner::BlobTransport;
 use crate::connectivity::{ConnectionLease, ConnectionRequest, ConnectionRequestScope};
+use crate::transfer::blob::BlobProgressSink;
 use crate::transfer::policy::PROGRESS_REPORT_INTERVAL;
 use crate::transfer::receive::timing::{ReceiveTiming, TimingError};
 use crate::transfer::receive::{scheduler::DownloadReservation, DownloadSettlement};
@@ -14,7 +15,7 @@ use tokio::sync::{watch, Notify};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::FileTransferCancellationReason;
-use uc_core::ports::blob::{BlobDigest, BlobProgressSink, BlobTicket};
+use uc_core::ports::blob::{BlobDigest, BlobTicket};
 
 #[derive(Clone, Copy)]
 pub(in super::super::super::super) enum BlobPreparationStop {
@@ -45,19 +46,31 @@ pub(in super::super::super::super) struct DownloadedBlob {
     _settlement: DownloadSettlement,
 }
 struct Progress {
+    sink: Mutex<Option<Arc<dyn BlobProgressSink>>>,
     timing: Mutex<ReceiveTiming>,
     changed: Notify,
     latest: watch::Sender<Option<(u64, u64)>>,
 }
 impl BlobValidatedProgress for Progress {
     fn validated_through(&self, end: u64, total: u64) -> Result<(), BlobExchangeError> {
-        if self
-            .timing
+        let (advanced, round) = {
+            let mut timing = self.timing.lock().unwrap_or_else(PoisonError::into_inner);
+            let advanced = timing
+                .validated_through(end, Instant::now())
+                .map_err(|source| {
+                    BlobExchangeError::new(BlobExchangeFailure::RequestExpired, source)
+                })?;
+            (advanced, timing.round())
+        };
+        let sink = self
+            .sink
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .validated_through(end, Instant::now())
-            .map_err(|source| BlobExchangeError::new(BlobExchangeFailure::RequestExpired, source))?
-        {
+            .clone();
+        if let Some(sink) = sink {
+            sink.observe_round(round, end, Some(total));
+        }
+        if advanced {
             self.latest.send_replace(Some((end, total)));
             self.changed.notify_one();
         }
@@ -102,6 +115,7 @@ impl BlobDownloadResources {
             .map_err(BlobExchangeError::from)?;
         let (latest, receive) = watch::channel(None);
         let progress = Arc::new(Progress {
+            sink: Mutex::new(None),
             timing: Mutex::new(ReceiveTiming::new(started_at)),
             changed: Notify::new(),
             latest,
@@ -116,6 +130,7 @@ impl BlobDownloadResources {
         let result = {
             let work = async {
                 let sink = preparing.await?;
+                *progress.sink.lock().unwrap_or_else(PoisonError::into_inner) = sink.clone();
                 if cancel.is_cancelled() {
                     return Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled));
                 }
@@ -139,6 +154,19 @@ impl BlobDownloadResources {
                 let content = self
                     .obtain_active(&request, source.digest, cancel, progress.clone())
                     .await?;
+                let round = progress
+                    .timing
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .round();
+                if let Some(sink) = progress
+                    .sink
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                {
+                    sink.observe_obtained(round, content.size);
+                }
                 Ok::<_, BlobExchangeError>((content, request))
             };
             tokio::pin!(work);
@@ -289,6 +317,19 @@ impl BlobDownloadResources {
                             source: source.into(),
                             additional: vec![error],
                         })?;
+                    let round = progress
+                        .timing
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .round();
+                    if let Some(sink) = progress
+                        .sink
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .as_ref()
+                    {
+                        sink.observe_retrying(round);
+                    }
                     progress.changed.notify_one();
                     tokio::select! {
                         biased;
@@ -297,14 +338,25 @@ impl BlobDownloadResources {
                         _ = sleep_until(deadline()) => return Err(BlobExchangeError::refused(BlobExchangeFailure::RequestExpired)),
                         _ = sleep_until(next) => {},
                     }
-                    progress
-                        .timing
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .start_retry(Instant::now())
-                        .map_err(|source| {
+                    let round = {
+                        let mut timing = progress
+                            .timing
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        timing.start_retry(Instant::now()).map_err(|source| {
                             BlobExchangeError::new(BlobExchangeFailure::RequestExpired, source)
                         })?;
+                        timing.round()
+                    };
+                    let sink = progress
+                        .sink
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
+                    if let Some(sink) = sink {
+                        sink.observe_round(round, 0, None);
+                        sink.observe_retrying(round);
+                    }
                     // 下一轮仍正常时只重开本交换；真实失活才消费旧租约并等待方向名额。
                 }
                 Err(error) => return Err(error),

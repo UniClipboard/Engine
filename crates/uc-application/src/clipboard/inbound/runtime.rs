@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use uc_core::clipboard::ClipboardContentCategorySet;
-use uc_core::ids::DeviceId;
+use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::security::TransferCipherError;
 use uc_core::ports::security::TransferCipherPort;
 use uc_core::ports::{
@@ -99,6 +99,7 @@ struct InboundProcessor {
 }
 
 struct PreparedInbound {
+    source_entry: Option<EntryId>,
     from_device: DeviceId,
     snapshot_hash: String,
     plaintext: Bytes,
@@ -179,6 +180,7 @@ impl InboundProcessor {
         let result = self
             .apply
             .apply(InboundClipboardApplyInput {
+                source_entry: prepared.source_entry.clone(),
                 from_device: prepared.from_device.as_str().to_owned(),
                 snapshot_hash: prepared.snapshot_hash.clone(),
                 plaintext: prepared.plaintext.clone(),
@@ -302,6 +304,7 @@ impl InboundProcessor {
             return None;
         }
         Some(PreparedInbound {
+            source_entry: inbound.header.source_entry,
             from_device: inbound.peer_device_id,
             snapshot_hash: inbound.header.snapshot_hash,
             plaintext,
@@ -366,6 +369,7 @@ fn summarize_plaintext(
 
 #[cfg(test)]
 mod tests {
+    mod source_identity;
     use super::super::ClipboardDelivery;
     use std::collections::VecDeque;
     use std::io::{self, Write};
@@ -734,6 +738,7 @@ mod tests {
             InboundClipboard {
                 peer_device_id: DeviceId::new(peer),
                 header: ClipboardHeader {
+                    source_entry: None,
                     version: ClipboardHeader::CURRENT_VERSION,
                     snapshot_hash: snapshot_hash.to_owned(),
                     captured_at_ms: 1,

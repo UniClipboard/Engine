@@ -13,7 +13,11 @@ use uc_observability_contract::{uc_info, uc_warn, wire_enum};
 
 use super::peer_reachability_adapter::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 use super::space_admission::{observe_space_admission_accepting, SPACE_ADMISSION_ALPN};
-use super::transfer_progress_adapter::TRANSFER_PROGRESS_ALPN;
+use uc_sync_protocol::clipboard::{
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
+use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
+use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
 #[derive(Debug)]
 pub(super) struct SessionProtocolRegistry {
@@ -130,6 +134,16 @@ struct SessionProtocolUnavailable {
 }
 
 impl SessionProtocolRegistry {
+    #[cfg(any(test, feature = "test-util"))]
+    pub(super) fn has_active_handler_for_test(&self, alpn: &[u8]) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .current
+            .as_ref()
+            .is_some_and(|generation| generation.accepts(alpn))
+    }
+
     pub(super) fn new() -> Self {
         Self {
             state: Mutex::new(RegistryState {
@@ -292,7 +306,12 @@ fn alpn_class(alpn: &[u8]) -> &'static str {
         "space_admission"
     } else if alpn == PEER_REACHABILITY_ALPN || alpn == LEGACY_PEER_REACHABILITY_ALPN {
         "presence"
-    } else if alpn == TRANSFER_PROGRESS_ALPN {
+    } else if matches!(
+        alpn,
+        ATTRIBUTED_CLIPBOARD_ALPN | MULTIPLEXED_CLIPBOARD_ALPN | CLIPBOARD_ALPN
+    ) {
+        "clipboard"
+    } else if alpn == TRANSFER_PROGRESS_ALPN || alpn == LEGACY_TRANSFER_PROGRESS_ALPN {
         "transfer_progress"
     } else {
         "other"
@@ -616,7 +635,61 @@ impl Drop for SessionLocalWork {
 
 #[cfg(test)]
 mod stall_watchdog_tests {
+    use super::super::connectivity::BranchRecoveryLocalWork;
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Semaphore;
+    use uc_application::deps::{
+        BranchRecoveryLocalWorkPort, BranchRecoveryResponse, BranchRecoveryWork,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recovery_local_work_survives_cancel_and_blocks_generation_drain() {
+        let generation = Arc::new(SessionProtocolGeneration::new(SessionProtocolHandlers {
+            routes: BTreeMap::new(),
+            handlers: Vec::new(),
+        }));
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let finished = Arc::new(AtomicBool::new(false));
+        let work: BranchRecoveryWork = {
+            let started = started.clone();
+            let release = release.clone();
+            let finished = finished.clone();
+            Box::pin(async move {
+                started.add_permits(1);
+                release.acquire().await.unwrap().forget();
+                finished.store(true, Ordering::SeqCst);
+                Ok(BranchRecoveryResponse::Rejected)
+            })
+        };
+        let task = tokio::spawn(HANDLING_GENERATION.scope(generation.clone(), async move {
+            BranchRecoveryLocalWork.execute(work).await
+        }));
+        started.acquire().await.unwrap().forget();
+        generation.begin_quiesce();
+        task.abort();
+        let cancelled = matches!(task.await, Err(error) if error.is_cancelled());
+        let rejected = HANDLING_GENERATION
+            .scope(generation.clone(), async {
+                begin_session_local_work().is_none()
+            })
+            .await;
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(100), generation.wait_until_drained())
+                .await
+                .is_err();
+        let finished_early = finished.load(Ordering::SeqCst);
+        release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), generation.wait_until_drained())
+            .await
+            .expect("实际工作结束后应完成排空");
+        assert!(cancelled, "处理任务应被取消");
+        assert!(rejected, "排空后不得开始新本地工作");
+        assert!(blocked, "排空须等待已开始的本地工作");
+        assert!(!finished_early);
+        assert!(finished.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn a_stalled_phase_is_recorded_once_and_still_completes() {

@@ -24,8 +24,9 @@ on:
           - profile-upgrade
           - membership-e2e
           - upgrade-matrix
+          - legacy-blob
       case_prefix:
-        description: Optional single scenario prefix such as E01, E02, or E03
+        description: 网络场景前缀；legacy-blob 模式选择 main-direct、main-relay、history-direct 或 history-relay。
         required: false
         type: string
       repeat:
@@ -136,7 +137,7 @@ jobs:
 
   manual:
     name: Manual real Engine scenario
-    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade' && inputs.mode != 'membership-e2e' && inputs.mode != 'upgrade-matrix'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade' && inputs.mode != 'membership-e2e' && inputs.mode != 'upgrade-matrix' && inputs.mode != 'legacy-blob'
     runs-on: ubuntu-24.04
     environment:
       name: engine-build-cache-reader
@@ -201,6 +202,70 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
+  legacy-blob:
+    name: Fixed legacy blob reproduction
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'legacy-blob'
+    runs-on: ubuntu-24.04
+    environment:
+      name: engine-build-cache-reader
+      deployment: false
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Install network test tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
+      - name: Prepare Rust build
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: blob-connectivity-linux
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+      - name: Install just
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+      # 预配对入口本身只执行一轮，重复由这里的独立进程与证据目录明确承担。
+      - name: Replay selected frozen old pair
+        shell: bash
+        env:
+          CASE_LABEL: ${{ inputs.case_prefix }}
+          REPEAT: ${{ inputs.repeat }}
+        run: |
+          [[ "$REPEAT" =~ ^[123]$ ]] || exit 2
+          selected="${CASE_LABEL:-history-relay}"
+          root="$PWD/target/progress-legacy-evidence/reproduction-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          for ((round=1; round<=REPEAT; round++)); do
+            UC_PROGRESS_LEGACY_EVIDENCE_ROOT="$root/round-$round" \
+              bash scripts/testing/run-progress-legacy-baseline.sh --case "$selected"
+          done
+          {
+            echo "## Fixed legacy blob reproduction"
+            echo "- case: $selected"
+            echo "- independent processes: $REPEAT"
+            echo "- scope: selected old/old cell; full compatibility matrix not run"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain fixed old pair evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: legacy-blob-reproduction-${{ github.run_attempt }}
+          path: |
+            target/progress-legacy-evidence/reproduction-*/**/*.json
+            target/progress-legacy-evidence/reproduction-*/**/*.txt
+            target/progress-legacy-evidence/reproduction-*/**/*.log
+          if-no-files-found: error
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

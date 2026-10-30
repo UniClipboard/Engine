@@ -1,45 +1,76 @@
 //! 整个接收动作的通知聚合；子获取只能记录事实，持久结算后才交接终态。
 use super::materialization::{DirectoryPublication, FileProgressCommitError};
-use super::work::PlannedReceiveItem;
+use super::work::{PlannedReceiveItem, ReceiveProgressSignal};
 use super::{DownloadSettlement, LocalSettlement, LocalSettlementOutcome};
 use crate::transfer::blob::fetch_failure_reason;
-use crate::transfer::blob::notifications::OutboundNotifications;
-use crate::transfer::policy::PROGRESS_REPORT_INTERVAL;
 use anyhow::Error as SourceError;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::{fmt, mem};
-use tokio::time::Instant;
 use uc_core::file_transfer::{
     FileTransferCancellationReason, FileTransferFailureReason, OutboundProgressStatus,
 };
-use uc_core::ids::DeviceId;
 use uc_core::ports::{
     group_receive_items, AttemptState, ReceiveItemFailureReason, ReceiveItemKind,
     ReceiveItemProgress, TrackedFileTransferStatus,
 };
 
+mod progress_snapshot;
+
 #[derive(Default)]
-pub(crate) struct ReceiveBatch(Mutex<State>);
+pub(crate) struct ReceiveBatch {
+    state: Mutex<State>,
+    signal: Mutex<Option<ReceiveProgressSignal>>,
+}
+// 字段按声明顺序释放：先放下事实锁，再发布无阻塞变化，避免与原目录读取形成反锁。
+struct BatchChange<'a> {
+    state: MutexGuard<'a, State>,
+    _signal: SignalOnDrop<'a>,
+}
+struct SignalOnDrop<'a>(&'a ReceiveBatch);
+impl Drop for SignalOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.progress_changed();
+    }
+}
+impl Deref for BatchChange<'_> {
+    type Target = State;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+impl DerefMut for BatchChange<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
 #[derive(Default)]
 struct State {
     planned: usize,
-    total: u64,
     items: HashMap<String, Item>,
     local_work: HashMap<String, DownloadSettlement>,
     /// 最后一个实际下载的本地交接覆盖父保存；下一项启动前不积累旧许可。
     commit_handoff: Option<DownloadSettlement>,
     directory_rollback: Option<DirectoryPublication>,
-    routes: HashMap<(DeviceId, String), Arc<OutboundNotifications>>,
     settled: Option<AttemptState>,
     finished: bool,
-    last_progress: Option<Instant>,
+}
+#[derive(Clone, Copy, Default)]
+struct RoundProgress {
+    index: u32,
+    bytes: u64,
+    total: Option<u64>,
+    retrying: bool,
 }
 struct Item {
+    round: RoundProgress,
     bytes: u64,
     status: OutboundProgressStatus,
     source: Option<Arc<SourceError>>,
     failure_reason: Option<ReceiveItemFailureReason>,
+    /// 原单项失败／取消已经完成实际本地结算；不代表父目录已回滚。
+    failure_settled: bool,
 }
 impl fmt::Debug for ReceiveBatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -47,36 +78,46 @@ impl fmt::Debug for ReceiveBatch {
     }
 }
 impl ReceiveBatch {
-    pub(crate) fn retain_directory_rollback(&self, publication: DirectoryPublication) {
-        self.0
+    fn change(&self) -> BatchChange<'_> {
+        BatchChange {
+            state: self.state.lock().unwrap_or_else(PoisonError::into_inner),
+            _signal: SignalOnDrop(self),
+        }
+    }
+    pub(crate) fn observe_progress(&self, signal: ReceiveProgressSignal) {
+        *self.signal.lock().unwrap_or_else(PoisonError::into_inner) = Some(signal);
+        self.progress_changed();
+    }
+    pub(crate) fn progress_changed(&self) {
+        let signal = self
+            .signal
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .directory_rollback
-            .get_or_insert(publication);
+            .clone();
+        if let Some(signal) = signal {
+            signal.changed();
+        }
+    }
+    pub(crate) fn retain_directory_rollback(&self, publication: DirectoryPublication) {
+        self.change().directory_rollback.get_or_insert(publication);
     }
     pub(crate) fn take_directory_rollback(&self) -> Option<DirectoryPublication> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .directory_rollback
-            .take()
+        self.change().directory_rollback.take()
     }
     pub(in super::super) fn local_settlement(&self, item: &str) -> DownloadSettlement {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.change();
         state.commit_handoff = None;
         state.local_work.entry(item.to_owned()).or_default().clone()
     }
     pub(crate) fn require_file_commit(&self, item: &str) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.change()
             .local_work
             .entry(item.to_owned())
             .or_default()
             .require_local_commit();
     }
     pub(in super::super) fn file_completion(&self, item: &str) -> Option<LocalSettlement> {
-        self.0
+        self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .local_work
@@ -88,64 +129,83 @@ impl ReceiveBatch {
             .is_some_and(|completion| completion.begin_commit())
     }
     pub(crate) fn fail_unsettled_files(&self, source: Arc<SourceError>) {
-        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.change();
         for work in state.local_work.values().chain(state.commit_handoff.iter()) {
             work.abandon_local(source.clone());
         }
     }
-    pub(crate) fn plan(&self, count: usize, total: u64) {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+    pub(crate) fn plan(&self, count: usize) {
+        let mut state = self.change();
         state.planned = count;
-        state.total = total;
     }
-    pub(crate) fn record(
-        &self,
-        reporter: Arc<OutboundNotifications>,
-        target: DeviceId,
-        transfer: &str,
-        item: &str,
-        bytes: u64,
-        status: OutboundProgressStatus,
-    ) {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+    /// 记录真实网络轮次的位置；历史高水位仍独立保留，迟到旧轮次没有副作用。
+    pub(crate) fn record_round(&self, item: &str, round: u32, bytes: u64, total: Option<u64>) {
+        let mut state = self.change();
         if state.finished {
             return;
         }
-        state
-            .routes
-            .entry((target, transfer.to_owned()))
-            .or_insert(reporter.clone());
-        let previous = state.items.entry(item.to_owned()).or_insert(Item {
+        let value = state.items.entry(item.to_owned()).or_insert(Item {
+            round: RoundProgress::default(),
             bytes: 0,
             status: OutboundProgressStatus::InProgress,
             source: None,
             failure_reason: None,
+            failure_settled: false,
         });
-        previous.bytes = previous.bytes.max(bytes);
-        if matches!(previous.status, OutboundProgressStatus::InProgress) {
-            previous.status = status;
-        }
-        // 中间进度不把一项的失败变成整批终态，也不等待远端通知。
-        let transferred = state
-            .items
-            .values()
-            .fold(0u64, |sum, item| sum.saturating_add(item.bytes));
-        let now = Instant::now();
-        if state
-            .last_progress
-            .is_some_and(|previous| now.duration_since(previous) < PROGRESS_REPORT_INTERVAL)
+        if !matches!(value.status, OutboundProgressStatus::InProgress) || round < value.round.index
         {
             return;
         }
-        state.last_progress = Some(now);
-        reporter.report(
-            &target,
-            transfer,
-            transferred.min(state.total),
-            Some(state.total),
-            OutboundProgressStatus::InProgress,
-        );
+        let known_total = total.or(value.round.total);
+        if known_total.is_some_and(|total| bytes > total)
+            || (round == value.round.index
+                && value
+                    .round
+                    .total
+                    .zip(total)
+                    .is_some_and(|(previous, current)| previous != current))
+        {
+            return;
+        }
+        value.bytes = value.bytes.max(bytes);
+        value.round = RoundProgress {
+            index: round,
+            retrying: false,
+            total: known_total,
+            bytes: if round == value.round.index {
+                value.round.bytes.max(bytes)
+            } else {
+                bytes
+            },
+        };
     }
+
+    /// 只由原下载负责人实际进入恢复等待／开始下一次尝试时记录。
+    pub(crate) fn record_retrying(&self, item: &str, round: u32) {
+        let mut state = self.change();
+        if state.finished {
+            return;
+        }
+        let value = state.items.entry(item.to_owned()).or_insert(Item {
+            round: RoundProgress::default(),
+            bytes: 0,
+            status: OutboundProgressStatus::InProgress,
+            source: None,
+            failure_reason: None,
+            failure_settled: false,
+        });
+        if !matches!(value.status, OutboundProgressStatus::InProgress) || round < value.round.index
+        {
+            return;
+        }
+        if round > value.round.index {
+            value.round.index = round;
+            value.round.bytes = 0;
+        }
+        value.round.retrying = true;
+    }
+
+    /// 仅在本项实际获取及输出清理结算后记录；仍持有本地工作时使用unsettled_fetch_failure。
     pub(crate) fn item_result(
         &self,
         item: &str,
@@ -153,7 +213,7 @@ impl ReceiveBatch {
         status: OutboundProgressStatus,
         source: Option<SourceError>,
     ) {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.change();
         if !state.finished {
             let local = state.local_work.remove(item);
             let verified = state
@@ -188,12 +248,25 @@ impl ReceiveBatch {
             if state.local_work.is_empty() && local.is_some() {
                 state.commit_handoff = local;
             }
+            let round = state.items.get(item).map_or(
+                RoundProgress {
+                    index: 0,
+                    bytes,
+                    ..RoundProgress::default()
+                },
+                |previous| previous.round,
+            );
             state.items.insert(
                 item.to_owned(),
                 Item {
+                    round,
                     bytes: verified,
                     status,
                     failure_reason: reason,
+                    failure_settled: matches!(
+                        status,
+                        OutboundProgressStatus::Failed | OutboundProgressStatus::Cancelled { .. }
+                    ),
                     source,
                 },
             );
@@ -206,16 +279,19 @@ impl ReceiveBatch {
         cancelled: bool,
         source: &SourceError,
     ) {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.change();
         if state.finished {
             return;
         }
         let item = state.items.entry(item.to_owned()).or_insert(Item {
+            round: RoundProgress::default(),
             bytes: 0,
             status: OutboundProgressStatus::InProgress,
             source: None,
             failure_reason: None,
+            failure_settled: false,
         });
+        item.failure_settled = false;
         item.status = if cancelled {
             OutboundProgressStatus::Cancelled {
                 reason: FileTransferCancellationReason::LocalUser,
@@ -231,15 +307,24 @@ impl ReceiveBatch {
     }
 
     pub(crate) fn item_materialized(&self, item: &str, bytes: u64) {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.change();
         if !state.finished {
+            let round = state.items.get(item).map_or(
+                RoundProgress {
+                    bytes,
+                    ..RoundProgress::default()
+                },
+                |previous| previous.round,
+            );
             state.items.insert(
                 item.to_owned(),
                 Item {
+                    round,
                     bytes,
                     status: OutboundProgressStatus::InProgress,
                     source: None,
                     failure_reason: None,
+                    failure_settled: false,
                 },
             );
         }
@@ -247,15 +332,24 @@ impl ReceiveBatch {
 
     /// 只有实际保存成功的本项才可在父动作结束之前归还原许可。
     pub(crate) fn item_saved(&self, item: &str, bytes: u64) {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.change();
         if !state.finished {
+            let round = state.items.get(item).map_or(
+                RoundProgress {
+                    bytes,
+                    ..RoundProgress::default()
+                },
+                |previous| previous.round,
+            );
             state.items.insert(
                 item.to_owned(),
                 Item {
+                    round,
                     bytes,
                     status: OutboundProgressStatus::Completed,
                     source: None,
                     failure_reason: None,
+                    failure_settled: false,
                 },
             );
             if let Some(local) = state.local_work.remove(item) {
@@ -272,15 +366,17 @@ impl ReceiveBatch {
         } else {
             OutboundProgressStatus::Failed
         };
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.change();
         if !state.finished {
             state.items.insert(
                 id.to_owned(),
                 Item {
+                    round: RoundProgress::default(),
                     bytes: 0,
                     status,
                     source: None,
                     failure_reason: previous.failure_reason,
+                    failure_settled: true,
                 },
             );
         }
@@ -292,13 +388,14 @@ impl ReceiveBatch {
         committed: &HashSet<usize>,
         attempt: AttemptState,
     ) -> Vec<ReceiveItemProgress> {
-        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         project_items(&state.items, state.finished, planned, committed, attempt)
     }
 
     pub(crate) fn facts(&self) -> ReceiveFacts {
-        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         ReceiveFacts {
+            settled: state.settled,
             finished: state.finished,
             items: state
                 .items
@@ -307,9 +404,11 @@ impl ReceiveBatch {
                     (
                         id.clone(),
                         Item {
+                            round: item.round,
                             bytes: item.bytes,
                             status: item.status,
                             failure_reason: item.failure_reason,
+                            failure_settled: item.failure_settled,
                             source: None,
                         },
                     )
@@ -318,13 +417,10 @@ impl ReceiveBatch {
         }
     }
     pub(crate) fn settled(&self, state: AttemptState) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .settled = Some(state);
+        self.change().settled = Some(state);
     }
     pub(crate) fn finish(&self, action_succeeded: bool) {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.change();
         if state.finished {
             return;
         }
@@ -363,13 +459,14 @@ impl ReceiveBatch {
             }
             _ => OutboundProgressStatus::Failed,
         };
-        let bytes = state
-            .items
-            .values()
-            .fold(0u64, |sum, item| sum.saturating_add(item.bytes))
-            .min(state.total);
-        for ((target, transfer), reporter) in &state.routes {
-            reporter.report(target, transfer, bytes, Some(state.total), status.clone());
+        // 原完整动作已实际结束；快照必须保留与原终态通知相同的最终事实。
+        if state.settled.is_none() {
+            state.settled = match status {
+                OutboundProgressStatus::Completed => Some(AttemptState::Completed),
+                OutboundProgressStatus::Failed => Some(AttemptState::Failed),
+                OutboundProgressStatus::Cancelled { .. } => Some(AttemptState::Cancelled),
+                OutboundProgressStatus::InProgress => None,
+            };
         }
         for item in state.items.values_mut() {
             item.source = None;
@@ -412,6 +509,7 @@ pub(crate) fn receive_failure_reason(error: &SourceError) -> ReceiveItemFailureR
 }
 
 pub(crate) struct ReceiveFacts {
+    settled: Option<AttemptState>,
     items: HashMap<String, Item>,
     finished: bool,
 }

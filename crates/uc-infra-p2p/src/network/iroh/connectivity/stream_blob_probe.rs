@@ -212,6 +212,7 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
             outbound_per_peer: 2,
             connections_per_peer_direction: Some(1),
             idle_retention: Some(IdleRetentionPolicy {
+                elapsed_clock: None,
                 timeout: Duration::from_secs(30),
                 capacity: 16,
             }),
@@ -225,6 +226,7 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
             inbound_per_connection: 2,
             connections_per_peer_direction: Some(1),
             idle_retention: Some(IdleRetentionPolicy {
+                elapsed_clock: None,
                 timeout: Duration::from_secs(30),
                 capacity: 16,
             }),
@@ -341,7 +343,7 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
         fresh.adopt(server_backend.connection.clone()).await,
         Err(ConnectivityError::Denied)
     ));
-    server_registry.close_device(&receiver_peer, b"test member revoked");
+    server_registry.close_device(&receiver_peer);
     server_members.admitted.store(true, Ordering::SeqCst);
     assert!(matches!(
         old_attempt.check_current().await,
@@ -352,7 +354,7 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
         Err(ConnectivityError::Denied)
     ));
     let session_attempt = server_admission.begin(receiver_peer);
-    server_registry.close_all(b"test session retired");
+    server_registry.close_all();
     assert!(matches!(
         session_attempt.check_current().await,
         Err(ConnectivityError::Denied)

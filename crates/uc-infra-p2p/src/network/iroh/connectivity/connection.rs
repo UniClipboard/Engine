@@ -2,16 +2,19 @@ use super::super::blobs::BLOBS_ALPN;
 use super::super::conn_path::connection_channel;
 use super::super::observed_connections::close_reason;
 use super::super::session_generation::{begin_session_local_work, SessionLocalWork};
+use super::super::space_admission::SPACE_ADMISSION_ALPN;
 #[cfg(feature = "test-util")]
-use super::super::test_support::register_blob_connection;
-use super::stream::wrap;
+use super::super::test_support::register_resource_connection;
+use super::stream::{wrap, wrap_receive, wrap_send};
 use async_trait::async_trait;
 use iroh::endpoint::{Connection, Side};
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::broadcast;
 use uc_application::deps::{
-    ConnectionMode, ConnectionProtocol, ConnectivityError, PeerConnection, StreamPair,
+    ConnectionMode, ConnectionProtocol, ConnectivityError, PeerConnection, PeerReceiveStream,
+    PeerSendStream, PeerUnidirectionalConnection, StreamPair,
 };
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ConnectionChannel, PeerReachabilityChanged, ReachabilityState};
@@ -20,12 +23,17 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
-use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+use uc_sync_protocol::clipboard::{
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
 use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
+use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
+use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
+use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
 pub(crate) struct IrohPeerConnection {
     native: Connection,
@@ -38,9 +46,15 @@ pub(crate) struct IrohPeerConnection {
     )>,
 }
 impl IrohPeerConnection {
+    pub(crate) fn native(connection: &dyn Any) -> Result<Connection, ConnectivityError> {
+        connection
+            .downcast_ref::<Self>()
+            .map(|connection| connection.native.clone())
+            .ok_or(ConnectivityError::Denied)
+    }
     pub(crate) fn wrap(connection: Connection) -> Arc<dyn PeerConnection> {
         #[cfg(feature = "test-util")]
-        register_blob_connection(&connection);
+        register_resource_connection(&connection);
         let session_work = if connection.alpn() == BLOBS_ALPN {
             let work = begin_session_local_work();
             if work.is_none() {
@@ -88,7 +102,7 @@ impl IrohPeerConnection {
         events: broadcast::Receiver<PeerReachabilityChanged>,
     ) -> Arc<dyn PeerConnection> {
         #[cfg(feature = "test-util")]
-        register_blob_connection(&connection);
+        register_resource_connection(&connection);
         Arc::new(Self {
             _session_work: None,
             native: connection,
@@ -109,10 +123,13 @@ impl PeerConnection for IrohPeerConnection {
     fn mode(&self) -> ConnectionMode {
         if matches!(
             self.native.alpn(),
-            MULTIPLEXED_CLIPBOARD_ALPN
+            ATTRIBUTED_CLIPBOARD_ALPN
+                | MULTIPLEXED_CLIPBOARD_ALPN
                 | MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN
                 | PEER_REACHABILITY_ALPN
                 | BLOBS_ALPN
+                | LEGACY_TRANSFER_PROGRESS_ALPN
+                | TRANSFER_PROGRESS_ALPN
         ) {
             ConnectionMode::Multiplexed
         } else if self.native.alpn() == LEGACY_PEER_REACHABILITY_ALPN {
@@ -123,14 +140,19 @@ impl PeerConnection for IrohPeerConnection {
     }
     fn protocol(&self) -> ConnectionProtocol {
         match self.native.alpn() {
+            SPACE_ADMISSION_ALPN => ConnectionProtocol::SpaceAdmission,
             BLOBS_ALPN => ConnectionProtocol::Blob,
+            LEGACY_TRANSFER_PROGRESS_ALPN => ConnectionProtocol::TransferProgressV1,
+            TRANSFER_PROGRESS_ALPN => ConnectionProtocol::TransferProgressV2,
             PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV2,
             LEGACY_PEER_REACHABILITY_ALPN => ConnectionProtocol::PeerReachabilityV1,
+            ATTRIBUTED_CLIPBOARD_ALPN => ConnectionProtocol::AttributedClipboard,
             MULTIPLEXED_CLIPBOARD_ALPN => ConnectionProtocol::MultiplexedClipboard,
             ACTIVE_CLIPBOARD_PULL_ALPN => ConnectionProtocol::ActiveClipboardPull,
             ACTIVE_CLIPBOARD_ALPN => ConnectionProtocol::ActiveClipboardState,
             CLIPBOARD_ALPN => ConnectionProtocol::Clipboard,
             MEMBERSHIP_HISTORY_EXCHANGE_ALPN => ConnectionProtocol::MembershipHistory,
+            MEMBERSHIP_BRANCH_RECOVERY_ALPN => ConnectionProtocol::MembershipBranchRecovery,
             MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN => ConnectionProtocol::MultiplexedMembershipHistory,
             GROUP_UPDATE_ALPN => ConnectionProtocol::GroupUpdate,
             LEGACY_GROUP_UPDATE_ALPN => ConnectionProtocol::LegacyGroupUpdate,
@@ -208,5 +230,28 @@ impl PeerConnection for IrohPeerConnection {
             .await
             .map(|(send, recv)| wrap(send, recv))
             .map_err(|error| ConnectivityError::Stream(Box::new(error)))
+    }
+    fn unidirectional(&self) -> Option<&dyn PeerUnidirectionalConnection> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl PeerUnidirectionalConnection for IrohPeerConnection {
+    async fn open_uni(&self) -> Result<Box<dyn PeerSendStream>, ConnectivityError> {
+        self.observe_liveness();
+        self.native
+            .open_uni()
+            .await
+            .map(wrap_send)
+            .map_err(|source| ConnectivityError::Stream(Box::new(source)))
+    }
+
+    async fn accept_uni(&self) -> Result<Box<dyn PeerReceiveStream>, ConnectivityError> {
+        self.native
+            .accept_uni()
+            .await
+            .map(wrap_receive)
+            .map_err(|source| ConnectivityError::Stream(Box::new(source)))
     }
 }

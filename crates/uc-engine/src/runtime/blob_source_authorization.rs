@@ -1,4 +1,8 @@
 //! 完整 facade 动作经生产装配发送真实 B 消息，引用实际 C 提供的内容。
+mod ownership;
+// 真实读流屏障只在 Linux 测试装配中启用，隔离验收必须使用同一条件。
+#[cfg(target_os = "linux")]
+mod peer_isolation;
 mod quota;
 use super::ProductionRuntime;
 use crate::assembly::host::{derive_app_paths, profile_key_recovery_store};
@@ -7,9 +11,9 @@ use crate::engine::{EngineRuntime, StartupProgress};
 use crate::testing::{empty_engine_host, mount_engine_rendezvous};
 use crate::{
     BlobResourceInput, CreateSpaceInput, DeviceMembershipSummary, EngineConfig, EngineEvent,
-    EntryReceiveProgressInput, EventStream, HistoryEntryInput, JoinSpaceInput, Operation,
-    OperationResult, ReceiveItemFailureReason, ReceiveProgressSummary, RemoveMemberInput,
-    SecretString, SettingsPatch, SyncSettingsPatch,
+    EntryReceiveProgressInput, EventStream, HistoryEntryInput, JoinSpaceInput,
+    JoinSpaceStatusSummary, Operation, OperationResult, ReceiveItemFailureReason,
+    ReceiveProgressSummary, RemoveMemberInput, SecretString, SettingsPatch, SyncSettingsPatch,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -80,8 +84,8 @@ async fn join(sponsor: &ProductionRuntime, joiner: &ProductionRuntime) {
 }
 
 async fn membership(runtime: &ProductionRuntime, count: usize, role: &str) -> String {
-    let mut last = (DeviceMembershipSummary::Unknown, 0_usize, 0_usize);
-    timeout(Duration::from_secs(30), async {
+    let mut last = (DeviceMembershipSummary::Unknown, 0_usize, 0_usize, "none");
+    let result = timeout(Duration::from_secs(30), async {
         loop {
             if let Ok(OperationResult::DeviceGroupChoices(choices)) = runtime
                 .execute(Operation::QueryDeviceGroupChoices, CancellationToken::new())
@@ -101,6 +105,15 @@ async fn membership(runtime: &ProductionRuntime, count: usize, role: &str) -> St
                         .iter()
                         .filter(|d| d.membership == DeviceMembershipSummary::Removed)
                         .count(),
+                    match choices.device_trust.current_join.as_ref() {
+                        None => "none",
+                        Some(JoinSpaceStatusSummary::Pending { .. }) => "pending",
+                        Some(JoinSpaceStatusSummary::Processing { .. }) => "processing",
+                        Some(JoinSpaceStatusSummary::Active { .. }) => "active",
+                        Some(JoinSpaceStatusSummary::NeedsAttention { .. }) => "needs_attention",
+                        Some(JoinSpaceStatusSummary::Rejected { .. }) => "rejected",
+                        Some(JoinSpaceStatusSummary::Terminated { .. }) => "terminated",
+                    },
                 );
                 if choices.device_trust.local_membership == DeviceMembershipSummary::Active
                     && choices
@@ -117,8 +130,30 @@ async fn membership(runtime: &ProductionRuntime, count: usize, role: &str) -> St
             sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("{role} membership must converge to {count}; last: {last:?}"))
+    .await;
+    if let Ok(device) = result {
+        return device;
+    }
+    // 原30秒断言已失败；只读失败现场有独立短预算，不延长恢复期限。
+    let diagnostic = timeout(
+        Duration::from_secs(1),
+        runtime.execute(
+            Operation::QueryMembershipDiagnostics,
+            CancellationToken::new(),
+        ),
+    )
+    .await;
+    let facts = match diagnostic {
+        Ok(Ok(OperationResult::MembershipDiagnostics(summary))) => Some((
+            summary.effective_member_count,
+            summary.pending_conflict_count,
+            summary.pending_confirmation_count,
+            summary.pending_effect_count,
+            summary.transition_phases,
+        )),
+        _ => None,
+    };
+    panic!("{role} membership must converge to {count}; last: {last:?}; owner_facts: {facts:?}")
 }
 
 async fn dispatch(sender: &AppFacade, receiver_id: &str, blob: &PublishBlobResult, size: usize) {

@@ -35,9 +35,9 @@ use crate::engine::startup::StartupProgressStore;
 use crate::engine::startup_owner::StartupCleanupOwner;
 use crate::{
     EngineConfig, EngineEvent, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
-    HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostDirectories,
-    HostFileAccess, HostSecureStorage, RefreshReason, SettingsChanged, SettingsSectionSummary,
-    TransferProgress,
+    HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostClipboardSnapshot,
+    HostDirectories, HostFileAccess, HostSecureStorage, RefreshReason, SettingsChanged,
+    SettingsSectionSummary, TransferProgress,
 };
 
 struct HostSecureStorageAdapter {
@@ -92,7 +92,11 @@ struct HostClipboardAdapter {
 
 impl SystemClipboardPort for HostClipboardAdapter {
     fn read_snapshot(&self) -> anyhow::Result<SystemClipboardSnapshot> {
-        let snapshot = self.host.read()?;
+        self.read_observation().map(|(snapshot, _)| snapshot)
+    }
+
+    fn read_observation(&self) -> anyhow::Result<(SystemClipboardSnapshot, Option<Vec<u8>>)> {
+        let (snapshot, identity) = self.host.read_with_identity()?;
         let mut representations = Vec::with_capacity(snapshot.representations.len());
         let mut file_metadata = Vec::new();
         let operation_dir = self
@@ -123,15 +127,25 @@ impl SystemClipboardPort for HostClipboardAdapter {
             }
         }
 
-        Ok(SystemClipboardSnapshot {
-            ts_ms: snapshot.observed_at_ms,
-            representations,
-            file_content_digests: Vec::new(),
-            file_set_v1_component: None,
-        })
+        Ok((
+            SystemClipboardSnapshot {
+                ts_ms: snapshot.observed_at_ms,
+                representations,
+                file_content_digests: Vec::new(),
+                file_set_v1_component: None,
+            },
+            identity.map(|value| value.0),
+        ))
     }
 
     fn write_snapshot(&self, snapshot: SystemClipboardSnapshot) -> anyhow::Result<()> {
+        self.write_with_receipt(snapshot).map(|_| ())
+    }
+
+    fn write_with_receipt(
+        &self,
+        snapshot: SystemClipboardSnapshot,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         let representations = snapshot
             .representations
             .into_iter()
@@ -153,10 +167,11 @@ impl SystemClipboardPort for HostClipboardAdapter {
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         self.host
-            .write(crate::HostClipboardSnapshot {
+            .write_with_receipt(HostClipboardSnapshot {
                 observed_at_ms: snapshot.ts_ms,
                 representations,
             })
+            .map(|receipt| receipt.identity.map(|value| value.0))
             .map_err(anyhow::Error::new)
     }
 }
@@ -366,6 +381,9 @@ impl EngineHostEventEmitter {
 impl HostEventEmitterPort for EngineHostEventEmitter {
     fn emit(&self, event: HostEvent) -> Result<(), EmitError> {
         let event = match event {
+            HostEvent::Transfer(TransferHostEvent::OutboundProgressChanged) => {
+                EngineEvent::OutboundProgressChanged
+            }
             HostEvent::Transfer(TransferHostEvent::Progress {
                 transfer_id,
                 entry_id,
@@ -1012,8 +1030,11 @@ mod tests {
                 uc_infra_p2p::network::iroh::MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
             )
             .await;
-        let membership_branch_recovery_reachable = network
-            .accepts_protocol_for_test(uc_infra_p2p::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN)
+        let branch_recovery_alpn = uc_infra_p2p::network::iroh::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
+        let membership_branch_recovery_installed =
+            network.has_active_protocol_for_test(branch_recovery_alpn);
+        let anonymous_branch_recovery_rejected = network
+            .rejects_anonymous_protocol_for_test(branch_recovery_alpn)
             .await;
         let space_admission_reachable = network
             .accepts_protocol_for_test(uc_infra_p2p::network::iroh::SPACE_ADMISSION_ALPN)
@@ -1024,11 +1045,7 @@ mod tests {
             network.accepts_protocol_for_test(b"uniclipboard/removal-notice/1"),
         );
         let deprecated_removal_protocols_reachable = exchange || late || notice;
-        prepared
-            .session
-            .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
-            .await
-            .unwrap();
+        drop(prepared.application);
         network.shutdown().await.unwrap();
         task_registry
             .shutdown(std::time::Duration::from_millis(500))
@@ -1039,8 +1056,12 @@ mod tests {
             "membership history exchange was not installed"
         );
         assert!(
-            membership_branch_recovery_reachable,
+            membership_branch_recovery_installed,
             "membership branch recovery protocol was not installed"
+        );
+        assert!(
+            anonymous_branch_recovery_rejected,
+            "anonymous branch recovery was not rejected"
         );
         assert!(
             space_admission_reachable,

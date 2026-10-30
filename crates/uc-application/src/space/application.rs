@@ -40,7 +40,7 @@ use crate::space::membership::{
     ExcludeMembershipMaintenancePort, MaintainSpaceMembershipDeps, MaintainSpaceMembershipUseCase,
     SpaceMembershipMaintenanceRuntime,
 };
-use crate::space::SpaceAdmissionObservationRegistry;
+use crate::space::{MemberScopeRetirementPort, SpaceAdmissionObservationRegistry};
 
 struct DeferredMaintenanceWake {
     target: OnceLock<Arc<dyn crate::space::membership::WakeSpaceMembershipMaintenancePort>>,
@@ -162,8 +162,9 @@ impl SpaceApplication {
         re_pairing: Arc<dyn crate::space::membership::ResolveRePairingPort>,
         admission_observations: Arc<SpaceAdmissionObservationRegistry>,
         space_transition_changes: tokio::sync::watch::Sender<()>,
+        scope_retirement: Arc<dyn MemberScopeRetirementPort>,
     ) -> Self {
-        Self::build_from_deps(
+        let application = Self::build_from_deps(
             SpaceApplicationDeps::from_application(
                 application,
                 adapters,
@@ -174,7 +175,9 @@ impl SpaceApplication {
             peer_reachability_changed_events,
             known_peer_contacts,
             re_pairing,
-        )
+        );
+        application.owner.bind_scope_retirement(scope_retirement);
+        application
     }
 
     #[cfg(test)]

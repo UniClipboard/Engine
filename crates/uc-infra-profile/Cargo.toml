@@ -8,6 +8,7 @@ publish = false
 
 [features]
 default = []
+branch-recovery-fault-tests = []
 # Allows test harnesses to bind sponsor and joiner endpoints in one process.
 # Production builds must not enable it: the runtime lease must reject a second
 # live node. See src/network/iroh/node.rs for the production lifecycle guard.
@@ -74,7 +75,7 @@ opentelemetry = { version = "=0.32.0", default-features = false, features = ["tr
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace"] }
 tracing-opentelemetry = { version = "=0.33.0", default-features = false }
 argon2 = { version = "0.5.3", features = ["std"] }
-opaque-ke = { version = "=4.0.1", features = ["argon2", "ristretto255"] }
+opaque-ke.workspace = true
 base64 = "0.22"
 subtle = "2.5.0"
 chacha20poly1305 = { version = "0.10.1", features = ["std", "stream"] }

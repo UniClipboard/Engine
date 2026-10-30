@@ -121,11 +121,15 @@ pub use crate::space::{
 pub use crate::space::{
     AdmissionDisplayStatus, AdvanceMembershipBranchTransitionError,
     AdvanceMembershipBranchTransitionInput, AdvanceMembershipBranchTransitionPort,
-    BeginMembershipBranchRecoveryInput, CurrentMemberSignatureError, CurrentMemberSignaturePort,
-    CurrentSpaceIdentityError, CurrentSpaceIdentityPort, CurrentSpaceMemberScope,
-    CurrentSpaceMemberScopeError, CurrentSpaceMemberScopePort, DeviceManagementResetDataPort,
-    InboundMembershipTransfer, InitialSpaceActivationPort, InitializeSpacePort,
-    IsSpaceUnlockedPort, IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
+    BeginMembershipBranchRecoveryInput, BranchRecoveryLocalWorkPort,
+    BranchRecoveryOperationScopePort, BranchRecoveryPeerPort, BranchRecoveryReceiver,
+    BranchRecoveryRequest, BranchRecoveryResponse, BranchRecoveryTransport,
+    BranchRecoveryWireError, BranchRecoveryWirePort, BranchRecoveryWork,
+    CurrentMemberSignatureError, CurrentMemberSignaturePort, CurrentSpaceIdentityError,
+    CurrentSpaceIdentityPort, CurrentSpaceMemberScope, CurrentSpaceMemberScopeError,
+    CurrentSpaceMemberScopePort, DeviceManagementResetDataPort, InboundMembershipTransfer,
+    InitialSpaceActivationPort, InitializeSpacePort, IsSpaceUnlockedPort,
+    IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
     IssueMembershipBranchRecoveryPort, JoinerStagedSecurityTransition, KnownPeerContact,
     LoadCurrentJoinStatusPort, LoadDeviceTrustObservationsPort, LockSpacePort,
     MembershipBranchRecoveryChannelError, MembershipBranchRecoveryChannelPort,
@@ -541,6 +545,8 @@ pub struct ApplicationDeps {
     pub trusted_peer_repo: Arc<dyn uc_core::TrustedPeerRepositoryPort>,
     /// 记录剪贴板条目向各 peer 投递状态的仓储端口。
     pub entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
+    /// 既有发送归属与清单的有界只读能力。
+    pub progress_history: Arc<dyn ReadProgressHistoryPort>,
     /// 剪贴板领域端口。
     pub clipboard: ClipboardPorts,
     /// 安全领域端口。
@@ -588,10 +594,11 @@ pub use crate::space::{
 pub use crate::connectivity::{
     AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionProtocol,
     ConnectionRequest, ConnectivityBackend, ConnectivityError, ConnectivityManager,
-    ConnectivityPolicy, IdleRetentionPolicy, InboundAdmissionFence, InboundAdmissionPolicy,
-    InboundConnectionError, InboundIdentityReservation, PeerConnection, PeerReceiveStream,
-    PeerSendStream, PendingInboundLease, SessionConnectionAdmissionPort, StreamLease, StreamPair,
-    StreamWorkLease,
+    ConnectivityPolicy, ElapsedClockError, ElapsedClockPort, ElapsedClockRefusal,
+    IdleRetentionPolicy, InboundAdmissionFence, InboundAdmissionPolicy, InboundConnectionError,
+    InboundIdentityReservation, PeerConnection, PeerReceiveStream, PeerSendStream,
+    PeerUnidirectionalConnection, PendingInboundLease, SessionConnectionAdmissionPort, StreamLease,
+    StreamPair, StreamWorkLease, UniStreamLease,
 };
 
 // 测试装配参数只经被动依赖入口公开，不进入业务门面白名单。
@@ -628,4 +635,42 @@ pub use crate::clipboard::active::transport::{
 pub use crate::space::{
     PeerReachabilityEnvironmentPort, PeerReachabilityTransport, PeerReachabilityTransportError,
     PeerReachabilityTransportPorts, PeerReachabilityWireError, PeerReachabilityWirePort,
+};
+
+pub use crate::transfer::progress::{
+    CurrentProgressTaskPort, ProgressBound, ProgressClaimRefusal, ProgressExchangeDeadline,
+    ProgressExchangeService, ProgressExchangeWorker, ProgressProjectionSnapshot,
+    ProgressReceiveError, ProgressReceiverPort, ProgressSourceTask, ProgressSubmission,
+    ProgressTaskAuthorityPort, ProgressTaskDescriptor, ProgressTerminalNotice,
+    ProgressTerminalRoundPort, ProgressUnattributedReceiverPort, ProgressWirePort,
+    TransferProgressProducer, TransferProgressReceiver,
+};
+
+pub use crate::transfer::progress::{
+    ProgressPageReply, ProgressPageRequest, ProgressSnapshot, ProgressSnapshotPage,
+    ProgressSnapshotProviderPort, ProgressSnapshotQuery, ProgressSnapshotRead,
+    ProgressSnapshotRound, ProgressSnapshotRoundPort, ProgressSnapshotTarget,
+    ProgressSnapshotWirePort, TransferProgressSnapshotReader,
+};
+
+pub use crate::transfer::progress::ProgressQueryResult;
+
+pub use crate::transfer::progress::{ProgressLiveRoundPort, ProgressUpdateNotice};
+
+pub use crate::transfer::progress::ProgressContactNotice;
+
+pub use crate::transfer::progress::{
+    ProgressProjectionAdmission, ProgressProjectionEvent, ProgressProjectionKey,
+    ProgressProjectionRegistry, ProgressProjectionWorker, TransferProgressReconciler,
+};
+
+pub use crate::transfer::progress::transfer_progress_connectivity_policy;
+
+pub use crate::transfer::progress::{ProgressInboundWirePort, TransferProgressTransport};
+
+pub use crate::transfer::progress::{ProgressInboundFactory, TransferProgressNetwork};
+
+pub use crate::transfer::progress::{
+    ProgressHistoryEvidence, ProgressHistoryReadError, ProgressHistoryRepresentation,
+    ReadProgressHistoryPort,
 };

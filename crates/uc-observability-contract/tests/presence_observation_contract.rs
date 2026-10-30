@@ -22,6 +22,9 @@ fn negotiated_protocol_only_exports_the_closed_known_kinds() {
         "peer_reachability_v1",
         "peer_reachability_v2",
         "blob",
+        "transfer_progress_v1",
+        "transfer_progress_v2",
+        "membership_branch_recovery",
         "other",
     ] {
         let payload = format!(
@@ -38,4 +41,18 @@ fn negotiated_protocol_only_exports_the_closed_known_kinds() {
     ] {
         assert!(decode_local_record("connection.protocol.negotiated", payload, "INFO").is_none());
     }
+}
+
+#[test]
+fn negotiated_progress_path_keeps_the_handshake_classification_without_accepting_addresses() {
+    for path in ["direct", "relay", "unknown", "other"] {
+        let payload = format!(
+            r#"{{"kind":"physical","record":{{"event":"negotiated","protocol":"transfer_progress_v2","initial_path":"{path}"}}}}"#
+        );
+        let fields =
+            decode_local_record("connection.protocol.negotiated", &payload, "INFO").unwrap();
+        assert_eq!(fields["initial_path"], path);
+        assert_eq!(fields.len(), 3);
+    }
+    assert!(decode_local_record("connection.protocol.negotiated", r#"{"kind":"physical","record":{"event":"negotiated","protocol":"transfer_progress_v2","initial_path":"PRIVATE_ADDRESS"}}"#, "INFO").is_none());
 }

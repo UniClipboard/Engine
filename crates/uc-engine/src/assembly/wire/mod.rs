@@ -37,6 +37,7 @@ use uc_core::clipboard::SelectRepresentationPolicyV1;
 use uc_core::diagnostics::HostLogProfile;
 use uc_core::ids::{ProfileId, RepresentationId};
 use uc_core::ports::blob::BlobReferenceRepositoryPort;
+use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
 use uc_core::ports::clipboard::{RepresentationCachePort, SelfWriteLedgerPort, SpoolQueuePort};
 use uc_core::ports::security::BlobCipherPort;
 use uc_core::ports::*;
@@ -107,7 +108,13 @@ use uc_observability_contract::uc_info;
 /// Infrastructure layer implementations
 struct InfraLayer {
     // Clipboard repositories
-    clipboard_entry_factory: Box<dyn FnOnce(Arc<dyn BlobCipherPort>) -> ClipboardEntryPorts + Send>,
+    clipboard_entry_factory: Box<
+        dyn FnOnce(
+                Arc<dyn BlobCipherPort>,
+                Arc<dyn EntryFileSetRepositoryPort>,
+            ) -> ClipboardEntryPorts
+            + Send,
+    >,
     clipboard_event_repo: Arc<dyn ClipboardEventWriterPort>,
     /// 与 `clipboard_event_repo` 共享底层 `DieselClipboardEventRepository`,
     /// 但暴露的是读端口(`ClipboardEventRepositoryPort`),用于视图层反查
@@ -677,20 +684,22 @@ pub async fn wire_dependencies_from_inputs(
     // per-session subkey derived from space access, so it is constructed here
     // (after space access + profile exist) rather than in `create_infra_layer`,
     // reusing the shared executor.
-    let entry_file_set_repo: Arc<dyn uc_core::ports::clipboard::EntryFileSetRepositoryPort> =
-        Arc::new(match &v3_content_protection {
-            Some(protection) => {
-                uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new_v3(
-                    infra.db_executor.clone(),
-                    Arc::clone(protection),
-                )
-            }
-            None => uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new(
+    let entry_file_set_impl = Arc::new(match &v3_content_protection {
+        Some(protection) => {
+            uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new_v3(
                 infra.db_executor.clone(),
-                space_access_ports.derive_subkey.clone(),
-                platform.current_profile.clone(),
-            ),
-        });
+                Arc::clone(protection),
+            )
+        }
+        None => uc_infra_storage::db::repositories::DieselEntryFileSetRepository::new(
+            infra.db_executor.clone(),
+            space_access_ports.derive_subkey.clone(),
+            platform.current_profile.clone(),
+        ),
+    });
+
+    let entry_file_set_repo: Arc<dyn uc_core::ports::clipboard::EntryFileSetRepositoryPort> =
+        entry_file_set_impl.clone();
 
     // 本机历史标签：名称以当前 profile 的内容保护密封；旧格式 profile 只能读取关联。
     let history_tag_repo = Arc::new(match &v3_content_protection {
@@ -842,7 +851,8 @@ pub async fn wire_dependencies_from_inputs(
         &infra.clipboard_event_repo,
         &infra.representation_repo,
     );
-    let clipboard_entry_ports = (infra.clipboard_entry_factory)(blob_cipher.clone());
+    let clipboard_entry_ports =
+        (infra.clipboard_entry_factory)(blob_cipher.clone(), entry_file_set_repo.clone());
     directory_receive.commit_inbound = Arc::new(EncryptingInboundReceiveCommit::new(
         directory_receive.commit_inbound.clone(),
         blob_cipher.clone(),
@@ -960,6 +970,7 @@ pub async fn wire_dependencies_from_inputs(
         clipboard_background,
         trusted_peer_repo: Arc::clone(&trusted_peer_repo),
         entry_delivery_repo: Arc::clone(&infra.entry_delivery_repo),
+        progress_history: entry_file_set_impl,
         clipboard: ClipboardPorts {
             resource_snapshot: Arc::new(DieselEntryResourceReader::new(
                 infra.db_executor.clone(),

@@ -24,7 +24,7 @@
 - 现场只读统计得到 10 条准入记录：9 条 Completed 很小，1 条 SponsorCommitted 占绝大部分。不能将本次问题归为已完成记录数量失控。
 - 未完成记录明文编码为 7,157,622 bytes；其独立密文文本为 25,553,814 bytes；仓库整体密文文本为 91,295,926 bytes，约 87.1 MiB。两层数字数组文本表示是约 13 倍膨胀的来源，AEAD 本身不是这个膨胀量的原因。
 - 大记录包括成员历史 684,503 bytes、安全状态 3,399,710 bytes、保留回复 3,073,238 bytes。保留这些数据参与恢复或重放，不能未经协议证明删除。
-- [成员仓储](../../../crates/uc-application/src/space/membership/ledger/repository.rs)存在恢复并验证历史的路径；现场采样也观察到成员历史重建及校验。
+- The historical `space/membership/ledger/repository.rs` included history recovery and validation. The path has been removed. Field sampling also observed history reconstruction and validation.
 - 旧桌面的三次设备组查询均返回成功，耗时约 4.1–4.4 秒。现场数据副本的仓库首次加载约 3.65 秒，现有复用修改后四次未变化读取合计约 79 ms，10 条记录仍可打开。后者是局部探针结果，不是完整桌面性能验收。
 
 ### 待补证据

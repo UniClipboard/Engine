@@ -4,6 +4,8 @@
 //! `MembershipLedgerRecordV5`；读取到 V1–V4 时在同一事务内迁移并写回 V5，迁移失败不改写原资料。
 
 mod codec;
+#[cfg(feature = "branch-recovery-fault-tests")]
+mod fault_test_gate;
 mod store;
 #[cfg(test)]
 pub(crate) mod test_support;

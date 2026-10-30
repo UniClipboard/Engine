@@ -14,4 +14,4 @@ pub use engine_version_state::FileEngineVersionStateRepository;
 pub use file_secure_storage::FileSecureStorage;
 pub use first_sync_state::FileFirstSyncStateRepository;
 pub use migration_state::FileLegacyMigrationRecovery;
-pub use time::{SystemClock, Timer};
+pub use time::{SystemClock, SystemElapsedClock, Timer};

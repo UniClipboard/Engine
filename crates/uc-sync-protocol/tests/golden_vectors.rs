@@ -4,9 +4,13 @@
 //! 断言失败：这类变化会破坏与已发布版本互通，必须改版本号或 ALPN，而不是改向量。
 
 use bytes::Bytes;
+use std::error::Error;
 use tokio::io::AsyncReadExt;
 use uc_core::file_transfer::OutboundProgressStatus;
-use uc_core::membership::{SpaceAdmissionEnvelopeV1, SpaceAdmissionMessageKind};
+use uc_core::ids::EntryId;
+use uc_core::membership::{
+    MemberInstanceId, MembershipBranchId, MembershipBranchRecoveryPackageV1, MembershipConflictId,
+};
 use uc_core::ports::ClipboardHeader;
 use uc_sync_protocol::active_clipboard_pull::{self, PullResponse};
 use uc_sync_protocol::active_clipboard_state::{self, ActiveClipboardWireMessage};
@@ -35,6 +39,7 @@ async fn drain(mut reader: tokio::io::DuplexStream) -> Vec<u8> {
 
 fn clipboard_header() -> ClipboardHeader {
     ClipboardHeader {
+        source_entry: None,
         version: ClipboardHeader::CURRENT_VERSION,
         snapshot_hash: "a".repeat(64),
         captured_at_ms: 1_700_000_000_000,
@@ -173,6 +178,59 @@ async fn space_admission_initial_hello_frame() {
 
 #[test]
 fn membership_branch_recovery_messages() {
+    let conflict = MembershipConflictId::from_bytes([0x11; 32]);
+    let branch = MembershipBranchId::from_bytes([0x22; 32]);
+    let recipient = MemberInstanceId::from_bytes([0x33; 32]);
+    let bindings = format!("{}{}{}", "11".repeat(32), "22".repeat(32), "33".repeat(32));
+    let request = membership_branch_recovery::encode(
+        &MembershipBranchRecoveryWireMessage::request_group_info(conflict, branch, recipient),
+    )
+    .expect("encode");
+    assert_vector(
+        "membership-branch-recovery/1 request group info",
+        &request,
+        &format!("0001{bindings}"),
+    );
+    let commit = membership_branch_recovery::encode(
+        &MembershipBranchRecoveryWireMessage::submit_external_commit(
+            conflict,
+            branch,
+            recipient,
+            vec![4, 5],
+        ),
+    )
+    .expect("encode");
+    assert_vector(
+        "membership-branch-recovery/1 external commit",
+        &commit,
+        &format!("0201{bindings}020405"),
+    );
+    let package = MembershipBranchRecoveryPackageV1::new_unsigned(
+        conflict,
+        branch,
+        recipient,
+        MemberInstanceId::from_bytes([0x44; 32]),
+        1,
+        [0x55; 32],
+        vec![6],
+        vec![7],
+        vec![8],
+    )
+    .expect("package")
+    .with_authorization_signature(vec![9]);
+    let recovery = membership_branch_recovery::encode(
+        &MembershipBranchRecoveryWireMessage::recovery_package(package),
+    )
+    .expect("encode");
+    assert_vector(
+        "membership-branch-recovery/1 recovery package",
+        &recovery,
+        &format!(
+            "030101{bindings}{}02{}0106010701080109",
+            "44".repeat(32),
+            "55".repeat(32)
+        ),
+    );
     let rejected =
         membership_branch_recovery::encode(&MembershipBranchRecoveryWireMessage::rejected())
             .expect("encode");
@@ -187,4 +245,55 @@ fn membership_branch_recovery_messages() {
         &group_info,
         "010103010203",
     );
+}
+
+#[test]
+fn attributed_clipboard_header_has_distinct_layout_and_preserves_frozen_old_bytes() {
+    let mut header = ClipboardHeader {
+        source_entry: None,
+        version: 2,
+        snapshot_hash: "h".into(),
+        captured_at_ms: 1,
+        origin_device_id: "d".into(),
+        origin_device_name: "n".into(),
+        payload_version: 3,
+    };
+    let old = clipboard::encode_header(&header, None).unwrap();
+    assert_vector(
+        "original clipboard header",
+        &old,
+        "55435431020168020164016e0300",
+    );
+    assert_eq!(clipboard::decode_header(&old).unwrap(), header);
+    header.source_entry = Some(EntryId::from("42424242-4242-4242-4242-424242424242"));
+    let encoded = clipboard::encode_header(&header, None).unwrap();
+    assert_vector(
+        "attributed clipboard header",
+        &encoded,
+        "55435432020168020164016e030042424242424242424242424242424242",
+    );
+    assert_eq!(clipboard::decode_header(&encoded).unwrap(), header);
+    for cut in 0..encoded.len() {
+        assert!(clipboard::decode_header(&encoded[..cut]).is_err());
+    }
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert!(matches!(
+        clipboard::decode_header(&trailing),
+        Err(clipboard::WireDecodeError::TrailingHeaderBytes)
+    ));
+    let mut old_with_source = old;
+    old_with_source.extend_from_slice(&[0x42; 16]);
+    assert!(matches!(
+        clipboard::decode_header(&old_with_source),
+        Err(clipboard::WireDecodeError::TrailingHeaderBytes)
+    ));
+    header.source_entry = Some(EntryId::from("invalid-sensitive-source"));
+    let source = clipboard::encode_header(&header, None).unwrap_err();
+    assert!(matches!(
+        source,
+        clipboard::WireEncodeError::SourceIdentity(_)
+    ));
+    assert!(source.source().is_some());
+    assert!(!source.to_string().contains("invalid-sensitive-source"));
 }

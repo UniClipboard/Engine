@@ -8,6 +8,7 @@ publish = false
 
 [features]
 default = []
+branch-recovery-fault-tests = ["uc-infra-profile/branch-recovery-fault-tests", "uc-infra-p2p/branch-recovery-fault-tests"]
 dev-tools = ["dep:serde_json", "dep:tracing-subscriber", "uc-infra-profile/test-util"]
 test-binding-worker-panic = []
 test-process-release = ["uc-observability-runtime/test-process-release"]

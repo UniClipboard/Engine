@@ -1,5 +1,6 @@
 //! 受管Engine的真实大文件流；工件仅含计数，不含内容、身份或路径。
 #![cfg(target_os = "linux")]
+mod progress;
 mod receive_lifecycle;
 mod task_origins;
 use super::receive_retry::member_id;
@@ -8,6 +9,7 @@ use super::{
     ENGINE_TEST_LOCK,
 };
 use crate::testing::receive_completion::{ReceiveCompletion, ReleaseCompletionOnDrop};
+use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
 use crate::{
     BlobResourceInput, CreateSpaceInput, Engine, EngineConfig, EngineEvent,
     EntryDeliveryStatusSummary, EntryReceiveProgressInput, HistoryEntryInput, HostCapabilities,
@@ -32,7 +34,9 @@ use task_origins::TaskOrigins;
 use tokio::runtime::Builder;
 use tokio::sync::oneshot;
 use tokio::time::{sleep, timeout};
-use uc_infra_p2p::network::iroh::test_support::blob_native_handle_counts;
+use uc_infra_p2p::network::iroh::test_support::{
+    blob_native_handle_counts, progress_native_handle_counts,
+};
 use url::Url;
 use wiremock::MockServer;
 
@@ -136,6 +140,7 @@ impl Resources {
         self.peak_rss_kib = self.peak_rss_kib.max(value.peak_rss_kib);
         self.fds = self.fds.max(value.fds);
         self.threads = self.threads.max(value.threads);
+        self.runtime_tasks = self.runtime_tasks.max(value.runtime_tasks);
         self.runtime_tasks = self.runtime_tasks.max(value.runtime_tasks);
     }
 }
@@ -269,6 +274,7 @@ async fn run_managed_resources(
     let server = MockServer::builder().start().await;
     mount_engine_rendezvous(&server).await;
     let native_handles_initial = blob_native_handle_counts();
+    let progress_handles_initial = progress_native_handle_counts();
     let mut native_handles_per_round = Vec::new();
     let (stop, mut stopped) = oneshot::channel();
     let sampler = tokio::spawn(async move {
@@ -279,6 +285,12 @@ async fn run_managed_resources(
     });
     let source_root = tempfile::tempdir()?;
     let receiver_root = tempfile::tempdir()?;
+    let progress_source = ReceiveExports::install(source_root.path(), usize::MAX, usize::MAX);
+    let progress_receiver = ReceiveExports::install(receiver_root.path(), usize::MAX, usize::MAX);
+    let _release_progress = [
+        ReleaseOnDrop(progress_source.clone()),
+        ReleaseOnDrop(progress_receiver.clone()),
+    ];
     if let Some(completion) = &completion {
         completion.install(receiver_root.path());
     }
@@ -346,6 +358,7 @@ async fn run_managed_resources(
     }
     let prepared = Resources::read()?;
     let mut rounds = Vec::new();
+    let mut progress_rounds = Vec::new();
     let mut completed_exchange_rounds = 0usize;
     let mut round_task_origins = Vec::new();
     let outcome: Result<()> = timeout(Duration::from_secs(480), async {
@@ -371,7 +384,7 @@ async fn run_managed_resources(
                 }
             })
             .await??;
-            timeout(Duration::from_secs(180), async {
+            let receive_attempt = timeout(Duration::from_secs(180), async {
                 loop {
                     if let OperationResult::EntryReceiveProgress(Some(progress)) = receiver
                         .execute(Operation::QueryEntryReceiveProgress(
@@ -383,7 +396,7 @@ async fn run_managed_resources(
                     {
                         if progress.state == "completed" {
                             assert_eq!(progress.items_completed, 1);
-                            break Ok::<_, anyhow::Error>(());
+                            break Ok::<_, anyhow::Error>(progress.attempt_id);
                         }
                         assert!(
                             !matches!(progress.state.as_str(), "failed" | "cancelled"),
@@ -441,6 +454,19 @@ async fn run_managed_resources(
             })
             .await??;
             completed_exchange_rounds += 1;
+            progress_rounds.push(
+                progress::verify_round(
+                    &source,
+                    &receiver_id,
+                    &sent.entry_id,
+                    &receive_attempt,
+                    &progress_source,
+                    &progress_receiver,
+                    &files,
+                    file_bytes,
+                )
+                .await?,
+            );
             rounds.push(Resources::read()?);
             if round == 1 {
                 if let Some(completion) = &completion {
@@ -490,6 +516,7 @@ async fn run_managed_resources(
                 && value.runtime_tasks <= initial.runtime_tasks + 1
                 && value.fds <= initial.fds
                 && blob_native_handle_counts().1 == native_handles_initial.1
+                && progress_native_handle_counts().1 == progress_handles_initial.1
             {
                 break Ok::<_, anyhow::Error>(value);
             }
@@ -498,6 +525,7 @@ async fn run_managed_resources(
     })
     .await;
     let native_handles_after_idle = blob_native_handle_counts();
+    let progress_handles_after_idle = progress_native_handle_counts();
     let native_counts_enabled = std::env::var_os("UC_RECEIVE_RESOURCE_EVIDENCE_DIR").is_some();
     let native_handles_verified = native_counts_enabled
         && native_handles_after_idle.0 > native_handles_initial.0
@@ -507,6 +535,9 @@ async fn run_managed_resources(
     let _ = stop.send(());
     let peaks = sampler.await??;
     let mut evidence = serde_json::json!({ "task_origin_probe": origins.is_some(), "round_task_origins": round_task_origins, "live_idle_observations": live_idle_observations, "bytes_per_file": file_bytes, "completed_rounds": rounds.len(), "completed_exchange_rounds": completed_exchange_rounds, "exact_bytes": transfer_files && outcome.is_ok(), "source_max_chunk_bytes": files.max_returned.load(Ordering::SeqCst), "source_reads": files.reads.load(Ordering::SeqCst), "before_shared_cpu_pool": before_shared_cpu_pool, "shared_cpu_pool_threads": shared_cpu_pool_threads, "initial": initial, "prepared": prepared, "rounds": rounds, "peaks": peaks, "closed": closed, "tags_verified": false, "quota_verified": false, "native_blob_connections_verified": native_handles_verified, "native_handles_initial": native_handles_initial, "native_handles_per_round": native_handles_per_round, "native_handles_before_shutdown": native_handles_before_shutdown, "native_handles_after_idle": native_handles_after_idle, "sampler_included_in_closed_tasks": true, "file_transfer_enabled": transfer_files, "thread_groups_after_idle": thread_groups()?, "thread_return_to_initial_verified": matches!(&idle_settled, Ok(Ok(_))), "tasks_without_sampler_return_to_initial_verified": closed_after_idle.runtime_tasks <= initial.runtime_tasks + 1, "closed_after_idle": closed_after_idle, "idle_settlement_ms": idle_ms });
+    evidence["progress_rounds"] = serde_json::to_value(&progress_rounds)?;
+    evidence["progress_handles_initial"] = serde_json::to_value(progress_handles_initial)?;
+    evidence["progress_handles_after_idle"] = serde_json::to_value(progress_handles_after_idle)?;
     if let Some(completion) = &completion {
         evidence["completion_sampling_probe"] = serde_json::json!({
             "sampled_while_held": completion.sampled_while_held.load(Ordering::SeqCst),
@@ -544,6 +575,8 @@ async fn run_managed_resources(
     outcome?;
     if native_counts_enabled && transfer_files {
         assert!(native_handles_verified, "必须实际观察原生blob句柄并归零");
+        assert!(progress_handles_after_idle.0 > progress_handles_initial.0);
+        assert_eq!(progress_handles_after_idle.1, progress_handles_initial.1);
     }
     assert_eq!(rounds.len(), if transfer_files { 2 } else { 0 });
     assert!(

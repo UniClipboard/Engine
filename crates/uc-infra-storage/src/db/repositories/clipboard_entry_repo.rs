@@ -494,7 +494,9 @@ where
         let entry_id = entry_id.to_string();
         self.executor
             .run(move |conn| {
-                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                // 先取得写权限再读取删除前提，避免读后升级在短写锁竞争下
+                // 立即返回 SQLITE_BUSY，绕过连接既有的写锁等待预算。
+                conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
                     let attempt_state = entry_receive_attempt::table
                         .filter(entry_receive_attempt::entry_id.eq(&entry_id))
                         .select(entry_receive_attempt::attempt_state)
@@ -617,6 +619,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    mod write_contention;
+
     use super::*;
     use crate::db::executor::DieselSqliteExecutor;
     use crate::db::mappers::clipboard_entry_mapper::ClipboardEntryRowMapper;

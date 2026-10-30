@@ -21,6 +21,7 @@
 | 复制并同步 | 接受一次本机复制通知 | 本机保存及各目标接收、保存结果；对方系统剪贴板写入独立结算 |
 | 手动发送或重新发送 | 用户明确发起发送 | 各目标成功、失败或等待重试；文件块与单个网络包不是独立业务动作 |
 | 手动重试接收失败项 | 用户明确选择失败项重试 | 实际保存完成、部分完成、取消、拒绝或来源不可用；准入接受不算接收完成 |
+| 核对接收状态 | 用户明确核对已发送条目的远端状态 | 核对已结算、仍运行、过期、未保留、不支持、不可达、忙碌、拒绝或失败；核对完成不表示文件全部交付 |
 | 修改成员关系 | 添加、移除成员或选择设备组 | 本机变更结果与其他成员确认情况分别表达，未确认不能算全部完成 |
 | 恢复成员一致性 | 上线、重启恢复或重试触发实际恢复工作 | 已一致、发现冲突、仍待确认或恢复失败 |
 | 恢复连接或会话 | 明确开始一次恢复尝试 | 恢复可用、失败或延期 |
@@ -54,9 +55,9 @@
   不额外制造一串独立的“生命周期成功”。
 - 关闭超时、任务异常退出等进入运行诊断，必须说明具体动作和失败类别，不能只写 `session_lifecycle`。
   任务异常退出统一由等待该任务的负责人调用 `record_task_join_failure`，以固定 `task.kind` 写入健康记录；
-  Blob 受管交换及关闭监督任务为 `blob_transport_worker`；
+  Blob 受管交换及关闭监督任务为 `blob_transport_worker`；进度受管连接监督任务为 `transfer_progress_connectivity_worker`；
   剪贴板投递记录、入站系统写入、活跃剪贴板收敛、延后排空、配对 mDNS 转发与移动端出站分发分别为 `clipboard_delivery_record`、`clipboard_inbound_os_write`、`active_clipboard_converge`、`clipboard_deferred_drain`、`pairing_mdns_forward`、`mobile_outbound_dispatch`；
-  Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；成员维护的一轮动作为 `membership_maintenance_round`，活跃剪贴板必需 worker 为 `active_clipboard_worker`，移动端绑定的引擎 worker 线程为 `mobile_worker`，Engine 启动任务为 `engine_startup`，出站进度翻译任务为 `outbound_progress_translator`，设备发现订阅及共用 mDNS 服务的任务异常退出为 `peer_discovery`，普通剪贴板共享拨号任务为 `clipboard_connectivity_worker`，设备可达性准入、连接监督及范围读取任务为 `presence_connectivity_worker`，成员历史连接任务为 `membership_history_connectivity_worker`。
+  Engine 操作、生命周期转换与会话挂起交接分别为 `engine_operation`、`engine_lifecycle_transition`、`session_suspend`；成员维护的一轮动作为 `membership_maintenance_round`，活跃剪贴板必需 worker 为 `active_clipboard_worker`，移动端绑定的引擎 worker 线程为 `mobile_worker`，Engine 启动任务为 `engine_startup`，出站进度翻译任务为 `outbound_progress_translator`，设备发现订阅及共用 mDNS 服务的任务异常退出为 `peer_discovery`，普通剪贴板共享拨号任务为 `clipboard_connectivity_worker`，设备可达性准入、连接监督及范围读取任务为 `presence_connectivity_worker`，成员历史连接任务为 `membership_history_connectivity_worker`，成员分支恢复连接任务为 `membership_branch_recovery_connectivity_worker`，Space 准入连接监督任务为 `space_admission_connectivity_worker`。
 - 真正执行的后台恢复可以成为独立动作，但要说明上线、重启、重试等固定触发原因，以及实际恢复结果。
 - 隐藏例行噪声不能丢失业务动作中的失败证据，不能单独过滤必要父节点、导致完整记录变成孤儿片段。
 - 测试记录与实际产品记录明确隔离。测试可以显式导出整批诊断用于验收，但不能让这些记录默认混入实际产品的业务视图。
@@ -255,6 +256,28 @@ Clipboard 的宿主复制在既有完整调用处创建 `clipboard.copy_and_sync
 接收的已提交部分／取消事实由同一不透明上下文跨原处理任务传递，既有回执保持原值；记录不得把部分保存压成整体成功。
 本地完整文件输出能力的 `clipboard.export_file` 是诊断子节点，存储失败保留固定类别，不输出内容摘要、文件名或路径；
 它不代表业务提交成功，也不因正常清理生成新的业务入口。重试不延长旧发送记录，不新增持久关联字段或业务阶段查询。
+用户通过既有完整 `ReconcileOutboundProgress` 发起核对时，Engine 装饰同一个 Application 完整能力，建立独立的
+`clipboard.reconcile_progress` 本地业务记录。内部再次发送流程仍归原 `clipboard.resend`，不通过 Engine 再建核对 root；
+普通 Query／List 不建业务记录。核对负责人继续独占授权、尝试核对、完整读取与采用，观测不获取内部对象或增加阶段接口。
+
+固定展示名称为 `clipboard.reconcile_progress.{结果}`，结果与完成日志分类如下。名称只使用合同枚举，设备编码器和两份 Collector
+同步校验名称、operation、domain 与 local 角色；不增加远程字段、原始条目标识或内容摘要。
+
+| 完整能力的结果 | 展示名称的结果后缀 | `uc.outcome` |
+| --- | --- | --- |
+| 已取得结算事实 | `settled` | `ok`：仅表示核对完成；事实可以包含文件失败或取消 |
+| 原任务仍运行 | `running` | `deferred` |
+| 原尝试已替换 | `superseded` | `skipped` |
+| 未保留、旧端不支持、不可达或忙碌 | `not_retained`／`unsupported`／`unreachable`／`busy` | `deferred`：不推断交付失败 |
+| 当前授权或输入拒绝 | `access_denied`／`invalid_input` | `rejected` |
+| 数据损坏或能力调用失败 | `invalid_data`／`unavailable` | `error`，分别使用 `corrupt`／`unavailable` 固定错误类型 |
+| 实际执行 future 被丢弃 | `cancelled` | `cancelled` |
+
+开始和结束均属于本次完整核对，名称在结束时采用实际返回的固定结果，每条记录只写一次对应完成日志；原返回值与错误来源保持。
+宿主停止等待仍由原受监督操作负责，不把等待者离开冒充实际工作已取消。
+heartbeat、ACK 与有界补发不创建独立业务 root，也不保留原接收／重试 span 延长其计时。协议后台工作仅可携带原合同允许的
+不透明在线关联，不能为核对观测新增持久关联、第二份业务权威或通知 outbox。
+
 Application 专用的 `ClipboardReceiverPort` 从 Core 移回接收模块，仍只有原订阅方法；广播容量、串行消费、回执、超时和关闭语义不变。
 `ClipboardDelivery` 是队列任务信封，Core `InboundClipboard` 原样放在其中，Core 仍无观测字段或依赖。
 
@@ -487,9 +510,18 @@ SDK TraceId/SpanId 位于顶层，缺失时省略。远程关闭不影响本地�
 正文，也不原样写入诊断文件；系统日志中的编码只包含同一组固定分类。远程入口忽略这个本地 target，
 不将正常路由计为远程隐私拒收。
 
-实际握手完成的 `connection.protocol.negotiated` 只输出封闭类别：可达性v1／v2、`blob`或`other`。
+共享出站拨号由首次建立该 flight 的调用提供既有 `ObservationContext`，连接管理器在实际拨号 worker 内延续此不透明关联。
+它只保留不可记录的父身份，不持有原业务 span；worker 仍隔离 tracing span，不能为连接诊断延长前台计时或新增业务 root。
+后加入的等待者复用已有建链事实，不改写原建链记录的关联。
+
+实际握手完成的 `connection.protocol.negotiated` 只输出封闭类别：可达性v1／v2、进度v1／v2、成员分支恢复、`blob`或`other`；协议类别直接取握手已协商的ALPN常量，不从对端版本或宿主能力推断。同一协商记录的`initial_path`复用该连接握手完成时实际选路的既有封闭分类；缺少该字段的旧记录仍可读取，但不能据此声称已证明连接路径。
 `blob`由固定SDK的ALPN匹配产生；不记录任意ALPN原文，不新增业务入口，未知协议继续归`other`。
 该记录仅进入本地连接诊断，远程入口仍忽略整个`uc.connectivity`，不扩大Collector字段。
+
+成员分支恢复在维护轮次内取得出站连接租约时，记录本地诊断 `membership.maintenance.connection_bound`，
+用既有轮次号和运行期生成的匿名 `connection_id` 将该轮与物理连接诊断关联。原始认证公钥和连接键只在
+同步发射时作为不可输出的内存上下文，未能建立匿名映射时保留既有不可关联状态，不输出原始值。该记录
+只表示租约已取得，不表示交换或恢复成功；无维护轮次时不发出，也不创建独立业务root。
 
 入站对端拒绝另以本地运行诊断 `peer.inbound.rejected` 记录固定协议和原因。展开字段仅有 `event.name`、
 `direction=inbound`、`protocol`、`uc.outcome=rejected`、`error.phase` 和 `error.reason`；不含对端标识、

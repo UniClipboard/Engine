@@ -1,0 +1,164 @@
+use super::io::{invalid, Exchange};
+use super::mapping::{ack, bound, contact, descriptor, identity, terminal, update};
+use super::{query, rejection};
+use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
+use uc_application::deps::{
+    ConnectionLease, CurrentProgressTaskPort, ProgressExchangeDeadline, ProgressReceiveError,
+    ProgressReceiverPort, ProgressSnapshotProviderPort, ProgressSnapshotQuery,
+    ProgressTaskDescriptor, StreamLease,
+};
+use uc_core::file_transfer::ProgressIdentity;
+use uc_sync_protocol::transfer_progress::v2::{Message, WireId};
+
+pub struct TransferProgressInbound;
+impl TransferProgressInbound {
+    /// 原始 deadline 只限制网络，不遗弃已经开始的 Application 采用；实际工作持有同一流许可。
+    pub async fn serve(
+        mut stream: StreamLease,
+        connection: &ConnectionLease,
+        generation: u64,
+        deadline: ProgressExchangeDeadline,
+        cancel: &CancellationToken,
+        owner: &dyn ProgressReceiverPort,
+        queries: &dyn ProgressSnapshotProviderPort,
+    ) -> Result<(), ProgressReceiveError> {
+        let mut exchange = Exchange::new(&mut stream, connection, &deadline, cancel);
+        let response = match exchange.read().await? {
+            Message::Query {
+                challenge,
+                source_entry,
+                expected_attempt,
+                offset,
+                snapshot_revision,
+            } => {
+                exchange.end_request().await?;
+                match query::reply(
+                    queries,
+                    &connection.peer(),
+                    challenge,
+                    ProgressSnapshotQuery {
+                        source: identity(source_entry),
+                        attempt: expected_attempt.map(identity),
+                        offset,
+                        revision: snapshot_revision,
+                    },
+                )
+                .await
+                {
+                    Ok(response) => Some(response),
+                    Err(error) => {
+                        rejection::send(&mut exchange, challenge, &error).await?;
+                        return Err(error);
+                    }
+                }
+            }
+            Message::Register { source_entry } => {
+                let registered = match owner
+                    .register(
+                        &connection.peer(),
+                        generation,
+                        identity(source_entry),
+                        &mut exchange,
+                    )
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let correlation = exchange.registration_challenge.unwrap_or(source_entry);
+                        rejection::send(&mut exchange, correlation, &error).await?;
+                        return Err(error);
+                    }
+                };
+                Some(bound(registered))
+            }
+            Message::Terminal {
+                binding,
+                scope,
+                owner_revision,
+                result,
+            } => {
+                exchange.end_request().await?;
+                let notice = terminal(binding, scope, owner_revision, result);
+                let adopted = match owner
+                    .adopt_terminal(&connection.peer(), generation, notice)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        rejection::send(&mut exchange, binding, &error).await?;
+                        return Err(error);
+                    }
+                };
+                if adopted != notice {
+                    return Err(invalid());
+                }
+                Some(ack(adopted))
+            }
+            Message::Contact {
+                binding,
+                scope,
+                owner_revision,
+                sequence,
+            } => {
+                exchange.end_request().await?;
+                owner
+                    .adopt_contact(
+                        &connection.peer(),
+                        generation,
+                        contact(binding, scope, owner_revision, sequence),
+                    )
+                    .await?;
+                None
+            }
+            Message::Update {
+                binding,
+                scope,
+                owner_revision,
+                progress,
+            } => {
+                exchange.end_request().await?;
+                owner
+                    .adopt_update(
+                        &connection.peer(),
+                        generation,
+                        update(binding, scope, owner_revision, progress),
+                    )
+                    .await?;
+                None
+            }
+            _ => return Err(invalid()),
+        };
+        if let Some(response) = response {
+            exchange.write(response).await?;
+        }
+        exchange.finish_send().await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CurrentProgressTaskPort for Exchange<'_> {
+    async fn challenge(
+        &mut self,
+        nonce: ProgressIdentity,
+    ) -> Result<ProgressTaskDescriptor, ProgressReceiveError> {
+        self.registration_challenge = Some(WireId(nonce.bytes()));
+        self.write(Message::Challenge {
+            nonce: WireId(nonce.bytes()),
+        })
+        .await?;
+        let Message::CurrentDescriptor {
+            challenge,
+            descriptor: current,
+        } = self.read().await?
+        else {
+            return Err(invalid());
+        };
+        if identity(challenge) != nonce {
+            return Err(ProgressReceiveError::Stale);
+        }
+        self.end_request().await?;
+        Ok(descriptor(current))
+    }
+}

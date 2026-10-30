@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 use super::connection::BUSY_TIMEOUT_MS;
+use super::ports::DatabaseGenerationMismatch;
 use uc_observability_contract::uc_info;
 
 /// Embed all diesel migrations at compile time
@@ -52,6 +53,21 @@ pub enum DbPoolError {
 }
 
 impl DbPool {
+    /// 校验代号和取得池连接共享读锁；替换只能在这两个动作之前或之后发生。
+    pub fn get_at_generation(
+        &self,
+        expected: u64,
+    ) -> Result<PooledConnection<ConnectionManager<SqliteConnection>>> {
+        let slot = self
+            .inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.generation.load(Ordering::Acquire) != expected {
+            return Err(DatabaseGenerationMismatch.into());
+        }
+        Ok(slot.pool.as_ref().ok_or(DbPoolError::Suspended)?.get()?)
+    }
+
     pub fn get(
         &self,
     ) -> std::result::Result<PooledConnection<ConnectionManager<SqliteConnection>>, DbPoolError>
@@ -541,11 +557,55 @@ fn run_migrations_raw(pool: &RawDbPool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{executor::DieselSqliteExecutor, ports::DbExecutor};
     use diesel::sql_types::Text;
     use diesel::QueryableByName;
+    use std::sync::mpsc;
 
     // Must match the forward-only schema repair migration directory.
     const ENTRY_FILE_SET_REPAIR_VERSION: &str = "20260714000001";
+
+    #[test]
+    fn connection_acquired_before_replacement_remains_on_old_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.sqlite");
+        let second = temp.path().join("second.sqlite");
+        let pool = init_db_pool(first.to_str().unwrap()).unwrap();
+        let executor = DieselSqliteExecutor::new(pool.clone());
+        let generation = pool.generation();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            executor.run_at_generation(generation, |conn| {
+                acquired_tx.send(())?;
+                resume_rx.recv()?;
+                diesel::sql_query("PRAGMA user_version = 42").execute(conn)?;
+                Ok(())
+            })
+        });
+        acquired_rx.recv().unwrap();
+        pool.replace_database(second.to_str().unwrap()).unwrap();
+        resume_tx.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        #[derive(QueryableByName)]
+        struct Version {
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            user_version: i32,
+        }
+        let version = |pool: &DbPool| {
+            diesel::sql_query("PRAGMA user_version")
+                .get_result::<Version>(&mut pool.get().unwrap())
+                .unwrap()
+                .user_version
+        };
+        assert_eq!(version(&pool), 0);
+        let old_pool = init_db_pool(first.to_str().unwrap()).unwrap();
+        assert_eq!(version(&old_pool), 42);
+        assert!(pool
+            .get_at_generation(generation)
+            .err()
+            .is_some_and(|error| error.is::<DatabaseGenerationMismatch>()));
+    }
 
     #[derive(QueryableByName)]
     struct TableColumn {

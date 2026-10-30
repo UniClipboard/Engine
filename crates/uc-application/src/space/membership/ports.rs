@@ -65,6 +65,8 @@ impl MembershipLedgerError {
 /// 一次成员记录提交：记录本身与由它推导出的成员读模型必须同时成立。
 #[derive(Clone)]
 pub struct MembershipRecordCommit {
+    /// 当前记录读取时所属数据库；取得写连接时必须原子核验。
+    pub expected_generation: u64,
     pub expected_revision: u64,
     pub replacement: MembershipRecord,
     /// 没有当前 Space 时为空；成员读模型由重建流程另行清理。
@@ -89,7 +91,7 @@ pub trait MembershipRecordStorePort: Send + Sync {
     async fn load(&self) -> Result<MembershipRecord, MembershipLedgerError>;
 
     /// 仅当当前修订号等于 `expected_revision` 且替换记录的修订号更大时，在同一事务中写入记录并
-    /// 落实成员读模型；任一部分失败时两者都不改变。
+    /// 落实成员读模型；取得连接时还须原子核验数据库代号，任一部分失败时两者都不改变。
     async fn commit(&self, commit: MembershipRecordCommit) -> Result<(), MembershipLedgerError>;
 
     /// 记录所在数据库的代号：控制世代切换、恢复出厂等替换数据库后必然改变。代号不同时，此前读到的

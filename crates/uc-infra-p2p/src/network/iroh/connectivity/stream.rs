@@ -12,13 +12,16 @@ struct SendHalf {
 }
 struct ReceiveHalf(RecvStream);
 pub(super) fn wrap(send: SendStream, receive: RecvStream) -> StreamPair {
-    (
-        Box::new(SendHalf {
-            native: send,
-            finished: false,
-        }),
-        Box::new(ReceiveHalf(receive)),
-    )
+    (wrap_send(send), wrap_receive(receive))
+}
+pub(super) fn wrap_send(send: SendStream) -> Box<dyn PeerSendStream> {
+    Box::new(SendHalf {
+        native: send,
+        finished: false,
+    })
+}
+pub(super) fn wrap_receive(receive: RecvStream) -> Box<dyn PeerReceiveStream> {
+    Box::new(ReceiveHalf(receive))
 }
 impl AsyncWrite for SendHalf {
     fn poll_write(
@@ -103,3 +106,47 @@ impl Drop for ReceiveHalf {
 #[cfg(test)]
 #[path = "stream_blob_probe.rs"]
 mod blob_probe;
+
+#[cfg(test)]
+#[path = "stream_progress_probe.rs"]
+mod progress_probe;
+
+#[cfg(test)]
+#[path = "stream_registration_probe.rs"]
+mod registration_probe;
+
+#[cfg(test)]
+#[path = "stream_terminal_probe.rs"]
+mod terminal_probe;
+
+#[cfg(test)]
+#[path = "stream_authority_probe.rs"]
+mod authority_probe;
+
+#[cfg(test)]
+#[path = "stream_outbound_probe.rs"]
+mod outbound_probe;
+
+#[cfg(test)]
+#[path = "stream_delivery_probe.rs"]
+mod delivery_probe;
+
+#[cfg(test)]
+#[path = "stream_shared_query_probe.rs"]
+mod shared_query_probe;
+
+#[cfg(test)]
+#[path = "stream_profile_probe.rs"]
+mod profile_probe;
+
+#[cfg(test)]
+#[path = "stream_rejection_probe.rs"]
+mod rejection_probe;
+
+#[cfg(test)]
+#[path = "stream_memory_backend_probe.rs"]
+mod memory_backend_probe;
+
+#[cfg(test)]
+#[path = "stream_memory_backend_fixture.rs"]
+pub(super) mod memory_backend_fixture;

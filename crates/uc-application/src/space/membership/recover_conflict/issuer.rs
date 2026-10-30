@@ -2,16 +2,20 @@ use std::sync::Arc;
 
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
-    LedgerInput, MembershipBranchTransitionV1, MembershipConflictPolicy, PeerEvidence,
+    LedgerInput, MemberInstanceId, MembershipBranchId, MembershipBranchTransitionV1,
+    MembershipConflictId, MembershipConflictPolicy, PeerEvidence, VersionedMembershipHistory,
 };
 use uc_core::ports::ClockPort;
 
+use crate::connectivity::ConnectivityError;
 use crate::space::membership::{
     ledger_error, CurrentMemberSignaturePort, MembershipBranchRecoverySession,
-    MembershipLedgerError, MembershipOwner,
+    MembershipLedgerError, MembershipOwner, SpaceMembershipView,
 };
 
+use super::ports::BranchRecoveryIssuerScope;
 use super::{
     BeginMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryError,
     IssueMembershipBranchRecoveryInput, IssueMembershipBranchRecoveryPort,
@@ -45,6 +49,7 @@ impl IssueMembershipBranchRecoveryUseCase {
 
     async fn authorize(
         &self,
+        generation: u64,
         source_device_id: &uc_core::ids::DeviceId,
         conflict_id: uc_core::membership::MembershipConflictId,
         target_branch_id: uc_core::membership::MembershipBranchId,
@@ -56,38 +61,62 @@ impl IssueMembershipBranchRecoveryUseCase {
         ),
         IssueMembershipBranchRecoveryError,
     > {
+        self.check_generation(generation)?;
         let view = self.owner.load().await.map_err(map_ledger_error)?;
-        let space = view.space().ok_or_else(corrupt)?;
-        let history = space.history().clone();
-        let record = space
-            .branch_recovery()
-            .conflicts
-            .get(&conflict_id)
-            .ok_or_else(rejected)?;
-        if record.local_branch_id != target_branch_id
-            || !MembershipConflictPolicy::matches_persisted_branch(&history, target_branch_id)
-                .map_err(|error| IssueMembershipBranchRecoveryError::Corrupt {
-                    source: anyhow::Error::new(error),
-                })?
-        {
-            return Err(rejected());
-        }
-        history
-            .admission_facts_for(recipient_member)
-            .filter(|facts| &facts.device_id == source_device_id)
-            .filter(|_| history.active_members().contains(&recipient_member))
-            .ok_or_else(rejected)?;
-        let local_device_id = space.local_device_id();
-        let authorizing_member = space.local_member();
-        if !history.active_members().contains(&authorizing_member)
-            || history
-                .admission_facts_for(authorizing_member)
-                .is_none_or(|facts| &facts.device_id != local_device_id)
-        {
-            return Err(corrupt());
-        }
-        Ok((history, authorizing_member))
+        self.check_generation(generation)?;
+        authorize_space(
+            view.space().ok_or_else(corrupt)?,
+            source_device_id,
+            conflict_id,
+            target_branch_id,
+            recipient_member,
+        )
+        .map_err(map_ledger_error)
     }
+
+    fn check_generation(&self, generation: u64) -> Result<(), IssueMembershipBranchRecoveryError> {
+        if self.owner.generation() != generation {
+            return Err(IssueMembershipBranchRecoveryError::Unavailable {
+                source: anyhow::anyhow!("membership database generation changed"),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn authorize_space(
+    space: &SpaceMembershipView,
+    source_device_id: &DeviceId,
+    conflict_id: MembershipConflictId,
+    target_branch_id: MembershipBranchId,
+    recipient_member: MemberInstanceId,
+) -> Result<(VersionedMembershipHistory, MemberInstanceId), MembershipLedgerError> {
+    let history = space.history().clone();
+    let record = space
+        .branch_recovery()
+        .conflicts
+        .get(&conflict_id)
+        .ok_or(MembershipLedgerError::Conflict)?;
+    if record.local_branch_id != target_branch_id
+        || !MembershipConflictPolicy::matches_persisted_branch(&history, target_branch_id)
+            .map_err(MembershipLedgerError::corrupt_from)?
+    {
+        return Err(MembershipLedgerError::Conflict);
+    }
+    history
+        .admission_facts_for(recipient_member)
+        .filter(|facts| &facts.device_id == source_device_id)
+        .filter(|_| history.active_members().contains(&recipient_member))
+        .ok_or(MembershipLedgerError::Conflict)?;
+    let authorizing_member = space.local_member();
+    if !history.active_members().contains(&authorizing_member)
+        || history
+            .admission_facts_for(authorizing_member)
+            .is_none_or(|facts| &facts.device_id != space.local_device_id())
+    {
+        return Err(MembershipLedgerError::corrupt());
+    }
+    Ok((history, authorizing_member))
 }
 
 #[async_trait::async_trait]
@@ -97,21 +126,43 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
         &self,
         input: BeginMembershipBranchRecoveryInput,
     ) -> Result<Vec<u8>, IssueMembershipBranchRecoveryError> {
-        self.authorize(
-            &input.source_device_id,
-            input.conflict_id,
-            input.target_branch_id,
-            input.recipient_member,
-        )
-        .await?;
+        input.scope.check_frozen().map_err(scope_error)?;
+        let generation = self.owner.generation();
+        let authorized = self
+            .authorize(
+                generation,
+                &input.source_device_id,
+                input.conflict_id,
+                input.target_branch_id,
+                input.recipient_member,
+            )
+            .await?;
         let group_info = self
             .material
             .export_membership_branch_recovery_group_info()
             .await
             .map_err(map_material_error)?;
+        self.check_generation(generation)?;
         if group_info.is_empty() {
             return Err(corrupt());
         }
+        let current = self
+            .authorize(
+                generation,
+                &input.source_device_id,
+                input.conflict_id,
+                input.target_branch_id,
+                input.recipient_member,
+            )
+            .await?;
+        if current != authorized {
+            return Err(IssueMembershipBranchRecoveryError::Unavailable {
+                source: anyhow::anyhow!(
+                    "membership authorization changed during group info export"
+                ),
+            });
+        }
+        input.scope.check_frozen().map_err(scope_error)?;
         Ok(group_info)
     }
 
@@ -122,11 +173,14 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
         uc_core::membership::MembershipBranchRecoveryPackageV1,
         IssueMembershipBranchRecoveryError,
     > {
+        input.scope.check_frozen().map_err(scope_error)?;
         if input.external_commit.is_empty() {
             return Err(rejected());
         }
+        let generation = self.owner.generation();
         let (history, authorizing_member) = self
             .authorize(
+                generation,
                 &input.source_device_id,
                 input.conflict_id,
                 input.target_branch_id,
@@ -137,6 +191,7 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
         let transition_id =
             MembershipBranchTransitionV1::derive_id(input.conflict_id, input.target_branch_id);
         let view = self.owner.load().await.map_err(map_ledger_error)?;
+        self.check_generation(generation)?;
         if let Some(session) = view.space().and_then(|space| {
             space
                 .branch_recovery()
@@ -144,6 +199,7 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
                 .get(&transition_id)
         }) {
             if let Some((digest, package)) = session.target_completion() {
+                input.scope.check_frozen().map_err(scope_error)?;
                 return (digest == external_commit_digest)
                     .then(|| package.clone())
                     .ok_or_else(rejected);
@@ -154,8 +210,14 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
                 }
                 let staged = staged.to_vec();
                 let package = package.clone();
-                self.commit_target_material(transition_id, input.source_device_id, staged)
-                    .await?;
+                self.commit_target_material(
+                    generation,
+                    transition_id,
+                    input.source_device_id,
+                    staged,
+                    input.scope.clone(),
+                )
+                .await?;
                 return Ok(package);
             }
             return Err(corrupt());
@@ -173,6 +235,7 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
             )
             .await
             .map_err(map_material_error)?;
+        self.check_generation(generation)?;
         let expires_at_ms = self
             .clock
             .now_ms()
@@ -212,6 +275,7 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
             .map_err(|error| IssueMembershipBranchRecoveryError::Unavailable {
                 source: anyhow::Error::new(error),
             })?;
+        self.check_generation(generation)?;
         let package = unsigned.with_authorization_signature(signature);
         let target_staged_space_material = prepared.target_staged_space_material;
         let session = MembershipBranchRecoverySession::new_target_prepared(
@@ -224,8 +288,26 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
             package.clone(),
         )
         .ok_or_else(corrupt)?;
+        let source_device_id = input.source_device_id;
+        let conflict_id = input.conflict_id;
+        let target_branch_id = input.target_branch_id;
+        let recipient_member = input.recipient_member;
+        let scope = input.scope.clone();
         self.owner
-            .commit(move |draft| {
+            .commit_in_generation(generation, move |draft| {
+                scope
+                    .check_frozen()
+                    .map_err(MembershipLedgerError::unavailable_from)?;
+                let (current_history, current_authorizer) = authorize_space(
+                    draft.require_space()?,
+                    &source_device_id,
+                    conflict_id,
+                    target_branch_id,
+                    recipient_member,
+                )?;
+                if current_history != history || current_authorizer != authorizing_member {
+                    return Err(MembershipLedgerError::Conflict);
+                }
                 if draft
                     .branch_recovery_mut()?
                     .recovery_sessions
@@ -239,9 +321,11 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
             .await
             .map_err(map_ledger_error)?;
         self.commit_target_material(
+            generation,
             transition_id,
             input.source_device_id,
             target_staged_space_material,
+            input.scope,
         )
         .await?;
         Ok(package)
@@ -251,54 +335,95 @@ impl IssueMembershipBranchRecoveryPort for IssueMembershipBranchRecoveryUseCase 
 impl IssueMembershipBranchRecoveryUseCase {
     async fn commit_target_material(
         &self,
+        generation: u64,
         transition_id: [u8; 32],
         recipient_device_id: uc_core::ids::DeviceId,
         target_staged_space_material: Vec<u8>,
+        scope: Arc<dyn BranchRecoveryIssuerScope>,
     ) -> Result<(), IssueMembershipBranchRecoveryError> {
-        self.material
-            .commit_membership_branch_recovery_material(target_staged_space_material)
-            .await
-            .map_err(map_material_error)?;
+        self.check_generation(generation)?;
+        let expected_material = target_staged_space_material.clone();
         self.owner
-            .commit(move |draft| {
-                let record = draft.branch_recovery_mut()?;
-                record
-                    .recovery_sessions
-                    .get_mut(&transition_id)
-                    .ok_or(MembershipLedgerError::Conflict)?
-                    .commit_target()
-                    .then_some(())
-                    .ok_or(MembershipLedgerError::Conflict)?;
-                let (_, package) = record
-                    .recovery_sessions
-                    .get(&transition_id)
-                    .and_then(MembershipBranchRecoverySession::target_completion)
-                    .ok_or(MembershipLedgerError::Conflict)?;
-                let conflict_id = package.conflict_id();
-                let target_branch_id = package.target_branch_id();
-                let conflict = record
-                    .conflicts
-                    .get_mut(&conflict_id)
-                    .ok_or(MembershipLedgerError::Conflict)?;
-                if conflict.local_branch_id != target_branch_id {
-                    return Err(MembershipLedgerError::Conflict);
-                }
-                conflict.status = crate::space::membership::MembershipConflictStatus::Completed;
-                conflict.selected_branch_id = Some(target_branch_id);
-                conflict.transition_id = Some(transition_id);
-                // 接收方已持有本机分支的完整恢复包，双方历史回到一致。
-                draft
-                    .apply(LedgerInput::PeerEvidenceReconciled {
-                        source: recipient_device_id,
-                        history: None,
-                        evidence: PeerEvidence::Consistent,
-                    })
-                    .map_err(ledger_error)?;
-                Ok(())
-            })
+            .run_and_commit_in_generation(
+                generation,
+                |view| {
+                    scope
+                        .check_frozen()
+                        .map_err(MembershipLedgerError::unavailable_from)?;
+                    let space = view.space().ok_or_else(MembershipLedgerError::corrupt)?;
+                    let (_, staged, package) = space
+                        .branch_recovery()
+                        .recovery_sessions
+                        .get(&transition_id)
+                        .and_then(MembershipBranchRecoverySession::target_preparation)
+                        .ok_or(MembershipLedgerError::Conflict)?;
+                    if staged != expected_material.as_slice() {
+                        return Err(MembershipLedgerError::Conflict);
+                    }
+                    let (history, _) = authorize_space(
+                        space,
+                        &recipient_device_id,
+                        package.conflict_id(),
+                        package.target_branch_id(),
+                        package.recipient_member(),
+                    )?;
+                    let current_history = history
+                        .encode_persisted_v2()
+                        .map_err(MembershipLedgerError::corrupt_from)?;
+                    if current_history != package.target_membership_history() {
+                        return Err(MembershipLedgerError::Conflict);
+                    }
+                    Ok(())
+                },
+                self.material
+                    .commit_membership_branch_recovery_material(target_staged_space_material),
+                move |draft| {
+                    let record = draft.branch_recovery_mut()?;
+                    record
+                        .recovery_sessions
+                        .get_mut(&transition_id)
+                        .ok_or(MembershipLedgerError::Conflict)?
+                        .commit_target()
+                        .then_some(())
+                        .ok_or(MembershipLedgerError::Conflict)?;
+                    let (_, package) = record
+                        .recovery_sessions
+                        .get(&transition_id)
+                        .and_then(MembershipBranchRecoverySession::target_completion)
+                        .ok_or(MembershipLedgerError::Conflict)?;
+                    let conflict_id = package.conflict_id();
+                    let target_branch_id = package.target_branch_id();
+                    let conflict = record
+                        .conflicts
+                        .get_mut(&conflict_id)
+                        .ok_or(MembershipLedgerError::Conflict)?;
+                    if conflict.local_branch_id != target_branch_id {
+                        return Err(MembershipLedgerError::Conflict);
+                    }
+                    conflict.status = crate::space::membership::MembershipConflictStatus::Completed;
+                    conflict.selected_branch_id = Some(target_branch_id);
+                    conflict.transition_id = Some(transition_id);
+                    // 接收方已持有本机分支的完整恢复包，双方历史回到一致。
+                    draft
+                        .apply(LedgerInput::PeerEvidenceReconciled {
+                            source: recipient_device_id,
+                            history: None,
+                            evidence: PeerEvidence::Consistent,
+                        })
+                        .map_err(ledger_error)?;
+                    Ok(())
+                },
+            )
             .await
-            .map_err(map_ledger_error)?;
+            .map_err(map_ledger_error)?
+            .map_err(map_material_error)?;
         Ok(())
+    }
+}
+
+fn scope_error(source: ConnectivityError) -> IssueMembershipBranchRecoveryError {
+    IssueMembershipBranchRecoveryError::Unavailable {
+        source: source.into(),
     }
 }
 

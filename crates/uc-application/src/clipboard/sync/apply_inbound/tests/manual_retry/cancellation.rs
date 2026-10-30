@@ -50,8 +50,6 @@ async fn single_file_cancel_during_owned_save_waits_for_actual_settlement() {
                 peer_id: "source".into(),
                 total_bytes: Some(7),
                 filename: "same.bin".into(),
-                outbound_transfer_id: None,
-                outbound_target: None,
                 batch_position: BatchPosition::Only,
                 individual_lifecycle: true,
             }),

@@ -156,8 +156,14 @@ pub fn decode(
             "membership branch recovery frame size is invalid"
         )));
     }
-    let message: MembershipBranchRecoveryWireMessage =
-        postcard::from_bytes(bytes).map_err(|source| invalid_wire(anyhow::Error::new(source)))?;
+    let (message, trailing): (MembershipBranchRecoveryWireMessage, &[u8]) =
+        postcard::take_from_bytes(bytes)
+            .map_err(|source| invalid_wire(anyhow::Error::new(source)))?;
+    if !trailing.is_empty() {
+        return Err(invalid_wire(anyhow::anyhow!(
+            "membership branch recovery frame has trailing bytes"
+        )));
+    }
     message.validate()?;
     Ok(message)
 }
@@ -204,6 +210,13 @@ mod tests {
             format!("{error:?}"),
             "MembershipBranchRecoveryWireError::Invalid"
         );
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_inside_a_frame() {
+        let mut frame = encode(&MembershipBranchRecoveryWireMessage::rejected()).unwrap();
+        frame.push(0x7f);
+        assert!(decode(&frame).is_err());
     }
 
     #[test]

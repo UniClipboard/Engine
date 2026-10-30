@@ -30,6 +30,7 @@ impl TimeoutStub {
     }
 }
 struct ApplicationRuntimeOwners {
+    progress: Stub,
     history_maintenance: Stub,
     file_transfer_timeout: TimeoutStub,
     search: Stub,

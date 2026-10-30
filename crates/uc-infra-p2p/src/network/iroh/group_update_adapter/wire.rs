@@ -22,12 +22,17 @@ fn version(protocol: ConnectionProtocol) -> Result<GroupUpdateVersion, Connectiv
         ConnectionProtocol::ActiveClipboardState
         | ConnectionProtocol::ActiveClipboardPull
         | ConnectionProtocol::Clipboard
+        | ConnectionProtocol::AttributedClipboard
         | ConnectionProtocol::MultiplexedClipboard
         | ConnectionProtocol::MembershipHistory
+        | ConnectionProtocol::MembershipBranchRecovery
         | ConnectionProtocol::MultiplexedMembershipHistory
         | ConnectionProtocol::PeerReachabilityV1
         | ConnectionProtocol::PeerReachabilityV2
         | ConnectionProtocol::Blob
+        | ConnectionProtocol::TransferProgressV1
+        | ConnectionProtocol::TransferProgressV2
+        | ConnectionProtocol::SpaceAdmission
         | ConnectionProtocol::Unsupported => Err(ConnectivityError::Denied),
     }
 }

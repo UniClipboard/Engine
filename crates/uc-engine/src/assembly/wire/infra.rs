@@ -322,8 +322,12 @@ pub(super) fn create_infra_layer(
     let availability_executor = db_executor.clone();
     // 只后置实际port构造，不安装缺密钥或明文占位实现。
     let clipboard_entry_factory: Box<
-        dyn FnOnce(Arc<dyn BlobCipherPort>) -> ClipboardEntryPorts + Send,
-    > = Box::new(move |cipher| ClipboardEntryPorts {
+        dyn FnOnce(
+                Arc<dyn BlobCipherPort>,
+                Arc<dyn EntryFileSetRepositoryPort>,
+            ) -> ClipboardEntryPorts
+            + Send,
+    > = Box::new(move |cipher, file_sets| ClipboardEntryPorts {
         get: entry_repo_arc.clone(),
         list: entry_repo_arc.clone(),
         list_for_deletion: entry_repo_arc.clone(),
@@ -337,6 +341,7 @@ pub(super) fn create_infra_layer(
         availability: Arc::new(DieselEntryAvailabilityRepository::new(
             availability_executor,
             cipher,
+            file_sets,
         )),
         replace_content: entry_replace_repo,
     });

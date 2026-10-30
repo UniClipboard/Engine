@@ -2,10 +2,10 @@
 mod restart;
 mod space;
 use super::*;
-use crate::{EngineState, UnlockSpaceInput};
+use crate::{EngineError, EngineState, UnlockSpaceInput};
 use std::sync::atomic::Ordering;
 
-async fn interrupted_retry(case: &ReceiveCase, attempt: &str) -> ReceiveProgressSummary {
+pub(super) async fn interrupted_retry(case: &ReceiveCase, attempt: &str) -> ReceiveProgressSummary {
     let current = timeout(Duration::from_secs(20), async {
         loop {
             if let OperationResult::EntryReceiveProgress(Some(current)) = case
@@ -208,28 +208,49 @@ async fn real_engine_revocation_during_retry_prevents_old_output_from_being_comm
     {
         removed.expect("真实成员移除必须接受");
     }
+    let mut first_query = true;
     timeout(Duration::from_secs(10), async {
         loop {
-            if let OperationResult::DeviceGroupChoices(choices) = case
+            // 真实查询仍执行；首次成功响应受控替换为CI观察到的可重试拒绝，不覆盖真实错误。
+            let queried = match case
                 .receiver
                 .execute(Operation::QueryDeviceGroupChoices)
                 .await
-                .unwrap()
             {
-                if choices.device_trust.local_membership == DeviceMembershipSummary::Active
-                    && !choices.device_trust.devices.iter().any(|device| {
-                        device.device_id == case.source_id
-                            && device.membership == DeviceMembershipSummary::Active
-                    })
-                {
-                    break;
+                Ok(OperationResult::DeviceGroupChoices(_)) if first_query => {
+                    first_query = false;
+                    Err(EngineError::new(
+                        1211,
+                        EngineErrorCategory::Unavailable,
+                        true,
+                    ))
                 }
+                result => result,
+            };
+            match queried {
+                Ok(OperationResult::DeviceGroupChoices(choices)) => {
+                    if choices.device_trust.local_membership == DeviceMembershipSummary::Active
+                        && !choices.device_trust.devices.iter().any(|device| {
+                            device.device_id == case.source_id
+                                && device.membership == DeviceMembershipSummary::Active
+                        })
+                    {
+                        break;
+                    }
+                }
+                Err(error)
+                    if error.code() == 1211
+                        && error.category() == EngineErrorCategory::Unavailable
+                        && error.is_retryable() => {}
+                Err(error) => panic!("成员权威查询出现非暂态失败：{error:?}"),
+                Ok(_) => panic!("成员权威查询返回非预期结果"),
             }
             sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .expect("真实当前成员权威必须在恢复导出前确认撤销");
+    assert!(!first_query, "必须实际覆盖一次可重试的查询拒绝");
     assert!(
         pending_output.is_file(),
         "未归还的真实导出仍归原接收动作持有"
@@ -260,7 +281,9 @@ async fn real_engine_offline_cancellation_ignores_permanently_blocked_progress()
     let case = receive_case(false).await;
     let _release = ReleaseOnDrop(case.exports.clone());
     case.source.shutdown_until_complete().await.unwrap();
-    case.exports.block_reports.store(true, Ordering::SeqCst);
+    case.exports
+        .block_progress_network
+        .store(true, Ordering::SeqCst);
     let OperationResult::EntryReceiveRetry(EntryReceiveRetryOutcome::Accepted { attempt_id }) =
         case.receiver
             .execute(Operation::RetryEntryReceive(case.retry_input()))
@@ -271,7 +294,7 @@ async fn real_engine_offline_cancellation_ignores_permanently_blocked_progress()
     };
     timeout(Duration::from_secs(20), async {
         case.exports.paused.notified().await;
-        case.exports.report_blocked.notified().await;
+        case.exports.progress_network_blocked.notified().await;
     })
     .await
     .expect("真实导出持完成权时，反向通知必须已经进入永久等待");

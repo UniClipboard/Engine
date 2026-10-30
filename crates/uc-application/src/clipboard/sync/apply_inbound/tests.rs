@@ -2,6 +2,7 @@ use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::sync::{Arc, Mutex};
 
 mod availability;
+mod directory_empty_root;
 mod directory_failure;
 mod directory_settlement;
 mod generation;
@@ -9,6 +10,7 @@ mod item_results;
 mod lifecycle;
 mod manual_retry;
 mod output_preparation;
+mod progress_authority;
 mod receive_work;
 mod representation_settlement;
 mod result_query;
@@ -34,7 +36,6 @@ use crate::facade::host_event::{
 };
 
 use uc_core::clipboard::ClipboardRepositoryError;
-use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::blob::{BlobDigest, BlobTicket, PlaintextHash};
 use uc_core::ports::clipboard::{FindEntryIdBySnapshotHashPort, TouchClipboardEntryPort};
@@ -815,6 +816,7 @@ fn fixture_input(text: &str) -> (ApplyInboundInput, String) {
     let (plaintext, snapshot_hash) = encode_snapshot_to_v3_bytes(&snapshot).unwrap();
     (
         ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("peer-x"),
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
@@ -843,6 +845,7 @@ fn fixture_input_from_snapshot(snapshot: SystemClipboardSnapshot) -> (ApplyInbou
     let (plaintext, snapshot_hash) = encode_snapshot_to_v3_bytes(&snapshot).unwrap();
     (
         ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("peer-x"),
             snapshot_hash: snapshot_hash.clone(),
             plaintext,
@@ -881,31 +884,6 @@ fn build_with_blob_materializer(
 #[derive(Default)]
 struct RecordingEmitter {
     events: Mutex<Vec<HostEvent>>,
-}
-
-#[derive(Default)]
-struct RecordingOutboundProgressReporter {
-    reports: Mutex<Vec<(String, String, u64, Option<u64>, OutboundProgressStatus)>>,
-}
-
-#[async_trait]
-impl OutboundProgressReporterPort for RecordingOutboundProgressReporter {
-    async fn report(
-        &self,
-        target: &DeviceId,
-        transfer_id: &str,
-        bytes_transferred: u64,
-        total_bytes: Option<u64>,
-        status: OutboundProgressStatus,
-    ) {
-        self.reports.lock().unwrap().push((
-            target.as_str().to_owned(),
-            transfer_id.to_owned(),
-            bytes_transferred,
-            total_bytes,
-            status,
-        ));
-    }
 }
 
 impl RecordingEmitter {
@@ -1410,6 +1388,7 @@ async fn visible_duplicate_window_expires() {
 #[tokio::test]
 async fn decode_failed_on_truncated_envelope() {
     let input = ApplyInboundInput {
+        source_entry: None,
         from_device: DeviceId::new("peer-broken"),
         snapshot_hash: "blake3v1:00".to_string(),
         plaintext: Bytes::from_static(b"not a valid V3 envelope"),
@@ -1583,6 +1562,7 @@ async fn materializes_blob_refs_before_capture_and_write() {
     let (plaintext, snapshot_hash) =
         encode_snapshot_with_blob_refs_to_v3_bytes(&original, &[blob_ref.clone()]).unwrap();
     let input = ApplyInboundInput {
+        source_entry: None,
         from_device: DeviceId::new("peer-x"),
         snapshot_hash: snapshot_hash.clone(),
         plaintext,
@@ -1674,6 +1654,7 @@ async fn partial_materialize_persists_entry_but_skips_os_write() {
     let (plaintext, snapshot_hash) =
         encode_snapshot_with_blob_refs_to_v3_bytes(&original, &[blob_ref.clone()]).unwrap();
     let input = ApplyInboundInput {
+        source_entry: None,
         from_device: DeviceId::new("peer-sender"),
         snapshot_hash,
         plaintext,
@@ -1769,6 +1750,7 @@ async fn partial_materialize_does_not_register_dedup_entry() {
     let (plaintext, snapshot_hash) =
         encode_snapshot_with_blob_refs_to_v3_bytes(&original, &[blob_ref.clone()]).unwrap();
     let input1 = ApplyInboundInput {
+        source_entry: None,
         from_device: DeviceId::new("peer-sender"),
         snapshot_hash: snapshot_hash.clone(),
         plaintext: plaintext.clone(),
@@ -1776,6 +1758,7 @@ async fn partial_materialize_does_not_register_dedup_entry() {
         activation_owner: InboundActivationOwner::Inbound,
     };
     let input2 = ApplyInboundInput {
+        source_entry: None,
         from_device: DeviceId::new("peer-sender"),
         snapshot_hash,
         plaintext,
@@ -2386,6 +2369,7 @@ async fn apply_inbound_materializes_and_commits_mixed_directory_payload() {
         .with_blob_materializer(Arc::new(materializer));
     let outcome = uc
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("peer-full-flow"),
             snapshot_hash,
             plaintext,
@@ -3373,6 +3357,7 @@ fn file_blob_input() -> ApplyInboundInput {
     let (plaintext, snapshot_hash) =
         encode_snapshot_with_blob_refs_to_v3_bytes(&original, &[blob_ref]).unwrap();
     ApplyInboundInput {
+        source_entry: None,
         from_device: DeviceId::new("peer-up"),
         snapshot_hash,
         plaintext,
@@ -3459,10 +3444,8 @@ async fn available_match_is_skipped_before_download() {
     let mut write = MockWrite::new();
     write.expect_write().times(0);
 
-    let reporter = Arc::new(RecordingOutboundProgressReporter::default());
     let uc = build_with_blob_materializer(repo, capture, write, materializer)
-        .with_check_entry_availability(Arc::new(FakeAvailability { available: true }))
-        .with_outbound_progress_reporter(reporter.clone());
+        .with_check_entry_availability(Arc::new(FakeAvailability { available: true }));
     let outcome = uc.execute(input).await.expect("skip path ok");
     assert_eq!(
         outcome,
@@ -3470,17 +3453,6 @@ async fn available_match_is_skipped_before_download() {
             snapshot_hash: file_blob_input().snapshot_hash,
             existing_entry_id: held_id,
         }
-    );
-    assert_eq!(
-        *reporter.reports.lock().unwrap(),
-        vec![(
-            "peer-up".to_owned(),
-            "sender-entry".to_owned(),
-            10,
-            Some(10),
-            OutboundProgressStatus::Completed,
-        )],
-        "a fully-held file must still acknowledge remote delivery completion"
     );
 }
 
@@ -4708,6 +4680,7 @@ async fn apply_inbound_does_not_replace_an_existing_nonterminal_attempt() {
 
     let error = use_case
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("peer-retry"),
             snapshot_hash,
             plaintext,
@@ -4759,6 +4732,7 @@ async fn explicit_directory_cancellation_emits_cancelled_not_failed() {
 
     let result = use_case
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("peer-cancel"),
             snapshot_hash,
             plaintext,
@@ -4828,6 +4802,7 @@ async fn apply_inbound_rejects_identity_mismatch_before_publication() {
 
     let err = uc
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("peer-verify-fail"),
             snapshot_hash,
             plaintext,
@@ -4882,6 +4857,7 @@ async fn apply_inbound_withdraws_published_roots_when_persistence_fails() {
 
     let err = uc
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("peer-persist-fail"),
             snapshot_hash,
             plaintext,

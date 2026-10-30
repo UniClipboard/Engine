@@ -6,7 +6,9 @@ UniClipboardEngine 是 UniClipboard 在 macOS、Windows、Linux、iOS、Android 
 
 它不是一个可以直接运行的终端应用。桌面程序和移动应用把它作为核心能力接入，并负责提供系统目录、安全存储、系统剪贴板、文件选择与生命周期通知。
 
-> 当前仍处于 1.0 之前。外部 Rust 使用方只依赖 `uc-engine`，移动端只使用同一个 `v*` Release 中对应平台的产物。内部 crate 和绑定不发布到 crates.io。
+> The [workspace version](Cargo.toml) is `1.1.0-rc.23`. Rust consumers depend only on `uc-engine`.
+> Mobile consumers must use platform artifacts from the same `v*` Release.
+> Internal crates and bindings are not published to crates.io.
 
 ## 核心能力
 
@@ -60,12 +62,15 @@ GitHub 自动生成的源码压缩包不包含 submodule 内容，源码构建�
 
 ## 安全边界
 
-任何写入 SQLite、磁盘缓存、搜索索引或配置文件的用户内容，都必须先经 MasterKey AEAD 加密，包括剪贴板正文、标题、预览、搜索字段、标签、剪贴板文件的文件名和文件路径。配置可以明文保存，但不得包含用户内容或凭据；凭据只保存在系统安全存储中。
+User content written to SQLite, disk cache, search indexes, or configuration files must use MasterKey AEAD encryption. Configuration can be stored in plaintext, but must not contain user content or credentials. The existing `vault/profile-secrets-v1` exception for runtime key material is described in the [security rules](docs/security/encrypted-persistence.md#运行期密钥材料).
 
-只有以下内容可以例外：
+The current security rules allow these plaintext exceptions:
 
 - 内容类型分类，例如 `text`、`image`、`file`；
 - 文件内容本体，可以按原始字节写入 Engine 管理的 blob store 或导入目录。
+- The sanitized original name of an inbound file, only as the actual basename in the managed file cache.
+
+The search index currently writes file extensions derived from file names and paths in plaintext. This violates the security rule above. The MIME and source-device columns also require review. See the [known implementation gap](docs/security/encrypted-persistence.md#known-search-index-gap).
 
 安全存储中的密钥材料由宿主平台保护。日志和公开错误不得包含剪贴板内容、密码、密钥、完整令牌、文件名或文件路径。详细规则见 [密文持久化规则](docs/security/encrypted-persistence.md) 和 [安全说明](SECURITY.md)。
 

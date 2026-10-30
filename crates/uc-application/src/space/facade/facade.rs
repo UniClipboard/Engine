@@ -103,6 +103,7 @@ impl SpaceFacade {
     /// 构造全部 Space 用例和认证消息 endpoint，但不启动任何后台维护任务。
     pub(crate) fn new_dormant(deps: SpaceFacadeDeps) -> Self {
         let SpaceFacadeDeps {
+            scope_retirement,
             connection_hints,
             application: app_deps,
             session,
@@ -133,6 +134,7 @@ impl SpaceFacade {
                 as Arc<dyn crate::space::membership::ResolveRePairingPort>,
             admission_observations,
             space_transition_changes,
+            scope_retirement,
         );
         let membership_initializer = application.initialize_membership();
         let membership_admission = application.query_membership_admission();

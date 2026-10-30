@@ -369,7 +369,6 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
         blob_reference: references.clone(),
         transfer_cipher: Arc::new(RejectMemory),
         host_event_emitter: None,
-        outbound_progress_reporter: None,
         file_transfer: None,
     }));
     let mut resource_rounds = Vec::new();

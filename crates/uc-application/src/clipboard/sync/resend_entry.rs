@@ -1,22 +1,24 @@
-//! ADR-005 Stage 1a · user-initiated resend.
-//!
-//!补齐 desktop 缺失的"重发"能力:用户在 entry detail view 上看到对某 peer
-//! 是 `Unreachable`(或 `Failed`),主动点重发。本用例**不引入新表、不新增 Port、
-//! 不自行监听自动触发**；用户手动重发的候选集合由
-//! [`EntryDeliveryRepositoryPort::list_by_entry`] 与
-//! [`TrustedPeerRepositoryPort::list`] 在本调用内派生(差集)。它只决定用户
-//! 允许重发的目标；既有本机内容的还原、组装和实际投递由私有的
-//! `ExistingLocalEntryDelivery` 统一完成。
-//!
+//! 用户再次发送的完整负责人：当前成员与本机来源校验、原文件任务核对及明确新尝试。
+//! 文件意图采用真实运行／结算结果，资料缺失与旧端保留重复风险；未核实不重新下载。
+//! 仅实际新投递交给 ExistingLocalEntryDelivery，自动内容重投继续使用原完整能力。
 
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 
+use futures::{stream, StreamExt, TryStreamExt};
 use thiserror::Error;
+use uc_core::file_transfer::EXCHANGE_GLOBAL_ACTIVE;
 
 use crate::deps::CurrentSpaceMemberScopePort;
+use crate::transfer::progress::{
+    ReconcileSentEntryPort, SentEntryReconciliation, TransferProgressQueryError,
+    TransferProgressReconciliation,
+};
 use uc_core::blob::ports::BlobReaderPort;
+use uc_core::clipboard::ClipboardEntryContentCategory;
 use uc_core::clipboard::EntryDeliveryStatus;
+use uc_core::error_class::ErrorClass;
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::clipboard::{
     ClipboardPayloadResolverPort, EntryFileSetRepositoryPort, GetClipboardEntryPort,
@@ -28,7 +30,9 @@ use uc_core::ports::{
 };
 use uc_core::trusted_peer::TrustedPeerRepositoryPort;
 
-use crate::clipboard::outbound::OutboundBlobPublishGateway;
+use crate::clipboard::outbound::{
+    OutboundBlobPublishGateway, MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES,
+};
 use crate::clipboard::sync::dispatch_entry::DispatchEntryRunner;
 
 use super::existing_local_entry_delivery::ExistingLocalEntryDelivery;
@@ -41,14 +45,12 @@ use uc_observability_contract::{
 /// 用户主动 resend 的命令。
 #[derive(Debug, Clone)]
 pub struct ResendEntryCommand {
+    /// 明确接受重新传输及可能的重复文件；仍不能绕过运行、离线或最终接收CAS。
+    pub confirm_new_transfer: bool,
     pub entry_id: EntryId,
-    /// `None` —— 派生 `trusted_peer \ (Delivered ∪ Duplicate)` 差集;
-    /// 差集为空时返回 [`ResendEntryError::NoEligibleTargets`]。
-    ///
-    /// `Some(list)` —— 仅向 list 重发;但 list 中每个 device 都必须在
-    /// `trusted_peer_repo.list()` 内,否则返回
-    /// [`ResendEntryError::TargetNotTrusted`]。
-    /// `Some(vec![])` 与差集为空等价(零目标),走 `NoEligibleTargets`。
+    /// `None` 核对全部符合条件的文件／blob目标；普通内联内容仍使用未送达差集。
+    /// `Some(list)` 仅处理指定的当前可信成员，重复目标只执行一次。
+    /// 零目标返回 `NoEligibleTargets`，核对成功不冒充一次新投递。
     pub target_filter: Option<Vec<DeviceId>>,
 }
 
@@ -57,6 +59,7 @@ pub struct ResendEntryCommand {
 /// 字段时不破 dispatch 路径)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResendReport {
+    pub reconciled: Vec<ResendTargetProgress>,
     pub accepted: usize,
     pub duplicate: usize,
     pub offline: usize,
@@ -67,10 +70,31 @@ pub struct ResendReport {
     pub pending: usize,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResendTargetProgress {
+    pub target: DeviceId,
+    pub progress: SentEntryReconciliation,
+    pub new_transfer_requested: bool,
+    pub duplicate_files_possible: bool,
+}
+
+impl fmt::Debug for ResendTargetProgress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResendTargetProgress")
+            .field("state", &self.progress.state)
+            .field("new_transfer_requested", &self.new_transfer_requested)
+            .field("duplicate_files_possible", &self.duplicate_files_possible)
+            .finish_non_exhaustive()
+    }
+}
+
 /// resend 用例的失败语义。表达"用户主动 resend 这个动作没能完成"的应用层
 /// 错误集合,不向上漏出底层仓储 / dispatch 错误。
 #[derive(Debug, Error)]
 pub enum ResendEntryError {
+    #[error("original transfer reconciliation failed")]
+    Reconciliation(#[source] TransferProgressQueryError),
     #[error("synchronization is disabled")]
     SynchronizationDisabled,
 
@@ -117,6 +141,7 @@ impl ResendEntryError {
     /// 日志用的固定分类，只反映变体，不含条目、设备标识或下层错误正文。
     pub(crate) fn kind(&self) -> &'static str {
         match self {
+            Self::Reconciliation(source) => source.class(),
             Self::SynchronizationDisabled => "synchronization_disabled",
             Self::EntryNotFound(_) => "entry_not_found",
             Self::EntryNotResendable { .. } => "entry_not_resendable",
@@ -163,6 +188,11 @@ impl ResendEntryRunner for ResendEntryUseCase {
 }
 
 pub(crate) struct ResendEntryUseCase {
+    entry_repo: Arc<dyn GetClipboardEntryPort>,
+    event_repo: Arc<dyn ClipboardEventRepositoryPort>,
+    device_identity: Arc<dyn DeviceIdentityPort>,
+    progress: Arc<dyn ReconcileSentEntryPort>,
+    settings: Arc<dyn SettingsPort>,
     entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
     trusted_peer_repo: Arc<dyn TrustedPeerRepositoryPort>,
     peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
@@ -177,6 +207,7 @@ pub(crate) struct ResendEntryUseCase {
 /// 外部 crate 通过 [`ClipboardOutboundFacade::new`](crate::facade::ClipboardOutboundFacade::new)
 /// 间接装配。
 pub(crate) struct ResendEntryDeps {
+    pub progress: Arc<dyn ReconcileSentEntryPort>,
     pub entry_repo: Arc<dyn GetClipboardEntryPort>,
     pub event_repo: Arc<dyn ClipboardEventRepositoryPort>,
     pub selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
@@ -204,20 +235,25 @@ impl ResendEntryUseCase {
         deps: ResendEntryDeps,
     ) -> (Self, Arc<dyn ExistingLocalEntryDeliveryRunner>) {
         let delivery = Arc::new(ExistingLocalEntryDelivery {
-            entry_repo: deps.entry_repo,
-            event_repo: deps.event_repo,
+            entry_repo: deps.entry_repo.clone(),
+            event_repo: deps.event_repo.clone(),
             selection_repo: deps.selection_repo,
             representation_repo: deps.representation_repo,
             rep_processing_repo: deps.rep_processing_repo,
             payload_resolver: deps.payload_resolver,
             blob_store: deps.blob_store,
-            device_identity: deps.device_identity,
-            settings: deps.settings,
+            device_identity: deps.device_identity.clone(),
+            settings: deps.settings.clone(),
             entry_file_set_repo: deps.entry_file_set_repo,
             blob_publisher: deps.blob_publisher,
             dispatch_runner: deps.dispatch_runner,
         }) as Arc<dyn ExistingLocalEntryDeliveryRunner>;
         let resend = Self {
+            entry_repo: deps.entry_repo,
+            event_repo: deps.event_repo,
+            device_identity: deps.device_identity,
+            progress: deps.progress,
+            settings: deps.settings,
             entry_delivery_repo: deps.entry_delivery_repo,
             trusted_peer_repo: deps.trusted_peer_repo,
             peer_scope: deps.peer_scope,
@@ -259,11 +295,7 @@ impl ResendEntryUseCase {
             .peer_scope
             .snapshot()
             .await
-            .map_err(|err| {
-                ResendEntryError::Storage(
-                    anyhow::Error::new(err).context("read current peer scope"),
-                )
-            })?
+            .map_err(|source| ResendEntryError::Reconciliation(source.into()))?
             .usable_peer_device_ids
             .into_iter()
             .collect::<HashSet<_>>();
@@ -272,20 +304,32 @@ impl ResendEntryUseCase {
             .filter(|device| current.contains(device))
             .collect::<Vec<_>>();
 
-        let targets: Vec<DeviceId> = match &cmd.target_filter {
-            Some(filter) => {
-                // 校验顺序按 filter 自身顺序,保证错误信息可复现(先报哪个
-                // 不在信任集合内,与 UI 中点的顺序一致)。
-                for d in filter {
-                    if !trusted.iter().any(|t| t == d) {
-                        return Err(ResendEntryError::TargetNotTrusted(*d));
-                    }
+        if let Some(filter) = cmd.target_filter.as_ref() {
+            for peer in filter {
+                if !trusted.contains(peer) {
+                    return Err(ResendEntryError::TargetNotTrusted(*peer));
                 }
-                if filter.is_empty() {
-                    return Err(ResendEntryError::NoEligibleTargets);
-                }
-                filter.clone()
             }
+            if filter.is_empty() {
+                return Err(ResendEntryError::NoEligibleTargets);
+            }
+        } else if trusted.is_empty() {
+            return Err(ResendEntryError::NoEligibleTargets);
+        }
+        let entry = self
+            .entry_repo
+            .get_entry(&cmd.entry_id)
+            .await
+            .map_err(|source| {
+                ResendEntryError::Storage(anyhow::Error::new(source).context("get resend entry"))
+            })?
+            .ok_or_else(|| ResendEntryError::EntryNotFound(cmd.entry_id.clone()))?;
+        // 大图也可能通过表示blob接收；不为了核对而重新读取已丢失的内容。
+        let requires_progress = entry.content_category == ClipboardEntryContentCategory::File
+            || (entry.content_category == ClipboardEntryContentCategory::Image
+                && entry.total_size > MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES as i64);
+        let targets: Vec<DeviceId> = match &cmd.target_filter {
+            Some(filter) => filter.clone(),
             None => {
                 let records = self
                     .entry_delivery_repo
@@ -308,7 +352,7 @@ impl ResendEntryUseCase {
                     .collect();
                 let diff: Vec<DeviceId> = trusted
                     .into_iter()
-                    .filter(|d| !covered.contains(d))
+                    .filter(|d| requires_progress || !covered.contains(d))
                     .collect();
                 if diff.is_empty() {
                     return Err(ResendEntryError::NoEligibleTargets);
@@ -317,7 +361,81 @@ impl ResendEntryUseCase {
             }
         };
 
-        self.delivery.deliver(cmd.entry_id, targets).await
+        let source = self
+            .event_repo
+            .get_source_device(&entry.event_id)
+            .await
+            .map_err(|source| ResendEntryError::Storage(source.context("get resend source")))?;
+        if source != Some(self.device_identity.current_device_id()) {
+            return Err(ResendEntryError::EntryNotResendable {
+                entry_id: cmd.entry_id,
+                reason: NotResendableReason::RemoteOrigin,
+            });
+        }
+        if !requires_progress {
+            return self.delivery.deliver(cmd.entry_id, targets).await;
+        }
+        if !self
+            .settings
+            .load()
+            .await
+            .map_err(ResendEntryError::Storage)?
+            .sync
+            .sync_enabled
+        {
+            return Err(ResendEntryError::SynchronizationDisabled);
+        }
+        let mut reconciled = Vec::with_capacity(targets.len());
+        let mut deliver = Vec::new();
+        let entry_id = &cmd.entry_id;
+        let results = stream::iter(targets)
+            .map(|target| async move {
+                self.progress
+                    .reconcile_sent_entry(target, entry_id)
+                    .await
+                    .map(|progress| (target, progress))
+                    .map_err(ResendEntryError::Reconciliation)
+            })
+            .buffered(EXCHANGE_GLOBAL_ACTIVE)
+            .try_collect::<Vec<_>>()
+            .await?;
+        for (target, progress) in results {
+            let duplicate_files_possible = matches!(
+                progress.state,
+                TransferProgressReconciliation::NotRetained
+                    | TransferProgressReconciliation::Unsupported
+            );
+            let new_transfer_requested = cmd.confirm_new_transfer
+                && matches!(
+                    progress.state,
+                    TransferProgressReconciliation::Settled
+                        | TransferProgressReconciliation::NotRetained
+                        | TransferProgressReconciliation::Unsupported
+                );
+            if new_transfer_requested {
+                deliver.push(target);
+            }
+            reconciled.push(ResendTargetProgress {
+                target,
+                progress,
+                new_transfer_requested,
+                duplicate_files_possible,
+            });
+        }
+        let mut report = if deliver.is_empty() {
+            ResendReport {
+                accepted: 0,
+                duplicate: 0,
+                offline: 0,
+                errored: 0,
+                pending: 0,
+                reconciled: Vec::new(),
+            }
+        } else {
+            self.delivery.deliver(cmd.entry_id, deliver).await?
+        };
+        report.reconciled = reconciled;
+        Ok(report)
     }
 }
 
@@ -344,6 +462,17 @@ impl ResendEntryUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct RejectUnexpectedProgress;
+    #[async_trait::async_trait]
+    impl ReconcileSentEntryPort for RejectUnexpectedProgress {
+        async fn reconcile_sent_entry(
+            &self,
+            _: DeviceId,
+            _: &EntryId,
+        ) -> Result<SentEntryReconciliation, TransferProgressQueryError> {
+            panic!("text-only resend must not query file progress")
+        }
+    }
 
     use std::sync::Mutex;
 
@@ -805,6 +934,7 @@ mod tests {
         let rep = text_rep("rep-1", b"hello resend");
 
         let uc = ResendEntryUseCase::new(ResendEntryDeps {
+            progress: Arc::new(RejectUnexpectedProgress),
             entry_repo: Arc::new(FakeEntryRepo { entry: Some(entry) }),
             event_repo: Arc::new(FakeEventRepo {
                 source: Some(local.clone()),
@@ -866,6 +996,7 @@ mod tests {
         let local = DeviceId::new("self");
         // get_source_device 返回 peer-a → 与 local 不等。
         let uc = ResendEntryUseCase::new(ResendEntryDeps {
+            progress: Arc::new(RejectUnexpectedProgress),
             entry_repo: Arc::new(FakeEntryRepo {
                 entry: Some(entry_with_event(&entry_id, &event_id)),
             }),
@@ -894,6 +1025,7 @@ mod tests {
 
         let err = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: Some(vec![DeviceId::new("peer-b")]),
             })
@@ -921,6 +1053,7 @@ mod tests {
         let rep = text_rep("rep-lost", b"placeholder");
 
         let uc = ResendEntryUseCase::new(ResendEntryDeps {
+            progress: Arc::new(RejectUnexpectedProgress),
             entry_repo: Arc::new(FakeEntryRepo {
                 entry: Some(entry_with_event(&entry_id, &event_id)),
             }),
@@ -951,6 +1084,7 @@ mod tests {
 
         let err = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: Some(vec![DeviceId::new("peer-b")]),
             })
@@ -982,6 +1116,7 @@ mod tests {
 
         let err = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: Some(vec![DeviceId::new("ghost")]),
             })
@@ -1006,6 +1141,7 @@ mod tests {
 
         let err = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: Some(vec![DeviceId::new("peer-a")]),
             })
@@ -1034,6 +1170,7 @@ mod tests {
 
         let err = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: None,
             })
@@ -1069,6 +1206,7 @@ mod tests {
 
         let report = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: None,
             })
@@ -1122,6 +1260,7 @@ mod tests {
 
         let report = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: Some(vec![DeviceId::new("peer-b")]),
             })
@@ -1162,6 +1301,7 @@ mod tests {
 
         let report = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: None,
             })
@@ -1222,6 +1362,7 @@ mod tests {
         let local = DeviceId::new("self");
 
         let uc = ResendEntryUseCase::new(ResendEntryDeps {
+            progress: Arc::new(RejectUnexpectedProgress),
             entry_repo: Arc::new(FakeEntryRepo {
                 entry: Some(entry_with_event(&entry_id, &event_id)),
             }),
@@ -1276,6 +1417,7 @@ mod tests {
 
         let err = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: Some(vec![DeviceId::new("peer-a")]),
             })
@@ -1315,6 +1457,7 @@ mod tests {
 
         let err = uc
             .execute(ResendEntryCommand {
+                confirm_new_transfer: false,
                 entry_id,
                 target_filter: Some(vec![DeviceId::new("peer-a")]),
             })
@@ -1369,6 +1512,7 @@ mod tests {
             Ok(happy_outcome(input))
         }));
         let uc = ResendEntryUseCase::new(ResendEntryDeps {
+            progress: Arc::new(RejectUnexpectedProgress),
             entry_repo: Arc::new(FakeEntryRepo {
                 entry: Some(entry_with_event(&entry_id, &event_id)),
             }),
@@ -1401,6 +1545,7 @@ mod tests {
         });
 
         uc.execute(ResendEntryCommand {
+            confirm_new_transfer: false,
             entry_id,
             target_filter: Some(vec![DeviceId::new("peer-a")]),
         })
@@ -1419,5 +1564,189 @@ mod tests {
             .unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(manifest.unwrap().members[0].relative_path, "child.txt");
+    }
+
+    struct FixedProgress(TransferProgressReconciliation);
+    #[async_trait]
+    impl ReconcileSentEntryPort for FixedProgress {
+        async fn reconcile_sent_entry(
+            &self,
+            _: DeviceId,
+            _: &EntryId,
+        ) -> Result<SentEntryReconciliation, TransferProgressQueryError> {
+            Ok(SentEntryReconciliation {
+                state: self.0,
+                current: None,
+            })
+        }
+    }
+    struct RecordingDelivery(Mutex<Vec<DeviceId>>);
+    #[async_trait]
+    impl ExistingLocalEntryDeliveryRunner for RecordingDelivery {
+        async fn deliver(
+            &self,
+            _: EntryId,
+            targets: Vec<DeviceId>,
+        ) -> Result<ResendReport, ResendEntryError> {
+            self.0.lock().unwrap().extend(targets.iter().copied());
+            Ok(ResendReport {
+                accepted: targets.len(),
+                duplicate: 0,
+                offline: 0,
+                errored: 0,
+                pending: 0,
+                reconciled: Vec::new(),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn file_resend_reconciles_even_after_header_delivery_and_only_explicit_safe_outcomes_redeliver(
+    ) {
+        use TransferProgressReconciliation::{
+            Busy, NotRetained, Running, Settled, Superseded, Unreachable, Unsupported,
+        };
+        for (state, may_transfer, duplicate_risk) in [
+            (Running, false, false),
+            (Settled, true, false),
+            (Superseded, false, false),
+            (NotRetained, true, true),
+            (Unsupported, true, true),
+            (Unreachable, false, false),
+            (Busy, false, false),
+        ] {
+            for confirm in [false, true] {
+                let local = DeviceId::new("self");
+                let owner = EntryId::from("entry-1");
+                let (mut uc, _) = build_uc(
+                    vec![delivered_record(&owner, "peer-b", 1)],
+                    vec![trusted(&local, "peer-b", 1)],
+                    Arc::new(UnusedDispatchRunner),
+                );
+                uc.entry_repo = Arc::new(FakeEntryRepo {
+                    entry: Some(
+                        entry_with_event(&owner, &EventId::from("evt-1"))
+                            .with_content_category(ClipboardEntryContentCategory::File),
+                    ),
+                });
+                uc.progress = Arc::new(FixedProgress(state));
+                let delivery = Arc::new(RecordingDelivery(Mutex::new(Vec::new())));
+                uc.delivery = delivery.clone();
+                let report = uc
+                    .execute(ResendEntryCommand {
+                        entry_id: owner,
+                        target_filter: None,
+                        confirm_new_transfer: confirm,
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    report.accepted,
+                    usize::from(confirm && may_transfer),
+                    "{state:?}, confirm={confirm}"
+                );
+                assert_eq!(delivery.0.lock().unwrap().len(), report.accepted);
+                assert_eq!(report.reconciled.len(), 1);
+                assert_eq!(report.reconciled[0].progress.state, state);
+                assert_eq!(
+                    report.reconciled[0].duplicate_files_possible,
+                    duplicate_risk
+                );
+                assert_eq!(
+                    report.reconciled[0].new_transfer_requested,
+                    confirm && may_transfer
+                );
+            }
+        }
+    }
+
+    struct FailedProgress;
+    #[async_trait]
+    impl ReconcileSentEntryPort for FailedProgress {
+        async fn reconcile_sent_entry(
+            &self,
+            _: DeviceId,
+            _: &EntryId,
+        ) -> Result<SentEntryReconciliation, TransferProgressQueryError> {
+            Err(TransferProgressQueryError::Unavailable(Box::new(
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "query storage sentinel",
+                ),
+            )))
+        }
+    }
+    #[tokio::test]
+    async fn file_resend_preserves_query_failure_source_and_never_treats_it_as_missing() {
+        use std::error::Error;
+        let local = DeviceId::new("self");
+        let owner = EntryId::from("entry-1");
+        let (mut uc, _) = build_uc(
+            Vec::new(),
+            vec![trusted(&local, "peer-b", 1)],
+            Arc::new(UnusedDispatchRunner),
+        );
+        uc.entry_repo = Arc::new(FakeEntryRepo {
+            entry: Some(
+                entry_with_event(&owner, &EventId::from("evt-1"))
+                    .with_content_category(ClipboardEntryContentCategory::File),
+            ),
+        });
+        uc.progress = Arc::new(FailedProgress);
+        let delivery = Arc::new(RecordingDelivery(Mutex::new(Vec::new())));
+        uc.delivery = delivery.clone();
+        let error = uc
+            .execute(ResendEntryCommand {
+                entry_id: owner,
+                target_filter: None,
+                confirm_new_transfer: true,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            ResendEntryError::Reconciliation(TransferProgressQueryError::Unavailable(_))
+        ));
+        let source = error
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(delivery.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn large_image_resend_also_adopts_original_blob_task_before_rebuilding_payload() {
+        let local = DeviceId::new("self");
+        let owner = EntryId::from("entry-1");
+        let (mut uc, _) = build_uc(
+            vec![delivered_record(&owner, "peer-b", 1)],
+            vec![trusted(&local, "peer-b", 1)],
+            Arc::new(UnusedDispatchRunner),
+        );
+        let mut entry = entry_with_event(&owner, &EventId::from("evt-1"))
+            .with_content_category(ClipboardEntryContentCategory::Image);
+        entry.total_size = (MAX_INLINE_OUTBOUND_REPRESENTATION_BYTES + 1) as i64;
+        uc.entry_repo = Arc::new(FakeEntryRepo { entry: Some(entry) });
+        uc.progress = Arc::new(FixedProgress(TransferProgressReconciliation::Running));
+        let delivery = Arc::new(RecordingDelivery(Mutex::new(Vec::new())));
+        uc.delivery = delivery.clone();
+        let report = uc
+            .execute(ResendEntryCommand {
+                entry_id: owner,
+                target_filter: None,
+                confirm_new_transfer: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            report.reconciled[0].progress.state,
+            TransferProgressReconciliation::Running
+        );
+        assert_eq!(report.accepted, 0);
+        assert!(delivery.0.lock().unwrap().is_empty());
+        assert!(!format!("{:?}", report.reconciled).contains("peer-b"));
     }
 }

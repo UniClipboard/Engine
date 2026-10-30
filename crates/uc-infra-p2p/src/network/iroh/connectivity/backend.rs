@@ -3,6 +3,7 @@ use super::super::connect::{connect_with_staggered_retry_classified, strip_relay
 use super::super::peer_address_resolver::PeerAddressResolver;
 use super::IrohPeerConnection;
 use async_trait::async_trait;
+use iroh::endpoint::ConnectOptions;
 use iroh::{Endpoint, EndpointAddr};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -10,24 +11,32 @@ use uc_application::deps::{ConnectivityBackend, ConnectivityError, PeerConnectio
 use uc_core::ids::DeviceId;
 use uc_core::ports::{PeerAddressRepositoryPort, PeerReachabilityPort};
 use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
+use uc_observability_contract::diagnostics::within_network_scope;
 use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
-use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+use uc_sync_protocol::clipboard::{
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
 use uc_sync_protocol::group_update::{GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN};
+use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 use uc_sync_protocol::membership_history::{
     MEMBERSHIP_HISTORY_EXCHANGE_ALPN, MULTIPLEXED_MEMBERSHIP_HISTORY_ALPN,
 };
 use uc_sync_protocol::peer_reachability::{LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
+use uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN;
+use uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN;
 
 /// 同一 endpoint 上的独立协议连接池只使用各自固定的协商配置。
 #[derive(Clone, Copy)]
 pub enum ConnectivityProfile {
+    TransferProgress,
     Blob,
     Presence,
     ActiveClipboardState,
     ActiveClipboardPull,
     Clipboard,
     MembershipHistory,
+    MembershipBranchRecovery,
     GroupUpdate,
     /// 仅供固定旧端互通验收；实际能力仍由协商结果决定。
     LegacyGroupUpdate,
@@ -94,6 +103,11 @@ impl ConnectivityBackend for IrohConnectivityBackend {
         }
         let (preferred, fallback, label) = match self.profile {
             ConnectivityProfile::Blob => (BLOBS_ALPN, BLOBS_ALPN, "blob"),
+            ConnectivityProfile::TransferProgress => (
+                TRANSFER_PROGRESS_ALPN,
+                LEGACY_TRANSFER_PROGRESS_ALPN,
+                "transfer-progress",
+            ),
             ConnectivityProfile::Presence => (
                 PEER_REACHABILITY_ALPN,
                 LEGACY_PEER_REACHABILITY_ALPN,
@@ -114,9 +128,16 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 MEMBERSHIP_HISTORY_EXCHANGE_ALPN,
                 "membership-history",
             ),
-            ConnectivityProfile::Clipboard => {
-                (MULTIPLEXED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, "clipboard")
-            }
+            ConnectivityProfile::MembershipBranchRecovery => (
+                MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+                MEMBERSHIP_BRANCH_RECOVERY_ALPN,
+                "membership-branch-recovery",
+            ),
+            ConnectivityProfile::Clipboard => (
+                ATTRIBUTED_CLIPBOARD_ALPN,
+                MULTIPLEXED_CLIPBOARD_ALPN,
+                "clipboard",
+            ),
             ConnectivityProfile::LegacyGroupUpdate => (
                 LEGACY_GROUP_UPDATE_ALPN,
                 LEGACY_GROUP_UPDATE_ALPN,
@@ -126,18 +147,48 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 (GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN, "group-update")
             }
         };
-        let result = if matches!(self.profile, ConnectivityProfile::Blob) {
-            // blob 的每轮只发起一次原生建连；恢复次数与退避由完整接收负责人统一计算。
+        let mut additional = vec![fallback.to_vec()];
+        if matches!(self.profile, ConnectivityProfile::Clipboard) {
+            additional.push(CLIPBOARD_ALPN.to_vec());
+        }
+        let result = if matches!(
+            self.profile,
+            ConnectivityProfile::Blob | ConnectivityProfile::MembershipBranchRecovery
+        ) {
+            // 每轮只发起一次原生建连；恢复次数与退避由对应业务负责人统一计算。
+            let address = if matches!(self.profile, ConnectivityProfile::MembershipBranchRecovery) {
+                strip_relay_if_lan_only(address)
+            } else {
+                address
+            };
             tokio::select! {
                 _ = cancel.cancelled() => return Err(ConnectivityError::Stopped),
                 result = self.endpoint.connect(address, preferred) => result.map_err(|source| ConnectivityError::Backend(Box::new(source))),
+            }
+        } else if matches!(self.profile, ConnectivityProfile::TransferProgress) {
+            // 方向名额覆盖唯一原生拨号；兼容ALPN在同一次握手提供，不交错创建影子连接。
+            let dial = async {
+                let connecting = within_network_scope(self.endpoint.connect_with_opts(
+                    strip_relay_if_lan_only(address),
+                    preferred,
+                    ConnectOptions::new().with_additional_alpns(additional),
+                ))
+                .await
+                .map_err(|source| ConnectivityError::Backend(Box::new(source)))?;
+                within_network_scope(connecting)
+                    .await
+                    .map_err(|source| ConnectivityError::Backend(Box::new(source)))
+            };
+            tokio::select! {
+                _=cancel.cancelled()=>return Err(ConnectivityError::Stopped),
+                result=dial=>result,
             }
         } else {
             let dial = connect_with_staggered_retry_classified(
                 self.endpoint.clone(),
                 address,
                 preferred,
-                vec![fallback.to_vec()],
+                additional,
                 label,
                 AddressInputSource::Stored,
             );

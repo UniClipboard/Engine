@@ -293,6 +293,9 @@ export interface OhEngine {
   cancelEntryReceive(entryId: string, attemptId: string): Promise<string>
   /** 用户主动取消单项；cancellation_incomplete 不等于已取消。 */
   cancelInboundTransfer(transferId: string): Promise<string>
+  queryOutboundProgress(entryId: string, targetDeviceId: string): Promise<OhOutboundProgress | null>
+  listOutboundProgress(): Promise<OhOutboundProgress[]>
+  reconcileOutboundProgress(entryId: string, targetDeviceId: string, expectedAttemptId?: string): Promise<string>
   queryEntryReceiveProgress(entryId: string): Promise<OhReceiveProgress | null>
   listEntryReceiveProgress(): Promise<OhReceiveProgress[]>
   queryActiveClipboard(): Promise<OhActiveClipboard | null>
@@ -483,3 +486,33 @@ declare const engine: {
 }
 
 export default engine
+
+export interface OhOutboundProgressItem {
+  kind: string
+  index: number
+  state: string
+  lastKnownPhase?: string
+  round?: number
+  completedBytes?: string
+  totalBytes?: string
+  failureReason?: string
+  cancellationReason?: string
+}
+
+export interface OhOutboundProgress {
+  entryId: string
+  targetDeviceId: string
+  attemptId?: string
+  revision: string
+  freshness: string
+  freshnessAvailable: boolean
+  state: string
+  itemsTotal: number
+  itemsWaiting: number
+  itemsRunning: number
+  itemsCompleted: number
+  itemsFailed: number
+  itemsCancelled: number
+  itemsUnconfirmed: number
+  items: OhOutboundProgressItem[]
+}

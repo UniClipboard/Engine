@@ -1,6 +1,7 @@
 mod cache_files;
 
 use self::cache_files::CacheFiles;
+use crate::transfer::progress::ProgressProjectionRegistry;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ use uc_observability_contract::{
 /// Use case for deleting clipboard entries with all associated data.
 pub(crate) struct DeleteClipboardEntryUseCase {
     receive_work: Arc<ReceiveWorkRegistry>,
+    progress: ProgressProjectionRegistry,
     get_entry: Arc<dyn GetClipboardEntryPort>,
     delete: Arc<dyn DeleteClipboardEntryWithReceiveStatePort>,
     representation_repo: Arc<dyn ListRepresentationsForEventPort>,
@@ -35,9 +37,11 @@ impl DeleteClipboardEntryUseCase {
         delete: Arc<dyn DeleteClipboardEntryWithReceiveStatePort>,
         representation_repo: Arc<dyn ListRepresentationsForEventPort>,
         receive_work: Arc<ReceiveWorkRegistry>,
+        progress: ProgressProjectionRegistry,
     ) -> Self {
         Self {
             receive_work,
+            progress,
             get_entry,
             delete,
             representation_repo,
@@ -72,6 +76,7 @@ impl DeleteClipboardEntryUseCase {
         fields(entry_id = %entry_id)
     )]
     pub(crate) async fn execute(&self, entry_id: &EntryId) -> Result<()> {
+        let _progress_scope = self.progress.deleting_entry(entry_id);
         let _receive_scope = self.receive_work.delete_scope(entry_id).await?;
         let entry = self
             .get_entry

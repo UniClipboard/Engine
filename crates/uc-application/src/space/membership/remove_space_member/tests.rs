@@ -512,3 +512,161 @@ async fn a_failed_admission_revocation_records_only_its_error_class() {
         "{output}"
     );
 }
+
+/// 不消费 watch 提示，直接验证正式移除和重新加入之间的原动作围栏。
+#[tokio::test]
+async fn committed_membership_retires_progress_before_notices_and_preserves_other_targets() {
+    use crate::connectivity::{ElapsedClockError, ElapsedClockPort};
+    use crate::space::MembershipLedgerError;
+    use crate::transfer::progress::{
+        ProgressProjectionAdmission, ProgressProjectionKey, ProgressProjectionRegistry,
+    };
+    use std::time::{Duration, Instant};
+    use uc_core::file_transfer::{ProgressIdentity, ProgressItem, ProgressItemKind};
+    use uc_core::ids::EntryId;
+    use uc_core::membership::LedgerInput;
+    struct Clock(Instant);
+    impl ElapsedClockPort for Clock {
+        fn elapsed(&self) -> Result<Duration, ElapsedClockError> {
+            Ok(self.0.elapsed())
+        }
+    }
+    let space = EstablishedSpace::new(&["device-a", "device-b", "device-c"]);
+    let fixture = OwnerFixture::new(space.record("device-a", 8));
+    let (registry, _worker) = ProgressProjectionRegistry::new(Arc::new(Clock(Instant::now())));
+    fixture
+        .owner
+        .bind_scope_retirement(Arc::new(registry.clone()));
+    fixture.owner.load().await.unwrap();
+    let key = |device| ProgressProjectionKey {
+        peer: DeviceId::new(device),
+        source: ProgressIdentity::new([42; 16]),
+    };
+    let plan = || {
+        vec![ProgressItem {
+            index: 0,
+            kind: ProgressItemKind::File,
+        }]
+    };
+    let pending = registry.begin_intent(EntryId::from("original-local-entry"));
+    pending.accept(key("device-b"), plan()).unwrap();
+    pending.accept(key("device-c"), plan()).unwrap();
+    let effects = Arc::new(EffectCounter(AtomicUsize::new(0)));
+    let remove = remove_case(&fixture, space.signer("device-a"), effects.clone());
+    remove.execute(&DeviceId::new("device-b")).await.unwrap();
+    assert_eq!(effects.0.load(Ordering::SeqCst), 1);
+    assert!(registry.snapshot(key("device-b")).is_none());
+    assert!(registry.snapshot(key("device-c")).is_some());
+    assert_eq!(
+        pending.accept(key("device-b"), plan()).unwrap(),
+        ProgressProjectionAdmission::Closed
+    );
+
+    let mut history = fixture
+        .owner
+        .load()
+        .await
+        .unwrap()
+        .require_space()
+        .unwrap()
+        .history()
+        .clone();
+    append_active_peer_to_history(
+        &mut history,
+        space.member("device-a"),
+        "device-b",
+        0x79,
+        0x62,
+    );
+    fixture
+        .owner
+        .commit(|draft| {
+            draft
+                .apply(LedgerInput::AdmissionCommitted { history })
+                .map_err(MembershipLedgerError::corrupt_from)
+        })
+        .await
+        .unwrap();
+    assert!(
+        registry.snapshot(key("device-c")).is_some(),
+        "unrelated member revision preserves results"
+    );
+    assert_eq!(
+        pending.accept(key("device-b"), plan()).unwrap(),
+        ProgressProjectionAdmission::Closed
+    );
+    let fresh = registry.begin_intent(EntryId::from("original-local-entry"));
+    assert_eq!(
+        fresh.accept(key("device-b"), plan()).unwrap(),
+        ProgressProjectionAdmission::Retained
+    );
+    assert_eq!(
+        pending.accept(key("device-c"), plan()).unwrap(),
+        ProgressProjectionAdmission::Unchanged
+    );
+
+    // 同一 ID 的新实例可以在一个完整历史输入中接替旧实例，不能只比较设备名单。
+    let mut history = fixture
+        .owner
+        .load()
+        .await
+        .unwrap()
+        .require_space()
+        .unwrap()
+        .history()
+        .clone();
+    append_active_peer_to_history(
+        &mut history,
+        space.member("device-a"),
+        "device-b",
+        0x7a,
+        0x72,
+    );
+    fixture
+        .owner
+        .commit(|draft| {
+            draft
+                .apply(LedgerInput::AdmissionCommitted { history })
+                .map_err(MembershipLedgerError::corrupt_from)
+        })
+        .await
+        .unwrap();
+    assert!(registry.snapshot(key("device-b")).is_none());
+    assert!(registry.snapshot(key("device-c")).is_some());
+    assert_eq!(
+        fresh.accept(key("device-b"), plan()).unwrap(),
+        ProgressProjectionAdmission::Closed
+    );
+
+    // 数据库世代即使恢复成相同成员名单，也不能继承旧会话关联。
+    fixture.records.replace_database(fixture.records.record());
+    fixture.owner.load().await.unwrap();
+    assert!(registry.snapshots().is_empty());
+    assert_eq!(
+        pending.accept(key("device-c"), plan()).unwrap(),
+        ProgressProjectionAdmission::Closed
+    );
+    let next = registry.begin_intent(EntryId::from("original-local-entry"));
+    next.accept(key("device-c"), plan()).unwrap();
+    fixture.records.fail_next_commits(1);
+    assert!(fixture
+        .owner
+        .commit(|draft| draft.clear_space())
+        .await
+        .is_err());
+    assert!(
+        registry.snapshots().is_empty(),
+        "uncertain authority fails closed without rolling back stored membership"
+    );
+    assert!(fixture.owner.load().await.unwrap().space().is_some());
+    fixture
+        .owner
+        .commit(|draft| draft.clear_space())
+        .await
+        .unwrap();
+    assert!(registry.snapshots().is_empty());
+    assert_eq!(
+        next.accept(key("device-c"), plan()).unwrap(),
+        ProgressProjectionAdmission::Closed
+    );
+}

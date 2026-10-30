@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use uc_core::ids::DeviceId;
 use uc_core::membership::{
     LedgerInput, MembershipConflictEvidenceV3, MembershipConflictPolicy,
     MembershipHistoryRelationship, PeerEvidence, PeerLink, PeerRelation,
@@ -24,16 +25,20 @@ impl ReconcileMembershipEvidenceUseCase {
     #[tracing::instrument(name = "usecase.reconcile_history_evidence.execute", skip_all)]
     pub(crate) async fn execute(
         &self,
-        source_device_id: &uc_core::ids::DeviceId,
+        source_device_id: &DeviceId,
         evidence: &MembershipConflictEvidenceV3,
     ) -> Result<Option<MembershipEvidenceExchange>, MembershipLedgerError> {
+        let generation = self.owner.generation();
         let view = self.owner.load().await?;
+        self.ensure_generation(generation)?;
         let space = view.require_space()?;
         let local = space.history();
-        let Ok(remote) = VersionedMembershipHistory::import_exchange_pages_v2(
+        let remote = VersionedMembershipHistory::import_exchange_pages_v2(
             &evidence.pages,
             self.owner.verifier(),
-        ) else {
+        );
+        self.ensure_generation(generation)?;
+        let Ok(remote) = remote else {
             return Ok(None);
         };
         let Ok(remote_position) = remote.current_position() else {
@@ -63,13 +68,14 @@ impl ReconcileMembershipEvidenceUseCase {
             .current_position()
             .map_err(MembershipLedgerError::corrupt_from)?;
         let response = |relationship| {
-            Some(MembershipEvidenceExchange {
+            self.ensure_generation(generation)?;
+            Ok(Some(MembershipEvidenceExchange {
                 response: MembershipConflictEvidenceV3 {
                     transfer_id: response_position.history_digest,
                     pages: response_pages,
                 },
                 relationship,
-            })
+            }))
         };
         if MembershipConflictPolicy::branch_id(local)
             .map_err(MembershipLedgerError::corrupt_from)?
@@ -78,10 +84,10 @@ impl ReconcileMembershipEvidenceUseCase {
             && local.active_members() == remote.active_members()
         {
             if relation != Some(PeerRelation::Consistent) {
-                self.commit_consistent(view.revision(), *source_device_id)
+                self.commit_consistent(generation, view.revision(), *source_device_id)
                     .await?;
             }
-            return Ok(response(MembershipHistoryRelationship::Consistent));
+            return response(MembershipHistoryRelationship::Consistent);
         }
         let Ok(conflict) = MembershipConflictPolicy::describe(local, &remote, local_member) else {
             return Ok(None);
@@ -123,10 +129,10 @@ impl ReconcileMembershipEvidenceUseCase {
             });
         if target_recovery_completed {
             if relation != Some(PeerRelation::Consistent) {
-                self.commit_consistent(view.revision(), *source_device_id)
+                self.commit_consistent(generation, view.revision(), *source_device_id)
                     .await?;
             }
-            return Ok(response(MembershipHistoryRelationship::Consistent));
+            return response(MembershipHistoryRelationship::Consistent);
         }
         let branch_recovery = space.branch_recovery();
         let evidence_already_recorded = branch_recovery
@@ -142,12 +148,12 @@ impl ReconcileMembershipEvidenceUseCase {
                 == Some(&presentation)
             && relation == Some(PeerRelation::Diverged);
         if evidence_already_recorded {
-            return Ok(response(MembershipHistoryRelationship::Diverged));
+            return response(MembershipHistoryRelationship::Diverged);
         }
         let source_device_id = *source_device_id;
         let expected_revision = view.revision();
         self.owner
-            .commit(move |draft| {
+            .commit_in_generation(generation, move |draft| {
                 if draft.require_space()?.ledger().revision() != expected_revision {
                     return Err(MembershipLedgerError::Conflict);
                 }
@@ -191,19 +197,27 @@ impl ReconcileMembershipEvidenceUseCase {
                 Ok(())
             })
             .await?;
-        Ok(response(MembershipHistoryRelationship::Diverged))
+        response(MembershipHistoryRelationship::Diverged)
     }
 }
 
 impl ReconcileMembershipEvidenceUseCase {
+    fn ensure_generation(&self, generation: u64) -> Result<(), MembershipLedgerError> {
+        if self.owner.generation() != generation {
+            return Err(MembershipLedgerError::unavailable());
+        }
+        Ok(())
+    }
+
     /// 双方分支一致但证据不能证明对端拥有本机当前位置：只修复关系，不伪造确认水位。
     async fn commit_consistent(
         &self,
+        generation: u64,
         expected_revision: u64,
-        source_device_id: uc_core::ids::DeviceId,
+        source_device_id: DeviceId,
     ) -> Result<(), MembershipLedgerError> {
         self.owner
-            .commit(move |draft| {
+            .commit_in_generation(generation, move |draft| {
                 if draft.require_space()?.ledger().revision() != expected_revision {
                     return Err(MembershipLedgerError::Conflict);
                 }

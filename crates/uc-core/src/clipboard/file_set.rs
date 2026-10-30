@@ -11,6 +11,8 @@
 //! 清单按原始行序逐行保留(含重复行与非文件行),因为身份计算与未来的
 //! 展示/重发都需要能区分"多一行"或"行序不同"的情况。
 
+use std::collections::BTreeMap;
+
 use crate::clipboard::ContentHash;
 use crate::ids::BlobId;
 
@@ -152,6 +154,45 @@ impl EntryFileSet {
             .any(|line| line.indicates_directory_root(row_count))
     }
 
+    /// v1结构身份没有覆盖根类型及同名根的分组；这些清单不能仅凭摘要复用。
+    ///
+    /// 一个根只有同名文件成员时，文件根与目录根产生相同leaf；多个选中根
+    /// 同名时，把成员合并到同一根也不改变leaf集合。这里只判定歧义，不改变
+    /// 既有摘要字节或从磁盘形态猜测原始根类型。
+    pub fn has_ambiguous_root_identity(&self) -> bool {
+        let mut names = BTreeMap::new();
+        let mut roots = BTreeMap::new();
+        for line in &self.lines {
+            let Some(location) = &line.member_location else {
+                continue;
+            };
+            if names
+                .insert(location.root_name.as_str(), location.root_index)
+                .is_some_and(|previous| previous != location.root_index)
+            {
+                return true;
+            }
+            let root = roots.entry(location.root_index).or_insert((
+                location.root_name.as_str(),
+                0usize,
+                false,
+            ));
+            if root.0 != location.root_name {
+                return true;
+            }
+            root.1 += 1;
+            root.2 = matches!(line.kind, EntryFileSetLineKind::File { .. })
+                && matches!(
+                    location.kind,
+                    FileSetMemberKind::File | FileSetMemberKind::Executable
+                )
+                && location.relative_path == location.root_name;
+        }
+        roots
+            .values()
+            .any(|(_, count, same_name_file)| *count == 1 && *same_name_file)
+    }
+
     /// 该清单中 `File` 行的内容 hash,已排序。
     ///
     /// 排序是有意为之:身份计算只关心"这条 entry 含有哪些文件内容",不
@@ -189,7 +230,7 @@ impl EntryFileSet {
         digests
     }
 
-    /// Return the structured identity component for a complete directory set.
+    /// 完整目录集的结构身份组件；按摘要复用前仍须排除根结构歧义。
     pub fn file_set_v1_component(&self) -> Option<[u8; 32]> {
         if !self.has_directory_structure()
             || self

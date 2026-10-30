@@ -230,6 +230,7 @@ fn make_member(seed: [u8; 32], device_id: &str) -> SpaceMember {
 
 fn sample_header() -> ClipboardHeader {
     ClipboardHeader {
+        source_entry: None,
         version: ClipboardHeader::CURRENT_VERSION,
         snapshot_hash: "9".repeat(64),
         captured_at_ms: 1_700_000_000_000,

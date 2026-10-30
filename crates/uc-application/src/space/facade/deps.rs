@@ -21,7 +21,7 @@ use crate::deps::{
     CurrentSpaceIdentityPort, InitialSpaceActivationPort, RePairingStateStorePort,
     SpaceAccessPorts, SpaceRebuildProgressPort,
 };
-use crate::space::{KnownPeerContact, SpaceRuntimeAdapters};
+use crate::space::{KnownPeerContact, MemberScopeRetirementPort, SpaceRuntimeAdapters};
 
 pub(crate) struct SpaceSessionDeps {
     pub space_access: SpaceAccessPorts,
@@ -57,6 +57,7 @@ pub(crate) struct SpaceTransitionDeps {
 }
 
 pub(crate) struct SpaceFacadeDeps {
+    pub scope_retirement: Arc<dyn MemberScopeRetirementPort>,
     pub connection_hints:
         futures::stream::BoxStream<'static, Result<crate::space::ConnectionHint, anyhow::Error>>,
     pub application: ApplicationDeps,

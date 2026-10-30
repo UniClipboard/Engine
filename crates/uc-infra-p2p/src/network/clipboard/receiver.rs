@@ -7,8 +7,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 use tracing::Instrument;
 use uc_application::deps::{
-    ClipboardDelivery, ClipboardReceiverPort, ConnectionLease, ConnectionMode, ConnectivityError,
-    ConnectivityManager, PeerConnection, PeerSendStream, StreamLease,
+    ClipboardDelivery, ClipboardReceiverPort, ConnectionLease, ConnectionMode, ConnectionProtocol,
+    ConnectivityError, ConnectivityManager, PeerConnection, PeerSendStream, StreamLease,
 };
 use uc_core::ports::{InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt};
 use uc_observability_contract::diagnostics::connectivity::{
@@ -136,6 +136,16 @@ impl ClipboardReceiverAdapter {
             },
         };
 
+        if decoded.header.source_entry.is_some()
+            && connection.protocol() != ConnectionProtocol::AttributedClipboard
+        {
+            uc_warn!(
+                error_kind = "frame_source_protocol",
+                "clipboard source identity requires negotiated capability"
+            );
+            emit_ack(&mut stream.send, AckCode::Rejected).await;
+            return;
+        }
         let span = operation_span(OperationContext {
             domain: DiagnosticDomain::Clipboard,
             operation: DiagnosticOperation::ClipboardReceive,

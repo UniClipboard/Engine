@@ -210,6 +210,7 @@ fn every_public_operation_has_a_stable_kind() {
         ),
         (
             Operation::ResendEntry(ResendEntryInput {
+                confirm_new_transfer: false,
                 entry_id: "entry-1".into(),
                 target_devices: vec![],
             }),
@@ -1189,6 +1190,7 @@ fn entry_delivery_contract_preserves_full_view_without_debugging_user_content() 
 fn resend_contract_preserves_report_and_structured_business_outcomes() {
     let outcomes = [
         uc_engine::ResendEntryOutcome::Completed(uc_engine::ResendReportSummary {
+            reconciled: Vec::new(),
             accepted: 1,
             duplicate: 2,
             offline: 3,
@@ -1217,6 +1219,7 @@ fn resend_contract_preserves_report_and_structured_business_outcomes() {
         uc_engine::OperationResult::EntryResent(outcomes[0].clone()),
         uc_engine::OperationResult::EntryResent(uc_engine::ResendEntryOutcome::Completed(
             uc_engine::ResendReportSummary {
+                reconciled: Vec::new(),
                 accepted: 1,
                 duplicate: 2,
                 offline: 3,
