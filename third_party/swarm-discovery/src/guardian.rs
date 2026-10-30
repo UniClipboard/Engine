@@ -1,4 +1,4 @@
-// UniClipboard 修改：接口接收者具有显式生命周期，期望接口集合按有界退避重试安装。
+// UniClipboard 修改：接口接收者具有显式生命周期，IPv4 与 IPv6 期望接口集合按有界退避重试安装。
 // 详见 UNICLIPBOARD_PATCH.md。
 use crate::{
     receiver::{receiver, ReceiverError},
@@ -13,15 +13,19 @@ use acto::{
 };
 use hickory_proto::rr::Name;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     future::{pending, poll_fn, Future},
     mem::replace,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     pin::Pin,
+    sync::Arc,
     task::Poll,
     time::Duration,
 };
-use tokio::time::{sleep_until, Instant};
+use tokio::{
+    net::UdpSocket,
+    time::{sleep_until, Instant},
+};
 
 /// 接口安装失败后的首次重试延迟。
 const INTERFACE_RETRY_INITIAL: Duration = Duration::from_secs(1);
@@ -38,6 +42,8 @@ pub enum Input {
     AddInterface(IpAddr),
     RemoveInterface(IpAddr),
     SetInterfaces(BTreeSet<Ipv4Addr>),
+    /// IPv6 期望接口集合：接口索引到发送套接字绑定的本机地址。
+    SetInterfacesV6(BTreeMap<u32, Ipv6Addr>),
 }
 
 type ReceiverResult = Result<(), ReceiverError>;
@@ -63,8 +69,9 @@ impl InterfaceReceiver {
 
 /// 接口所有者：唯一维护期望接口集合、已安装接口及其接收者，并负责安装重试。
 ///
-/// 只有收到 [`Input::SetInterfaces`] 后才进入期望集合模式并重试失败的安装；
-/// 只使用构建器初始接口或 `add_interface_v4` 的调用方保持上游的单次尝试行为。
+/// 只有收到 [`Input::SetInterfaces`] 或 [`Input::SetInterfacesV6`] 后，对应协议族才进入
+/// 期望集合模式并重试失败的安装；只使用构建器初始接口或 `add_interface_v4` 的调用方保持
+/// 上游的单次尝试行为。IPv6 接口按操作系统接口索引维护，两个协议族共用同一退避节奏。
 struct Interfaces {
     rt: AcTokioRuntime,
     sockets: Sockets,
@@ -72,11 +79,25 @@ struct Interfaces {
     sender: ActoRef<sender::MdnsMsg>,
     receivers: HashMap<Ipv4Addr, InterfaceReceiver>,
     desired: Option<BTreeSet<Ipv4Addr>>,
+    receivers_v6: HashMap<u32, InterfaceReceiver>,
+    desired_v6: Option<BTreeMap<u32, Ipv6Addr>>,
     retry_at: Option<Instant>,
     retry_delay: Duration,
 }
 
 impl Interfaces {
+    fn spawn_receiver(&self, name: &str, socket: Arc<UdpSocket>) -> InterfaceReceiver {
+        let service_name = self.service_name.clone();
+        let target = self.sender.clone();
+        let spawned = self
+            .rt
+            .spawn_actor(name, move |ctx| receiver(ctx, service_name, socket, target));
+        InterfaceReceiver {
+            stop: spawned.me,
+            handle: spawned.handle,
+        }
+    }
+
     /// 为已有套接字的接口启动接收者；没有套接字时返回 `false`。
     fn start_receiver(&mut self, addr: Ipv4Addr) -> bool {
         if self.receivers.contains_key(&addr) {
@@ -85,20 +106,21 @@ impl Interfaces {
         let Some(socket) = self.sockets.get_interface_socket_v4(addr) else {
             return false;
         };
-        let service_name = self.service_name.clone();
-        let target = self.sender.clone();
-        let spawned = self
-            .rt
-            .spawn_actor(&format!("receiver_interface_{addr}"), move |ctx| {
-                receiver(ctx, service_name, socket, target)
-            });
-        self.receivers.insert(
-            addr,
-            InterfaceReceiver {
-                stop: spawned.me,
-                handle: spawned.handle,
-            },
-        );
+        let receiver = self.spawn_receiver(&format!("receiver_interface_{addr}"), socket);
+        self.receivers.insert(addr, receiver);
+        true
+    }
+
+    /// 为已有套接字的 IPv6 接口启动接收者；没有套接字时返回 `false`。
+    fn start_receiver_v6(&mut self, index: u32) -> bool {
+        if self.receivers_v6.contains_key(&index) {
+            return true;
+        }
+        let Some(socket) = self.sockets.get_interface_socket_v6(index) else {
+            return false;
+        };
+        let receiver = self.spawn_receiver("receiver_interface_v6", socket);
+        self.receivers_v6.insert(index, receiver);
         true
     }
 
@@ -131,6 +153,46 @@ impl Interfaces {
         self.sockets.remove_interface_v4(addr);
     }
 
+    /// 与 [`Self::install`] 相同的完整性要求：IPv6 接口的套接字、接收者以及主通配 IPv6
+    /// 套接字上该接口索引的组播成员关系都就绪才算安装成功。
+    ///
+    /// 已安装接口的绑定地址与期望不同时（例如原地址已被移除）先完整移除再重新安装。
+    /// 没有主通配 IPv6 套接字（IPv6 不可用或只启用 IPv4）时无从接收，不安装也不重试。
+    async fn install_v6(&mut self, index: u32, addr: Ipv6Addr) -> bool {
+        if !self.sockets.has_v6() {
+            return true;
+        }
+        if self
+            .sockets
+            .interface_addr_v6(index)
+            .is_some_and(|bound| bound != addr)
+        {
+            self.retire_v6(index).await;
+        }
+        if let Err(e) = self.sockets.add_interface_v6(index, addr) {
+            tracing::debug!("IPv6 interface addition failed: {}", e);
+            return false;
+        }
+        if !self.start_receiver_v6(index) {
+            return false;
+        }
+        match self.sockets.ensure_group_on_main_v6(index) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!("IPv6 interface multicast membership incomplete: {}", e);
+                false
+            }
+        }
+    }
+
+    /// 先停止并等待 IPv6 接口的接收者退出，再释放套接字并退出该接口的组播组。
+    async fn retire_v6(&mut self, index: u32) {
+        if let Some(receiver) = self.receivers_v6.remove(&index) {
+            receiver.stop().await;
+        }
+        self.sockets.remove_interface_v6(index);
+    }
+
     async fn add(&mut self, addr: Ipv4Addr) {
         match &mut self.desired {
             Some(desired) => {
@@ -158,23 +220,44 @@ impl Interfaces {
         self.reconcile().await;
     }
 
+    async fn set_v6(&mut self, desired: BTreeMap<u32, Ipv6Addr>) {
+        self.desired_v6 = Some(desired);
+        self.reconcile().await;
+    }
+
     /// 让已安装接口与期望集合一致；仍有接口未安装时按有界退避安排下一次尝试。
     async fn reconcile(&mut self) {
-        let Some(desired) = self.desired.clone() else {
+        if self.desired.is_none() && self.desired_v6.is_none() {
             return;
-        };
-        let stale: Vec<Ipv4Addr> = self
-            .receivers
-            .keys()
-            .filter(|addr| !desired.contains(addr))
-            .copied()
-            .collect();
-        for addr in stale {
-            self.retire(addr).await;
         }
         let mut complete = true;
-        for addr in desired {
-            complete &= self.install(addr);
+        if let Some(desired) = self.desired.clone() {
+            let stale: Vec<Ipv4Addr> = self
+                .receivers
+                .keys()
+                .filter(|addr| !desired.contains(addr))
+                .copied()
+                .collect();
+            for addr in stale {
+                self.retire(addr).await;
+            }
+            for addr in desired {
+                complete &= self.install(addr);
+            }
+        }
+        if let Some(desired) = self.desired_v6.clone() {
+            let stale: Vec<u32> = self
+                .receivers_v6
+                .keys()
+                .filter(|index| !desired.contains_key(index))
+                .copied()
+                .collect();
+            for index in stale {
+                self.retire_v6(index).await;
+            }
+            for (index, addr) in desired {
+                complete &= self.install_v6(index, addr).await;
+            }
         }
         if complete {
             self.retry_at = None;
@@ -192,7 +275,11 @@ impl Interfaces {
     /// 等待任一接口接收者自行结束；正常移除的接收者已先从表中删除，不会出现在这里。
     fn next_exit(&mut self) -> impl Future<Output = Result<ReceiverResult, PanicOrAbort>> + '_ {
         poll_fn(|cx| {
-            for receiver in self.receivers.values_mut() {
+            for receiver in self
+                .receivers
+                .values_mut()
+                .chain(self.receivers_v6.values_mut())
+            {
                 if let Poll::Ready(result) = ActoHandle::poll(Pin::new(&mut receiver.handle), cx) {
                     return Poll::Ready(result);
                 }
@@ -263,6 +350,8 @@ pub async fn guardian(
         sender: snd_ref.clone(),
         receivers: HashMap::new(),
         desired: None,
+        receivers_v6: HashMap::new(),
+        desired_v6: None,
         retry_at: None,
         retry_delay: INTERFACE_RETRY_INITIAL,
     };
@@ -314,8 +403,11 @@ pub async fn guardian(
         match msg {
             Input::AddInterface(IpAddr::V4(addr)) => interfaces.add(addr).await,
             Input::RemoveInterface(IpAddr::V4(addr)) => interfaces.remove(addr).await,
+            // IPv6 接口按接口索引维护，只经 `SetInterfacesV6` 修改；公开接口不发送按地址的
+            // IPv6 增删。
             Input::AddInterface(IpAddr::V6(_)) | Input::RemoveInterface(IpAddr::V6(_)) => {}
             Input::SetInterfaces(desired) => interfaces.set(desired).await,
+            Input::SetInterfacesV6(desired) => interfaces.set_v6(desired).await,
             msg => {
                 snd_ref.send(sender::MdnsMsg::Update(msg));
             }

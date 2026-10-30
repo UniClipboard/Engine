@@ -12,7 +12,7 @@ use socket::{InterfaceProbe, SocketError, Sockets};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Display,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     str::FromStr,
     time::{Duration, Instant},
 };
@@ -366,8 +366,8 @@ impl Discoverer {
     /// Provide a list of local IPv4 addresses to send multicast messages on specific interfaces.
     ///
     /// This improves discovery in multi-homed environments where peers may be on different
-    /// network segments. Note that this only affects IPv4; IPv6 multicast always uses the
-    /// default interface.
+    /// network segments. Note that this only affects IPv4; IPv6 multicast uses the default
+    /// interface unless [`DropGuard::set_interfaces_v6`] is used (UniClipboard patch).
     pub fn with_multicast_interfaces_v4(mut self, interfaces: Vec<Ipv4Addr>) -> Self {
         self.multicast_interfaces = interfaces;
         self
@@ -486,7 +486,8 @@ impl DropGuard {
     /// has started. Useful for systems where network interfaces may come up after
     /// the application starts.
     ///
-    /// Note: This only affects IPv4. IPv6 multicast always uses the default interface.
+    /// Note: This only affects IPv4. IPv6 interfaces are managed by
+    /// [`Self::set_interfaces_v6`] (UniClipboard patch).
     pub fn add_interface_v4(&self, interface: Ipv4Addr) {
         self.aref
             .send(guardian::Input::AddInterface(IpAddr::V4(interface)));
@@ -496,7 +497,8 @@ impl DropGuard {
     ///
     /// This stops sending multicast messages on the specified interface.
     ///
-    /// Note: This only affects IPv4. IPv6 multicast always uses the default interface.
+    /// Note: This only affects IPv4. IPv6 interfaces are managed by
+    /// [`Self::set_interfaces_v6`] (UniClipboard patch).
     pub fn remove_interface_v4(&self, interface: Ipv4Addr) {
         self.aref
             .send(guardian::Input::RemoveInterface(IpAddr::V4(interface)));
@@ -505,14 +507,35 @@ impl DropGuard {
     /// 声明期望参与组播的完整 IPv4 接口集合（UniClipboard 补丁）。
     ///
     /// 后台把已安装接口调整为该集合：移除多余接口时先停止并等待其接收者退出，再释放
-    /// 套接字；只有套接字与接收者都已建立才算安装成功。仍有接口未安装时按 1 秒起、
-    /// 最长 60 秒的退避重试，直到安装成功或该接口离开期望集合；重复提交相同集合会立即
-    /// 再尝试一次。首次调用后，`add_interface_v4`/`remove_interface_v4` 也修改这个集合。
+    /// 套接字；只有套接字、接收者以及主通配套接字上的组播成员关系都已建立才算安装成功。
+    /// 仍有接口未安装时按 1 秒起、最长 60 秒的退避重试，直到安装成功或该接口离开期望集合；
+    /// 重复提交相同集合会立即再尝试一次。首次调用后，`add_interface_v4`/`remove_interface_v4`
+    /// 也修改这个集合。
     ///
-    /// 只影响 IPv4；IPv6 组播始终使用默认接口。
+    /// 只影响 IPv4；IPv6 接口见 [`Self::set_interfaces_v6`]。
     pub fn set_interfaces_v4(&self, interfaces: impl IntoIterator<Item = Ipv4Addr>) {
         let interfaces: BTreeSet<Ipv4Addr> = interfaces.into_iter().collect();
         self.aref.send(guardian::Input::SetInterfaces(interfaces));
+    }
+
+    /// 声明期望参与组播的完整 IPv6 接口集合（UniClipboard 补丁）。
+    ///
+    /// 每项为（操作系统接口索引，该接口上的一个本机地址）。IPv6 的组播成员关系与发送接口
+    /// 都按接口索引生效，因此集合以接口索引为键：每个接口只建立一个发送套接字，并在主通配
+    /// IPv6 套接字上为该索引加入一次组播组；同一索引出现多次时以最后一项为准，索引 0
+    /// （“默认接口”）被忽略。地址只用于绑定该接口的发送套接字，使报文源端口为 5353，
+    /// 不影响通告的记录；link-local 地址以接口索引为 scope 绑定。已安装接口的地址变化时，
+    /// 先完整移除该接口再重新安装。
+    ///
+    /// 安装完整性、退避重试与移除顺序与 [`Self::set_interfaces_v4`] 相同，两个协议族共用同一
+    /// 退避节奏。没有主通配 IPv6 套接字（IPv6 不可用或 [`IpClass::V4Only`]）时不安装 IPv6
+    /// 接口。从未调用此接口时保持上游行为：IPv6 组播只使用默认接口。
+    pub fn set_interfaces_v6(&self, interfaces: impl IntoIterator<Item = (u32, Ipv6Addr)>) {
+        let interfaces: BTreeMap<u32, Ipv6Addr> = interfaces
+            .into_iter()
+            .filter(|(index, _)| *index != 0)
+            .collect();
+        self.aref.send(guardian::Input::SetInterfacesV6(interfaces));
     }
 }
 
@@ -832,5 +855,164 @@ mod tests {
         .await;
         assert_eq!(joins_after_leave(&state, removed, retained).1, 2);
         assert_eq!(state.created(retained), 1, "retained socket is not rebuilt");
+    }
+
+    /// 本机 IPv6 回环接口的（接口索引，::1）；主机未启用 IPv6 时返回 `None`。
+    #[cfg(target_os = "linux")]
+    fn loopback_v6() -> Option<(u32, Ipv6Addr)> {
+        let interface = if_addrs::get_if_addrs()
+            .ok()?
+            .into_iter()
+            .find(|interface| interface.addr.ip() == IpAddr::V6(Ipv6Addr::LOCALHOST))?;
+        Some((interface.index?, Ipv6Addr::LOCALHOST))
+    }
+
+    /// 启动同时要求 IPv4 与 IPv6 主套接字的发现服务，只使用 IPv6 期望集合。
+    #[cfg(target_os = "linux")]
+    fn spawn_v6_discoverer(service: &str, state: &Arc<socket::probe::State>) -> DropGuard {
+        Discoverer::new(service.to_string(), "ipv6_peer".to_string())
+            .with_ip_class(IpClass::V4AndV6)
+            .with_cadence(Duration::from_millis(500))
+            .with_interface_probe(state.probe())
+            .spawn(&tokio::runtime::Handle::current())
+            .expect("spawn IPv6 discoverer")
+    }
+
+    /// 该接口在主通配套接字上是否有成功的加入记录。
+    #[cfg(target_os = "linux")]
+    fn joined(state: &socket::probe::State, key: socket::probe::Key) -> bool {
+        use socket::probe::Membership;
+        state
+            .memberships()
+            .iter()
+            .any(|(op, k, ok)| *op == Membership::Join && *k == key && *ok)
+    }
+
+    /// 本组测试在 Linux 回环接口上用 ::1 建立真实套接字。Linux 回环接口不能收发 IPv6 组播，
+    /// 断言只依赖观察点记录（套接字弱引用、发送尝试与成员操作），不依赖组播投递；主机未启用
+    /// IPv6 时跳过。
+    #[cfg(target_os = "linux")]
+    macro_rules! require_loopback_v6 {
+        () => {
+            match loopback_v6() {
+                Some(interface) => interface,
+                None => {
+                    eprintln!("skipped: host has no IPv6 loopback");
+                    return;
+                }
+            }
+        };
+    }
+
+    /// UniClipboard 补丁：IPv6 接口按接口索引安装，发送套接字、接收者与主通配套接字上的
+    /// 组播成员关系都建立，查询经该接口套接字发出；移出期望集合后套接字被全部持有者释放，
+    /// 并在主通配套接字上退出该接口的组播组。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn ipv6_interface_is_installed_by_index_and_released_when_removed() {
+        use socket::probe::{Key, Membership};
+        let (index, addr) = require_loopback_v6!();
+        let key = Key::V6(index);
+        let state = Arc::new(socket::probe::State::default());
+        let guard = spawn_v6_discoverer(&format!("v6install{}", std::process::id()), &state);
+
+        guard.set_interfaces_v6([(index, addr)]);
+        wait_until("IPv6 interface installed", || {
+            state.live(key) == 1 && joined(&state, key)
+        })
+        .await;
+        wait_until("query sent on the IPv6 interface socket", || {
+            state.sends(key) >= 1
+        })
+        .await;
+
+        guard.set_interfaces_v6([]);
+        wait_until("IPv6 interface released", || state.live(key) == 0).await;
+        let log = state.memberships();
+        assert_eq!(
+            log.last().map(|(op, k, _)| (*op, *k)),
+            Some((Membership::Leave, key)),
+            "the group is left on the main socket after the socket is released"
+        );
+        assert_eq!(state.created(key), 1);
+    }
+
+    /// UniClipboard 补丁：IPv6 接口套接字的首次创建与第一次重试都失败后，期望集合保持不变，
+    /// 后台按退避重试，直到套接字真正建立才算已安装。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_ipv6_interface_installation_is_retried_without_a_new_interface_set() {
+        use socket::probe::Key;
+        let (index, addr) = require_loopback_v6!();
+        let key = Key::V6(index);
+        let state = Arc::new(socket::probe::State::default());
+        state.fail_next(2);
+        let guard = spawn_v6_discoverer(&format!("v6retry{}", std::process::id()), &state);
+
+        guard.set_interfaces_v6([(index, addr)]);
+        wait_until("first installation attempt", || state.attempts(key) >= 1).await;
+        assert_eq!(state.live(key), 0, "a failed addition is not installed");
+
+        // 不再提交新的期望集合：只靠后台重试完成安装。
+        wait_until("retried installation", || {
+            state.live(key) == 1 && joined(&state, key)
+        })
+        .await;
+        assert_eq!(state.attempts(key), 3);
+    }
+
+    /// UniClipboard 补丁：主通配 IPv6 套接字为接口索引加入组播组失败时，接口算作未完整安装，
+    /// 后台重试在不提交新期望集合、也不重建发送套接字的情况下补齐成员关系。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_failed_ipv6_join_is_retried_without_a_new_interface_set() {
+        use socket::probe::{Key, Membership};
+        let (index, addr) = require_loopback_v6!();
+        let key = Key::V6(index);
+        let state = Arc::new(socket::probe::State::default());
+        // 建立套接字时的加入与同一轮协调中的立即重试都失败。
+        state.fail_next_joins(key, 2);
+        let guard = spawn_v6_discoverer(&format!("v6join{}", std::process::id()), &state);
+
+        guard.set_interfaces_v6([(index, addr)]);
+        wait_until("failed join retried in the background", || {
+            joined(&state, key)
+        })
+        .await;
+        let failed_joins = state
+            .memberships()
+            .iter()
+            .filter(|(op, k, ok)| *op == Membership::Join && *k == key && !*ok)
+            .count();
+        assert_eq!(failed_joins, 2);
+        assert_eq!(state.created(key), 1, "the interface socket is not rebuilt");
+        assert_eq!(state.live(key), 1);
+    }
+
+    /// UniClipboard 补丁：同一接口索引的期望地址变化时，旧发送套接字先被完整释放再按新地址
+    /// 安装；新地址无法绑定时按退避重试，恢复可用地址后重新安装。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn changing_the_address_of_an_ipv6_interface_rebuilds_its_socket() {
+        use socket::probe::Key;
+        let (index, addr) = require_loopback_v6!();
+        let key = Key::V6(index);
+        let state = Arc::new(socket::probe::State::default());
+        let guard = spawn_v6_discoverer(&format!("v6rebind{}", std::process::id()), &state);
+
+        guard.set_interfaces_v6([(index, addr)]);
+        wait_until("IPv6 interface installed", || state.live(key) == 1).await;
+
+        // 文档地址不属于本机，绑定失败。
+        let unassigned: Ipv6Addr = "2001:db8::1".parse().expect("documentation address");
+        guard.set_interfaces_v6([(index, unassigned)]);
+        wait_until("old socket released and rebinding attempted", || {
+            state.live(key) == 0 && state.attempts(key) >= 2
+        })
+        .await;
+
+        guard.set_interfaces_v6([(index, addr)]);
+        wait_until("IPv6 interface reinstalled", || state.live(key) == 1).await;
+        assert_eq!(state.created(key), 2);
     }
 }
