@@ -590,12 +590,14 @@ fn ensure_parent(dest: &Path) -> Result<(), PendingImportError> {
     if let Some(parent) = dest.parent().filter(|path| !path.as_os_str().is_empty()) {
         if !parent.is_dir() {
             ensure_parent(parent)?;
-            let mut builder = std::fs::DirBuilder::new();
+            let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             builder
                 .create(parent)
                 .map_err(PendingImportError::copy_member_from)?;

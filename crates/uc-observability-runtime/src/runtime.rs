@@ -540,6 +540,7 @@ impl ProcessObservabilityHandle {
             )
     }
     #[cfg(feature = "test-process-release")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_stop_census(&self) {
         if let Some(census) = self
             .state
@@ -652,6 +653,7 @@ impl ProcessObservabilityHandle {
         }
     }
 
+    #[allow(dead_code, reason = "Used by the standalone process owner probe")]
     pub(crate) fn observe_process_release_internal(
         &self,
         deadline: Duration,

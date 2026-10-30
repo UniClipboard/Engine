@@ -14,6 +14,7 @@ use uc_engine::{
 
 #[path = "../../../bindings/uc-engine-uniffi/src/runtime/startup_delivery.rs"]
 #[allow(unexpected_cfgs, reason = "直接复用绑定模块；测试特性属于绑定 crate")]
+#[allow(dead_code, reason = "Probe uses a subset of this module")]
 mod startup_delivery;
 
 type BindingError = uc_engine::EngineError;

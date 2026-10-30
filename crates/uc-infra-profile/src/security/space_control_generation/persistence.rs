@@ -179,10 +179,10 @@ pub(super) fn write_new_database(
         .map_err(|source| storage(anyhow::Error::new(source)))
 }
 
-pub(super) fn sync_directory(directory: &Path) -> Result<(), SpaceControlGenerationError> {
+pub(super) fn sync_directory(_directory: &Path) -> Result<(), SpaceControlGenerationError> {
     #[cfg(not(windows))]
     {
-        std::fs::File::open(directory)
+        std::fs::File::open(_directory)
             .and_then(|file| file.sync_all())
             .map_err(|source| storage(anyhow::Error::new(source)))?;
     }

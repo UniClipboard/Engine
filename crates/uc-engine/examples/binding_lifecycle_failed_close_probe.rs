@@ -13,6 +13,7 @@ use uc_engine::{
 };
 
 #[path = "../../../bindings/uc-engine-uniffi/src/runtime/worker_lifecycle.rs"]
+#[allow(dead_code, reason = "Probe uses a subset of this module")]
 mod worker_lifecycle;
 mod shutdown_wait {
     use std::sync::mpsc::Sender;

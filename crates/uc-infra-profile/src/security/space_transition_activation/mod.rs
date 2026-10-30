@@ -735,10 +735,10 @@ fn recovery(source: anyhow::Error) -> SpaceTransitionActivationError {
     SpaceTransitionActivationError::Recovery { source }
 }
 
-fn sync_directory(directory: &std::path::Path) -> std::io::Result<()> {
+fn sync_directory(_directory: &std::path::Path) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
-        std::fs::File::open(directory)?.sync_all()?;
+        std::fs::File::open(_directory)?.sync_all()?;
     }
     Ok(())
 }

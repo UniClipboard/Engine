@@ -1,5 +1,6 @@
 //! 验证关闭协调器对未确认任务的资源保留；不代表完整运行期释放。
 #[path = "../src/runtime/shutdown/coordination.rs"]
+#[allow(dead_code, reason = "Probe uses a subset of this module")]
 mod coordination;
 
 use std::fs::File;

@@ -169,31 +169,37 @@ impl ReleaseObservation {
     }
 
     #[cfg(feature = "test-process-release")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_local_error(&self) -> Option<Arc<io::Error>> {
         lock(&self.cleanup_errors).local.clone()
     }
 
     #[cfg(feature = "test-process-release")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_coordinator_error(&self) -> Option<Arc<io::Error>> {
         lock(&self.cleanup_errors).coordinator.clone()
     }
 
     #[cfg(feature = "test-process-release")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_operation_error(&self) -> Option<Arc<io::Error>> {
         lock(&self.operation_errors).local.clone()
     }
 
     #[cfg(feature = "test-process-release")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_network_error(&self) -> Option<Arc<io::Error>> {
         lock(&self.cleanup_errors).network.clone()
     }
 
     #[cfg(feature = "test-process-release")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_network_operation_error(&self) -> Option<Arc<io::Error>> {
         lock(&self.operation_errors).network.clone()
     }
 
     #[cfg(feature = "test-process-release")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_trace_operation_error(
         &self,
     ) -> Option<Arc<opentelemetry_sdk::error::OTelSdkError>> {
@@ -201,6 +207,7 @@ impl ReleaseObservation {
     }
 
     #[cfg(feature = "test-process-release")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_log_operation_error(
         &self,
     ) -> Option<Arc<opentelemetry_sdk::error::OTelSdkError>> {
@@ -425,6 +432,7 @@ impl ProcessReleaseCoordinator {
     }
     /// 仅供端到端工件注入无法实际耗尽的代次。
     #[cfg(feature = "test-process-release")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_active_generation(generation: u64) -> Self {
         Self {
             state: Mutex::new(Phase::Active { generation }),

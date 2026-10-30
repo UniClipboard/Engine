@@ -15,6 +15,7 @@ use uc_engine::{
 #[path = "../../../bindings/uc-engine-uniffi/src/runtime/shutdown_wait.rs"]
 mod shutdown_wait;
 #[path = "../../../bindings/uc-engine-uniffi/src/runtime/worker_lifecycle.rs"]
+#[allow(dead_code, reason = "Probe uses a subset of this module")]
 mod worker_lifecycle;
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value

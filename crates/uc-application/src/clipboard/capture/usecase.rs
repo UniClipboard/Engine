@@ -1489,11 +1489,11 @@ fn normalized_basename(path: &std::path::Path) -> String {
         .unwrap_or_else(|| ".".to_string())
 }
 
-fn member_kind(metadata: &std::fs::Metadata) -> FileSetMemberKind {
+fn member_kind(_metadata: &std::fs::Metadata) -> FileSetMemberKind {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 != 0 {
+        if _metadata.permissions().mode() & 0o111 != 0 {
             return FileSetMemberKind::Executable;
         }
     }

@@ -16,7 +16,7 @@ mod stream_isolation;
 #[cfg(target_os = "linux")]
 use super::blob_resources::ReceiveResourceBaseline;
 use super::{
-    empty_engine_host, mount_engine_rendezvous, next_engine_event_matching, persistent_engine_host,
+    mount_engine_rendezvous, next_engine_event_matching, persistent_engine_host,
     MemoryHostSecureStorage, ENGINE_TEST_LOCK,
 };
 use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};

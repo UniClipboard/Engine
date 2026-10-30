@@ -11,11 +11,16 @@ mod remote_health {
     pub(crate) fn record_local_file_recovered() {}
 }
 
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::Command;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
 use file_statistics::LocalDiagnosticSource;
+#[cfg(target_os = "macos")]
 use local_file::{managed_log_files, LocalFileRuntime};
 use uc_observability_runtime::{SignalResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS};
 

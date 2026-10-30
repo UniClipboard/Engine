@@ -126,16 +126,19 @@ impl StartupLifecycle {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_rollback_task_panic(&self) -> bool {
         self._cleanup.probe_rollback_task_panic()
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_owned_start_failure(&self) -> Option<(&'static str, std::io::ErrorKind)> {
         self._cleanup.probe_owned_start_failure()
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_cleanup_worker_failure(
         &self,
     ) -> Option<(&'static str, std::io::ErrorKind)> {
@@ -143,21 +146,25 @@ impl StartupLifecycle {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_retry_executor_panic(&self) -> bool {
         self._cleanup.probe_retry_executor_panic()
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_retry_executor_drop_panic(&self) -> bool {
         self._cleanup.probe_retry_executor_drop_panic()
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_retry_callback_and_drop_panic(&self) -> bool {
         self._cleanup.probe_retry_callback_and_drop_panic()
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_host_cleanup_errors(
         &self,
     ) -> Vec<(HostCapabilityErrorCategory, Option<ErrorKind>)> {

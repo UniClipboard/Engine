@@ -1,5 +1,6 @@
 //! 使用真实执行器和独立文件锁验证停止结果，不代表 Engine 释放。
 #[path = "../src/engine/owned_executor.rs"]
+#[allow(dead_code, reason = "Probe uses a subset of this module")]
 mod owned_executor;
 
 use std::fs::File;

@@ -234,12 +234,14 @@ fn exists(path: &Path) -> Result<bool, PendingImportError> {
 }
 
 fn private_directory(path: &Path) -> Result<(), PendingImportError> {
-    let mut builder = DirBuilder::new();
+    let builder = DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     match builder.create(path) {
         Ok(()) => {
             sync_directory(path).map_err(failure)?;
