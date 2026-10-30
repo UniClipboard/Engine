@@ -1,6 +1,6 @@
 # ADR-019：工作空间收敛等待状态按设备精确公开
 
-- **状态**：等待名单已实施；ADR-020 的上线核对、待用户决定和分叉关系待重新同步
+- **Status**: Historical public contract. The current Engine does not expose the waiting-list fields described here. See the [current Engine interface](../uc-engine-interface.md) and the [feature status](../features/019-device-specific-convergence-waiting-status.md).
 - **日期**：2026-08-11
 - **修订**：ADR-016 的对外收敛状态展示边界
 - **被修订**：ADR-020 不再把等待名单解释为全局一致；名单只描述本机已知传播，待用户移除决定

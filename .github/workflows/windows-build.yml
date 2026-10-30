@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [main, migration/initial-core-import]
+    types: [opened, synchronize, reopened, labeled]
   merge_group:
   push:
     branches: [main, migration/initial-core-import]
@@ -15,11 +16,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-build-${{ github.ref }}
+  group: windows-build-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name || 'run' }}
   cancel-in-progress: true
 
 jobs:
+  scope:
+    uses: ./.github/workflows/pr-scope.yml
+
   windows:
+    needs: scope
+    if: always() && !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.scope != 'docs')
     name: Windows ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -53,6 +59,7 @@ jobs:
           rustup show active-toolchain
 
       - name: Start shared Engine compiler cache
+        if: (needs.scope.result != 'success' || needs.scope.outputs.scope != 'snapshot')
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: windows-${{ matrix.arch }}
@@ -61,6 +68,7 @@ jobs:
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Record build provenance
+        if: (needs.scope.result != 'success' || needs.scope.outputs.scope != 'snapshot')
         run: |
           state=clean
           if [[ -n "$(git status --porcelain)" ]]; then state=modified; fi
@@ -77,21 +85,24 @@ jobs:
           } | tee "$RUNNER_TEMP/windows-evidence/toolchain.txt"
 
       - name: Validate workspace metadata
+        if: (needs.scope.result != 'success' || needs.scope.outputs.scope != 'snapshot')
         run: cargo metadata --locked --format-version 1 > /dev/null
 
       # 构建证据：编译全部工作区目标，包括 cfg(windows) 专属代码。
       - name: Check all workspace targets
+        if: (needs.scope.result != 'success' || needs.scope.outputs.scope != 'snapshot')
         run: bash scripts/build-cache/mbx.sh --cargo check --workspace --all-targets --locked 2>&1 | tee "$RUNNER_TEMP/windows-evidence/check.log"
 
       # 运行证据：在 Windows 主机上真实执行 MoveFileExW 替换路径，只使用临时目录。
       - name: Run Windows storage durability tests
+        if: (needs.scope.result != 'success' || needs.scope.outputs.scope != 'snapshot')
         run: |
           bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-storage --lib active_space_generation_manifest_store 2>&1 | tee "$RUNNER_TEMP/windows-evidence/storage-tests.log"
           bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-local --lib fs::atomic_publish 2>&1 | tee -a "$RUNNER_TEMP/windows-evidence/storage-tests.log"
           bash scripts/build-cache/mbx.sh --cargo test --locked -p uc-infra-local --lib fs::durability 2>&1 | tee -a "$RUNNER_TEMP/windows-evidence/storage-tests.log"
 
       - name: Publish scenario CAS snapshot
-        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        if: (success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')) && (needs.scope.result != 'success' || needs.scope.outputs.scope != 'snapshot')
         uses: ./.github/actions/mbx-snapshot
         with:
           operation: save
@@ -101,7 +112,7 @@ jobs:
           secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain Windows evidence
-        if: always()
+        if: (always()) && (needs.scope.result != 'success' || needs.scope.outputs.scope != 'snapshot')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-build-${{ matrix.arch }}
@@ -109,3 +120,7 @@ jobs:
             ${{ runner.temp }}/windows-evidence
             ${{ runner.temp }}/mbx-evidence
           if-no-files-found: warn
+
+      - name: Validate snapshot tools on Windows
+        if: needs.scope.result == 'success' && needs.scope.outputs.scope == 'snapshot'
+        uses: ./.github/actions/snapshot-tests

@@ -1,5 +1,7 @@
 # ADR-004: Restore Single Representation for Clipboard Restore
 
+Status: Historical. The current restore path reconstructs a snapshot with multiple available representations and passes it to the host write boundary. See [`restore_selection.rs`](../../../crates/uc-application/src/clipboard/restore/restore_selection.rs) and [`snapshot_from_entry.rs`](../../../crates/uc-application/src/clipboard/sync/snapshot_from_entry.rs). This does not establish multi-format acceptance on every host.
+
 ## Context
 
 Clipboard entries can contain multiple representations (e.g. text + html). The
