@@ -1,4 +1,5 @@
 //! 使用真实启动负责人和受控宿主关闭验证私有结果；不代表设备验收。
+#![cfg(not(test))]
 #![allow(dead_code)]
 #[path = "../src/assembly/mod.rs"]
 mod assembly;

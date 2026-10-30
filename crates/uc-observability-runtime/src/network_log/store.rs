@@ -200,10 +200,11 @@ impl RecordStore for RunStore {
     fn park(&mut self) -> io::Result<()> {
         #[cfg(feature = "test-process-release")]
         if PROBE_NETWORK_PARK_FAILURE.swap(false, Ordering::SeqCst) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                io::Error::from_raw_os_error(libc::EACCES),
-            ));
+            #[cfg(unix)]
+            let source = io::Error::from_raw_os_error(libc::EACCES);
+            #[cfg(not(unix))]
+            let source = io::Error::new(io::ErrorKind::PermissionDenied, "controlled park failure");
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, source));
         }
         #[cfg(feature = "test-process-release")]
         if PROBE_NETWORK_PARK_BLOCK.load(Ordering::SeqCst) {
