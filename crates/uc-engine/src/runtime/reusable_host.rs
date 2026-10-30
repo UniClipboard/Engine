@@ -4,6 +4,7 @@
 //! 每次装配只借出一份视图；变化流是宿主级资源，运行期结束时归还而不是关闭，
 //! 只有 Engine 最终关闭时才真正关闭它。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use async_trait::async_trait;
@@ -32,6 +33,7 @@ impl ReusableHost {
             clipboard: Arc::new(SharedClipboard {
                 inner: RwLock::new(clipboard),
                 stream: Mutex::new(StreamSlot::NotTaken),
+                retry_supported: AtomicBool::new(false),
             }),
             files,
             analytics,
@@ -53,13 +55,21 @@ impl ReusableHost {
         )
     }
 
+    /// 只对宿主明确支持重试且没有关闭任务运行的流允许显式重试。
+    pub(crate) fn has_retryable_change_stream(&self) -> bool {
+        matches!(*self.clipboard.lock_stream(), StreamSlot::Idle(_))
+            && self.clipboard.retry_supported.load(Ordering::Acquire)
+    }
+
     /// Engine 最终关闭：关闭未被运行期占用的变化流。
     pub(crate) async fn close_change_stream(&self) -> Result<(), HostCapabilityError> {
         let idle = {
             let mut slot = self.clipboard.lock_stream();
-            match std::mem::replace(&mut *slot, StreamSlot::Absent) {
+            let stream = match std::mem::replace(&mut *slot, StreamSlot::Absent) {
                 StreamSlot::Idle(stream) => Some(stream),
                 StreamSlot::NotTaken => {
+                    // 宿主回调可能崩溃；在它确认结果前不能把槽位标为不存在。
+                    *slot = StreamSlot::Lent;
                     let taken = self
                         .clipboard
                         .inner
@@ -67,7 +77,11 @@ impl ReusableHost {
                         .unwrap_or_else(PoisonError::into_inner)
                         .take_change_stream();
                     match taken {
-                        Ok(stream) => stream,
+                        Ok(Some(stream)) => Some(stream),
+                        Ok(None) => {
+                            *slot = StreamSlot::Absent;
+                            None
+                        }
                         Err(error) => {
                             *slot = StreamSlot::NotTaken;
                             return Err(error);
@@ -81,17 +95,51 @@ impl ReusableHost {
                         "host change stream remains borrowed",
                     ));
                 }
+                StreamSlot::Closing => {
+                    *slot = StreamSlot::Closing;
+                    return Err(HostCapabilityError::new(
+                        HostCapabilityErrorCategory::Unavailable,
+                        "host change stream close remains in progress",
+                    ));
+                }
                 StreamSlot::Absent => None,
+            };
+            if stream.is_some() {
+                *slot = StreamSlot::Closing;
             }
+            stream
         };
         match idle {
-            Some(mut stream) => match stream.shutdown().await {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    self.clipboard.give_back(stream);
-                    Err(error)
+            Some(stream) => {
+                let mut closing = ClosingChangeStream {
+                    stream: Some(stream),
+                    home: Arc::clone(&self.clipboard),
+                };
+                let result = match closing.stream.as_mut() {
+                    Some(stream) => stream.shutdown().await,
+                    None => Err(HostCapabilityError::new(
+                        HostCapabilityErrorCategory::Unavailable,
+                        "host change stream close lost its owner",
+                    )),
+                };
+                let retry_supported = result.is_err()
+                    && closing.stream.as_ref().is_some_and(|stream| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            stream.supports_shutdown_retry()
+                        }))
+                        .unwrap_or(false)
+                    });
+                closing
+                    .home
+                    .retry_supported
+                    .store(retry_supported, Ordering::Release);
+                if result.is_ok() {
+                    let stream = closing.stream.take();
+                    *closing.home.lock_stream() = StreamSlot::Absent;
+                    drop(stream);
                 }
-            },
+                result
+            }
             None => Ok(()),
         }
     }
@@ -101,12 +149,14 @@ enum StreamSlot {
     NotTaken,
     Idle(Box<dyn HostClipboardChangeStream>),
     Lent,
+    Closing,
     Absent,
 }
 
 struct SharedClipboard {
     inner: RwLock<Box<dyn HostClipboard>>,
     stream: Mutex<StreamSlot>,
+    retry_supported: AtomicBool,
 }
 
 impl SharedClipboard {
@@ -120,6 +170,20 @@ impl SharedClipboard {
 }
 
 struct ClipboardView(Arc<SharedClipboard>);
+
+/// 关闭被取消或失败时，把仍有资源的变化流交还给原负责人。
+struct ClosingChangeStream {
+    stream: Option<Box<dyn HostClipboardChangeStream>>,
+    home: Arc<SharedClipboard>,
+}
+
+impl Drop for ClosingChangeStream {
+    fn drop(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            self.home.give_back(stream);
+        }
+    }
+}
 
 impl HostClipboard for ClipboardView {
     fn read_with_identity(
@@ -184,6 +248,13 @@ impl HostClipboard for ClipboardView {
                 }
             }
             StreamSlot::Idle(stream) => Ok(Some(self.lend(stream))),
+            StreamSlot::Closing => {
+                *slot = StreamSlot::Closing;
+                Err(HostCapabilityError::new(
+                    HostCapabilityErrorCategory::Unavailable,
+                    "host change stream close remains in progress",
+                ))
+            }
             previous @ (StreamSlot::Lent | StreamSlot::Absent) => {
                 *slot = previous;
                 Ok(None)

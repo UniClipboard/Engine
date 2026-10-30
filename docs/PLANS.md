@@ -20,6 +20,8 @@
 
 ## 当前专项计划
 
+- [Process observability and failed-start release specification](exec-plans/active/2026-10-27-process-startup-release-spec.md): proposed; complete owners, source-matched bindings, native artifacts, and end-to-end acceptance remain incomplete.
+
 - [Issue #34 后续缺口处理](exec-plans/completed/2026-10-30-issue-34-followups.md)：实现与本地验收完成并归档；目录复用、D15独立发现证明与成员证据数据库代号隔离落地，最终工作区5004项及成员56项通过。原间歇异常和旧格式演进继续由技术债跟踪，远端CI及设备范围由总清单跟踪。
 
 - [Issue #34 总验收清单](exec-plans/completed/2026-10-29-connectivity-migration-acceptance.md)：按用户决定结束架构迁移跟踪并归档；D14双1GiB基线仅开发者本机显式运行，D15脚本修正已本地验收。新候选CI、独立技术债、发布和设备范围继续按实际记录，结项不代表这些项目全部通过。

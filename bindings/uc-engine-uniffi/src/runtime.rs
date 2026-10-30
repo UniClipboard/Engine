@@ -12,21 +12,26 @@ use uc_engine::observability::{
     AdoptOutcome, AnalyticsEventContext, AnalyticsIdentityError, AnalyticsIdentityPort,
     AnalyticsPort, DeviceType, Event, GroupIdentifyPayload, IdentifyPayload, Os, ReleaseOutcome,
 };
+#[cfg(feature = "test-binding-worker-panic")]
+use uc_engine::probe_wrap_startup_host;
 use uc_engine::{
     CancelEntryReceiveInput, CancelInboundTransferInput, ChangeEncryptionPassphraseInput,
     ClipboardRestoreMode, ClipboardRestoreOutcome,
     ConfigImportRejectionReason as EngineConfigImportRejectionReason, CreateSpaceInput,
     CustomRelayMutation, CustomRelayMutationOutcome, CustomRelayRejection, Engine, EngineConfig,
-    EntryReceiveProgressInput, EntryReceiveRetryOutcome as EngineReceiveRetryOutcome,
-    ExportEntryInput, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
-    HostClipboard, HostClipboardIdentity, HostClipboardRepresentation, HostClipboardSnapshot,
-    HostClipboardWriteReceipt, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
-    HostSecureStorage, JoinSpaceInput, ObserveClipboardChangeInput, Operation, OperationResult,
-    OutboundProgressInput, OutboundProgressSummary, ReceiveProgressSummary,
-    ReconcileOutboundProgressInput, RecoverSessionInput, RemoveMemberInput, ResendEntryInput,
-    RestoreClipboardInput, RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput,
-    SendTextInput, StartupLifecycleInput, StartupProgress, TransferCancellationReason,
+    EngineError, EntryReceiveProgressInput, EntryReceiveRetryOutcome as EngineReceiveRetryOutcome,
+    EventStream, ExportEntryInput, HostCapabilities, HostCapabilityError,
+    HostCapabilityErrorCategory, HostClipboard, HostClipboardIdentity, HostClipboardRepresentation,
+    HostClipboardSnapshot, HostClipboardWriteReceipt, HostDirectories, HostFileAccess,
+    HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
+    ObserveClipboardChangeInput, Operation, OperationResult, OutboundProgressInput,
+    OutboundProgressSummary, ReceiveProgressSummary, ReconcileOutboundProgressInput,
+    RecoverSessionInput, RemoveMemberInput, ResendEntryInput, RestoreClipboardInput,
+    RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
+    StartupProgress, TransferCancellationReason,
 };
+#[cfg(feature = "test-binding-worker-panic")]
+use uc_engine::{HostConfigurationFile, HostConfigurationFileReset};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -48,12 +53,17 @@ mod lifecycle;
 mod release_tests;
 mod shutdown;
 mod shutdown_wait;
+mod startup_delivery;
 mod startup_lifecycle;
 mod worker_join;
 mod worker_lifecycle;
 mod worker_shutdown;
 use shutdown_wait::ShutdownWait;
-pub use startup_lifecycle::MobileStartupLifecycle;
+use startup_delivery::{StartupDeliveryOwner, StartupWorkerGuard};
+use startup_lifecycle::StartupLaunch;
+pub use startup_lifecycle::{
+    BindingStartupReleaseReport, BindingStartupReleaseState, MobileStartupLifecycle,
+};
 use worker_join::WorkerJoin;
 use worker_lifecycle::LifecycleCommand;
 
@@ -1043,47 +1053,120 @@ impl MobileEngine {
         analytics: Option<(Arc<dyn BindingAnalyticsHost>, BindingAnalyticsContext)>,
         startup_lifecycle: Option<&MobileStartupLifecycle>,
     ) -> Result<Arc<Self>, BindingError> {
-        let capabilities = host_capabilities(Arc::clone(&host), analytics)?;
-        let startup_lifecycle = startup_lifecycle
-            .map(MobileStartupLifecycle::take_input)
-            .transpose()?;
+        let default_lifecycle;
+        let lifecycle = match startup_lifecycle {
+            Some(lifecycle) => lifecycle,
+            None => {
+                default_lifecycle = MobileStartupLifecycle::new();
+                &default_lifecycle
+            }
+        };
+        let startup_lifecycle = lifecycle.take_input()?;
+        let delivery = lifecycle.delivery_owner();
+        let capabilities = match host_capabilities(Arc::clone(&host), analytics) {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                drop(startup_lifecycle);
+                drop(host);
+                lifecycle.record_preparation_failure(error.clone());
+                return Err(error);
+            }
+        };
+        #[cfg(feature = "test-binding-worker-panic")]
+        let capabilities = match std::env::var_os("UC_TEST_BINDING_STARTUP_RETRY_LOCK") {
+            Some(path) => match probe_wrap_startup_host(capabilities, PathBuf::from(path)) {
+                Ok(capabilities) => capabilities,
+                Err(_source) => {
+                    // discarded-source[contract-boundary]: 测试夹具使用既有绑定错误，不向宿主暴露文件路径。
+                    let error = BindingError::RuntimeUnavailable;
+                    drop(startup_lifecycle);
+                    drop(host);
+                    lifecycle.record_preparation_failure(error.clone());
+                    return Err(error);
+                }
+            },
+            None => capabilities,
+        };
         let config = EngineConfig::new(config.app_version).with_profile_id(config.profile_id);
+        #[cfg(feature = "test-binding-worker-panic")]
+        let config = if std::env::var_os("UC_TEST_BINDING_INVALID_ENGINE_CONFIG").is_some() {
+            config.with_host_configuration_files([HostConfigurationFile::new(
+                "../invalid.json",
+                HostConfigurationFileReset::ByEngine,
+            )])
+        } else {
+            config
+        };
+        let (progress, _) = StartupProgress::channel();
+        let startup =
+            Engine::start_with_lifecycle(config, capabilities, progress, startup_lifecycle);
+        lifecycle.mark_engine_accepted();
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();
         let events = Arc::new(EventQueue::new(256));
         let (started, start_result) = mpsc::channel();
+        #[cfg(feature = "test-binding-worker-panic")]
+        let started = if std::env::var_os("UC_TEST_BINDING_DELIVERY_LOST").is_some() {
+            drop(started);
+            let (sender, receiver) = mpsc::channel();
+            drop(receiver);
+            sender
+        } else {
+            started
+        };
         let worker_events = Arc::clone(&events);
-        let worker = std::thread::Builder::new()
-            .name("uc-engine-uniffi".to_owned())
-            .spawn(move || {
+        let worker_delivery = Arc::clone(&delivery);
+        let worker_preparation_failure = lifecycle.preparation_failure_owner();
+        let mut launch = StartupLaunch::new(startup, Arc::clone(&worker_preparation_failure));
+        let worker = spawn_binding_worker(move || {
+            if let Some(startup) = launch.take() {
                 run_worker(
-                    config,
-                    capabilities,
+                    startup,
                     requests,
                     lifecycle_requests,
                     worker_events,
                     started,
-                    startup_lifecycle,
+                    worker_delivery,
+                    worker_preparation_failure,
                 )
-            })
-            .map_err(thread_spawn_failed)?;
+            } else {
+                let _ = started.send(Err(BindingError::RuntimeUnavailable));
+                BindingResourceRelease::Failed {
+                    error: BindingError::RuntimeUnavailable,
+                }
+            }
+        })
+        .map_err(|source| {
+            let error = thread_spawn_failed(source);
+            lifecycle.record_preparation_failure(error.clone());
+            error
+        })?;
 
         match start_result.recv() {
-            Ok(Ok(())) => Ok(Arc::new(Self {
-                commands: Mutex::new(Some(commands)),
-                lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
-                shutdown_pending: AtomicBool::new(false),
-                shutdown_wait: Mutex::new(None),
-                events,
-                worker: WorkerJoin::new(worker),
-            })),
+            Ok(Ok(())) => {
+                let engine = Arc::new(Self {
+                    commands: Mutex::new(Some(commands)),
+                    lifecycle_commands: Mutex::new(Some(lifecycle_commands)),
+                    shutdown_pending: AtomicBool::new(false),
+                    shutdown_wait: Mutex::new(None),
+                    events,
+                    worker: WorkerJoin::new(worker),
+                });
+                delivery.delivered();
+                Ok(engine)
+            }
             Ok(Err(error)) => {
+                if matches!(error, BindingError::RuntimeUnavailable) {
+                    lifecycle.record_preparation_failure(error.clone());
+                }
                 let _ = worker.join();
                 Err(error)
             }
             Err(_) => {
                 let _ = worker.join();
-                Err(BindingError::RuntimeUnavailable)
+                let error = BindingError::RuntimeUnavailable;
+                lifecycle.record_preparation_failure(error.clone());
+                Err(error)
             }
         }
     }
@@ -1735,15 +1818,39 @@ impl Drop for MobileEngine {
     }
 }
 
+fn spawn_binding_worker(
+    task: impl FnOnce() -> BindingResourceRelease + Send + 'static,
+) -> io::Result<std::thread::JoinHandle<BindingResourceRelease>> {
+    #[cfg(feature = "test-binding-worker-panic")]
+    if let Some(root) = std::env::var_os("UC_TEST_BINDING_SPAWN_FAIL") {
+        drop(task);
+        let root = PathBuf::from(root);
+        let _ = std::fs::write(root.join("spawn-rejected"), b"rejected");
+        while !root.join("continue").exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "controlled spawn failure",
+        ));
+    }
+    std::thread::Builder::new()
+        .name("uc-engine-uniffi".to_owned())
+        .spawn(task)
+}
+
 fn run_worker(
-    config: EngineConfig,
-    host: HostCapabilities,
+    startup: impl Future<Output = Result<(Engine, EventStream), EngineError>>,
     requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
     lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<LifecycleCommand>,
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
-    startup_lifecycle: Option<StartupLifecycleInput>,
+    delivery: Arc<StartupDeliveryOwner>,
+    preparation_failure: Arc<Mutex<Option<BindingError>>>,
 ) -> BindingResourceRelease {
+    // 先创建保护对象，使运行时在异常退出时先释放其已接收工作。
+    let _worker_guard =
+        StartupWorkerGuard::new(Arc::clone(&delivery), BindingError::RuntimeUnavailable);
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1751,39 +1858,39 @@ fn run_worker(
         Ok(runtime) => runtime,
         Err(_) => {
             log_mobile_failure("runtime_build", &BindingError::RuntimeUnavailable);
+            *lock(&preparation_failure) = Some(BindingError::RuntimeUnavailable);
             let _ = started.send(Err(BindingError::RuntimeUnavailable));
             return BindingResourceRelease::Failed {
                 error: BindingError::RuntimeUnavailable,
             };
         }
     };
-    runtime.block_on(run_worker_loop(
-        config,
-        host,
+    let outcome = runtime.block_on(run_worker_loop(
+        startup,
         requests,
         lifecycle_requests,
         events,
         started,
-        startup_lifecycle,
-    ))
+        Arc::clone(&delivery),
+    ));
+    #[cfg(feature = "test-binding-worker-panic")]
+    if let Some(root) = std::env::var_os("UC_TEST_BINDING_RUNTIME_BLOCKER") {
+        let _ = std::fs::write(PathBuf::from(root).join("draining"), b"draining");
+    }
+    drop(runtime);
+    delivery.finish(&outcome);
+    outcome
 }
 
 async fn run_worker_loop(
-    config: EngineConfig,
-    host: HostCapabilities,
+    startup: impl Future<Output = Result<(Engine, EventStream), EngineError>>,
     requests: tokio::sync::mpsc::UnboundedReceiver<WorkerCommand>,
     lifecycle_requests: tokio::sync::mpsc::UnboundedReceiver<LifecycleCommand>,
     events: Arc<EventQueue>,
     started: mpsc::Sender<Result<(), BindingError>>,
-    startup_lifecycle: Option<StartupLifecycleInput>,
+    delivery: Arc<StartupDeliveryOwner>,
 ) -> BindingResourceRelease {
-    let result = match startup_lifecycle {
-        Some(lifecycle) => {
-            let (progress, _) = StartupProgress::channel();
-            Engine::start_with_lifecycle(config, host, progress, lifecycle).await
-        }
-        None => Engine::start(config, host).await,
-    };
+    let result = startup.await;
     let (engine, mut engine_events) = match result {
         Ok(started_engine) => started_engine,
         Err(error) => {
@@ -1794,6 +1901,29 @@ async fn run_worker_loop(
         }
     };
     let engine = Arc::new(engine);
+    delivery.accept(Arc::clone(&engine));
+
+    #[cfg(feature = "test-binding-worker-panic")]
+    if let Some(root) = std::env::var_os("UC_TEST_BINDING_RUNTIME_BLOCKER") {
+        let root = PathBuf::from(root);
+        tokio::task::spawn_blocking(move || {
+            let Ok(lease) = std::fs::File::create(root.join("worker.lease")) else {
+                return;
+            };
+            if lease.lock().is_err() {
+                return;
+            }
+            let _ = std::fs::write(root.join("ready"), b"ready");
+            while !root.join("release").is_file() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+    }
+
+    #[cfg(feature = "test-binding-worker-panic")]
+    if std::env::var_os("UC_TEST_BINDING_WORKER_PANIC").is_some() {
+        panic!("controlled binding worker termination");
+    }
 
     let forwarded_events = Arc::clone(&events);
     let event_task = tokio::spawn(async move {
@@ -1803,22 +1933,35 @@ async fn run_worker_loop(
         forwarded_events.close();
     });
     if started.send(Ok(())).is_err() {
-        return worker_shutdown::finish_shutdown(
-            engine.shutdown_until_released(),
+        delivery.delivery_lost(BindingError::RuntimeUnavailable);
+        let outcome = worker_shutdown::finish_shutdown(
+            delivery.shutdown_owned(Arc::clone(&engine), None, BindingError::RuntimeUnavailable),
             event_task,
             events,
         )
         .await;
+        return outcome;
     }
 
-    let shutdown_response = run_until_lifecycle_finishes(
-        worker_lifecycle::run(Arc::clone(&engine), lifecycle_requests),
+    let lifecycle_delivery = Arc::clone(&delivery);
+    let (shutdown_response, shutdown_outcome) = run_until_lifecycle_finishes(
+        worker_lifecycle::run(
+            Arc::clone(&engine),
+            lifecycle_requests,
+            move |engine, grace| {
+                let delivery = Arc::clone(&lifecycle_delivery);
+                async move {
+                    delivery
+                        .shutdown_owned(engine, grace, BindingError::RuntimeUnavailable)
+                        .await
+                }
+            },
+        ),
         run_operations(&engine, requests),
     )
     .await;
     let result =
-        worker_shutdown::finish_shutdown(engine.shutdown_until_released(), event_task, events)
-            .await;
+        worker_shutdown::finish_shutdown(async { shutdown_outcome }, event_task, events).await;
     for response in shutdown_response {
         let _ = response.send(result.clone());
     }

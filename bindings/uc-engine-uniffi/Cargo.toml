@@ -16,6 +16,8 @@ required-features = ["bindgen-cli"]
 
 [features]
 bindgen-cli = ["uniffi/cli"]
+test-binding-worker-panic = ["uc-engine/test-binding-worker-panic"]
+test-process-release = ["uc-engine/test-process-release"]
 
 [dependencies]
 serde_json = "1"
@@ -33,8 +35,12 @@ ndk-context = "0.1"
 
 [dev-dependencies]
 cargo_metadata = "0.19.2"
+opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "trace"] }
+prost = "0.14"
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 uc-engine = { path = "../../crates/uc-engine", features = ["dev-tools"] }
+wiremock = "0.6"
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

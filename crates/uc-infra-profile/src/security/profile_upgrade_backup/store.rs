@@ -24,6 +24,7 @@ use uc_infra_local::app_version_state::{read_version_before_upgrade, DEFAULT_FIL
 use uc_infra_local::fs::file_lock::try_lock_exclusive;
 use uc_infra_local::fs::VaultLayout;
 
+use super::activity::ProfileUpgradeBackupActivity;
 use super::diagnostics::{record_backup_failure, with_backup_action};
 use super::inventory::{excluded_paths, has_profile};
 use super::record::{
@@ -40,6 +41,7 @@ pub struct ProfileUpgradeBackupStore {
     pub(super) profile: String,
     pub(super) secure_storage: Arc<dyn SecureStoragePort>,
     directory: PathBuf,
+    pub(super) activity: Arc<ProfileUpgradeBackupActivity>,
 }
 
 impl ProfileUpgradeBackupStore {
@@ -78,7 +80,13 @@ impl ProfileUpgradeBackupStore {
             profile,
             secure_storage,
             directory: directory.join(source_directory_id.to_hex().as_str()),
+            activity: Arc::new(ProfileUpgradeBackupActivity::default()),
         }
+    }
+
+    /// 已接收的备份工作由启动负责人持续观察。
+    pub fn activity(&self) -> Arc<ProfileUpgradeBackupActivity> {
+        Arc::clone(&self.activity)
     }
 
     pub(crate) fn directory(&self) -> PathBuf {
@@ -109,9 +117,12 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
         &self,
     ) -> Result<Vec<ProfileUpgradeBackupEntry>, ProfileUpgradeBackupError> {
         let store = self.clone();
+        let activity = self.activity.begin();
         let result = tokio::task::spawn_blocking(move || {
-            let _lease = store.lease()?;
-            store.list_locked()
+            activity.finish((|| {
+                let _lease = store.lease()?;
+                store.list_locked()
+            })())
         })
         .await
         .map_err(backup_error)
@@ -122,9 +133,12 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
     async fn delete_backup(&self, id: &str) -> Result<(), ProfileUpgradeBackupError> {
         let store = self.clone();
         let id = id.to_owned();
+        let activity = self.activity.begin();
         let result = tokio::task::spawn_blocking(move || {
-            let _lease = store.lease()?;
-            store.delete_locked(&id)
+            activity.finish((|| {
+                let _lease = store.lease()?;
+                store.delete_locked(&id)
+            })())
         })
         .await
         .map_err(backup_error)
@@ -159,7 +173,12 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
     ) -> Result<(), ProfileUpgradeBackupError> {
         let store = self.clone();
         let target = target.clone();
-        let result = match tokio::task::spawn_blocking(move || store.capture(&target)).await {
+        let activity = self.activity.begin();
+        let result = match tokio::task::spawn_blocking(move || {
+            activity.finish(store.capture(&target))
+        })
+        .await
+        {
             Ok(result) => result,
             Err(error) => Err(backup_error(error)),
         };
@@ -172,11 +191,15 @@ impl ProfileUpgradeBackupPort for ProfileUpgradeBackupStore {
     ) -> Result<(), ProfileUpgradeBackupError> {
         let store = self.clone();
         let target = target.clone();
-        let result =
-            match tokio::task::spawn_blocking(move || store.preserve_secrets(&target)).await {
-                Ok(result) => result,
-                Err(error) => Err(backup_error(error)),
-            };
+        let activity = self.activity.begin();
+        let result = match tokio::task::spawn_blocking(move || {
+            activity.finish(store.preserve_secrets(&target))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(backup_error(error)),
+        };
         Self::record_result("preserve_security_materials", result)
     }
 }

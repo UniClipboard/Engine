@@ -58,7 +58,11 @@ fn prepared(fail: bool) -> (StartupHandoff, StartupProgress, Arc<HeldShutdown>) 
     let parts = Engine::from_runtime(Arc::clone(&runtime), 16);
     let (input, progress) = StartupProgress::channel();
     input.store.starting_services();
-    (StartupHandoff::new(parts, input), progress, runtime)
+    (
+        StartupHandoff::new(parts, input, Arc::new(StartupCleanupOwner::default())),
+        progress,
+        runtime,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

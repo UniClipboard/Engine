@@ -5,7 +5,10 @@ mod android;
 mod build_source;
 mod config;
 mod engine_activity;
-pub use engine_activity::EngineLogActivity;
+pub use engine_activity::{
+    confirm_engine_closed, update_engine_closer, EngineLogActivity, RetainedEngineCloser,
+    RetainedEngineResult, RetainedEngineState, RetainedEngineToken,
+};
 mod file_statistics;
 mod host_diagnostics;
 pub use host_diagnostics::{
@@ -23,6 +26,7 @@ mod module_log;
 mod module_log_fields;
 mod network_log;
 mod process_census;
+mod process_release;
 pub use local_capture::{
     CaptureEndReason, DetailedCaptureRequest, LocalCaptureMode, LocalCaptureStatus,
     LocalDiagnosticError, LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability,
@@ -34,10 +38,14 @@ pub use network_log::{
     NetworkLogConfig, NetworkLogCounters, NetworkLogError, NetworkLogExportReport, NetworkLogFile,
     NetworkLogState, NetworkLogStatus, NetworkProcessRole, NETWORK_LOG_SCHEMA_VERSION,
 };
+pub use process_release::{
+    ProcessFailureKind, ProcessReleaseReport, ProcessReleaseResult, ProcessResumeResult,
+};
 mod remote_health;
 mod runtime;
 mod status;
 mod subscriber;
+mod subscriber_gate;
 mod telemetry;
 
 #[cfg(target_os = "android")]

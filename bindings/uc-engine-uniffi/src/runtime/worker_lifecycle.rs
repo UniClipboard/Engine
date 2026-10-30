@@ -1,7 +1,7 @@
 use std::future::{poll_fn, Future};
 use std::sync::{mpsc, Arc};
 use std::task::Poll;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinSet;
@@ -29,25 +29,42 @@ pub(super) enum LifecycleCommand {
     },
 }
 
-pub(super) async fn run(
+pub(super) async fn run<F, T>(
     engine: Arc<Engine>,
     mut requests: UnboundedReceiver<LifecycleCommand>,
-) -> Vec<ShutdownReply> {
+    shutdown: F,
+) -> (Vec<ShutdownReply>, ResourceReleaseOutcome)
+where
+    F: Fn(Arc<Engine>, Option<Duration>) -> T,
+    T: Future<Output = ResourceReleaseOutcome>,
+{
     let mut pending = JoinSet::new();
-    let response = loop {
+    let mut failed = None;
+    let (response, outcome) = loop {
         tokio::select! {
             biased;
             completed = pending.join_next(), if !pending.is_empty() => {
                 match completed {
-                    Some(Ok(Some(response))) => break Some(response),
-                    Some(Err(_)) => break None,
+                    Some(Ok(Some(response))) => break (Some(response), None),
+                    Some(Err(_)) => break (None, failed),
                     _ => {}
                 }
             }
             command = requests.recv() => {
-                let Some(command) = command else { break None };
+                let Some(command) = command else { break (None, failed) };
+                if let LifecycleCommand::Shutdown { response, deadline } = command {
+                    // 调用方的等待期限由 ShutdownWait 管理，不取消已接收的关闭。
+                    let outcome = shutdown(Arc::clone(&engine), Some(deadline.saturating_duration_since(Instant::now()))).await;
+                    schedule_flush_after_lifecycle();
+                    if matches!(outcome, ResourceReleaseOutcome::Released { .. }) {
+                        break (Some(response), Some(outcome));
+                    }
+                    let _ = response.send(BindingResourceRelease::from(outcome.clone()));
+                    failed = Some(outcome);
+                    continue;
+                }
                 if let Some(Some(response)) = forward(&mut pending, dispatch(Arc::clone(&engine), command)).await {
-                    break Some(response);
+                    break (Some(response), None);
                 }
             }
         }
@@ -55,7 +72,14 @@ pub(super) async fn run(
     requests.close();
     let mut responses: Vec<_> = response.into_iter().collect();
     // 通道离开也由 Engine 完成实际关闭，再回收所有仅负责等待结果的转交任务。
-    let _ = engine.shutdown_until_released().await;
+    let outcome = match outcome {
+        Some(outcome) => outcome,
+        None => {
+            let outcome = shutdown(Arc::clone(&engine), None).await;
+            schedule_flush_after_lifecycle();
+            outcome
+        }
+    };
     while let Some(completed) = pending.join_next().await {
         if let Ok(Some(reply)) = completed {
             responses.push(reply);
@@ -66,7 +90,7 @@ pub(super) async fn run(
             responses.push(response);
         }
     }
-    responses
+    (responses, outcome)
 }
 
 async fn forward<T: Send + 'static>(
@@ -100,22 +124,8 @@ async fn dispatch(engine: Arc<Engine>, command: LifecycleCommand) -> Option<Shut
         LifecycleCommand::LifecycleState { response } => {
             let _ = response.send(map_engine_state(engine.lifecycle_state().await));
         }
-        LifecycleCommand::Shutdown { deadline, response } => {
-            let outcome = engine
-                .shutdown_with_outcome(deadline.saturating_duration_since(Instant::now()))
-                .await;
-            // 回应属于原清理；调用方等待期限不终止该回应。
-            let outcome = if matches!(outcome, ResourceReleaseOutcome::Pending) {
-                engine.shutdown_until_released().await
-            } else {
-                outcome
-            };
-            let result = BindingResourceRelease::from(outcome);
-            schedule_flush_after_lifecycle();
-            if matches!(result, BindingResourceRelease::Released { .. }) {
-                return Some(response);
-            }
-            let _ = response.send(result);
+        LifecycleCommand::Shutdown { .. } => {
+            unreachable!("shutdown is handled by the lifecycle owner")
         }
     }
     None

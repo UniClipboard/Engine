@@ -24,7 +24,10 @@ pub use profile_storage_upgrade::{
     StorageUpgradeFailure, StorageUpgradeObserver, StorageUpgradeProgressOutcome,
     StorageUpgradeSnapshot, StorageUpgradeStep, StorageUpgradeStepProgress, StorageUpgradeUnit,
 };
-pub use profile_upgrade_backup::{ProfileUpgradeBackupRecordKeyMissing, ProfileUpgradeBackupStore};
+pub use profile_upgrade_backup::{
+    BackupWorkerAbnormal, ProfileUpgradeBackupActivity, ProfileUpgradeBackupRecordKeyMissing,
+    ProfileUpgradeBackupStore,
+};
 pub use space_control_generation::{
     AdmissionInputInconsistency, AdmissionInputIssue, PreparedSpaceControlGeneration,
     SpaceControlGeneration, SpaceControlGenerationError,

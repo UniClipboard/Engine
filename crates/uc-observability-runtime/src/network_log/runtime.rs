@@ -1,8 +1,8 @@
 //! 独立网络日志的进程内装配：队列、写入策略、层与对外的控制和导出。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tracing_subscriber::filter::filter_fn;
@@ -33,19 +33,86 @@ pub(crate) struct NetworkLogRuntime {
     shared: Arc<Shared>,
     counters: Arc<NetworkCounters>,
     prepared: Arc<AtomicBool>,
-    closing: Arc<Mutex<ClosePhase>>,
+    closing: Arc<Mutex<CloseState>>,
+}
+
+struct CloseState {
+    phase: ClosePhase,
+    operation: Arc<()>,
+    parking: Option<Arc<ParkWait>>,
+}
+
+#[derive(Default)]
+struct ParkWait {
+    accepted: AtomicBool,
+    result: Mutex<Option<SignalResult>>,
+    changed: Condvar,
+}
+
+impl ParkWait {
+    fn complete(&self, result: SignalResult) {
+        *lock(&self.result) = Some(result);
+        self.changed.notify_all();
+    }
+
+    fn wait(&self, deadline: Duration) -> SignalResult {
+        let started = Instant::now();
+        let mut result = lock(&self.result);
+        loop {
+            if let Some(result) = *result {
+                return result;
+            }
+            let Some(remaining) = deadline.checked_sub(started.elapsed()) else {
+                return SignalResult::TimedOut;
+            };
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(result, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            result = next;
+            if timeout.timed_out() && result.is_none() {
+                return SignalResult::TimedOut;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClosePhase {
     Open,
-    /// 进程内没有工作中的 Engine：文件与租约已交还，记录直接丢弃，直到重开。
+    /// 文件线程尚未确认停车；不能将等待超时当作关闭回执。
+    Parking,
+    /// 文件线程尚未确认重开；旧停车结果不能证明当前状态。
+    Reopening,
+    /// 文件线程已确认文件与租约交还。
     Parked,
     Closing,
+    CloseUnconfirmed,
     Closed,
 }
 
 impl NetworkLogRuntime {
+    pub(crate) fn park_error(&self) -> Option<Arc<std::io::Error>> {
+        self.queue.park_error()
+    }
+    pub(crate) fn retry_failed_park(&self) {
+        let mut state = lock(&self.closing);
+        if state.phase == ClosePhase::Parking
+            && state
+                .parking
+                .as_ref()
+                .is_some_and(|parking| *lock(&parking.result) == Some(SignalResult::Failed))
+            && self.queue.has_live_closer()
+        {
+            state.parking = None;
+        }
+    }
+    pub(crate) fn has_live_closer(&self) -> bool {
+        matches!(
+            lock(&self.closing).phase,
+            ClosePhase::Open | ClosePhase::Parking | ClosePhase::Reopening | ClosePhase::Parked
+        ) && self.queue.has_live_closer()
+    }
     /// 构造运行时和要装入进程 subscriber 的层。目录打开在工作线程里完成且可重试，
     /// 这里失败只可能是线程无法创建，由调用方降级为不采集网络日志。
     pub(crate) fn new(config: NetworkLogConfig) -> std::io::Result<(Arc<Self>, HostLogLayer)> {
@@ -81,7 +148,11 @@ impl NetworkLogRuntime {
             shared,
             counters,
             prepared,
-            closing: Arc::new(Mutex::new(ClosePhase::Open)),
+            closing: Arc::new(Mutex::new(CloseState {
+                phase: ClosePhase::Open,
+                operation: Arc::new(()),
+                parking: None,
+            })),
         });
         Ok((
             runtime,
@@ -90,11 +161,14 @@ impl NetworkLogRuntime {
     }
 
     fn phase(&self) -> ClosePhase {
-        *lock(&self.closing)
+        lock(&self.closing).phase
     }
 
     fn accepts_control(&self) -> bool {
-        matches!(self.phase(), ClosePhase::Open | ClosePhase::Parked)
+        matches!(
+            self.phase(),
+            ClosePhase::Open | ClosePhase::Parking | ClosePhase::Reopening | ClosePhase::Parked
+        )
     }
 
     pub(crate) fn start_capture(
@@ -131,9 +205,11 @@ impl NetworkLogRuntime {
         let remaining = self.shared.detailed_remaining_ms();
         let state = match self.phase() {
             // 停车期间文件已关闭；Engine 恢复后回到 Ready。
-            ClosePhase::Closed | ClosePhase::Closing | ClosePhase::Parked => {
-                NetworkLogState::Closed
-            }
+            ClosePhase::Closed | ClosePhase::Parked => NetworkLogState::Closed,
+            ClosePhase::Parking
+            | ClosePhase::Reopening
+            | ClosePhase::Closing
+            | ClosePhase::CloseUnconfirmed => NetworkLogState::Unavailable,
             ClosePhase::Open if self.queue.unavailable() => NetworkLogState::Unavailable,
             ClosePhase::Open if !self.prepared.load(Ordering::Acquire) => NetworkLogState::Starting,
             ClosePhase::Open => NetworkLogState::Ready,
@@ -212,48 +288,120 @@ impl NetworkLogRuntime {
     /// 已接受的记录落盘后关闭当前分段并交还运行租约；之后到达的记录计入封口丢弃，不打开任何文件。
     /// 重复停车不重复执行。会等待文件线程，不能在异步运行线程上调用。
     pub(crate) fn park(&self, deadline: Duration) -> SignalResult {
-        {
-            let mut phase = lock(&self.closing);
-            match *phase {
-                ClosePhase::Open => *phase = ClosePhase::Parked,
-                ClosePhase::Parked => {}
-                ClosePhase::Closing | ClosePhase::Closed => return SignalResult::AlreadyShutdown,
+        let (operation, parking) = {
+            let mut state = lock(&self.closing);
+            match state.phase {
+                ClosePhase::Parking if state.parking.is_some() => {
+                    let parking = state.parking.as_ref().cloned();
+                    drop(state);
+                    return parking.map_or(SignalResult::Failed, |parking| parking.wait(deadline));
+                }
+                ClosePhase::Parked => return SignalResult::Completed,
+                ClosePhase::Open | ClosePhase::Parking | ClosePhase::Reopening => {
+                    state.phase = ClosePhase::Parking;
+                    state.operation = Arc::new(());
+                    let parking = Arc::new(ParkWait::default());
+                    state.parking = Some(Arc::clone(&parking));
+                    (Arc::clone(&state.operation), parking)
+                }
+                ClosePhase::Closing | ClosePhase::CloseUnconfirmed | ClosePhase::Closed => {
+                    return SignalResult::AlreadyShutdown;
+                }
             }
+        };
+        let closing = Arc::clone(&self.closing);
+        let observed = Arc::clone(&parking);
+        let accepted = Arc::clone(&parking);
+        let result = self.queue.park_with_observer(
+            deadline,
+            Box::new(move |success| {
+                let mut state = lock(&closing);
+                if success
+                    && state.phase == ClosePhase::Parking
+                    && Arc::ptr_eq(&state.operation, &operation)
+                {
+                    state.phase = ClosePhase::Parked;
+                }
+                observed.complete(if success {
+                    SignalResult::Completed
+                } else {
+                    SignalResult::Failed
+                });
+            }),
+            Box::new(move || accepted.accepted.store(true, Ordering::Release)),
+        );
+        if !parking.accepted.load(Ordering::Acquire) {
+            parking.complete(result);
+            let mut state = lock(&self.closing);
+            if state
+                .parking
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &parking))
+            {
+                state.parking = None;
+            }
+        } else if result == SignalResult::Failed {
+            // 线程断开时不会再调用确认回调，等待者必须看到终止失败。
+            parking.complete(SignalResult::Failed);
         }
-        self.queue.park(deadline)
+        result
     }
 
     /// 以同一运行编号重新取得租约并打开新分段；运行目录若已被其他进程回收则重建。
     pub(crate) fn unpark(&self, deadline: Duration) -> SignalResult {
-        {
-            let mut phase = lock(&self.closing);
-            match *phase {
-                ClosePhase::Parked => *phase = ClosePhase::Open,
+        let operation = {
+            let mut state = lock(&self.closing);
+            match state.phase {
+                ClosePhase::Parked | ClosePhase::Parking | ClosePhase::Reopening => {
+                    state.phase = ClosePhase::Reopening;
+                    state.operation = Arc::new(());
+                    state.parking = None;
+                    Arc::clone(&state.operation)
+                }
                 ClosePhase::Open => return SignalResult::Completed,
-                ClosePhase::Closing | ClosePhase::Closed => return SignalResult::AlreadyShutdown,
+                ClosePhase::Closing | ClosePhase::CloseUnconfirmed | ClosePhase::Closed => {
+                    return SignalResult::AlreadyShutdown;
+                }
             }
-        }
-        self.queue.unpark(deadline)
+        };
+        let closing = Arc::clone(&self.closing);
+        self.queue.unpark_with_observer(
+            deadline,
+            Box::new(move |success| {
+                let mut state = lock(&closing);
+                if success
+                    && state.phase == ClosePhase::Reopening
+                    && Arc::ptr_eq(&state.operation, &operation)
+                {
+                    state.phase = ClosePhase::Open;
+                }
+            }),
+        )
     }
 
     /// 在独立线程里排空并关闭网络队列：它的耗时和结果不进入业务日志的关闭摘要。
-    pub(crate) fn shutdown_detached(self: &Arc<Self>, deadline: Duration) {
+    pub(crate) fn shutdown_detached(self: &Arc<Self>) {
         {
-            let mut phase = lock(&self.closing);
-            if !matches!(*phase, ClosePhase::Open | ClosePhase::Parked) {
+            let mut state = lock(&self.closing);
+            if matches!(state.phase, ClosePhase::Closing | ClosePhase::Closed) {
                 return;
             }
-            *phase = ClosePhase::Closing;
+            state.phase = ClosePhase::Closing;
+            state.operation = Arc::new(());
         }
         let runtime = Arc::clone(self);
         let spawned = std::thread::Builder::new()
             .name("uc-network-log-shutdown".to_owned())
             .spawn(move || {
-                runtime.queue.shutdown(deadline);
-                *lock(&runtime.closing) = ClosePhase::Closed;
+                let completed = runtime.queue.shutdown_until_complete();
+                lock(&runtime.closing).phase = if completed {
+                    ClosePhase::Closed
+                } else {
+                    ClosePhase::CloseUnconfirmed
+                };
             });
         if spawned.is_err() {
-            *lock(&self.closing) = ClosePhase::Closed;
+            lock(&self.closing).phase = ClosePhase::CloseUnconfirmed;
         }
     }
 }

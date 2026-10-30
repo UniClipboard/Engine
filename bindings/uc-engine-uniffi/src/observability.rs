@@ -128,7 +128,15 @@ fn runtime_config(
 }
 
 fn remote_config(config: BindingCollectorConfig) -> Result<OtlpHttpConfig, BindingError> {
-    let remote = OtlpHttpConfig::new(&config.trace_endpoint, &config.log_endpoint)
+    #[cfg(feature = "test-process-release")]
+    let remote = if std::env::var_os("UC_TEST_BINDING_OTLP_LOOPBACK").is_some() {
+        OtlpHttpConfig::new_loopback(&config.trace_endpoint, &config.log_endpoint)
+    } else {
+        OtlpHttpConfig::new(&config.trace_endpoint, &config.log_endpoint)
+    };
+    #[cfg(not(feature = "test-process-release"))]
+    let remote = OtlpHttpConfig::new(&config.trace_endpoint, &config.log_endpoint);
+    let remote = remote
         // discarded-source[input-validation]: the rejection reason is fully expressed by the target classification
         .map_err(|_| BindingError::ObservabilityConfigInvalid)?;
     match (config.auth_header_name, config.auth_header_value) {

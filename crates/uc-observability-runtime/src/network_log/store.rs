@@ -27,6 +27,13 @@ const MANIFEST_FILE: &str = "run.json";
 const SEGMENT_PREFIX: &str = "network.";
 const SEGMENT_SUFFIX: &str = ".jsonl";
 
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_NETWORK_PARK_FAILURE: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_NETWORK_PARK_BLOCK: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_NETWORK_PARK_ENTERED: AtomicBool = AtomicBool::new(false);
+
 /// 一次运行目录的写入策略；打开是惰性且可重试的，初始化失败与运行中失败走同一个恢复路径。
 pub(crate) struct RunStore {
     network_root: PathBuf,
@@ -191,6 +198,24 @@ impl RecordStore for RunStore {
 
     /// 先落盘并关闭分段，再交还租约：其他进程只有在本进程停止写入后才能把该运行视为不活动。
     fn park(&mut self) -> io::Result<()> {
+        #[cfg(feature = "test-process-release")]
+        if PROBE_NETWORK_PARK_FAILURE.swap(false, Ordering::SeqCst) {
+            #[cfg(unix)]
+            let source = io::Error::from_raw_os_error(libc::EACCES);
+            #[cfg(not(unix))]
+            let source = io::Error::new(io::ErrorKind::PermissionDenied, "controlled park failure");
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, source));
+        }
+        #[cfg(feature = "test-process-release")]
+        if PROBE_NETWORK_PARK_BLOCK.load(Ordering::SeqCst) {
+            PROBE_NETWORK_PARK_ENTERED.store(true, Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while PROBE_NETWORK_PARK_BLOCK.load(Ordering::SeqCst)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
         self.parked = true;
         let Some(run) = self.open.take() else {
             return Ok(());
@@ -213,7 +238,11 @@ impl RecordStore for RunStore {
             return Ok(());
         }
         self.parked = false;
-        self.ensure_open().map(|_| ())
+        if let Err(error) = self.ensure_open() {
+            self.parked = true;
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn store_record(&mut self, bytes: &[u8], _source: usize) -> io::Result<()> {

@@ -44,6 +44,16 @@ struct QueuedRequest {
     response: oneshot::Sender<Result<(), EngineError>>,
 }
 
+/// 请求完成或队列工作线程被取消时，结束同一次活动登记。
+struct ActiveRequestGuard(Arc<TransitionQueue>);
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        self.0.state().active_request = false;
+        self.0.drained.notify_waiters();
+    }
+}
+
 enum QueuedItem {
     Request(QueuedRequest),
     StartupHandoff(oneshot::Sender<()>),
@@ -249,6 +259,12 @@ impl TransitionQueue {
                     continue;
                 }
             };
+            let active = ActiveRequestGuard(Arc::clone(&self));
+            #[cfg(feature = "dev-tools")]
+            if super::super::PROBE_HOLD_LIFECYCLE.swap(false, Ordering::AcqRel) {
+                super::super::PROBE_LIFECYCLE_HELD.store(true, Ordering::Release);
+                std::future::pending::<()>().await;
+            }
             // 每个请求拥有完整执行；调用方离开或一次意外退出不丢弃其余已接收请求。
             let requests = Arc::clone(&self);
             let result =
@@ -262,8 +278,7 @@ impl TransitionQueue {
                     Err(EngineError::new(1108, EngineErrorCategory::Internal, true))
                 });
             let _ = response.send(result);
-            self.state().active_request = false;
-            self.drained.notify_waiters();
+            drop(active);
         }
     }
 

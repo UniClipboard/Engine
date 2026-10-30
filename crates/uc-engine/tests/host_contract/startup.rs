@@ -13,6 +13,12 @@ use uc_engine::{
 
 use super::{EmptyClipboard, EmptyFiles, MemorySecureStorage};
 
+#[path = "startup/abandoned_cleanup.rs"]
+mod abandoned_cleanup;
+
+#[path = "startup/partial_runtime.rs"]
+mod partial_runtime;
+
 #[path = "startup/crash.rs"]
 mod crash;
 

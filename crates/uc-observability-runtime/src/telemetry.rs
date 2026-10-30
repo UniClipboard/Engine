@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,8 +11,10 @@ use opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
-use tracing_subscriber::filter::dynamic_filter_fn;
+use tracing_subscriber::filter::{dynamic_filter_fn, filter_fn};
+use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
+use tracing_subscriber::Registry;
 use uc_observability_contract::diagnostics::TELEMETRY_SCHEMA_VERSION;
 
 use crate::config::{ObservabilityConfig, OtlpHttpConfig};
@@ -20,11 +23,12 @@ use crate::local_file::LocalFileRuntime;
 use crate::local_log_processor::LocalLogProcessor;
 use crate::local_recording::LocalRecordingState;
 use crate::remote_health::{
-    RemoteHealthCounters, RemoteHealthSnapshot, RemoteSubmissionControl, TrackedLogProcessor,
-    TrackedSpanProcessor,
+    RemoteHealthCounters, RemoteHealthSnapshot, RemoteSubmissionControl, TracingSpans,
+    TrackedLogProcessor, TrackedSpanProcessor,
 };
 use crate::status::{RemoteSetupFailure, SetupStatus, SignalResult};
 use crate::subscriber::RuntimeLayer;
+use crate::subscriber_gate::SubscriberGate;
 #[cfg(test)]
 use crate::{DeploymentEnvironment, ObservabilityResource, OperatingSystem};
 
@@ -41,9 +45,151 @@ pub(crate) struct TelemetryRuntime {
 pub(crate) struct TelemetrySignalSummary {
     pub(crate) traces: SignalResult,
     pub(crate) logs: SignalResult,
+    pub(crate) trace_error: Option<Arc<opentelemetry_sdk::error::OTelSdkError>>,
+    pub(crate) log_error: Option<Arc<opentelemetry_sdk::error::OTelSdkError>>,
+}
+
+struct GuardedTraceLayer<L> {
+    inner: L,
+    activity: Option<Arc<TracingSpans>>,
+}
+
+struct TraceBoundaryLayer {
+    activity: Arc<TracingSpans>,
+    begins: bool,
+}
+
+impl Layer<Registry> for TraceBoundaryLayer {
+    fn on_new_span(
+        &self,
+        _: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        _: Context<'_, Registry>,
+    ) {
+        if self.begins {
+            self.activity.start(id);
+        }
+    }
+
+    fn on_close(&self, id: tracing::span::Id, _: Context<'_, Registry>) {
+        if !self.begins {
+            self.activity.end(&id);
+        }
+    }
+}
+
+impl<L: Layer<Registry> + 'static> Layer<Registry> for GuardedTraceLayer<L> {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        context: Context<'_, Registry>,
+    ) {
+        if self.admitted(id) {
+            self.inner.on_new_span(attrs, id, context);
+        }
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        context: Context<'_, Registry>,
+    ) {
+        if self.admitted(id) {
+            self.inner.on_record(id, values, context);
+        }
+    }
+
+    fn on_follows_from(
+        &self,
+        id: &tracing::span::Id,
+        follows: &tracing::span::Id,
+        context: Context<'_, Registry>,
+    ) {
+        if self.admitted(id) {
+            self.inner.on_follows_from(id, follows, context);
+        }
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, context: Context<'_, Registry>) {
+        self.inner.on_event(event, context);
+    }
+
+    fn on_enter(&self, id: &tracing::span::Id, context: Context<'_, Registry>) {
+        if self.admitted(id) {
+            self.inner.on_enter(id, context);
+        }
+    }
+
+    fn on_exit(&self, id: &tracing::span::Id, context: Context<'_, Registry>) {
+        if self.admitted(id) {
+            self.inner.on_exit(id, context);
+        }
+    }
+
+    fn on_close(&self, id: tracing::span::Id, context: Context<'_, Registry>) {
+        if self.admitted(&id) {
+            self.inner.on_close(id.clone(), context);
+        }
+    }
+
+    fn on_id_change(
+        &self,
+        old: &tracing::span::Id,
+        new: &tracing::span::Id,
+        context: Context<'_, Registry>,
+    ) {
+        if self
+            .activity
+            .as_ref()
+            .is_none_or(|activity| activity.replace(old, new))
+        {
+            self.inner.on_id_change(old, new, context);
+        }
+    }
+
+    // SAFETY: 指针由被包装的层提供，借用期不超过该层及 self 的借用期。
+    unsafe fn downcast_raw(&self, id: TypeId) -> Option<*const ()> {
+        if id == TypeId::of::<Self>() {
+            Some(self as *const _ as *const ())
+        } else {
+            // SAFETY: 保留调用方的类型与生命周期约束，原样转交内层。
+            unsafe { self.inner.downcast_raw(id) }
+        }
+    }
+}
+
+impl<L> GuardedTraceLayer<L> {
+    fn admitted(&self, id: &tracing::span::Id) -> bool {
+        self.activity
+            .as_ref()
+            .is_none_or(|activity| activity.contains(id))
+    }
 }
 
 impl TelemetryRuntime {
+    pub(crate) fn guard_subscriber<S>(&self, subscriber: S) -> SubscriberGate<S> {
+        SubscriberGate::new(
+            subscriber,
+            self.submission
+                .as_ref()
+                .map(RemoteSubmissionControl::tracing_activity),
+        )
+    }
+
+    pub(crate) fn trace_boundary(&self, begins: bool) -> Option<RuntimeLayer> {
+        self.submission.as_ref().map(|submission| {
+            Box::new(
+                TraceBoundaryLayer {
+                    activity: submission.tracing_activity(),
+                    begins,
+                }
+                .with_filter(filter_fn(remote_span_enabled)),
+            ) as RuntimeLayer
+        })
+    }
+
     pub(crate) fn new(
         config: &ObservabilityConfig,
         local_file: Option<Arc<LocalFileRuntime>>,
@@ -98,10 +244,17 @@ impl TelemetryRuntime {
             .with_context_activation(true)
             .with_location(false)
             .with_threads(false)
-            .with_tracked_inactivity(false)
-            .with_filter(dynamic_filter_fn(move |metadata, _| {
-                trace_accepting.load(Ordering::Acquire) && remote_span_enabled(metadata)
-            }));
+            .with_tracked_inactivity(false);
+        let trace_layer = GuardedTraceLayer {
+            inner: trace_layer,
+            activity: self
+                .submission
+                .as_ref()
+                .map(RemoteSubmissionControl::tracing_activity),
+        }
+        .with_filter(dynamic_filter_fn(move |metadata, _| {
+            trace_accepting.load(Ordering::Acquire) && remote_span_enabled(metadata)
+        }));
         let log_accepting = Arc::clone(&self.accepting);
         let log_layer = OpenTelemetryTracingBridge::new(&self.logs).with_filter(dynamic_filter_fn(
             move |metadata, _| log_accepting.load(Ordering::Acquire) && sdk_log_enabled(metadata),
@@ -120,17 +273,63 @@ impl TelemetryRuntime {
         }
     }
 
+    pub(crate) fn pause(&self) {
+        self.accepting.store(false, Ordering::Release);
+        if let Some(submission) = &self.submission {
+            submission.pause();
+        }
+    }
+
+    pub(crate) fn close_admission(&self) {
+        self.accepting.store(false, Ordering::Release);
+        if let Some(submission) = &self.submission {
+            submission.close_span_admission();
+        }
+    }
+
+    pub(crate) fn wait_accepted_spans(&self, interrupted: &impl Fn() -> bool) -> Option<bool> {
+        self.submission
+            .as_ref()
+            .map_or(Some(true), |submission| submission.wait_spans(interrupted))
+    }
+
+    pub(crate) fn notify_span_wait(&self) {
+        if let Some(submission) = &self.submission {
+            submission.notify_span_wait();
+        }
+    }
+
+    pub(crate) fn resume(&self) -> bool {
+        if self
+            .submission
+            .as_ref()
+            .is_some_and(|submission| !submission.resume())
+        {
+            return false;
+        }
+        self.accepting.store(true, Ordering::Release);
+        true
+    }
+
     pub(crate) fn force_flush(&self) -> TelemetrySignalSummary {
+        let (traces, trace_error) = signal_with_error(self.traces.force_flush());
+        let (logs, log_error) = signal_with_error(self.logs.force_flush());
         TelemetrySignalSummary {
-            traces: signal_result(self.traces.force_flush()),
-            logs: signal_result(self.logs.force_flush()),
+            traces,
+            logs,
+            trace_error,
+            log_error,
         }
     }
 
     pub(crate) fn shutdown(&self, deadline: Duration) -> TelemetrySignalSummary {
+        let (traces, trace_error) = signal_with_error(self.traces.shutdown_with_timeout(deadline));
+        let (logs, log_error) = signal_with_error(self.logs.shutdown_with_timeout(deadline));
         TelemetrySignalSummary {
-            traces: signal_result(self.traces.shutdown_with_timeout(deadline)),
-            logs: signal_result(self.logs.shutdown_with_timeout(deadline)),
+            traces,
+            logs,
+            trace_error,
+            log_error,
         }
     }
 
@@ -223,6 +422,7 @@ impl TelemetryRuntime {
                 .with_span_processor(TrackedSpanProcessor::new(
                     span_exporter,
                     submission.span_gate(),
+                    submission.span_activity(),
                 ))
                 .with_resource(resource.clone())
                 .build(),
@@ -274,6 +474,7 @@ fn resource(config: &ObservabilityConfig) -> Resource {
         .build()
 }
 
+#[cfg(test)]
 fn signal_result<T>(result: Result<T, opentelemetry_sdk::error::OTelSdkError>) -> SignalResult {
     match result {
         Ok(_) => SignalResult::Completed,
@@ -283,6 +484,23 @@ fn signal_result<T>(result: Result<T, opentelemetry_sdk::error::OTelSdkError>) -
         Err(opentelemetry_sdk::error::OTelSdkError::Timeout(_)) => SignalResult::TimedOut,
         Err(_) => SignalResult::Failed,
     }
+}
+
+fn signal_with_error(
+    result: Result<(), opentelemetry_sdk::error::OTelSdkError>,
+) -> (
+    SignalResult,
+    Option<Arc<opentelemetry_sdk::error::OTelSdkError>>,
+) {
+    let classification = match &result {
+        Ok(()) => SignalResult::Completed,
+        Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown) => {
+            SignalResult::AlreadyShutdown
+        }
+        Err(opentelemetry_sdk::error::OTelSdkError::Timeout(_)) => SignalResult::TimedOut,
+        Err(_) => SignalResult::Failed,
+    };
+    (classification, result.err().map(Arc::new))
 }
 
 /// 远端导出器装配结果：状态加上失败阶段（仅失败时存在）。
