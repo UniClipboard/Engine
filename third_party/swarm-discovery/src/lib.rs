@@ -365,9 +365,8 @@ impl Discoverer {
     /// By default (empty vector), multicast messages are sent only on the default interface.
     /// Provide a list of local IPv4 addresses to send multicast messages on specific interfaces.
     ///
-    /// This improves discovery in multi-homed environments where peers may be on different
-    /// network segments. Note that this only affects IPv4; IPv6 multicast uses the default
-    /// interface unless [`DropGuard::set_interfaces_v6`] is used (UniClipboard patch).
+    /// 改善对端处于不同网段时的多网卡发现。此设置只影响 IPv4；IPv6 默认使用系统默认
+    /// 接口，调用 [`DropGuard::set_interfaces_v6`] 后按期望接口集合收发（UniClipboard 补丁）。
     pub fn with_multicast_interfaces_v4(mut self, interfaces: Vec<Ipv4Addr>) -> Self {
         self.multicast_interfaces = interfaces;
         self
@@ -486,8 +485,7 @@ impl DropGuard {
     /// has started. Useful for systems where network interfaces may come up after
     /// the application starts.
     ///
-    /// Note: This only affects IPv4. IPv6 interfaces are managed by
-    /// [`Self::set_interfaces_v6`] (UniClipboard patch).
+    /// 此方法只影响 IPv4；IPv6 接口由 [`Self::set_interfaces_v6`] 管理（UniClipboard 补丁）。
     pub fn add_interface_v4(&self, interface: Ipv4Addr) {
         self.aref
             .send(guardian::Input::AddInterface(IpAddr::V4(interface)));
@@ -497,8 +495,7 @@ impl DropGuard {
     ///
     /// This stops sending multicast messages on the specified interface.
     ///
-    /// Note: This only affects IPv4. IPv6 interfaces are managed by
-    /// [`Self::set_interfaces_v6`] (UniClipboard patch).
+    /// 此方法只影响 IPv4；IPv6 接口由 [`Self::set_interfaces_v6`] 管理（UniClipboard 补丁）。
     pub fn remove_interface_v4(&self, interface: Ipv4Addr) {
         self.aref
             .send(guardian::Input::RemoveInterface(IpAddr::V4(interface)));
@@ -935,6 +932,37 @@ mod tests {
             "the group is left on the main socket after the socket is released"
         );
         assert_eq!(state.created(key), 1);
+    }
+
+    /// 同一网卡的多个地址共用一个成员关系；相同索引的最后一项决定绑定地址，
+    /// 重复提交同一最终地址既不重建套接字，也不退出或重复加入组播组。
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn ipv6_addresses_on_one_interface_share_one_membership() {
+        use socket::probe::Key;
+        let (index, addr) = require_loopback_v6!();
+        let key = Key::V6(index);
+        let state = Arc::new(socket::probe::State::default());
+        let guard = spawn_v6_discoverer(&format!("v6shared{}", std::process::id()), &state);
+        let unassigned: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        guard.set_interfaces_v6([(index, unassigned), (index, addr)]);
+        wait_until("IPv6 membership installed", || joined(&state, key)).await;
+        let memberships = state.memberships();
+        guard.set_interfaces_v6([(index, addr)]);
+        // 等到 guardian 确实消费了新集合，再检查没有产生额外成员操作。
+        guard.set_interfaces_v4([Ipv4Addr::LOCALHOST]);
+        wait_until("guardian processed the repeated set", || {
+            state.created(Ipv4Addr::LOCALHOST) == 1
+        })
+        .await;
+        assert_eq!(state.created(key), 1);
+        let retained: Vec<_> = state
+            .memberships()
+            .into_iter()
+            .filter(|(_, k, _)| *k == key)
+            .collect();
+        assert_eq!(retained, memberships);
+        assert_eq!(state.attempts(key), 1);
     }
 
     /// UniClipboard 补丁：IPv6 接口套接字的首次创建与第一次重试都失败后，期望集合保持不变，
