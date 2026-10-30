@@ -1,6 +1,6 @@
 # ADR-012：主动刷新共享设备采用自动连接与状态通知
 
-- **状态**：Accepted（已实现）
+- **Status**: Superseded for the public refresh contract. See the [workspace convergence plan](../../exec-plans/completed/016-workspace-wide-convergence.md) and the [current Engine interface](../uc-engine-interface.md).
 - **日期**：2026-08-07
 - **修订**：2026-08-09 补充“会话恢复后自动查找”触发路径
 - **相关文档**：`ARCHITECTURE.md`、`docs/design-docs/ports.md`、`docs/design-docs/features/012-automatic-shared-device-refresh.md`

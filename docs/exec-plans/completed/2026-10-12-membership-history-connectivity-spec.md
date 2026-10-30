@@ -1,6 +1,6 @@
 # Issue #34 第四切片：成员历史完整迁移与连接复用规格
 
-状态：**本地实现与验收完成，待线上检查**（2026-10-13）；设计于 2026-10-12 确认，最终验收结果见执行计划。
+Status: completed and merged in [PR #180](https://github.com/UniClipboard/Engine/pull/180). The [execution plan](2026-10-12-membership-history-connectivity-plan.md) records the exact head, checks, skipped jobs, and device acceptance boundary.
 基线：`origin/main edf0a296`，第三切片合并提交为 `247490af`。
 [执行计划](2026-10-12-membership-history-connectivity-plan.md)负责实施顺序、门禁与证据；本文是本切片设计的唯一来源。
 
