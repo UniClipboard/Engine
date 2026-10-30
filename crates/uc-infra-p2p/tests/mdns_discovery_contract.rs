@@ -240,3 +240,33 @@ async fn ipv6_multicast_interfaces_are_read_at_start_and_on_local_address_change
     receiver.shutdown().await.unwrap();
     sender.shutdown().await.unwrap();
 }
+
+/// AAAA 记录无法携带 scope id，对端收到的 IPv6 link-local 地址无法拨号，因此不通告；
+/// 同一发布中的其他 IPv4 与 IPv6 地址照常通告。
+#[tokio::test]
+async fn ipv6_link_local_addresses_are_not_advertised() {
+    let (receiver, sender, id) = pair();
+    let mut active = receiver.resolve(id).unwrap();
+    let advertised: Vec<std::net::SocketAddr> = vec![
+        "192.0.2.10:4242".parse().unwrap(),
+        "[2001:db8::10]:4242".parse().unwrap(),
+    ];
+    let link_local: std::net::SocketAddr = "[fe80::10]:4242".parse().unwrap();
+    sender.publish(&EndpointData::from_iter(
+        advertised
+            .iter()
+            .chain([&link_local])
+            .map(|addr| TransportAddr::Ip(*addr)),
+    ));
+    let item = tokio::time::timeout(Duration::from_secs(10), active.next())
+        .await
+        .expect("discovery works")
+        .unwrap()
+        .unwrap();
+    let mut resolved: Vec<std::net::SocketAddr> =
+        item.to_endpoint_addr().ip_addrs().copied().collect();
+    resolved.sort();
+    assert_eq!(resolved, advertised);
+    receiver.shutdown().await.unwrap();
+    sender.shutdown().await.unwrap();
+}

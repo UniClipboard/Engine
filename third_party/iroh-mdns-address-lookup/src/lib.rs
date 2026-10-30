@@ -644,11 +644,18 @@ impl MdnsAddressLookup {
             .map_err(|e| AddressLookupBuilderError::from_err("mdns", e))
     }
 
+    /// 按端口分组待通告的地址。
+    ///
+    /// UniClipboard 补丁：不通告 IPv6 link-local 地址。AAAA 记录无法携带 scope id，对端
+    /// 收到的 fe80::/10 地址不知道经哪个接口到达，不能拨号。
     fn socketaddrs_to_addrs<'a>(
         socketaddrs: impl Iterator<Item = &'a SocketAddr>,
     ) -> HashMap<u16, Vec<IpAddr>> {
         let mut addrs: HashMap<u16, Vec<IpAddr>> = HashMap::default();
-        for socketaddr in socketaddrs {
+        for socketaddr in socketaddrs.filter(|addr| match addr.ip() {
+            IpAddr::V6(ip) => !ip.is_unicast_link_local(),
+            IpAddr::V4(_) => true,
+        }) {
             addrs
                 .entry(socketaddr.port())
                 .and_modify(|a| a.push(socketaddr.ip()))
