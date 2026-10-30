@@ -1,6 +1,6 @@
 # Issue #34 第四切片：成员历史完整迁移与连接复用执行计划
 
-状态：**本地实现与验收完成，待线上检查**（2026-10-13）。基于最新 main 实施；原文档检查不是本切片行为证据。
+Status: completed. [PR #180](https://github.com/UniClipboard/Engine/pull/180) merged as `2f9afc9956b0cda82e65c912f0c0f6dc6aa51256` on 2026-10-13. Its final head was `b30011bcf3319560b96bd96f09ca4bfb74e3eafe`. Engine repository checks, Engine tests, upgrade smoke, and Windows x64 and arm64 builds passed on that head. Coverage and connection-recovery jobs were skipped. Physical-device acceptance was not run. The earlier local failures remain recorded below.
 基线：`origin/main edf0a296`；第三切片 `247490af` 已合并，Issue #34 保持开放。
 唯一设计来源：[实现规格](2026-10-12-membership-history-connectivity-spec.md)。本文记录执行顺序、退出条件和证据，
 不建立第二套协议或授权规则。
@@ -102,7 +102,7 @@
 
 ## 阶段 6：本地完整门禁、线上检查与归档
 
-状态：本地完成，线上检查待后续推送；当前保持 active，不提前归档。
+Status: completed for the checks listed in the status above. Skipped jobs and physical devices remain unverified.
 
 ### 本地先行
 

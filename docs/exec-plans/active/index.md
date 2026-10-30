@@ -5,7 +5,6 @@
 
 
 
-- [Issue #34 第四切片：成员历史完整迁移与连接复用](2026-10-12-membership-history-connectivity-plan.md)（本地实现与验收完成，待线上检查；[实现规格](2026-10-12-membership-history-connectivity-spec.md)）
 
 - [连接候选发布、网络恢复与路径观测](2026-10-10-connection-path-and-network-recovery.md)（实施中：地址过滤与连接路径改动已落地，端到端与网络矩阵验收待执行）
 - [连接生命周期加固：关闭移除成员的连接、可取消发送、连接复用、地址刷新、重试负责人](2026-10-10-connection-lifecycle-hardening.md)（草案：四项在本分支，每项先写复现测试；连接复用另开 issue）
@@ -34,7 +33,6 @@
 - [Peer Address 读取失败的准确诊断](2026-09-22-peer-address-read-diagnostics.md)（实施完成，等待下游现场诊断）
 - [Core 边界收口](2026-09-23-core-boundary-remediation.md)（提议：违规清单已完成第一轮盘点，修复未开始）
 - [大图发送前本地准备性能与诊断](2026-09-18-large-image-publish-latency.md)（实施中）
-- [本机历史标签](2026-10-04-local-history-tags.md)（本地实现与端到端验收完成，等待合并）
 - [统一暂停、恢复与中断恢复](2026-09-12-unified-runtime-lifecycle.md)（实施中，剩余设备与产品宿主验收未完成；包含已有后台问题修复记录入口）
 
 计划完成时先更新稳定设计/ADR 和验收证据，再移入 `../completed/`。

@@ -2,11 +2,19 @@
 
 ## 状态
 
-设计草案；附录 A 记录了已完成的安全修正。产品范围见 [PRD-001](../../product-specs/001-local-encrypted-search.md)，关键取舍见 [ADR-013](../decisions/013-local-encrypted-search-index.md)。
+The sections below describe the historical design and its `search-v10` repair. They are not a complete description of the current implementation. Product requirements remain in [PRD-001](../../product-specs/001-local-encrypted-search.md).
+
+## Current implementation status
+
+Engine exposes `SearchEntries` and `RebuildSearchIndex` through the stable operation contract. The current index uses `search-v11` for the legacy strategy and `search-v12` for the V3 strategy. Engine assembly selects a strategy from the available profile protection runtime. See [`operation.rs`](../../../crates/uc-engine/src/contract/operation.rs), [`constants.rs`](../../../crates/uc-infra-storage/src/search/constants.rs), and [`infra.rs`](../../../crates/uc-engine/src/assembly/wire/infra.rs).
+
+The index adds prefix tokens for eligible words. The parser rejects mixed `AND` and `OR`. The inspected parser does not explicitly reject parentheses or negation. Those inputs still need runtime verification. The product specification has not yet resolved these differences.
+
+The index writes file extensions derived from file names and paths in plaintext. This violates the current persistence rule. The MIME and source-device columns also need review. The [security rules](../../security/encrypted-persistence.md#known-search-index-gap) describe the gap and the repair boundary. The historical plaintext tradeoff in Appendix A is not an approved exception to the current rule.
 
 ## 概览
 
-本说明定义本地加密搜索的稳定行为和数据保护约束。
+The following sections retain the historical search design. The status section above records the verified current behavior and known gaps.
 
 ## 架构摘要
 
@@ -582,7 +590,9 @@ search」把五个从内容派生的字段以 **明文** 落进 `search_document
     靠 `busy_timeout=5000` + 有限次退避重试等过实时写入尖峰；实现会记录 `VACUUM` 耗时日志以便
     发现异常停顿。若未来该阻塞面成为问题，根治方向是把搜索索引拆到独立 DB 文件后再 VACUUM。
 
-### 显式接受的权衡（明文保留）
+### Historical plaintext tradeoff
+
+This historical tradeoff does not authorize plaintext under the current security rules. See the [known search index gap](../../security/encrypted-persistence.md#known-search-index-gap).
 
 - `source_device`：被 SQL 下推 `eq_any` 过滤，加密即破坏过滤；内容为稳定 `DeviceId`（非用户
   自定义名），泄露面 =「哪台设备产生了该条目」，属 v1「元数据明文可接受」范畴。

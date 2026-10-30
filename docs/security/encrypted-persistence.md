@@ -20,6 +20,16 @@
 
 上述例外不包含原始目录路径、数据库/搜索字段、日志、目录名或其他关联元数据。
 
+## Known search index gap
+
+The production search index currently stores `file_extensions` as plaintext JSON in SQLite.
+The search projection derives these extensions from file names and paths. This violates the default rule above.
+The V3 search path also writes the extensions in plaintext. See [`projection.rs`](../../crates/uc-application/src/search/projection.rs), [`rows.rs`](../../crates/uc-infra-storage/src/search/rows.rs), and [`infra.rs`](../../crates/uc-engine/src/assembly/wire/infra.rs).
+
+The index also stores `mime_type` and `source_device` in plaintext. Their input ranges and protection requirements need review. An arbitrary MIME string is not automatically an approved content-type enum.
+
+This section describes the current implementation, not an approved exception. A repair must cover new writes, index rebuild, existing plaintext, and failure recovery. The current evidence is a code-path inspection; a disk probe for these fields has not been run.
+
 ## 配置与凭据
 
 - 配置（用户或程序的偏好与参数，如本机设备名、保存目录、relay 地址、局域网地址）可以明文保存，无需逐项审批；配置不得包含用户内容或凭据，日志与观测规则不变。
