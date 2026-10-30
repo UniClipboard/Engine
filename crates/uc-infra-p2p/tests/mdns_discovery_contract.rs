@@ -7,7 +7,9 @@ use iroh::{
     address_lookup::{AddressLookup, EndpointData},
     SecretKey, TransportAddr,
 };
-use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup, MulticastInterfacesV4};
+use iroh_mdns_address_lookup::{
+    DiscoveryEvent, MdnsAddressLookup, MulticastInterfacesV4, MulticastInterfacesV6,
+};
 
 fn pair() -> (MdnsAddressLookup, MdnsAddressLookup, iroh::EndpointId) {
     let service = format!("uni-test-{}", uuid::Uuid::new_v4().simple());
@@ -169,6 +171,71 @@ async fn multicast_interfaces_are_read_at_start_and_on_local_address_changes() {
     })
     .await
     .expect("a local address change refreshes the interface set");
+
+    receiver.shutdown().await.unwrap();
+    sender.shutdown().await.unwrap();
+}
+
+/// 本机非回环 IPv6 接口的（接口索引，地址），每个接口取一个地址；只用于测试接口来源。
+fn local_ipv6_interfaces() -> Vec<(u32, std::net::Ipv6Addr)> {
+    let mut interfaces = std::collections::BTreeMap::new();
+    for interface in if_addrs::get_if_addrs().unwrap_or_default() {
+        if let (std::net::IpAddr::V6(ip), Some(index)) = (interface.addr.ip(), interface.index) {
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                interfaces.entry(index).or_insert(ip);
+            }
+        }
+    }
+    interfaces.into_iter().collect()
+}
+
+/// IPv6 接口来源与 IPv4 一样在启动时读取一次，并在本机发布地址变化时再次读取；
+/// 在本机 IPv6 接口上收发时发现照常工作。
+#[tokio::test]
+async fn ipv6_multicast_interfaces_are_read_at_start_and_on_local_address_changes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let service = format!("uni-test-{}", uuid::Uuid::new_v4().simple());
+    let reads = Arc::new(AtomicUsize::new(0));
+    let interfaces = {
+        let reads = Arc::clone(&reads);
+        MulticastInterfacesV6::new(move || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            local_ipv6_interfaces()
+        })
+    };
+    let id = SecretKey::generate().public();
+    let receiver = MdnsAddressLookup::builder()
+        .service_name(service.clone())
+        .advertise(false)
+        .multicast_interfaces_v6(MulticastInterfacesV6::new(local_ipv6_interfaces))
+        .build(SecretKey::generate().public())
+        .unwrap();
+    let sender = MdnsAddressLookup::builder()
+        .service_name(service)
+        .multicast_interfaces_v6(interfaces)
+        .build(id)
+        .unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 1, "read once at start");
+
+    let mut active = receiver.resolve(id).unwrap();
+    sender.publish(&EndpointData::from_iter([TransportAddr::Ip(
+        "192.0.2.10:4242".parse().unwrap(),
+    )]));
+    let resolved = tokio::time::timeout(Duration::from_secs(10), active.next())
+        .await
+        .expect("discovery works with configured IPv6 interfaces")
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.endpoint_id(), id);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while reads.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a local address change refreshes the IPv6 interface set");
 
     receiver.shutdown().await.unwrap();
     sender.shutdown().await.unwrap();

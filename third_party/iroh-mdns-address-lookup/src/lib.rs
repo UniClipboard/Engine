@@ -56,7 +56,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     fmt,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -185,6 +185,32 @@ impl fmt::Debug for MulticastInterfacesV4 {
     }
 }
 
+/// 返回当前应参与 mDNS 组播的本机 IPv6 接口：每项为（操作系统接口索引，该接口上的一个
+/// 本机地址）。
+///
+/// 读取时机与 [`MulticastInterfacesV4`] 相同。IPv6 组播按接口索引生效，地址只用于绑定该
+/// 接口的发送套接字；结果是期望集合，由 swarm-discovery 的 `set_interfaces_v6` 负责增删接口
+/// 并重试安装失败的接口。
+#[derive(Clone)]
+pub struct MulticastInterfacesV6(Arc<dyn Fn() -> Vec<(u32, Ipv6Addr)> + Send + Sync>);
+
+impl MulticastInterfacesV6 {
+    /// 用接口快照函数创建来源。
+    pub fn new(snapshot: impl Fn() -> Vec<(u32, Ipv6Addr)> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(snapshot))
+    }
+
+    fn snapshot(&self) -> Vec<(u32, Ipv6Addr)> {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for MulticastInterfacesV6 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MulticastInterfacesV6")
+    }
+}
+
 /// Builder for [`MdnsAddressLookup`].
 #[derive(Debug)]
 pub struct MdnsAddressLookupBuilder {
@@ -192,6 +218,7 @@ pub struct MdnsAddressLookupBuilder {
     service_name: String,
     filter: AddrFilter,
     multicast_interfaces_v4: Option<MulticastInterfacesV4>,
+    multicast_interfaces_v6: Option<MulticastInterfacesV6>,
 }
 
 impl MdnsAddressLookupBuilder {
@@ -202,6 +229,7 @@ impl MdnsAddressLookupBuilder {
             service_name: N0_SERVICE_NAME.to_string(),
             filter: AddrFilter::default(),
             multicast_interfaces_v4: None,
+            multicast_interfaces_v6: None,
         }
     }
 
@@ -212,6 +240,16 @@ impl MdnsAddressLookupBuilder {
     /// 按 1 秒起、最长 60 秒的有界退避重试。
     pub fn multicast_interfaces_v4(mut self, interfaces: MulticastInterfacesV4) -> Self {
         self.multicast_interfaces_v4 = Some(interfaces);
+        self
+    }
+
+    /// 在全部给定的 IPv6 接口上收发 mDNS，而不只是默认接口。
+    ///
+    /// 未设置时保持上游行为：IPv6 只使用默认接口。启动后以及本机发布地址每次变化时读取
+    /// 来源，把结果作为期望集合交给 swarm-discovery；单个接口无法安装时只跳过该接口，按与
+    /// IPv4 相同的有界退避重试。
+    pub fn multicast_interfaces_v6(mut self, interfaces: MulticastInterfacesV6) -> Self {
+        self.multicast_interfaces_v6 = Some(interfaces);
         self
     }
 
@@ -259,6 +297,7 @@ impl MdnsAddressLookupBuilder {
             self.service_name,
             self.filter,
             self.multicast_interfaces_v4,
+            self.multicast_interfaces_v6,
         )
     }
 }
@@ -319,6 +358,7 @@ impl MdnsAddressLookup {
         service_name: String,
         filter: AddrFilter,
         multicast_interfaces_v4: Option<MulticastInterfacesV4>,
+        multicast_interfaces_v6: Option<MulticastInterfacesV6>,
     ) -> Result<Self, AddressLookupBuilderError> {
         debug!("Creating new Mdns service");
         let (send, mut recv) = mpsc::channel(64);
@@ -339,6 +379,9 @@ impl MdnsAddressLookup {
         // 接口集合只表达期望；是否安装成功由 swarm-discovery 判断，初始失败的接口由其重试。
         if let Some(initial) = initial_interfaces_v4 {
             address_lookup.set_interfaces_v4(initial);
+        }
+        if let Some(interfaces) = &multicast_interfaces_v6 {
+            address_lookup.set_interfaces_v6(interfaces.snapshot());
         }
 
         let local_addrs: Watchable<Option<EndpointData>> = Watchable::default();
@@ -364,6 +407,9 @@ impl MdnsAddressLookup {
                         // swarm-discovery，由它增删接口；集合未变时也会立即重试未安装的接口。
                         if let Some(interfaces) = &multicast_interfaces_v4 {
                             address_lookup.set_interfaces_v4(interfaces.snapshot());
+                        }
+                        if let Some(interfaces) = &multicast_interfaces_v6 {
+                            address_lookup.set_interfaces_v6(interfaces.snapshot());
                         }
                         address_lookup.remove_all();
 
