@@ -1,7 +1,13 @@
 """报告覆盖必须与场景及次数匹配，重复项不能抵消缺失项。"""
 import copy
 import importlib.util
+import contextlib
+import io
+import json
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location(
@@ -136,6 +142,61 @@ class ProgressResources(unittest.TestCase):
             with self.subTest(field=field):
                 data=large_report();data[field]=value
                 with self.assertRaises(AssertionError):validator.verify_large_report(data)
+
+
+class ExecutionScope(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        for index, report in enumerate(reports()):
+            self.write(f'receive-lifecycle-{index}.json', report)
+        for index in range(12):
+            self.write(f'sdk-tags-{index}.json', dict(store_open_during_count=True, sdk_temp_tags=0))
+        events = [
+            dict(event='created', slots=0, active=0, peer_active_max=0, queued=0, peer_queued_max=0),
+            dict(event='active', slots=4, active=4, peer_active_max=2, queued=0, peer_queued_max=0),
+            dict(event='settled', slots=0, active=0, peer_active_max=0, queued=0, peer_queued_max=0, closed=True),
+        ]
+        (self.root/'download-scheduler-test.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in events))
+
+    def write(self, name, value):
+        (self.root/name).write_text(json.dumps(value))
+
+    def verify(self, *args):
+        with contextlib.redirect_stdout(io.StringIO()):
+            validator.main([str(self.root), *args])
+        return json.loads((self.root/'summary.json').read_text())
+
+    def test_default_scope_records_large_case_as_skipped(self):
+        result = self.verify()
+        self.assertEqual(result['large_file_engine_status'], 'skipped')
+        self.assertEqual(result['large_file_engine_skip_reason'], 'developer-local-only')
+        self.assertIsNone(result['large_file_engine'])
+
+    def test_default_scope_does_not_use_a_stale_large_report(self):
+        (self.root/'managed-engine-large.json').write_text('stale invalid report')
+        self.assertEqual(self.verify()['large_file_engine_status'], 'skipped')
+
+    def test_explicit_local_scope_requires_a_real_report(self):
+        with self.assertRaises(FileNotFoundError):
+            self.verify('--include-local-large')
+
+    def test_explicit_local_scope_preserves_large_resource_validation(self):
+        self.write('managed-engine-large.json', large_report())
+        self.assertEqual(self.verify('--include-local-large')['large_file_engine_status'], 'passed')
+        data = large_report()
+        data['completed_rounds'] = 1
+        self.write('managed-engine-large.json', data)
+        with self.assertRaises(AssertionError):
+            self.verify('--include-local-large')
+
+    def test_ci_cannot_enable_the_local_large_runner(self):
+        script = Path(__file__).with_name('run-blob-lifecycle-resources.sh')
+        result = subprocess.run(['bash', str(script), '--include-local-large'],
+                                env={**os.environ, 'CI': 'true'}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('CI不得启用', result.stderr)
 
 
 if __name__ == "__main__":

@@ -208,6 +208,7 @@ fn verify_file(path: &Path, round: usize, file_bytes: u64) -> Result<()> {
 }
 
 #[test]
+#[ignore = "仅开发者本机显式运行双1GiB资源基线；不进入CI或覆盖率运行"]
 fn managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and_tasks(
 ) -> Result<()> {
     let mut builder = Builder::new_multi_thread();

@@ -22,7 +22,7 @@
 
 - [Issue #34 后续缺口处理](exec-plans/completed/2026-10-30-issue-34-followups.md)：实现与本地验收完成并归档；目录复用、D15独立发现证明与成员证据数据库代号隔离落地，最终工作区5004项及成员56项通过。原间歇异常和旧格式演进继续由技术债跟踪，远端CI及设备范围由总清单跟踪。
 
-- [Issue #34 总验收清单](exec-plans/active/2026-10-29-connectivity-migration-acceptance.md)：统一核对原 DoD、切片状态、最终 CI、首次失败与跳过边界。
+- [Issue #34 总验收清单](exec-plans/completed/2026-10-29-connectivity-migration-acceptance.md)：按用户决定结束架构迁移跟踪并归档；D14双1GiB基线仅开发者本机显式运行，D15脚本修正已本地验收。新候选CI、独立技术债、发布和设备范围继续按实际记录，结项不代表这些项目全部通过。
 
 - [Space 加入受管通信](exec-plans/completed/2026-10-29-space-admission-connectivity-plan.md)：实现与本地验收完成；初次加入、续接和入站流接入统一连接管理器，保留非成员专属认证与原协议，修复单端点占尽准入额度；历史发布二进制、Relay 和真机矩阵跳过。
 

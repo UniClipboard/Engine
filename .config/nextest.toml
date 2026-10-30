@@ -203,7 +203,7 @@ test-group = "process"
 threads-required = "num-test-threads"
 slow-timeout = { period = "30s", terminate-after = 2 }
 
-# 受管双Engine连续2×1GiB真实流式资源验收；无重试，独占宿主并给实际字节校验留出期限。
+# Engine资源验收无重试并独占宿主；双1GiB用例仅供开发者本机显式运行。
 [[profile.default.overrides]]
 filter = "package(uc-engine) & test(/host_adapter_contract::blob_resources::/)"
 threads-required = "num-test-threads"

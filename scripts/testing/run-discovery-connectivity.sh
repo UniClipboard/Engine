@@ -55,7 +55,8 @@ unset UC_MEMBERSHIP_HISTORY_TEST_RELAY
 status=0
 timeout --kill-after=5s 180 "$2" --ignored --exact cloud_outage_uses_only_mdns_after_both_processes_restart --nocapture > "$out/discovery.log" 2>&1 || status=$?
 nft -j list table inet discovery_test > "$out/firewall.json"
-if ((status == 0)) && ! rg -qF 'test result: ok. 1 passed;' "$out/discovery.log"; then status=1; fi
+# 拒绝零测试假通过；使用runner已有的grep，不依赖额外安装rg。
+if ((status == 0)) && ! grep -qF 'test result: ok. 1 passed;' "$out/discovery.log"; then status=1; fi
 printf '%s\n' "$status" > "$out/exit-code.txt"
 cat "$out/discovery.log"
 exit "$status"

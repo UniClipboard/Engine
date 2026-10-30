@@ -1,6 +1,6 @@
 # Issue #34 总验收清单
 
-状态：**结算中，议题保持开放**（2026-10-30）。本清单对应
+状态：**按用户明确决定结束架构迁移跟踪并归档**（2026-10-30）。D14资源基线调整为仅开发者本机显式运行，D15脚本修正已有本地完整验收；两项收尾由本轮PR交付，新候选远端CI仍独立跟踪，不将关闭议题写成全部CI或设备验收通过。本清单对应
 [Issue #34](https://github.com/UniClipboard/Engine/issues/34) 的 Definition of Done 和补充分层合同，
 不把切片合并、平台编译或重跑通过当作整项完成。
 
@@ -12,7 +12,7 @@
 
 总验收须逐项给出代码／运行证据、确切候选及覆盖范围，保持首次失败和跳过项。
 第四、七、九片达到各自退出条件后才归档；真实设备与完整历史矩阵未跑时仍列为跳过。
-本次不关闭远端 issue、不合并交付 PR、不发布或更改产品仓依赖。
+本次按用户明确指令关闭远端issue并归档总清单；本轮收尾PR仍单独评审及验收，不自动合并或发布，不更改产品仓依赖。
 
 ## 切片交付状态
 
@@ -31,7 +31,7 @@
 
 ## Definition of Done 逐项对应
 
-“已有证据”表示所属切片已证明该范围，不表示当前候选全部回归完成；“待总审”必须补齐后才能关闭 #34。
+“已有证据”表示所属切片已证明该范围，不表示当前候选全部回归完成。用户按下列已实现范围与验收边界结束架构迁移跟踪；后续CI、设备及独立技术债不因结项而改记为通过。
 
 | 编号 | 原要求 | 当前证据与结论 |
 | --- | --- | --- |
@@ -80,6 +80,10 @@ Core／Application／协议的生产包依赖与源码由[仓库检查](../../..
 
 D15已由[后续处理计划](../completed/2026-10-30-issue-34-followups.md)补齐本地端到端证明：真实Cloud保持开启且有失败终态，两端完全退出后使用新双栈端口，旧地址即便仍在持久记录中也被防火墙排除。mDNS负对照无成功路径和内容，正对照仅放行mDNS即完成Direct认证同步及合成剪贴板宿主准确读回。原先分层证明不足的记录保留于既有归档；新场景已接入CI，但本地结果不代表远端执行或真机验收。
 
+主线 `357d7f64` 的[原CI记录](https://github.com/UniClipboard/Engine/actions/runs/41008568253/job/123909265326)中，D15测试体46.31秒通过，但包装脚本在零测试检查处因 `rg: command not found` 退出1。
+该检查改用runner已有的 `grep -qF`，仍要求恰有一个成功用例，原测试失败退出码也原样保留；不改发现流程、断言或期限。
+修正后本机原完整场景43.73秒通过，包装脚本退出0；无rg环境下成功／零测试／原失败退出码分别核验为0／1／101。原CI失败继续保留，远端新候选仍须独立验收，不能把测试体通过写成原CI整步通过。
+
 ## 补充分层合同与覆盖边界
 
 ### 关联议题的责任与结算边界
@@ -89,7 +93,7 @@ D15已由[后续处理计划](../completed/2026-10-30-issue-34-followups.md)补�
 
 | 关联范围 | 已有实现或明确边界 | 仍须独立结算 |
 | --- | --- | --- |
-| [#68](https://github.com/UniClipboard/Engine/issues/68)（open） | 会话代次与长期网络owner已有接缝；[043规格](043-engine-network-runtime-and-space-session-handover.md)将网络寿命限定为Engine活跃期，挂起不无限保活endpoint | 完整生命周期、安全、性能与设备矩阵按043计划核验，不能用本片连接租约证明整项已完成 |
+| [#68](https://github.com/UniClipboard/Engine/issues/68)（open） | 会话代次与长期网络owner已有接缝；[043规格](../active/043-engine-network-runtime-and-space-session-handover.md)将网络寿命限定为Engine活跃期，挂起不无限保活endpoint | 完整生命周期、安全、性能与设备矩阵按043计划核验，不能用本片连接租约证明整项已完成 |
 | [#70](https://github.com/UniClipboard/Engine/issues/70)（open） | 第三／四片的历史恢复与逐页ACK保持原业务退避，不引入批量协议 | 取消周期积压发送、连接后完整拉取及旧版上线发送的全部合同须另行核验，不把历史通信迁移等同#70完成 |
 | [#170](https://github.com/UniClipboard/Engine/issues/170)（open） | 第二／四／八片按协议专属连接复用；presence健康连接不直接借给内容协议 | 原议题要求的Direct／Relay／高延迟／丢包握手次数与首条延迟对照，及收益结论须按其原验收结算 |
 | [#140](https://github.com/UniClipboard/Engine/issues/140)（open） | 第三片及当前总审已证明组更新的完整Application接收负责人和受管入站；不是仍缺owner | 源码／切片证据可用于议题结算，GitHub开放状态不自动改变本片已完成事实 |
@@ -97,7 +101,7 @@ D15已由[后续处理计划](../completed/2026-10-30-issue-34-followups.md)补�
 | [#142](https://github.com/UniClipboard/Engine/issues/142)（open）、[#171](https://github.com/UniClipboard/Engine/issues/171)（closed） | [#172](https://github.com/UniClipboard/Engine/pull/172)已合并，区分明确拒绝／暂不可用／旧端未分类，处理历史sticky rejection；#171已关闭 | #142提出的其余拒绝粒度与发送行为须按原合同核对，不把两项完全等同，也不再次实现已合并分类 |
 | [#166](https://github.com/UniClipboard/Engine/issues/166)（open） | [#169](https://github.com/UniClipboard/Engine/pull/169)已合并，Joiner／Sponsor生成材料时采样当前地址；Relay延迟及双角色互通已有独立证据 | 现场后台／蜂窝等边界保持原PR限制；议题仍开放不代表仍使用启动地址快照 |
 | [#167](https://github.com/UniClipboard/Engine/issues/167)（open） | 对端握手失败与本机Relay健康是不同事实；不能直接推断全局endpoint重建 | 按原现场失效层、有限恢复与真实前后台证据结算，不由#166地址修复或单次Relay成功覆盖 |
-| [#134](https://github.com/UniClipboard/Engine/issues/134)（open） | 与#167分开；现有Relay恢复矩阵只证明各自固定场景和预算 | 底层退避及三秒目标按[专属计划](2026-09-18-relay-only-three-second-recovery.md)与原议题逐项结算，不能推广为所有公网／设备场景 |
+| [#134](https://github.com/UniClipboard/Engine/issues/134)（open） | 与#167分开；现有Relay恢复矩阵只证明各自固定场景和预算 | 底层退避及三秒目标按[专属计划](../active/2026-09-18-relay-only-three-second-recovery.md)与原议题逐项结算，不能推广为所有公网／设备场景 |
 | [#104](https://github.com/UniClipboard/Engine/issues/104)、[#72](https://github.com/UniClipboard/Engine/issues/72)（均open） | 当前已有逻辑时间规则、真实网络分层和并行模式入口；不改生产期限 | 原各项性能、固定等待移除与重复压力要求继续由各自测试计划核验，不通过减少必需网络矩阵完成本次CI收尾 |
 
 [#173](https://github.com/UniClipboard/Engine/pull/173)也已合并，覆盖当时连接生命周期计划的1／2／4／5项；
@@ -112,7 +116,7 @@ D15已由[后续处理计划](../completed/2026-10-30-issue-34-followups.md)补�
 | 本地成功／远端保存／系统写入分别结算 | 第七、八片真实输出、接收权威、ACK 与 Collector／Jaeger；发送 ACK 不表示系统剪贴板写入成功 |
 | 重启、积压和事务边界 | 第三、四、七、九片真实 SQLite／MLS、强杀与幂等；第二 backend 的虚拟时间不能代替网络及持久证明 |
 | 设备网络运行期与 Space 会话 | 原 generation／迟到结果／切 Space／关闭测试；#68 的完整 endpoint 生命周期仍按其所属计划独立验收，不因 #34 切片完成自动关闭 |
-| 有界资源与关闭 | 两轮各 1GiB、SDK worker／tag／staging、连接／任务／FD；第九片跨进程容量不执行 MLS，不能外推全部真实恢复压力 |
+| 有界资源与关闭 | 双Engine两轮各1GiB资源基线按用户要求仅开发者本机显式运行；CI保留其余生命周期、SDK tag／连接／任务／FD、配额与容量验收，详见[测试指南](../../design-docs/testing-guide.md#双1gib资源基线仅在开发者本机运行)。第九片跨进程容量不执行MLS，不能外推全部真实恢复压力 |
 | 平台 | 原 CI 按实际 macOS／Windows／iOS／Android／HarmonyOS 编译步骤结算；编译成功不代表设备运行 |
 
 ## 首次失败与未完成清单
