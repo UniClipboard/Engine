@@ -1,6 +1,6 @@
 # Issue #34 第四切片：成员历史完整迁移与连接复用执行计划
 
-Status: completed. [PR #180](https://github.com/UniClipboard/Engine/pull/180) merged as `2f9afc9956b0cda82e65c912f0c0f6dc6aa51256` on 2026-10-13. Its final head was `b30011bcf3319560b96bd96f09ca4bfb74e3eafe`. Engine repository checks, Engine tests, upgrade smoke, and Windows x64 and arm64 builds passed on that head. Coverage and connection-recovery jobs were skipped. Physical-device acceptance was not run. The earlier local failures remain recorded below.
+状态：**实现与已执行的必需 CI 验收完成，已归档**（2026-10-29 核对结算）。[PR #180](https://github.com/UniClipboard/Engine/pull/180) 于 2026-10-13 合并；最终同 head 的仓库检查、Engine 测试、升级 smoke 及 Windows x64／arm64 构建通过，覆盖率与扩展连接恢复 job 跳过，物理设备验收跳过。最终 head、合并提交及原失败记录见文末；原文档检查不是本切片行为证据。
 基线：`origin/main edf0a296`；第三切片 `247490af` 已合并，Issue #34 保持开放。
 唯一设计来源：[实现规格](2026-10-12-membership-history-connectivity-spec.md)。本文记录执行顺序、退出条件和证据，
 不建立第二套协议或授权规则。
@@ -102,7 +102,7 @@ Status: completed. [PR #180](https://github.com/UniClipboard/Engine/pull/180) me
 
 ## 阶段 6：本地完整门禁、线上检查与归档
 
-Status: completed for the checks listed in the status above. Skipped jobs and physical devices remain unverified.
+状态：本地与最终同提交实际执行的线上必需检查已完成；覆盖率、扩展连接恢复 job 与物理设备保持跳过。最终结算见文末，以下保留原执行顺序。
 
 ### 本地先行
 
@@ -272,3 +272,20 @@ EncryptionError::NotInitialized。当前 Space 材料更新在 vault I/O 前开�
 （4204/4205）；已补齐环境完整重跑，未修改该测试或放宽 CI。审计初次因工具不在 PATH 未启动，随后使用
 既有 cargo-audit 0.22.2 完成。以上过程保留原日志，线上修复后结果由 PR #180 的当前 head 检查记录确认。
 macOS/Windows 的修复后运行、物理设备与覆盖率未在本机执行，不计为本地通过。
+
+
+## 最终线上验收与归档结算（2026-10-29）
+
+[PR #180](https://github.com/UniClipboard/Engine/pull/180) 已合并，最终代码为
+`b30011bcf3319560b96bd96f09ca4bfb74e3eafe`，合并提交为 `2f9afc9956b0cda82e65c912f0c0f6dc6aa51256`。
+核对同一 head 的 [PR Check 38400885976](https://github.com/UniClipboard/Engine/actions/runs/38400885976)
+与 [Windows Build 38400886013](https://github.com/UniClipboard/Engine/actions/runs/38400886013) 均成功。
+PR 的仓库检查、workspace、testkit、成员 smoke、Relay 历史复用、隔离配对 smoke、升级 smoke
+及固定旧 main 历史双向交换步骤均实际成功。覆盖率与扩展隔离网络 job 按原 PR 条件跳过，不能计为通过。
+
+原本地完整验证与首次失败记录继续按所属提交保留。物理设备、切网、睡眠／后台、完整升级非 smoke
+矩阵仍未执行；本次核对不扩大它们的覆盖范围。稳定职责和复用合同已在
+[成员历史所有权](../../design-docs/membership-history-ownership.md)与
+[连接边界](../../design-docs/clipboard-connectivity.md)维护。
+
+原“待线上检查”记录到此完成结算，spec／plan 同步归档；不关闭整个 #34，也不代表发布。

@@ -230,6 +230,9 @@ target/nextest/ci/junit.xml
 - 旧 `cargo test` 或专用脚本仍可运行。
 - 新测试进入正确分组，没有被 `fast` 意外选入真实网络或设备集合。
 - CI 上传 JUnit、JSON 和文本摘要，`if: always()` 保留故障证据。
+- CI 各组运行前清空共用的 `target/nextest/ci/junit.xml`，组名报告只从对应步骤的 `success`／`failure` 结果保留。
+  取消或跳过不能把前一组留下的 JUnit 复制成当前组报告；原始文件可随工件保留，但必须结合实际步骤、用例身份与来源核对，不能仅看文件名或零失败计数。
+- workspace 测试失败时先上传该组 JUnit 为 `engine-workspace-failure`，便于在后续长测试结束前定位；整组结束后的完整工件仍按原入口保留。编译未产生报告时不伪造空报告，取消／跳过不触发此失败工件。
 - 默认不重试；任何 retry-pass 必须单独统计，不能当作稳定通过。
 - 真实网络和设备未执行时明确写“跳过/未验证”。
 - 先读取实际工件再报告成功，不以 workflow 绿色代替报告验收。

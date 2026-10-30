@@ -363,6 +363,31 @@ fn own_run_directory(runtime: &ChildRuntime) -> PathBuf {
         .join(status.run_id)
 }
 
+fn remove_run_directory(directory: &Path) {
+    // 写入者仍使用原路径；先原子移走目录，避免递归删除时又有新文件进入。
+    let detached = directory.with_extension("removed");
+    std::fs::rename(directory, &detached).expect("detach run directory");
+    std::fs::remove_dir_all(detached).expect("remove detached run directory");
+}
+
+fn block_run_directory(directory: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        remove_run_directory(directory);
+        match std::fs::File::create_new(directory) {
+            Ok(_) => return,
+            Err(error) => {
+                // 写入者可能先重建目录；只继续安装故障，不重跑拨号或验收断言。
+                assert!(directory.is_dir(), "block run path: {error}");
+                assert!(
+                    Instant::now() < deadline,
+                    "writer kept recreating the directory during fault setup"
+                );
+            }
+        }
+    }
+}
+
 async fn run_client(scenario: &str) {
     let runtime = install_child_subscriber("client");
     let addr_path = out_root().join("server.addr.json");
@@ -424,13 +449,12 @@ async fn run_client(scenario: &str) {
             runtime.stage("before_fault");
             let run_directory = own_run_directory(&runtime);
             // 目录被外部删除：下一次写入或刷新重建目录并继续。
-            std::fs::remove_dir_all(&run_directory).expect("remove run directory");
+            remove_run_directory(&run_directory);
             dial_once(&endpoint, &addr).await;
             tokio::time::sleep(Duration::from_millis(200)).await;
             runtime.stage("directory_removed");
             // 目录位置被普通文件占住：写入失败、状态不可用，业务拨号不受影响。
-            std::fs::remove_dir_all(&run_directory).expect("remove recreated directory");
-            std::fs::write(&run_directory, b"blocker").expect("block path");
+            block_run_directory(&run_directory);
             dial_once(&endpoint, &addr).await;
             tokio::time::sleep(Duration::from_millis(200)).await;
             runtime.stage("path_blocked");
@@ -609,8 +633,16 @@ fn run_scenario(run: &Run<'_>) {
     let client_status = client.wait().expect("client exit");
     std::fs::write(run.out.join("server.stop"), b"").expect("stop server");
     let server_status = server.wait().expect("server exit");
-    assert!(client_status.success(), "client child failed");
-    assert!(server_status.success(), "server child failed");
+    assert!(
+        client_status.success(),
+        "client child failed ({client_status}):\n{}",
+        std::fs::read_to_string(run.out.join("client.stderr.txt")).expect("client stderr")
+    );
+    assert!(
+        server_status.success(),
+        "server child failed ({server_status}):\n{}",
+        std::fs::read_to_string(run.out.join("server.stderr.txt")).expect("server stderr")
+    );
 }
 
 #[test]
@@ -824,6 +856,16 @@ fn artifact_root(name: &str) -> (PathBuf, Option<tempfile::TempDir>) {
             (root, None)
         }
         Err(_) => {
+            if let Some(path) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
+                let root = PathBuf::from(path).join("network-log-e2e");
+                std::fs::create_dir_all(&root).expect("CI artifact dir");
+                let directory = tempfile::Builder::new()
+                    .prefix(&format!("{name}-"))
+                    .tempdir_in(root)
+                    .expect("unique CI artifact dir");
+                // CI 需在父测试失败后仍保留两端原日志；显式输出目录沿用原约定。
+                return (directory.keep(), None);
+            }
             let temporary = tempfile::tempdir().expect("temp artifact dir");
             (temporary.path().to_path_buf(), Some(temporary))
         }

@@ -28,7 +28,9 @@ use tracing::instrument::WithSubscriber;
 use tracing::{Instrument, Span};
 use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
-use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
+use uc_observability_contract::diagnostics::{
+    record_task_join_failure, DiagnosticTaskKind, ObservationContext,
+};
 use uc_observability_contract::uc_debug;
 
 #[derive(Clone)]
@@ -471,6 +473,7 @@ impl<K: ConnectionKey> ConnectivityManager<K> {
     ) {
         let weak = Arc::downgrade(&self.inner);
         let task_kind = self.inner.policy.task_kind;
+        let observation = ObservationContext::capture();
         let mut acquisition = self.acquisition();
         acquisition.address_hint = address_hint;
         acquisition.cancel = flight.cancel.clone();
@@ -505,7 +508,9 @@ impl<K: ConnectionKey> ConnectivityManager<K> {
             async move {
                 let acquisition = async move { acquisition.connect(target, peer, attempt).await };
                 let mut worker = AbortOnDropHandle::new(tokio::spawn(
-                    acquisition
+                    // 只延续不透明关联，不让拨号或本地准入延长调用方的业务 span。
+                    observation
+                        .scope(acquisition)
                         .instrument(Span::none())
                         .with_current_subscriber(),
                 ));

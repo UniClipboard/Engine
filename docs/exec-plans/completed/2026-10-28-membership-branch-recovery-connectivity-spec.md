@@ -1,6 +1,6 @@
 # Issue #34 第九切片：成员分支恢复受管连接实现规格
 
-状态：设计草案，待实现（2026-10-28）。本文定义实现合同与实施顺序，不表示新增行为已经验证。
+状态：**实现与验收已完成并归档**（2026-10-30）。逐项证据、首次失败及未执行范围见[执行计划最终结算](2026-10-28-membership-branch-recovery-connectivity-plan.md#最终候选网络核验与归档结算2026-10-30)；#34整体仍保持开放。
 核对基线：`80bda137541f1a054897f8d1474634dac9d752e8`（第八切片归档PR #342合并提交）。实施前重新固定实际main、候选及兼容端SHA，不以本文基线自动代表未来发布版本。
 
 ## 1. 概述（Overview）
@@ -38,7 +38,9 @@
 - 不顺带修复旧旧Relay文件拒绝、成员F2间歇失败等历史技术债；原失败仍须记录。
 - 不把本片通过等同整个Issue #34完成、产品宿主采用或发布验收。
 
-## 4. 当前架构上下文（Current Architecture Context）
+## 4. 设计前架构上下文（2026-10-28基线）
+
+本节保留设计前的责任断点；受管实现已替换原生 adapter，当前证据见执行计划，不将下列旧状态当作当前实现。
 
 ### 恢复与签发业务
 
@@ -50,7 +52,7 @@ Relationship: 接收方持久保存RecipientPrepared后提交external commit；�
 ### 现有传输实现
 
 Component: 原生分支恢复adapter。
-Path: [membership_branch_recovery_adapter.rs](../../../crates/uc-infra-p2p/src/network/iroh/membership_branch_recovery_adapter.rs)。
+Path: 基线中的 `membership_branch_recovery_adapter.rs`（已删除）；现有受管入口为[branch_recovery_handler.rs](../../../crates/uc-infra-p2p/src/network/iroh/connectivity/branch_recovery_handler.rs)。
 Responsibility: 出站地址解析、重试拨号、framing、入站身份解析和业务dispatch。
 Relationship: 目前同时承担连接操作和协议交换；逐步骤使用10秒超时。请求／响应为u32长度前缀、编码体和发送方向FIN，每条连接处理一次交换。
 
@@ -72,7 +74,7 @@ Relationship: Engine仅替换完整对象接线，不获得恢复内部步骤。
 
 ### 组件（Components）
 
-1. 在`recover_conflict`内部增加`transport/`业务通信模块，按owner、port、模型、错误、测试拆分。它实现现有`MembershipBranchRecoveryChannelPort`，输入仍为既有request／commit，输出仍为GroupInfo／恢复包，依赖manager及专属wire port。它负责一次交换的请求冻结、期限与结果分类，不选择peer或执行MLS。
+1. 在`recover_conflict`内部增加`transport.rs`业务通信模块，按owner、port、模型、错误、测试拆分。它实现现有`MembershipBranchRecoveryChannelPort`，输入仍为既有request／commit，输出仍为GroupInfo／恢复包，依赖manager及专属wire port。它负责一次交换的请求冻结、期限与结果分类，不选择peer或执行MLS。
 2. 同模块提供完整入站receiver，消费Uni租约、读取一个领域请求、调用既有issuer、写回一个结果。业务dispatch从Infra移回Application；不得要求Engine选择begin或issue。
 3. Infra增加`ConnectivityProfile::MembershipBranchRecovery`，只协商现有ALPN；`IrohPeerConnection`将其识别为`ConnectionProtocol::MembershipBranchRecovery`及`SingleExchange`。handler仅将原生连接包装、交付manager和完整receiver。
 4. Infra wire adapter只把Uni流与已有wire编码互转，不拨号、不读成员仓储、不持久化、不决定重试。旧adapter在调用方整体迁移后删除，不能保留原生fallback。
@@ -190,18 +192,18 @@ SingleExchange不得合并不同业务交换共享同一条只能完成一次的
 
 ## 9. 验收条件（Acceptance Criteria）
 
-* [ ] AC01：原维护入口完成真实分支恢复，Engine与宿主没有新增步骤编排或公共API。
-* [ ] AC02：出入站均走专属Uni profile和受管租约；旁路静态检查及故意加入原生拨号的负fixture生效。
-* [ ] AC03：合法分叉恢复不被普通同步准入误挡；陌生、歧义、错peer、已撤销及不合法recipient全部拒绝。
-* [ ] AC04：原generation冻结覆盖排队、身份读取、拨号、流和业务提交；移除后重加、切Space、迟到结果不能复活旧请求。
-* [ ] AC05：一次取消不影响其他交换；30秒绝对期限及10秒首流上限不因步骤切换续期，本地提交实际监督结束。
-* [ ] AC06：连接、拨号、队列和入站并发遵守本片预算；过载有界，关闭后资源回到基线。
-* [ ] AC07：现有ALPN、五类消息、长度前缀、FIN及4 MiB限制保持；新旧双角色Direct／Relay真实矩阵通过。
-* [ ] AC08：响应丢失、相同commit重试、不同commit冲突及各持久阶段重启保持原幂等／恢复合同，无新格式或明文写入。
-* [ ] AC09：第二测试backend完成同一业务通信；Application／Core／协议层没有新增iroh类型依赖。
-* [ ] AC10：来源错误可追溯，公开错误与日志脱敏；网络成功不冒充恢复完成，无额外网络业务root。
-* [ ] AC11：原生旧实现删除，生命周期参与者完整，相关测试、根门禁及最终候选必需CI通过；未执行平台逐项跳过。
-* [ ] AC12：稳定合同回写，证据逐项关联；旧技术债保留，按实际完成状态归档，不据本片关闭整个#34。
+* [x] AC01：原维护入口完成真实分支恢复，Engine与宿主没有新增步骤编排或公共API。
+* [x] AC02：出入站均走专属Uni profile和受管租约；旁路静态检查及故意加入原生拨号的负fixture生效。
+* [x] AC03：合法分叉恢复不被普通同步准入误挡；陌生、歧义、错peer、已撤销及不合法recipient全部拒绝。
+* [x] AC04：原generation冻结覆盖排队、身份读取、拨号、流和业务提交；移除后重加、切Space、迟到结果不能复活旧请求。
+* [x] AC05：一次取消不影响其他交换；30秒绝对期限及10秒首流上限不因步骤切换续期，本地提交实际监督结束。
+* [x] AC06：连接、拨号、队列和入站并发遵守本片预算；过载有界，关闭后资源回到基线。
+* [x] AC07：现有ALPN、五类消息、长度前缀、FIN及4 MiB限制保持；新旧双角色Direct／Relay真实矩阵通过。
+* [x] AC08：响应丢失、相同commit重试、不同commit冲突及各持久阶段重启保持原幂等／恢复合同，无新格式或明文写入。
+* [x] AC09：第二测试backend完成同一业务通信；Application／Core／协议层没有新增iroh类型依赖。
+* [x] AC10：来源错误可追溯，公开错误与日志脱敏；网络成功不冒充恢复完成，无额外网络业务root。
+* [x] AC11：原生旧实现删除，生命周期参与者完整，相关测试、根门禁及最终候选必需CI通过；未执行平台逐项跳过。
+* [x] AC12：稳定合同回写，证据逐项关联；旧技术债保留，按实际完成状态归档，不据本片关闭整个#34。
 
 ## 10. 风险与取舍（Risks and Trade-offs）
 
@@ -212,11 +214,13 @@ SingleExchange不得合并不同业务交换共享同一条只能完成一次的
 - 不把整个恢复用例或签发、port、wire与测试塞进一个`mod.rs`；模块入口保持声明与必要导出，防止统一负责人演变为单文件负担。
 - peer选择沿用现有首个证据peer规则，不新增地址评分、在线优先或自动切换heuristic；若发现其可用性问题，另记证据和范围。
 
-## 11. 待确认问题（Open Questions）
+## 11. 实施前问题的核验结论
 
-1. 当前普通准入在实际分叉记录下是否阻断合法recipient？阶段0必须用当前真实记录给出结论，再决定复用现有准入或实现最小恢复资格port；不得未经证明选用宽松准入。
-2. 实际Direct／Relay最慢成功恢复是否适合30秒总期限及当前并发预算？尚无本片测量，不声称这些预算已经通过。
-3. 真实兼容矩阵使用哪个受支持旧端SHA？实施前固定同时支持该ALPN与原持久恢复行为的端点；不能凭版本名假设支持。
-4. 原本地签发与转换scope能否完整覆盖切Space和不可取消提交？阶段0需逐个gate证明，若缺口影响原持久事务，只在原owner补齐，不让Engine持有恢复阶段。
+1. **普通准入不能直接复用。** 基线规则明确拒绝 `Diverged`；本片通过真实分叉恢复验证后，使用恢复专属成员事实port及认证身份唯一映射，保留消息级recipient与签发资格核验，不放宽普通同步规则。
+2. **保留30秒交换预算。** 出入站交换共用绝对期限、首流10秒与并发预算均有专项验证；当前交付候选三角色Direct／Relay六格通过。矩阵耗时包含配对、分叉和进程操作，不能拿整格耗时当作单次交换耗时，也不据本地拓扑宣称所有公网慢链路均已验证。
+3. **兼容端已固定。** 恢复矩阵旧端源码为 `5cbca8fc24a278fa7b01ae611bf4b925914bef13`，真实新旧双角色互通及五类消息向量已有证据；实际二进制SHA和当前候选来源见执行计划，不凭版本名或另一协议的旧端替代。
+4. **提交继续由原owner监督。** 原作用域覆盖网络返回、准备和条件提交；真实迟到响应下切Space、同设备移除重加及各持久阶段重启有专项验证。已开始的不可取消提交监督到实际结束，不把超时或取消等同回滚。
 
-以上为实现前验证事项，不要求用户猜测内部实现。若证明需要改变协议、安全规则、持久格式或稳定公共接口，应先修订本规格并明确范围，不能在实现中暗中扩大。
+稳定结论由[成员分支恢复通信边界](../../design-docs/membership-history-ownership.md#成员分支恢复通信边界)维护；
+验证层次、失败、跳过项及最终候选范围见[逐项证据表](2026-10-28-membership-branch-recovery-connectivity-plan.md#验收证据核对最终结算)。
+以上问题及AC01–12已按最终代码候选 `33dc6f03` 的证据结算；首轮失败、技术债和设备等跳过项见执行计划，不外推为#34整体完成。

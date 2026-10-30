@@ -153,6 +153,7 @@ jobs:
           scripts/architecture/check-direct-log-macros.test.mjs
           scripts/testing/relay-recovery-support.test.mjs
           scripts/testing/connection-recovery-session.test.mjs
+          scripts/testing/connection-recovery-host.test.mjs
           scripts/testing/clipboard-delivery-evidence.test.mjs
           scripts/testing/transfer-progress-evidence.test.mjs
           scripts/testing/verify-progress-connectivity.test.mjs
@@ -297,9 +298,9 @@ jobs:
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
-    # 完整 workspace 与原固定资源负载共用构建；冷构建时曾在资源阶段触及60分钟上限。
-    # 仅增加整组CI预算，各场景的原期限、负载和资源阈值保持不变。
-    timeout-minutes: 90
+    # workspace、恢复进程组和原固定资源负载均为必需；#345首轮在成员smoke阶段触及90分钟整组上限。
+    # 仅将整组CI预算调整为120分钟，保留各测试原期限、负载、资源阈值和零重试。
+    timeout-minutes: 120
     env:
       # 所有测试组共用同一次全工作区构建，只编译一次。
       UC_TEST_BUILD_SCOPE: workspace
@@ -331,14 +332,25 @@ jobs:
         run: cargo nextest run --profile ci --locked --workspace --all-targets --no-run
 
       - name: Run workspace tests
-        run: bash scripts/testing/run-test-group.sh workspace
+        id: workspace_tests
+        run: |
+          rm -f target/nextest/ci/junit.xml
+          bash scripts/testing/run-test-group.sh workspace
         env:
           # Linux 内联帧可能只有短名称；校验实际可用符号，完整符号由 macOS checks job 校验。
           UC_EXPECT_DIAGNOSTIC_STACK: available
 
       - name: Keep workspace test report
-        if: always()
+        if: always() && (steps.workspace_tests.outcome == 'success' || steps.workspace_tests.outcome == 'failure')
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/workspace.xml || true
+
+      - name: Retain workspace failure before remaining groups
+        if: failure() && steps.workspace_tests.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-workspace-failure
+          path: target/test-reports/workspace.xml
+          if-no-files-found: ignore
 
       - name: Run branch recovery process and checkpoint tests
         if: success() || failure()
@@ -349,7 +361,7 @@ jobs:
             --features branch-recovery-fault-tests,uc-engine/branch-recovery-fault-tests --test branch_recovery
 
       - name: Keep branch recovery process report
-        if: always() && steps.branch_recovery_process.outcome != 'skipped'
+        if: always() && (steps.branch_recovery_process.outcome == 'success' || steps.branch_recovery_process.outcome == 'failure')
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/branch-recovery-process.xml || true
 
       - name: Install just for current-authority registration proof
@@ -363,33 +375,39 @@ jobs:
       - name: Run mandatory blob lifecycle resources
         if: success() || failure()
         id: blob_lifecycle_resources
-        run: bash scripts/testing/run-blob-lifecycle-resources.sh
+        run: |
+          rm -f target/nextest/ci/junit.xml
+          bash scripts/testing/run-blob-lifecycle-resources.sh
         env:
           UC_EXPECT_DIAGNOSTIC_STACK: available
           # 保留连续两轮及原资源断言，仅在轮末记录任务来源，定位 runner 上的瞬时增长。
           UC_BLOB_TASK_ORIGIN_PROBE: "1"
 
       - name: Keep blob lifecycle resource report
-        if: always() && steps.blob_lifecycle_resources.outcome != 'skipped'
+        if: always() && (steps.blob_lifecycle_resources.outcome == 'success' || steps.blob_lifecycle_resources.outcome == 'failure')
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/blob-lifecycle-resources.xml || true
 
       - name: Run testkit evidence suites
         if: success() || failure()
-        run: bash scripts/testing/run-test-group.sh evidence
+        id: testkit_evidence
+        run: |
+          rm -f target/nextest/ci/junit.xml
+          bash scripts/testing/run-test-group.sh evidence
 
       - name: Keep testkit evidence report
-        if: always()
+        if: always() && (steps.testkit_evidence.outcome == 'success' || steps.testkit_evidence.outcome == 'failure')
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/evidence.xml || true
 
       - name: Run membership smoke scenarios
         if: success() || failure()
-        run: >-
-          bash scripts/testing/run-test-group.sh membership-e2e
-          -E 'test(/^automatic_connections::/) | test(/^removal_convergence::/)
-          | test(=admission::fresh_device_join_completes_through_stable_operations)'
+        id: membership_smoke
+        run: |
+          rm -f target/nextest/ci/junit.xml
+          bash scripts/testing/run-test-group.sh membership-e2e \
+            -E 'test(/^automatic_connections::/) | test(/^removal_convergence::/) | test(=admission::fresh_device_join_completes_through_stable_operations)'
 
       - name: Keep membership smoke report
-        if: always()
+        if: always() && (steps.membership_smoke.outcome == 'success' || steps.membership_smoke.outcome == 'failure')
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/membership-e2e-smoke.xml || true
 
       # 在隔离网络中完成三节点配对与文本、文件双向传输；其余场景与重复轮次属于完整检查和 nightly。
