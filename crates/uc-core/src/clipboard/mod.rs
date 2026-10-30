@@ -21,7 +21,6 @@ mod repository_error;
 mod selection;
 mod snapshot;
 mod system;
-mod thumbnail;
 mod timestamp;
 
 pub use active_state::{ActiveClipboardState, MobileConsumableRef};
@@ -64,5 +63,4 @@ pub use integration_mode::ClipboardIntegrationMode;
 pub use mime::{normalize_wire_mime, ImageKind, MimeClass, MimeType};
 pub use origin::ClipboardOrigin;
 pub use payload_availability::PayloadAvailability;
-pub use thumbnail::ThumbnailMetadata;
 pub use timestamp::TimestampMs;

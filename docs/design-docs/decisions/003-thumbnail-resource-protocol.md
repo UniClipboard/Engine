@@ -1,5 +1,8 @@
 # ADR-003: Thumbnail Resource Protocol for Preview Thumbnails
 
+Status: superseded by the breaking [entry thumbnail contract](../entry-thumbnails.md). The following records the historical decision. Its operation, URL projection, metadata repository, and background generation are no longer active. Historical encrypted data is retained.
+
+
 ## Context
 
 Thumbnail bytes are generated and stored as blobs, but the thumbnail blob id is only

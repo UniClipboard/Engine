@@ -122,7 +122,7 @@ pub enum OperationKind {
     QueryHistoryStats,
     GetHistoryEntryResource,
     ReadBlob,
-    ReadThumbnail,
+    ReadEntryThumbnail,
     ReadEntryFile,
     QueryEntryDelivery,
     ClearHistory,
@@ -239,7 +239,7 @@ impl fmt::Display for OperationKind {
             Self::QueryHistoryStats => "query_history_stats",
             Self::GetHistoryEntryResource => "get_history_entry_resource",
             Self::ReadBlob => "read_blob",
-            Self::ReadThumbnail => "read_thumbnail",
+            Self::ReadEntryThumbnail => "read_entry_thumbnail",
             Self::ReadEntryFile => "read_entry_file",
             Self::QueryEntryDelivery => "query_entry_delivery",
             Self::ClearHistory => "clear_history",
@@ -400,7 +400,7 @@ pub enum Operation {
     QueryHistoryStats,
     GetHistoryEntryResource(HistoryEntryInput),
     ReadBlob(BlobResourceInput),
-    ReadThumbnail(ThumbnailResourceInput),
+    ReadEntryThumbnail(HistoryEntryInput),
     ReadEntryFile(HistoryEntryInput),
     QueryEntryDelivery(HistoryEntryInput),
     ClearHistory,
@@ -519,7 +519,7 @@ impl Operation {
             Self::QueryHistoryStats => OperationKind::QueryHistoryStats,
             Self::GetHistoryEntryResource(_) => OperationKind::GetHistoryEntryResource,
             Self::ReadBlob(_) => OperationKind::ReadBlob,
-            Self::ReadThumbnail(_) => OperationKind::ReadThumbnail,
+            Self::ReadEntryThumbnail(_) => OperationKind::ReadEntryThumbnail,
             Self::ReadEntryFile(_) => OperationKind::ReadEntryFile,
             Self::QueryEntryDelivery(_) => OperationKind::QueryEntryDelivery,
             Self::ClearHistory => OperationKind::ClearHistory,
@@ -871,11 +871,6 @@ pub struct HistoryEntryInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobResourceInput {
     pub blob_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ThumbnailResourceInput {
-    pub representation_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -223,10 +223,10 @@ fn every_public_operation_has_a_stable_kind() {
             OperationKind::ReadBlob,
         ),
         (
-            Operation::ReadThumbnail(uc_engine::ThumbnailResourceInput {
-                representation_id: "representation-1".into(),
+            Operation::ReadEntryThumbnail(uc_engine::HistoryEntryInput {
+                entry_id: "entry-1".into(),
             }),
-            OperationKind::ReadThumbnail,
+            OperationKind::ReadEntryThumbnail,
         ),
         (
             Operation::ReadEntryFile(uc_engine::HistoryEntryInput {
@@ -349,7 +349,6 @@ fn history_management_contract_preserves_results_without_debugging_user_content(
             size_bytes: 10,
             captured_at_ms: 1,
             content_type: "text".into(),
-            thumbnail_url: Some("http://private/thumbnail".into()),
             is_encrypted: true,
             is_favorited: true,
             updated_at_ms: 2,
@@ -360,8 +359,6 @@ fn history_management_contract_preserves_results_without_debugging_user_content(
             link_urls: Some(vec!["https://private.example/secret".into()]),
             link_domains: Some(vec!["private.example".into()]),
             file_sizes: Some(vec![10]),
-            image_width: None,
-            image_height: None,
             is_directory: true,
             payload_state: None,
         }]),

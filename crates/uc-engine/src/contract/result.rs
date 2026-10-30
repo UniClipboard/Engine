@@ -88,7 +88,6 @@ pub struct HistoryEntrySummary {
     pub size_bytes: i64,
     pub captured_at_ms: i64,
     pub content_type: String,
-    pub thumbnail_url: Option<String>,
     pub is_encrypted: bool,
     pub is_favorited: bool,
     pub updated_at_ms: i64,
@@ -99,8 +98,6 @@ pub struct HistoryEntrySummary {
     pub link_urls: Option<Vec<String>>,
     pub link_domains: Option<Vec<String>>,
     pub file_sizes: Option<Vec<i64>>,
-    pub image_width: Option<i32>,
-    pub image_height: Option<i32>,
     pub is_directory: bool,
     pub payload_state: Option<String>,
 }
@@ -114,7 +111,6 @@ impl fmt::Debug for HistoryEntrySummary {
             .field("has_detail", &self.has_detail)
             .field("size_bytes", &self.size_bytes)
             .field("content_type", &self.content_type)
-            .field("has_thumbnail", &self.thumbnail_url.is_some())
             .field("is_encrypted", &self.is_encrypted)
             .field("is_favorited", &self.is_favorited)
             .field("tag_count", &self.content_tags.len())

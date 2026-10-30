@@ -382,8 +382,6 @@ pub(super) fn create_infra_layer(
     );
     let blob_repository: Arc<dyn BlobRepositoryPort> = Arc::new(blob_repo);
 
-    let thumbnail_repo_impl = DieselThumbnailRepository::new(Arc::clone(&db_executor));
-    let thumbnail_repo: Arc<dyn ThumbnailRepositoryPort> = Arc::new(thumbnail_repo_impl);
     let thumbnail_generator = InfraThumbnailGenerator::new(128).map_err(|e| {
         WiringError::ThumbnailInit(
             anyhow::Error::from(e).context("Failed to create thumbnail generator"),
@@ -470,7 +468,6 @@ pub(super) fn create_infra_layer(
         selection_repo,
         blob_reference_repo,
         blob_repository,
-        thumbnail_repo,
         thumbnail_generator,
         key_material,
         settings_repo,

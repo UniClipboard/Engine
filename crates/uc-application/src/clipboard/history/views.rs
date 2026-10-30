@@ -18,7 +18,6 @@ pub struct EntryProjectionView {
     pub size_bytes: i64,
     pub captured_at: i64,
     pub content_type: String,
-    pub thumbnail_url: Option<String>,
     pub is_encrypted: bool,
     pub is_favorited: bool,
     pub updated_at: i64,
@@ -29,8 +28,6 @@ pub struct EntryProjectionView {
     pub link_urls: Option<Vec<String>>,
     pub link_domains: Option<Vec<String>>,
     pub file_sizes: Option<Vec<i64>>,
-    pub image_width: Option<i32>,
-    pub image_height: Option<i32>,
     /// Whether this file entry was captured as a directory. Sourced from the
     /// single `EntryFileSet::has_directory_structure()` authority; `false` for
     /// non-file entries or when no manifest is available. The sender UI keys off

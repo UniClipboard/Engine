@@ -10,12 +10,9 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{info_span, Instrument};
 use uc_core::clipboard::{MimeType, PayloadAvailability};
-use uc_core::clipboard::{ThumbnailMetadata, TimestampMs};
 use uc_core::ids::RepresentationId;
-use uc_core::ports::clipboard::{
-    ProcessingUpdateOutcome, ThumbnailGeneratorPort, ThumbnailRepositoryPort,
-};
-use uc_core::ports::{ClipboardRepresentationStore, ClockPort, ContentHashPort};
+use uc_core::ports::clipboard::ProcessingUpdateOutcome;
+use uc_core::ports::{ClipboardRepresentationStore, ContentHashPort};
 use uc_observability_contract::{
     error_source::io_error_kind,
     log_fields::{log_id, log_vocab},
@@ -38,26 +35,14 @@ fn should_convert_to_png(mime: Option<&MimeType>) -> bool {
     }
 }
 
-/// Result of converting an image to PNG, including pre-decoded RGBA pixels
-/// to avoid re-decoding for thumbnail generation.
-struct ConvertedImage {
-    png_bytes: Vec<u8>,
-    rgba_bytes: Vec<u8>,
-    width: u32,
-    height: u32,
-}
-
 /// Convert image bytes (any format supported by the `image` crate) to PNG.
 ///
 /// Uses fast compression because the blob store applies zstd compression on top,
 /// making aggressive PNG compression redundant. This significantly reduces encoding time
 /// for large images (e.g. 34MB TIFF → PNG drops from ~2s to ~0.5s).
 ///
-/// Returns both PNG bytes and pre-decoded RGBA pixels to avoid re-decoding for thumbnails.
-fn convert_image_to_png(image_bytes: &[u8]) -> Result<ConvertedImage> {
+fn convert_image_to_png(image_bytes: &[u8]) -> Result<Vec<u8>> {
     let img = image::load_from_memory(image_bytes).context("decode image for PNG conversion")?;
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
 
     let mut png_bytes = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new_with_quality(
@@ -68,12 +53,7 @@ fn convert_image_to_png(image_bytes: &[u8]) -> Result<ConvertedImage> {
     img.write_with_encoder(encoder)
         .context("encode image as PNG")?;
 
-    Ok(ConvertedImage {
-        png_bytes,
-        rgba_bytes: rgba.into_raw(),
-        width,
-        height,
-    })
+    Ok(png_bytes)
 }
 
 /// Background worker that materializes blob data from cache/spool.
@@ -85,9 +65,6 @@ pub struct BackgroundBlobWorker {
     repo: Arc<dyn ClipboardRepresentationStore>,
     blob_writer: Arc<dyn BlobWriterPort>,
     hasher: Arc<dyn ContentHashPort>,
-    thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
-    thumbnail_generator: Arc<dyn ThumbnailGeneratorPort>,
-    clock: Arc<dyn ClockPort>,
     retry_max_attempts: u32,
     retry_backoff: Duration,
 }
@@ -101,9 +78,6 @@ impl BackgroundBlobWorker {
         repo: Arc<dyn ClipboardRepresentationStore>,
         blob_writer: Arc<dyn BlobWriterPort>,
         hasher: Arc<dyn ContentHashPort>,
-        thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
-        thumbnail_generator: Arc<dyn ThumbnailGeneratorPort>,
-        clock: Arc<dyn ClockPort>,
         retry_max_attempts: u32,
         retry_backoff: Duration,
     ) -> Self {
@@ -114,9 +88,6 @@ impl BackgroundBlobWorker {
             repo,
             blob_writer,
             hasher,
-            thumbnail_repo,
-            thumbnail_generator,
-            clock,
             retry_max_attempts,
             retry_backoff,
         }
@@ -302,10 +273,6 @@ impl BackgroundBlobWorker {
         let mime = rep_meta.as_ref().and_then(|r| r.mime_type.as_ref());
         let needs_conversion = should_convert_to_png(mime);
 
-        // Pre-decoded RGBA pixels from format conversion, used to skip
-        // re-decoding in thumbnail generation.
-        let mut pre_decoded_rgba: Option<(Vec<u8>, u32, u32)> = None;
-
         let (blob_bytes, mime_updated) = if needs_conversion {
             let original_mime = mime.map(|m| m.as_str()).unwrap_or("unknown");
             let original_size = raw_bytes.len();
@@ -315,12 +282,10 @@ impl BackgroundBlobWorker {
                         representation_id = log_id(&rep_id),
                         original_mime = log_vocab(&original_mime),
                         original_size = original_size,
-                        converted_size = converted.png_bytes.len(),
+                        converted_size = converted.len(),
                         "Converted image to PNG for blob storage"
                     );
-                    pre_decoded_rgba =
-                        Some((converted.rgba_bytes, converted.width, converted.height));
-                    (converted.png_bytes, true)
+                    (converted, true)
                 }
                 Err(err) => {
                     uc_warn!(
@@ -386,8 +351,6 @@ impl BackgroundBlobWorker {
                         "Failed to delete spool entry after blob materialization"
                     );
                 }
-                self.try_generate_thumbnail(rep_id, &blob_bytes, pre_decoded_rgba)
-                    .await;
                 Ok(ProcessResult::Completed)
             }
             Ok(ProcessingUpdateOutcome::StateMismatch) => {
@@ -446,106 +409,6 @@ impl BackgroundBlobWorker {
         }
         Ok(())
     }
-
-    async fn try_generate_thumbnail(
-        &self,
-        rep_id: &RepresentationId,
-        raw_bytes: &[u8],
-        pre_decoded_rgba: Option<(Vec<u8>, u32, u32)>,
-    ) {
-        if let Err(err) = self
-            .generate_thumbnail(rep_id, raw_bytes, pre_decoded_rgba)
-            .await
-        {
-            uc_error!(
-                representation_id = log_id(&rep_id),
-                error_kind = "thumbnail_generate",
-                io_error_kind = io_error_kind(err.as_ref()),
-                "Failed to generate thumbnail"
-            );
-        }
-    }
-
-    async fn generate_thumbnail(
-        &self,
-        rep_id: &RepresentationId,
-        raw_bytes: &[u8],
-        pre_decoded_rgba: Option<(Vec<u8>, u32, u32)>,
-    ) -> Result<()> {
-        let rep = match self.repo.get_representation_by_id(rep_id).await? {
-            Some(rep) => rep,
-            None => {
-                uc_warn!(
-                    representation_id = log_id(&rep_id),
-                    "Representation missing while generating thumbnail"
-                );
-                return Ok(());
-            }
-        };
-
-        if rep.inline_data.is_some() {
-            return Ok(());
-        }
-
-        let is_image = rep
-            .mime_type
-            .as_ref()
-            .map(|mime| mime.as_str().starts_with("image/"))
-            .unwrap_or(false);
-        if !is_image {
-            return Ok(());
-        }
-
-        if self
-            .thumbnail_repo
-            .get_by_representation_id(rep_id)
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-
-        let generated = if let Some((rgba, width, height)) = pre_decoded_rgba {
-            self.thumbnail_generator
-                .generate_thumbnail_from_rgba(&rgba, width, height)
-                .await
-                .context("failed to generate thumbnail from pre-decoded RGBA")?
-        } else {
-            self.thumbnail_generator
-                .generate_thumbnail(raw_bytes)
-                .await
-                .context("failed to generate thumbnail")?
-        };
-
-        let thumbnail_hash = self
-            .hasher
-            .hash_bytes(&generated.thumbnail_bytes)
-            .context("failed to hash thumbnail bytes")?;
-
-        let thumbnail_blob_id = self
-            .blob_writer
-            .write_if_absent(&thumbnail_hash, &generated.thumbnail_bytes)
-            .await
-            .context("failed to write thumbnail blob")?;
-
-        let created_at_ms = TimestampMs::from_epoch_millis(self.clock.now_ms());
-        let thumbnail_size_bytes = generated.thumbnail_bytes.len() as i64;
-        let metadata = ThumbnailMetadata::new(
-            rep_id.clone(),
-            thumbnail_blob_id,
-            generated.thumbnail_mime_type,
-            generated.original_width,
-            generated.original_height,
-            thumbnail_size_bytes,
-            Some(created_at_ms),
-        );
-        self.thumbnail_repo
-            .insert_thumbnail(&metadata)
-            .await
-            .context("failed to insert thumbnail metadata")?;
-
-        Ok(())
-    }
 }
 
 enum ProcessResult {
@@ -562,7 +425,6 @@ mod tests {
     use tempfile::TempDir;
     use uc_core::clipboard::PersistedClipboardRepresentation;
     use uc_core::ids::FormatId;
-    use uc_core::ports::clipboard::GeneratedThumbnail;
     use uc_core::{BlobId, ContentHash};
     use uc_infra_crypto::hashing::Blake3Hasher;
 
@@ -603,45 +465,6 @@ mod tests {
 
         async fn write_path_if_absent(&self, _path: &std::path::Path) -> anyhow::Result<BlobId> {
             unimplemented!("worker only uses write_if_absent")
-        }
-    }
-
-    // A text/plain representation never reaches thumbnail generation, so these
-    // fakes must stay unreachable. They panic if the worker ever calls them.
-    struct UnusedThumbnailRepo;
-    #[async_trait]
-    impl ThumbnailRepositoryPort for UnusedThumbnailRepo {
-        async fn get_by_representation_id(
-            &self,
-            _id: &RepresentationId,
-        ) -> anyhow::Result<Option<ThumbnailMetadata>> {
-            unimplemented!("thumbnail path is unreachable for text/plain")
-        }
-        async fn insert_thumbnail(&self, _m: &ThumbnailMetadata) -> anyhow::Result<()> {
-            unimplemented!("thumbnail path is unreachable for text/plain")
-        }
-    }
-
-    struct UnusedThumbnailGenerator;
-    #[async_trait]
-    impl ThumbnailGeneratorPort for UnusedThumbnailGenerator {
-        async fn generate_thumbnail(&self, _b: &[u8]) -> anyhow::Result<GeneratedThumbnail> {
-            unimplemented!("thumbnail path is unreachable for text/plain")
-        }
-        async fn generate_thumbnail_from_rgba(
-            &self,
-            _b: &[u8],
-            _w: u32,
-            _h: u32,
-        ) -> anyhow::Result<GeneratedThumbnail> {
-            unimplemented!("thumbnail path is unreachable for text/plain")
-        }
-    }
-
-    struct FixedClock;
-    impl ClockPort for FixedClock {
-        fn now_ms(&self) -> i64 {
-            0
         }
     }
 
@@ -687,9 +510,6 @@ mod tests {
                 completed: Arc::clone(&completed),
             }),
             Arc::new(Blake3Hasher),
-            Arc::new(UnusedThumbnailRepo),
-            Arc::new(UnusedThumbnailGenerator),
-            Arc::new(FixedClock),
             3,
             Duration::from_millis(1),
         );
@@ -752,9 +572,6 @@ mod tests {
             repo,
             Arc::new(FakeBlobWriter),
             Arc::new(Blake3Hasher),
-            Arc::new(UnusedThumbnailRepo),
-            Arc::new(UnusedThumbnailGenerator),
-            Arc::new(FixedClock),
             3,
             Duration::from_millis(1),
         );

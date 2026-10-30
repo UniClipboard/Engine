@@ -323,3 +323,6 @@ fn host_boundary_debug_output_redacts_user_content_and_details() {
 
 #[path = "host_contract/resource_release.rs"]
 mod resource_release;
+
+#[path = "host_contract/entry_thumbnails.rs"]
+mod entry_thumbnails;

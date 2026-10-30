@@ -1,21 +1,25 @@
+mod entry_thumbnail;
+
+use entry_thumbnail::{EntryThumbnailCache, ReadEntryResourceSnapshotPort};
 use std::sync::Arc;
+use uc_core::ports::clipboard::ThumbnailGeneratorPort;
 
 use tracing::instrument;
 use uc_core::blob::ports::BlobReaderPort;
 use uc_core::clipboard::{
     FileDisplayMetadata, MimeType, FILE_DISPLAY_METADATA_FORMAT, FILE_DISPLAY_METADATA_MIME,
 };
-use uc_core::ids::{BlobId, EntryId, RepresentationId};
+use uc_core::ids::{BlobId, EntryId};
 use uc_core::ports::clipboard::{
     GetClipboardEntryPort, GetRepresentationByBlobIdPort, ListRepresentationsForEventPort,
-    ThumbnailRepositoryPort,
 };
 
 #[derive(Clone)]
 pub struct ResourceFacadeDeps {
+    pub snapshot: Arc<dyn ReadEntryResourceSnapshotPort>,
+    pub generator: Arc<dyn ThumbnailGeneratorPort>,
     pub representation_by_blob_id: Arc<dyn GetRepresentationByBlobIdPort>,
     pub representations_for_event: Arc<dyn ListRepresentationsForEventPort>,
-    pub thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
     pub blob_store: Arc<dyn BlobReaderPort>,
     pub entry_repo: Arc<dyn GetClipboardEntryPort>,
 }
@@ -41,6 +45,12 @@ pub struct FileResourceView {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceFacadeError {
+    #[error("encryption session is locked")]
+    SessionLocked,
+    #[error("thumbnail generation is busy")]
+    Busy,
+    #[error("entry has no available image preview")]
+    Unavailable,
     #[error("resource not found")]
     NotFound,
     #[error("resource mismatch")]
@@ -50,12 +60,16 @@ pub enum ResourceFacadeError {
 }
 
 pub struct ResourceFacade {
+    entry_thumbnails: EntryThumbnailCache,
     deps: ResourceFacadeDeps,
 }
 
 impl ResourceFacade {
     pub fn new(deps: ResourceFacadeDeps) -> Self {
-        Self { deps }
+        Self {
+            deps,
+            entry_thumbnails: EntryThumbnailCache::default(),
+        }
     }
 
     #[instrument(skip_all, fields(blob_id = %blob_id))]
@@ -83,43 +97,6 @@ impl ResourceFacade {
         let bytes = self.deps.blob_store.get(&blob_id).await.map_err(|err| {
             ResourceFacadeError::Internal(anyhow::Error::from(err).context("read blob"))
         })?;
-
-        Ok(BinaryResourceView { mime_type, bytes })
-    }
-
-    #[instrument(skip_all, fields(representation_id = %representation_id))]
-    pub async fn thumbnail(
-        &self,
-        representation_id: &str,
-    ) -> Result<BinaryResourceView, ResourceFacadeError> {
-        let representation_id = RepresentationId::from(representation_id);
-        let metadata = self
-            .deps
-            .thumbnail_repo
-            .get_by_representation_id(&representation_id)
-            .await
-            .map_err(|err| {
-                ResourceFacadeError::Internal(anyhow::Error::from(err).context("look up thumbnail"))
-            })?
-            .ok_or(ResourceFacadeError::NotFound)?;
-
-        if metadata.representation_id != representation_id {
-            return Err(ResourceFacadeError::Mismatch(
-                "thumbnail representation id does not match request".to_string(),
-            ));
-        }
-
-        let mime_type = Some(mime_to_string(&metadata.thumbnail_mime_type));
-        let bytes = self
-            .deps
-            .blob_store
-            .get(&metadata.thumbnail_blob_id)
-            .await
-            .map_err(|err| {
-                ResourceFacadeError::Internal(
-                    anyhow::Error::from(err).context("read thumbnail blob"),
-                )
-            })?;
 
         Ok(BinaryResourceView { mime_type, bytes })
     }
@@ -280,16 +257,16 @@ fn sanitize_basename(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::entry_thumbnail::{EntryResourceReadError, EntryResourceSnapshot};
     use super::*;
+    use uc_core::ports::clipboard::GeneratedThumbnail;
 
     use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use uc_core::clipboard::{
-        ClipboardRepositoryError, PersistedClipboardRepresentation, ThumbnailMetadata,
-    };
-    use uc_core::ids::{EventId, FormatId};
+    use uc_core::clipboard::{ClipboardRepositoryError, PersistedClipboardRepresentation};
+    use uc_core::ids::{EventId, FormatId, RepresentationId};
     use uc_core::ClipboardEntry;
 
     #[derive(Default)]
@@ -350,44 +327,6 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeThumbnailRepo {
-        by_representation_id: Mutex<HashMap<RepresentationId, ThumbnailMetadata>>,
-    }
-
-    #[async_trait]
-    impl ThumbnailRepositoryPort for FakeThumbnailRepo {
-        async fn get_by_representation_id(
-            &self,
-            representation_id: &RepresentationId,
-        ) -> Result<Option<ThumbnailMetadata>> {
-            Ok(self
-                .by_representation_id
-                .lock()
-                .expect("thumbnail lock")
-                .remove(representation_id))
-        }
-
-        async fn insert_thumbnail(&self, metadata: &ThumbnailMetadata) -> Result<()> {
-            self.by_representation_id
-                .lock()
-                .expect("thumbnail lock")
-                .insert(
-                    metadata.representation_id.clone(),
-                    ThumbnailMetadata::new(
-                        metadata.representation_id.clone(),
-                        metadata.thumbnail_blob_id.clone(),
-                        metadata.thumbnail_mime_type.clone(),
-                        metadata.original_width,
-                        metadata.original_height,
-                        metadata.original_size_bytes,
-                        metadata.created_at_ms,
-                    ),
-                );
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
     struct FakeBlobStore {
         bytes: Mutex<HashMap<BlobId, Vec<u8>>>,
     }
@@ -407,27 +346,44 @@ mod tests {
     struct TestDeps {
         facade: ResourceFacade,
         representation_repo: Arc<FakeRepresentationRepo>,
-        thumbnail_repo: Arc<FakeThumbnailRepo>,
         blob_store: Arc<FakeBlobStore>,
         entry_repo: Arc<FakeEntryRepo>,
     }
 
+    struct UnusedThumbnailDependencies;
+
+    #[async_trait]
+    impl ReadEntryResourceSnapshotPort for UnusedThumbnailDependencies {
+        async fn read_entry_resource_snapshot(
+            &self,
+            _: &EntryId,
+        ) -> Result<Option<EntryResourceSnapshot>, EntryResourceReadError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl ThumbnailGeneratorPort for UnusedThumbnailDependencies {
+        async fn generate_thumbnail(&self, _: &[u8]) -> Result<GeneratedThumbnail> {
+            anyhow::bail!("unused")
+        }
+    }
+
     fn test_deps() -> TestDeps {
         let representation_repo = Arc::new(FakeRepresentationRepo::default());
-        let thumbnail_repo = Arc::new(FakeThumbnailRepo::default());
         let blob_store = Arc::new(FakeBlobStore::default());
         let entry_repo = Arc::new(FakeEntryRepo::default());
         let facade = ResourceFacade::new(ResourceFacadeDeps {
+            snapshot: Arc::new(UnusedThumbnailDependencies),
+            generator: Arc::new(UnusedThumbnailDependencies),
             representation_by_blob_id: representation_repo.clone(),
             representations_for_event: representation_repo.clone(),
-            thumbnail_repo: thumbnail_repo.clone(),
             blob_store: blob_store.clone(),
             entry_repo: entry_repo.clone(),
         });
         TestDeps {
             facade,
             representation_repo,
-            thumbnail_repo,
             blob_store,
             entry_repo,
         }
@@ -469,35 +425,6 @@ mod tests {
         let error = deps.facade.blob("missing").await.expect_err("missing");
 
         assert!(matches!(error, ResourceFacadeError::NotFound));
-    }
-
-    #[tokio::test]
-    async fn thumbnail_returns_bytes_and_mime_type() {
-        let deps = test_deps();
-        let representation_id = RepresentationId::from("rep-1");
-        let blob_id = BlobId::from("thumb-1");
-        deps.thumbnail_repo
-            .insert_thumbnail(&ThumbnailMetadata::new(
-                representation_id,
-                blob_id.clone(),
-                MimeType("image/webp".to_string()),
-                100,
-                80,
-                3,
-                None,
-            ))
-            .await
-            .expect("insert thumbnail");
-        deps.blob_store
-            .bytes
-            .lock()
-            .expect("blob lock")
-            .insert(blob_id, vec![4, 5, 6]);
-
-        let view = deps.facade.thumbnail("rep-1").await.expect("thumbnail");
-
-        assert_eq!(view.mime_type, Some("image/webp".to_string()));
-        assert_eq!(view.bytes, vec![4, 5, 6]);
     }
 
     fn seed_entry_with_file_rep(deps: &TestDeps, entry_id: &str, file_path: &std::path::Path) {

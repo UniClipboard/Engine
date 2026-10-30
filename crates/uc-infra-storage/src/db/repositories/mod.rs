@@ -31,7 +31,6 @@ mod history_file_references;
 mod representation_repo;
 mod space_member_repo;
 mod space_security_store;
-mod thumbnail_repo;
 mod trusted_peer_repo;
 
 pub use active_clipboard_register_repo::*;
@@ -60,5 +59,4 @@ pub use relationship_store::*;
 pub use representation_repo::*;
 pub use space_member_repo::*;
 pub use space_security_store::*;
-pub use thumbnail_repo::*;
 pub use trusted_peer_repo::*;

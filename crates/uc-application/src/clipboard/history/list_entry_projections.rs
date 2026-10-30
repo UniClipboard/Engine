@@ -10,13 +10,11 @@ use uc_core::clipboard::{
 use uc_core::ports::clipboard::{
     EntryFileSetRepositoryPort, GetRepresentationPort, ListClipboardEntriesPort,
 };
-use uc_core::ports::{
-    ClipboardSelectionRepositoryPort, GetEntryTransferSummaryPort, ThumbnailRepositoryPort,
-};
+use uc_core::ports::{ClipboardSelectionRepositoryPort, GetEntryTransferSummaryPort};
 use uc_core::search::document::ContentType;
 use uc_core::search::tag::TaggableContent;
 use uc_observability_contract::{
-    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_error, uc_warn,
+    error_source::io_error_kind, log_fields::log_id, uc_debug, uc_warn,
 };
 
 use crate::clipboard::file_set_query::load_has_directory_structure;
@@ -31,7 +29,6 @@ pub(crate) struct EntryProjectionDto {
     pub(crate) size_bytes: i64,
     pub(crate) captured_at: i64,
     pub(crate) content_type: String,
-    pub(crate) thumbnail_url: Option<String>,
     pub(crate) is_encrypted: bool,
     pub(crate) is_favorited: bool,
     pub(crate) updated_at: i64,
@@ -43,8 +40,6 @@ pub(crate) struct EntryProjectionDto {
     pub(crate) link_urls: Option<Vec<String>>,
     pub(crate) link_domains: Option<Vec<String>>,
     pub(crate) file_sizes: Option<Vec<i64>>,
-    pub(crate) image_width: Option<i32>,
-    pub(crate) image_height: Option<i32>,
     /// Whether this file entry was captured as a directory (its manifest carries
     /// members expanded from a directory root). Sourced from the single
     /// `EntryFileSet::has_directory_structure()` authority. The sender UI hides
@@ -73,7 +68,6 @@ pub(crate) struct ListClipboardEntryProjectionsUseCase {
     entry_repo: Arc<dyn ListClipboardEntriesPort>,
     selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
     representation_repo: Arc<dyn GetRepresentationPort>,
-    thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
     file_transfer_repo: Arc<dyn GetEntryTransferSummaryPort>,
     entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
     max_limit: usize,
@@ -183,30 +177,17 @@ fn resolve_preview_text(
     preview_rep: &PersistedClipboardRepresentation,
     is_image: bool,
     paste_rep: &PersistedClipboardRepresentation,
-    image_dimensions: Option<(i32, i32)>,
 ) -> String {
     if let Some(uri_list) = file_uri_list_preview(content_category, preview_rep, paste_rep) {
         return uri_list.text;
     }
+    if is_image {
+        return format!("Image ({} bytes)", preview_rep.size_bytes);
+    }
     if let Some(data) = preview_rep.inline_data.as_ref() {
         return String::from_utf8_lossy(data).trim().to_string();
     }
-    if is_image {
-        return image_placeholder(image_dimensions, preview_rep.size_bytes);
-    }
     "Text content (full payload in background processing)".to_string()
-}
-
-/// Placeholder preview for an image entry that carries no inline text. Prefers
-/// the original pixel dimensions (`W×H`); falls back to a byte count when the
-/// dimensions are unknown (e.g. thumbnail metadata missing).
-fn image_placeholder(dimensions: Option<(i32, i32)>, size_bytes: i64) -> String {
-    match dimensions {
-        Some((width, height)) if width > 0 && height > 0 => {
-            format!("Image ({}×{})", width, height)
-        }
-        _ => format!("Image ({} bytes)", size_bytes),
-    }
 }
 
 fn content_type_from_entry_category(category: ClipboardEntryContentCategory) -> ContentType {
@@ -255,7 +236,6 @@ impl ListClipboardEntryProjectionsUseCase {
         entry_repo: Arc<dyn ListClipboardEntriesPort>,
         selection_repo: Arc<dyn ClipboardSelectionRepositoryPort>,
         representation_repo: Arc<dyn GetRepresentationPort>,
-        thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
         file_transfer_repo: Arc<dyn GetEntryTransferSummaryPort>,
         entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
     ) -> Self {
@@ -263,7 +243,6 @@ impl ListClipboardEntryProjectionsUseCase {
             entry_repo,
             selection_repo,
             representation_repo,
-            thumbnail_repo,
             file_transfer_repo,
             entry_file_set_repo,
             max_limit: 1000,
@@ -386,41 +365,11 @@ impl ListClipboardEntryProjectionsUseCase {
             };
             let paste_rep_ref = fetched_paste_rep.as_ref().unwrap_or(&representation);
 
-            // Resolve the thumbnail + original image dimensions before the preview
-            // text, so an image entry's placeholder preview can show its pixel
-            // dimensions (W×H) rather than a raw byte count.
-            let (thumbnail_url, image_width, image_height) = if is_image {
-                match self
-                    .thumbnail_repo
-                    .get_by_representation_id(&selection.selection.preview_rep_id)
-                    .await
-                {
-                    Ok(Some(metadata)) => (
-                        Some(format!("/clipboard/thumbnails/{}", preview_rep_id)),
-                        Some(metadata.original_width),
-                        Some(metadata.original_height),
-                    ),
-                    Ok(None) => (None, None, None),
-                    Err(err) => {
-                        uc_error!(
-                            error_kind = "thumbnail_metadata_lookup",
-                            io_error_kind = io_error_kind(err.as_ref()),
-                            entry_id = log_id(&entry_id_str),
-                            "Failed to fetch thumbnail metadata"
-                        );
-                        (None, None, None)
-                    }
-                }
-            } else {
-                (None, None, None)
-            };
-
             let preview = resolve_preview_text(
                 entry.content_category,
                 &representation,
                 is_image,
                 paste_rep_ref,
-                image_width.zip(image_height),
             );
             let file_uri_list =
                 file_uri_list_preview(entry.content_category, &representation, paste_rep_ref);
@@ -513,7 +462,6 @@ impl ListClipboardEntryProjectionsUseCase {
                 size_bytes: representation.size_bytes,
                 captured_at,
                 content_type: entry.content_category.as_db_str().to_string(),
-                thumbnail_url,
                 is_encrypted: false,
                 is_favorited: entry.is_favorited,
                 updated_at: captured_at,
@@ -525,8 +473,6 @@ impl ListClipboardEntryProjectionsUseCase {
                 link_urls,
                 link_domains: None,
                 file_sizes,
-                image_width,
-                image_height,
                 is_directory,
                 payload_state,
             });
@@ -564,7 +510,6 @@ mod tests {
         ClipboardEntry, ClipboardRepositoryError, ClipboardSelection, ClipboardSelectionDecision,
         ContentHash, EntryFileSet, EntryFileSetError, EntryFileSetLine, EntryFileSetLineKind,
         FileSetMemberKind, FileSetMemberLocation, HashAlgorithm, MimeType, SelectionPolicyVersion,
-        ThumbnailMetadata,
     };
     use uc_core::ids::{BlobId, EntryId, EventId, FormatId, RepresentationId};
     use uc_core::ports::file_transfer::{EntryTransferSummary, FileTransferProjectionError};
@@ -644,20 +589,6 @@ mod tests {
     }
 
     mockall::mock! {
-        ThumbnailRepo {}
-
-        #[async_trait]
-        impl ThumbnailRepositoryPort for ThumbnailRepo {
-            async fn get_by_representation_id(
-                &self,
-                representation_id: &RepresentationId,
-            ) -> anyhow::Result<Option<ThumbnailMetadata>>;
-
-            async fn insert_thumbnail(&self, metadata: &ThumbnailMetadata) -> anyhow::Result<()>;
-        }
-    }
-
-    mockall::mock! {
         TransferRepo {}
 
         #[async_trait]
@@ -707,7 +638,6 @@ mod tests {
             &preview_rep,
             true,
             &paste_rep,
-            None,
         );
         assert_eq!(preview, "file:///home/u/photo.png");
     }
@@ -716,44 +646,39 @@ mod tests {
     fn resolve_preview_plain_file_uses_preview_rep_uri_list() {
         // Regular file copy: preview_rep == paste_rep == uri-list. Unchanged.
         let rep = uri_list_rep("file:///home/u/report.pdf");
-        let preview =
-            resolve_preview_text(ClipboardEntryContentCategory::File, &rep, false, &rep, None);
+        let preview = resolve_preview_text(ClipboardEntryContentCategory::File, &rep, false, &rep);
         assert_eq!(preview, "file:///home/u/report.pdf");
     }
 
     #[test]
-    fn resolve_preview_image_file_without_uri_list_shows_dimensions() {
-        // paste_rep unreadable (falls back to the image preview_rep): no uri-list
-        // is available, so the placeholder shows the image's pixel dimensions.
+    fn resolve_preview_image_file_without_uri_list_shows_size() {
+        // 无文件列表时只返回图片大小占位文字，不查询旧缩略图元数据。
         let image_rep = image_blob_rep(2048);
         let preview = resolve_preview_text(
             ClipboardEntryContentCategory::File,
             &image_rep,
             true,
             &image_rep,
-            Some((1920, 1080)),
         );
-        assert_eq!(preview, "Image (1920×1080)");
+        assert_eq!(preview, "Image (2048 bytes)");
     }
 
     #[test]
-    fn resolve_preview_pure_image_entry_shows_dimensions() {
+    fn resolve_preview_pure_image_entry_shows_size() {
         let image_rep = image_blob_rep(999);
         let preview = resolve_preview_text(
             ClipboardEntryContentCategory::Image,
             &image_rep,
             true,
             &image_rep,
-            Some((800, 600)),
         );
-        assert_eq!(preview, "Image (800×600)");
+        assert_eq!(preview, "Image (999 bytes)");
     }
 
     #[test]
     fn resolve_preview_text_entry_uses_inline_text() {
         let rep = plain_text_rep("hello world");
-        let preview =
-            resolve_preview_text(ClipboardEntryContentCategory::Text, &rep, false, &rep, None);
+        let preview = resolve_preview_text(ClipboardEntryContentCategory::Text, &rep, false, &rep);
         assert_eq!(preview, "hello world");
     }
 
@@ -842,13 +767,6 @@ mod tests {
             .times(1)
             .return_once(move |_, _| Ok(Some(paste_rep)));
 
-        let mut thumbnail_repo = MockThumbnailRepo::new();
-        thumbnail_repo
-            .expect_get_by_representation_id()
-            .with(mockall::predicate::eq(preview_rep_id))
-            .times(1)
-            .return_once(|_| Ok(None));
-
         let mut transfer_repo = MockTransferRepo::new();
         transfer_repo
             .expect_get_entry_transfer_summary()
@@ -860,7 +778,6 @@ mod tests {
             Arc::new(entry_repo),
             Arc::new(selection_repo),
             Arc::new(representation_repo),
-            Arc::new(thumbnail_repo),
             Arc::new(transfer_repo),
             Arc::new(file_set_repo_none()),
         );
@@ -949,9 +866,6 @@ mod tests {
             .times(1)
             .return_once(move |_, _| Ok(Some(rep)));
 
-        // Non-image reps never touch the thumbnail repo.
-        let thumbnail_repo = MockThumbnailRepo::new();
-
         let mut transfer_repo = MockTransferRepo::new();
         transfer_repo
             .expect_get_entry_transfer_summary()
@@ -962,7 +876,6 @@ mod tests {
             Arc::new(entry_repo),
             Arc::new(selection_repo),
             Arc::new(representation_repo),
-            Arc::new(thumbnail_repo),
             Arc::new(transfer_repo),
             Arc::new(file_set_repo),
         );
@@ -1045,24 +958,6 @@ mod tests {
 
         assert_eq!(projections.len(), 1);
         assert!(!projections[0].is_directory);
-    }
-
-    #[test]
-    fn image_placeholder_prefers_dimensions() {
-        assert_eq!(
-            image_placeholder(Some((1920, 1080)), 5000),
-            "Image (1920×1080)"
-        );
-    }
-
-    #[test]
-    fn image_placeholder_falls_back_to_bytes_without_dimensions() {
-        assert_eq!(image_placeholder(None, 5000), "Image (5000 bytes)");
-        // Zero / negative dimensions are treated as unknown.
-        assert_eq!(
-            image_placeholder(Some((0, 1080)), 5000),
-            "Image (5000 bytes)"
-        );
     }
 
     #[test]

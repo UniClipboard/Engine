@@ -11,7 +11,6 @@ use uc_core::ids::{EntryId, EventId, FormatId, RepresentationId};
 use uc_core::ports::blob::BlobTransferPort;
 use uc_core::ports::clipboard::{
     ClipboardPayloadResolverPort, EntryFileSetRepositoryPort, SaveClipboardEntryPort,
-    ThumbnailRepositoryPort,
 };
 use uc_core::ports::search::search_index::SearchIndexPort;
 use uc_core::ports::{
@@ -71,7 +70,6 @@ pub struct ClipboardHistoryFacadeDeps {
     pub event_writer: Arc<dyn ClipboardEventWriterPort>,
     pub payload_resolver: Arc<dyn ClipboardPayloadResolverPort>,
     pub blob_store: Arc<dyn BlobReaderPort>,
-    pub thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
     pub file_transfer_repo: Arc<dyn GetEntryTransferSummaryPort>,
     /// Directory-structure authority for the list projection's `is_directory`
     /// flag (`EntryFileSet::has_directory_structure()`).
@@ -130,7 +128,6 @@ impl ClipboardHistoryFacade {
             event_writer,
             payload_resolver,
             blob_store,
-            thumbnail_repo,
             file_transfer_repo,
             entry_file_set_repo,
             search_index,
@@ -180,7 +177,6 @@ impl ClipboardHistoryFacade {
             entry_list.clone(),
             selection_repo.clone(),
             rep_get.clone(),
-            thumbnail_repo,
             file_transfer_repo,
             entry_file_set_repo,
         );
@@ -537,7 +533,6 @@ fn projection_to_view(entry: EntryProjectionDto) -> EntryProjectionView {
         size_bytes: entry.size_bytes,
         captured_at: entry.captured_at,
         content_type: entry.content_type,
-        thumbnail_url: entry.thumbnail_url,
         is_encrypted: entry.is_encrypted,
         is_favorited: entry.is_favorited,
         updated_at: entry.updated_at,
@@ -548,8 +543,6 @@ fn projection_to_view(entry: EntryProjectionDto) -> EntryProjectionView {
         link_urls: entry.link_urls,
         link_domains,
         file_sizes: entry.file_sizes,
-        image_width: entry.image_width,
-        image_height: entry.image_height,
         is_directory: entry.is_directory,
         payload_state: entry.payload_state,
     }

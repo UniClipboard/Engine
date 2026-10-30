@@ -40,7 +40,7 @@ use crate::operations::history::receive::{
 };
 use crate::operations::history::resend::execute_resend_entry;
 use crate::operations::history::resource::{
-    execute_read_blob, execute_read_entry_file, execute_read_thumbnail,
+    execute_read_blob, execute_read_entry_file, execute_read_entry_thumbnail,
 };
 use crate::operations::history::search::{
     execute_count_search_entries, execute_query_daily_entry_counts, execute_query_search_status,
@@ -549,8 +549,8 @@ impl EngineRuntime for ProductionRuntime {
                 Operation::ReadBlob(input) => {
                     execute_read_blob(self.current_facade().await?.as_ref(), input).await
                 }
-                Operation::ReadThumbnail(input) => {
-                    execute_read_thumbnail(self.current_facade().await?.as_ref(), input).await
+                Operation::ReadEntryThumbnail(input) => {
+                    execute_read_entry_thumbnail(self.current_facade().await?.as_ref(), input).await
                 }
                 Operation::ReadEntryFile(input) => {
                     execute_read_entry_file(self.current_facade().await?.as_ref(), input).await

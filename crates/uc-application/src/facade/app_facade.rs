@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use uc_core::file_transfer::TransferProgressView;
 
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use uc_core::membership::{MembershipBranchId, MembershipConflictId, MembershipEventId};
 
 use crate::clipboard::sync::V3BlobRef;
@@ -44,8 +44,8 @@ use crate::facade::roster::{
     MemberSummary, PeerReachabilityRefreshReport, PeerSnapshotView, RosterError,
 };
 use crate::facade::{
-    MembershipDiagnosticsView, MembershipReadiness, QueryMembershipDiagnosticsError,
-    QueryMembershipReadinessError,
+    BinaryResourceView, MembershipDiagnosticsView, MembershipReadiness,
+    QueryMembershipDiagnosticsError, QueryMembershipReadinessError, ResourceFacadeError,
 };
 use crate::settings::diagnostics::DiagnosticsFacadeError;
 use crate::space::PeerConnectionError;
@@ -168,6 +168,7 @@ pub struct AppFacade {
     space: Arc<SpaceFacade>,
     probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     resource: Arc<ResourceFacade>,
+    thumbnail_session_access: RwLock<()>,
     clipboard_history: Arc<ClipboardHistoryFacade>,
     clipboard_capture: Arc<ClipboardCaptureFacade>,
     clipboard_sync: Arc<ClipboardSyncFacade>,
@@ -204,6 +205,7 @@ impl AppFacade {
             space: parts.space,
             probe_profile_key_access: parts.probe_profile_key_access,
             resource: parts.resource,
+            thumbnail_session_access: RwLock::new(()),
             clipboard_history: parts.clipboard_history,
             clipboard_capture: parts.clipboard_capture,
             clipboard_sync: parts.clipboard_sync,
@@ -424,11 +426,29 @@ impl AppFacade {
         self.resource.blob(blob_id).await
     }
 
-    pub async fn read_thumbnail_resource(
+    pub async fn read_entry_thumbnail_resource(
         &self,
-        representation_id: &str,
-    ) -> Result<crate::facade::BinaryResourceView, crate::facade::ResourceFacadeError> {
-        self.resource.thumbnail(representation_id).await
+        entry_id: &str,
+    ) -> Result<BinaryResourceView, ResourceFacadeError> {
+        let _access = self.thumbnail_session_access.read().await;
+        self.require_thumbnail_session().await?;
+        let result = self.resource.entry_thumbnail(entry_id).await;
+        self.require_thumbnail_session().await?;
+        result
+    }
+
+    async fn require_thumbnail_session(&self) -> Result<(), ResourceFacadeError> {
+        let state = self
+            .space
+            .query_space_access_state()
+            .await
+            .map_err(|source| ResourceFacadeError::Internal(source.into()))?;
+        if state.session_ready {
+            Ok(())
+        } else {
+            self.resource.discard_thumbnail_cache();
+            Err(ResourceFacadeError::SessionLocked)
+        }
     }
 
     pub async fn read_entry_file_resource(
@@ -461,6 +481,9 @@ impl AppFacade {
     }
 
     pub async fn lock_space_session(&self) -> Result<(), LockSpaceSessionError> {
+        // 写锁等待当前读取完成，并阻止排队读取越过锁定后的授权检查。
+        let _access = self.thumbnail_session_access.write().await;
+        self.resource.discard_thumbnail_cache();
         self.space.lock_space_session().await
     }
 
