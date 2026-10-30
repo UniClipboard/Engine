@@ -42,6 +42,22 @@ pub async fn execute_read_thumbnail(
         .map_err(|error| map_resource_error(error, THUMBNAIL_NOT_FOUND_CODE))
 }
 
+pub async fn execute_read_entry_thumbnail(
+    facade: &AppFacade,
+    input: HistoryEntryInput,
+) -> Result<OperationResult, EngineError> {
+    facade
+        .read_entry_thumbnail_resource(&input.entry_id)
+        .await
+        .map(|resource| {
+            OperationResult::ThumbnailRead(BinaryResourceSummary {
+                bytes: resource.bytes,
+                media_type: resource.mime_type,
+            })
+        })
+        .map_err(|error| map_resource_error(error, THUMBNAIL_NOT_FOUND_CODE))
+}
+
 pub async fn execute_read_entry_file(
     facade: &AppFacade,
     input: HistoryEntryInput,
@@ -61,6 +77,16 @@ pub async fn execute_read_entry_file(
 
 fn map_resource_error(error: ResourceFacadeError, not_found_code: u32) -> EngineError {
     match error {
+        ResourceFacadeError::Busy => EngineError::new(
+            ENTRY_THUMBNAIL_BUSY_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+        ),
+        ResourceFacadeError::Unavailable => EngineError::new(
+            ENTRY_THUMBNAIL_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            false,
+        ),
         ResourceFacadeError::NotFound => {
             EngineError::new(not_found_code, EngineErrorCategory::NotFound, false)
         }

@@ -44,8 +44,8 @@ use crate::facade::roster::{
     MemberSummary, PeerReachabilityRefreshReport, PeerSnapshotView, RosterError,
 };
 use crate::facade::{
-    MembershipDiagnosticsView, MembershipReadiness, QueryMembershipDiagnosticsError,
-    QueryMembershipReadinessError,
+    BinaryResourceView, MembershipDiagnosticsView, MembershipReadiness,
+    QueryMembershipDiagnosticsError, QueryMembershipReadinessError, ResourceFacadeError,
 };
 use crate::settings::diagnostics::DiagnosticsFacadeError;
 use crate::space::PeerConnectionError;
@@ -429,6 +429,13 @@ impl AppFacade {
         representation_id: &str,
     ) -> Result<crate::facade::BinaryResourceView, crate::facade::ResourceFacadeError> {
         self.resource.thumbnail(representation_id).await
+    }
+
+    pub async fn read_entry_thumbnail_resource(
+        &self,
+        entry_id: &str,
+    ) -> Result<BinaryResourceView, ResourceFacadeError> {
+        self.resource.entry_thumbnail(entry_id).await
     }
 
     pub async fn read_entry_file_resource(

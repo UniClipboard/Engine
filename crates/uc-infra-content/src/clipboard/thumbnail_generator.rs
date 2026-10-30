@@ -1,8 +1,15 @@
+use std::io::Cursor;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use image::{imageops::FilterType, ColorType, GenericImageView};
+use image::{imageops::FilterType, ColorType, GenericImageView, ImageReader, Limits};
+use tokio::sync::Semaphore;
+use tokio::task::spawn_blocking;
+
 use uc_core::clipboard::MimeType;
 use uc_core::ports::clipboard::{GeneratedThumbnail, ThumbnailGeneratorPort};
+
+static GENERATION_GATE: Semaphore = Semaphore::const_new(1);
 
 pub struct InfraThumbnailGenerator {
     max_edge: u32,
@@ -20,10 +27,35 @@ impl InfraThumbnailGenerator {
 #[async_trait]
 impl ThumbnailGeneratorPort for InfraThumbnailGenerator {
     async fn generate_thumbnail(&self, image_bytes: &[u8]) -> Result<GeneratedThumbnail> {
-        let decoded =
-            image::load_from_memory(image_bytes).context("decode image bytes for thumbnail")?;
-        let (original_width, original_height) = decoded.dimensions();
-        self.generate_from_decoded(decoded, original_width, original_height)
+        let permit = GENERATION_GATE
+            .acquire()
+            .await
+            .context("thumbnail generator closed")?;
+        if image_bytes.len() > 32 * 1024 * 1024 {
+            anyhow::bail!("thumbnail source exceeds byte limit");
+        }
+        let bytes = image_bytes.to_vec();
+        let max_edge = self.max_edge;
+        // 阻塞任务持有许可，调用方取消也不能释放正在运行的解码容量。
+        let result = spawn_blocking(move || {
+            let _permit = permit;
+            let mut reader = ImageReader::new(Cursor::new(bytes))
+                .with_guessed_format()
+                .context("identify thumbnail source")?;
+            let mut limits = Limits::default();
+            limits.max_alloc = Some(64 * 1024 * 1024);
+            limits.max_image_width = Some(8192);
+            limits.max_image_height = Some(8192);
+            reader.limits(limits);
+            let decoded = reader
+                .decode()
+                .context("decode image bytes for thumbnail")?;
+            let (width, height) = decoded.dimensions();
+            Self { max_edge }.generate_from_decoded(decoded, width, height)
+        })
+        .await
+        .context("thumbnail blocking task failed")?;
+        result
     }
 
     async fn generate_thumbnail_from_rgba(
@@ -32,10 +64,29 @@ impl ThumbnailGeneratorPort for InfraThumbnailGenerator {
         width: u32,
         height: u32,
     ) -> Result<GeneratedThumbnail> {
-        let rgba_image = image::RgbaImage::from_raw(width, height, rgba_bytes.to_vec())
-            .ok_or_else(|| anyhow::anyhow!("RGBA buffer size mismatch for {}x{}", width, height))?;
-        let decoded = image::DynamicImage::ImageRgba8(rgba_image);
-        self.generate_from_decoded(decoded, width, height)
+        let permit = GENERATION_GATE
+            .acquire()
+            .await
+            .context("thumbnail generator closed")?;
+        let expected = u64::from(width) * u64::from(height) * 4;
+        if width > 8192
+            || height > 8192
+            || expected > 64 * 1024 * 1024
+            || expected != rgba_bytes.len() as u64
+        {
+            anyhow::bail!("thumbnail RGBA dimensions exceed limits or mismatch");
+        }
+        let bytes = rgba_bytes.to_vec();
+        let max_edge = self.max_edge;
+        spawn_blocking(move || {
+            let _permit = permit;
+            let rgba_image = image::RgbaImage::from_raw(width, height, bytes)
+                .ok_or_else(|| anyhow::anyhow!("RGBA buffer size mismatch"))?;
+            let decoded = image::DynamicImage::ImageRgba8(rgba_image);
+            Self { max_edge }.generate_from_decoded(decoded, width, height)
+        })
+        .await
+        .context("thumbnail blocking task failed")?
     }
 }
 

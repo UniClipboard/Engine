@@ -195,6 +195,7 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `GetHistoryEntryResource` | 返回指定记录的资源标识、类型、大小及可用读取方式 |
 | `ReadBlob` | 读取指定 blob 的完整字节和媒体类型 |
 | `ReadThumbnail` | 读取指定表示的缩略图字节和媒体类型 |
+| `ReadEntryThumbnail` | Resolve the current entry preview and read or generate bounded WebP thumbnail bytes. See [entry thumbnails](entry-thumbnails.md). |
 | `ReadEntryFile` | 读取指定记录的首个已物化文件及下载文件名 |
 | `QueryEntryDelivery` | 返回指定记录的来源及每个当前仍有效且可信设备的投递状态；已移除设备不显示，当前成员范围无法确认时查询失败 |
 | `ClearHistory` | 清空全部历史，并返回删除数量和未删除条目标识 |

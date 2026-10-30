@@ -1,4 +1,8 @@
+mod entry_thumbnail;
+
+use entry_thumbnail::{EntryThumbnailCache, ReadEntryResourceSnapshotPort};
 use std::sync::Arc;
+use uc_core::ports::clipboard::ThumbnailGeneratorPort;
 
 use tracing::instrument;
 use uc_core::blob::ports::BlobReaderPort;
@@ -13,6 +17,8 @@ use uc_core::ports::clipboard::{
 
 #[derive(Clone)]
 pub struct ResourceFacadeDeps {
+    pub snapshot: Arc<dyn ReadEntryResourceSnapshotPort>,
+    pub generator: Arc<dyn ThumbnailGeneratorPort>,
     pub representation_by_blob_id: Arc<dyn GetRepresentationByBlobIdPort>,
     pub representations_for_event: Arc<dyn ListRepresentationsForEventPort>,
     pub thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
@@ -41,6 +47,10 @@ pub struct FileResourceView {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceFacadeError {
+    #[error("thumbnail generation is busy")]
+    Busy,
+    #[error("entry has no available image preview")]
+    Unavailable,
     #[error("resource not found")]
     NotFound,
     #[error("resource mismatch")]
@@ -50,12 +60,16 @@ pub enum ResourceFacadeError {
 }
 
 pub struct ResourceFacade {
+    entry_thumbnails: EntryThumbnailCache,
     deps: ResourceFacadeDeps,
 }
 
 impl ResourceFacade {
     pub fn new(deps: ResourceFacadeDeps) -> Self {
-        Self { deps }
+        Self {
+            deps,
+            entry_thumbnails: EntryThumbnailCache::default(),
+        }
     }
 
     #[instrument(skip_all, fields(blob_id = %blob_id))]
@@ -412,12 +426,47 @@ mod tests {
         entry_repo: Arc<FakeEntryRepo>,
     }
 
+    struct UnusedThumbnailDependencies;
+
+    #[async_trait::async_trait]
+    impl ReadEntryResourceSnapshotPort for UnusedThumbnailDependencies {
+        async fn read_entry_resource_snapshot(
+            &self,
+            _: &EntryId,
+        ) -> Result<
+            Option<super::entry_thumbnail::EntryResourceSnapshot>,
+            super::entry_thumbnail::EntryResourceReadError,
+        > {
+            Ok(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ThumbnailGeneratorPort for UnusedThumbnailDependencies {
+        async fn generate_thumbnail(
+            &self,
+            _: &[u8],
+        ) -> anyhow::Result<uc_core::ports::clipboard::GeneratedThumbnail> {
+            anyhow::bail!("unused")
+        }
+        async fn generate_thumbnail_from_rgba(
+            &self,
+            _: &[u8],
+            _: u32,
+            _: u32,
+        ) -> anyhow::Result<uc_core::ports::clipboard::GeneratedThumbnail> {
+            anyhow::bail!("unused")
+        }
+    }
+
     fn test_deps() -> TestDeps {
         let representation_repo = Arc::new(FakeRepresentationRepo::default());
         let thumbnail_repo = Arc::new(FakeThumbnailRepo::default());
         let blob_store = Arc::new(FakeBlobStore::default());
         let entry_repo = Arc::new(FakeEntryRepo::default());
         let facade = ResourceFacade::new(ResourceFacadeDeps {
+            snapshot: Arc::new(UnusedThumbnailDependencies),
+            generator: Arc::new(UnusedThumbnailDependencies),
             representation_by_blob_id: representation_repo.clone(),
             representations_for_event: representation_repo.clone(),
             thumbnail_repo: thumbnail_repo.clone(),

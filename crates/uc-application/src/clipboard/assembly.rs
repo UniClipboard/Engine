@@ -457,6 +457,8 @@ impl ClipboardAssembly {
 
     pub fn resource(&self) -> Arc<ResourceFacade> {
         Arc::new(ResourceFacade::new(ResourceFacadeDeps {
+            snapshot: Arc::clone(&self.deps.clipboard.resource_snapshot),
+            generator: Arc::clone(&self.deps.storage.thumbnail_generator),
             representation_by_blob_id: Arc::clone(
                 &self.deps.clipboard.representation_ports.get_by_blob_id,
             ),
