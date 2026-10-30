@@ -2,7 +2,6 @@
 
 这里包含设计中、实施中、待实现或暂时阻塞的工作。状态以各文件开头为准。
 
-- [Issue #34 总验收清单](2026-10-29-connectivity-migration-acceptance.md)（最终 CI、第四／七／九片结算及原 DoD 总审进行中）
 
 
 

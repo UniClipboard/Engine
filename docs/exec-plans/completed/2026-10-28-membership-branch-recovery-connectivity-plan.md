@@ -1080,7 +1080,7 @@ Blob summary 为 `28aaf4bc761928d7bdd301a35e760a64e35e4fdbbe1b4a1854d9c35db6cc8f
 至此 AC01–12 在本片原定范围内结算，计划与规格共同移入 completed。
 移动平台只证明原 SDK 绑定／probe 编译；真机运行、物理切网、睡眠／后台、全部 NAT 拓扑、
 完整历史非 smoke 及产品宿主采用均未从本轮结果推出通过。
-#34 的 D15 仍缺排除缓存替代路径的真实 mDNS-only 端到端证明，见[总验收清单](../active/2026-10-29-connectivity-migration-acceptance.md)。
+#34 的 D15 仍缺排除缓存替代路径的真实 mDNS-only 端到端证明，见[总验收清单](2026-10-29-connectivity-migration-acceptance.md)。
 本次归档不关闭 #34、不合并 #350、不发布或修改产品依赖。
 
 归档前根六项门禁全部通过：`just cargo metadata --locked --format-version 1`、
