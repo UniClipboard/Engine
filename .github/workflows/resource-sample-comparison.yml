@@ -1,0 +1,79 @@
+name: Blob resource source comparison
+on:
+  push:
+    branches: [ci/blob-resource-regression-check]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline
+            source: 5461cb105f77c61e5aef7225b39ce5705e6c6718
+          - label: pr-tested-merge
+            source: ec487ce60ca9db6eec4226be98222c8cb20c60c7
+          - label: merged
+            source: 073ae68dea60d9ffe3295b2a8e645a2ec17428ef
+    env:
+      UC_ENGINE_MBX_LOCAL_ONLY: '1'
+      UC_TEST_BUILD_SCOPE: workspace
+      UC_EXPECT_DIAGNOSTIC_STACK: available
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ matrix.source }}
+          submodules: recursive
+      - uses: ./.github/actions/apt-download-cache
+        with:
+          packages: iproute2 nftables iputils-ping file clang libclang-dev cmake
+      - uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: blob-resource-comparison-linux
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145,just
+      - name: Record exact source
+        run: |
+          mkdir -p comparison
+          git rev-parse HEAD > comparison/source.txt
+          git rev-parse 'HEAD^{tree}' > comparison/tree.txt
+          git status --porcelain > comparison/source-state.txt
+          sha256sum Cargo.lock > comparison/cargo-lock.sha256
+          rustc --version --verbose > comparison/rustc.txt
+      - name: Repeat existing complete-exchange scenario three times
+        shell: bash
+        run: |
+          failure=0
+          for round in 1 2 3; do
+            evidence="$PWD/comparison/round-$round"
+            mkdir -p "$evidence"
+            export UC_TEST_ARTIFACTS_DIR="$evidence"
+            export UC_MANAGED_BLOB_RESOURCE_EVIDENCE="$evidence/sample.json"
+            set +e
+            bash scripts/testing/run-test-group.sh workspace -E 'package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::blob_resources::managed_engine_resource_sample_waits_for_the_complete_inbound_exchange)' > "$evidence/run.log" 2>&1
+            result=$?
+            set -e
+            printf '%s\n' "$result" > "$evidence/exit-code.txt"
+            if [[ -f target/nextest/ci/junit.xml ]]; then
+              cp target/nextest/ci/junit.xml "$evidence/junit.xml"
+            fi
+            if [[ "$result" != 0 ]]; then failure=1; fi
+            if [[ ! -f "$evidence/junit.xml" ]]; then failure=1; continue; fi
+            python3 - "$evidence/junit.xml" <<'VERIFY' || failure=1
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).getroot().iter('testcase'))
+          assert len(cases) == 1, len(cases)
+          assert cases[0].get('name') == 'testing::host_adapter_contract::blob_resources::managed_engine_resource_sample_waits_for_the_complete_inbound_exchange'
+          VERIFY
+          done
+          exit "$failure"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: blob-resource-comparison-${{ matrix.label }}
+          path: comparison
+          if-no-files-found: error
