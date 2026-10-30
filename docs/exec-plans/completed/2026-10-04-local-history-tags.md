@@ -1,6 +1,6 @@
 # 本机历史标签
 
-状态：本地实现与端到端验收完成，等待合并。
+Status: completed. Engine [PR #158](https://github.com/UniClipboard/Engine/pull/158) merged as `d4dd324a1a88a622ed5fc503a506745a8fdca350` on 2026-10-06. Desktop [PR #1847](https://github.com/UniClipboard/UniClipboard/pull/1847) merged with that immutable Engine revision. The Engine history-tag lifecycle test passed again during the 2026-10-30 documentation audit. This does not establish device or release acceptance.
 
 ## 背景与决定
 
@@ -89,4 +89,4 @@
 
 ## 剩余事项
 
-- Desktop t-0167 以本地 Engine override 联调；跨仓发布前替换为已合并的不可变来源。
+- Desktop PR #1847 replaced the local Engine override with the merged Engine revision. Release acceptance was not checked during this archive.

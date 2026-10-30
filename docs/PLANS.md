@@ -26,7 +26,7 @@
 
 - [Space 加入受管通信](exec-plans/completed/2026-10-29-space-admission-connectivity-plan.md)：实现与本地验收完成；初次加入、续接和入站流接入统一连接管理器，保留非成员专属认证与原协议，修复单端点占尽准入额度；历史发布二进制、Relay 和真机矩阵跳过。
 
-- Issue #34 第九切片：[成员分支恢复受管连接执行计划](exec-plans/completed/2026-10-28-membership-branch-recovery-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-28-membership-branch-recovery-connectivity-spec.md)。实现与验收完成并归档；最终代码候选 `33dc6f03` 的恢复六格、完整Engine、原网络24格及平台编译／Windows门禁均已核验。首轮固定旧旧Relay失败及旧技术债保留；移动编译不代表真机运行，物理切网／睡眠／后台和额外历史矩阵跳过。#350保持草稿，#34的D15本地端到端证据已由后续计划补齐，远端CI及设备范围由总清单继续跟踪。
+- Issue #34 第九切片：[成员分支恢复受管连接执行计划](exec-plans/completed/2026-10-28-membership-branch-recovery-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-28-membership-branch-recovery-connectivity-spec.md)。实现与验收完成并归档；最终代码候选 `33dc6f03` 的恢复六格、完整Engine、原网络24格及平台编译／Windows门禁均已核验。首轮固定旧旧Relay失败及旧技术债保留；移动编译不代表真机运行，物理切网／睡眠／后台和额外历史矩阵跳过。#350已合并至main（`5f3f16c7`）；#34的D15本地端到端证据已由后续计划补齐，后续修复的远端CI及设备范围由总清单继续跟踪。
 
 - Issue #34 第八切片：[反向进度与发送侧状态投影执行计划](exec-plans/completed/2026-10-24-transfer-progress-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-24-transfer-progress-connectivity-spec.md)及[验收结论](exec-plans/completed/2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)。实施与验收结算完成，同head主CI13项及Windows双架构通过；物理挂起／设备后台按用户要求跳过，历史旧端Relay／成员F2间歇失败与远端日志丢弃边界保留。归档PR #342已合并至main（`80bda137`，2026-10-28北京时间）；合并不代表发布，也不关闭整个#34。
 
@@ -36,7 +36,7 @@
 
 - Issue #34 第五切片：[当前剪贴板状态与按需拉取执行计划](exec-plans/completed/2026-10-14-active-clipboard-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-14-active-clipboard-connectivity-spec.md)。状态为完成，本地验收与代码提交线上必需检查通过；四向 Uni 迁移、每次网络交换 10 秒、每轮 4 目标、最新待发状态与独立容量；保留原恢复语义和文件本体链路。
 
-- Issue #34 第四切片：[成员历史完整迁移与连接复用执行计划](exec-plans/completed/2026-10-12-membership-history-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-12-membership-history-connectivity-spec.md)。状态为实现与验收完成并归档；#180 最终同 head PR／Windows CI 通过，设备及扩展矩阵跳过；成员历史独占连接池、新多流 ALPN 与旧 `/4` fallback、每方向一条、当前成员 30 秒空闲保留；不新增批量协议。
+- Issue #34 第四切片：[成员历史完整迁移与连接复用执行计划](exec-plans/completed/2026-10-12-membership-history-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-12-membership-history-connectivity-spec.md)。PR #180 已合并，实现与已执行的必需 CI 验收完成并归档；最终同 head 的仓库检查、Engine 测试、升级 smoke 及 Windows x64／arm64 构建通过，覆盖率、扩展连接恢复与物理设备矩阵跳过；成员历史独占连接池、新多流 ALPN 与旧 `/4` fallback、每方向一条、当前成员 30 秒空闲保留；不新增批量协议。
 
 - Issue #34 第三切片：[组更新收发与主动恢复执行计划](exec-plans/completed/2026-10-11-group-update-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-11-group-update-connectivity-spec.md)。状态为完成；完整 Uni 收发、统一应用与 /4 主动逐页恢复落地，最终 workspace、成员、真实 SQLite/MLS 强杀断点、独立宿主和固定 main 双方向互通通过；物理设备与跨网络矩阵跳过，不新增批量协议，不关闭整个 #34。
 - Issue #34 第二切片：[普通剪贴板连接边界执行计划](exec-plans/completed/2026-10-11-clipboard-connectivity-plan.md)，对应[实现规格](exec-plans/completed/2026-10-11-clipboard-connectivity-spec.md)。状态为完成；切片验收及根门禁通过，完整 workspace 的成员 G2 一项失败与隔离通过均保留记录，原因待查；平台与历史发布矩阵明确跳过。

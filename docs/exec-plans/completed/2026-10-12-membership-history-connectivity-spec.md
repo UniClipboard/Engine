@@ -1,6 +1,6 @@
 # Issue #34 第四切片：成员历史完整迁移与连接复用规格
 
-状态：**实现及必需验收完成，已归档**（2026-10-29结算）；最终同 head CI 与跳过项见[执行计划](2026-10-12-membership-history-connectivity-plan.md#最终线上验收与归档结算2026-10-29)。
+状态：**实现与已执行的必需验收完成，已归档**（2026-10-29 核对结算）；[PR #180](https://github.com/UniClipboard/Engine/pull/180) 已合并，最终同 head CI、原失败及跳过项见[执行计划](2026-10-12-membership-history-connectivity-plan.md#最终线上验收与归档结算2026-10-29)。
 基线：`origin/main edf0a296`，第三切片合并提交为 `247490af`。
 [执行计划](2026-10-12-membership-history-connectivity-plan.md)负责实施顺序、门禁与证据；本文是本切片设计的唯一来源。
 

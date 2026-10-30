@@ -1,0 +1,21 @@
+name: Snapshot regression tests
+description: Run SDK and native round-trip regressions without remote credentials.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install required snapshot SDK
+      shell: bash
+      run: python3 -m pip install --disable-pip-version-check --target "$RUNNER_TEMP/engine-snapshot-test-sdk" boto3==1.40.0
+    - name: Run snapshot regressions with the real SDK
+      shell: bash
+      env:
+        PYTHONPATH: ${{ runner.temp }}/engine-snapshot-test-sdk
+      run: |
+        python3 -c "import boto3; assert boto3.__version__ == '1.40.0'"
+        python3 scripts/build-cache/mbx-snapshot.test.py -v
+        python3 scripts/build-cache/verify-r2-build.test.py
+        python3 scripts/build-cache/check-snapshot-routing.py
+        python3 scripts/build-cache/mbx-snapshot.integration.py
