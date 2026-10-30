@@ -81,6 +81,7 @@ pub use subscriber::HostLogLayer;
 use process_release::{
     ProcessFailureKind, ProcessReleaseErrors, ProcessReleaseResult, ProcessResumeResult,
 };
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -269,6 +270,7 @@ fn generation_exhaustion_probe() {
     );
 }
 
+#[cfg(unix)]
 fn main() {
     #[cfg(feature = "test-process-release")]
     if std::env::args().any(|arg| arg == "--terminal-admission-deadline") {
@@ -984,6 +986,7 @@ fn network_resume_held_probe(queue_release: bool, retry_release: bool, fail_queu
 }
 
 #[cfg(feature = "test-process-release")]
+#[cfg(unix)]
 fn network_park_retry_probe(both_files: bool) {
     use std::sync::atomic::Ordering;
     let root = tempfile::tempdir().expect("root");
@@ -1353,6 +1356,7 @@ fn daily_error_queued_probe(fail_queued_spawn: bool) {
 }
 
 #[cfg(feature = "test-process-release")]
+#[cfg(unix)]
 fn daily_park_retry_probe(terminal: bool) {
     let root = tempfile::tempdir().expect("root");
     let config = ObservabilityConfig::new(
@@ -2336,6 +2340,7 @@ fn export_overlap_probe() {
     let _ = handle.shutdown(Duration::from_secs(5));
 }
 
+#[cfg(unix)]
 fn release_after_queued_resume_probe() {
     let root = tempfile::tempdir().expect("root");
     let config = ObservabilityConfig::new(
@@ -2466,6 +2471,7 @@ fn release_after_queued_resume_probe() {
     let _ = handle.shutdown(Duration::from_secs(5));
 }
 
+#[cfg(unix)]
 fn release_during_resume_probe() {
     let root = tempfile::tempdir().expect("root");
     let config = ObservabilityConfig::new(
@@ -2787,4 +2793,9 @@ fn terminal_admission_deadline_probe() {
         bounded && held && closed,
         "unaccepted actions must meet deadlines and a later release must close resources"
     );
+}
+
+#[cfg(not(unix))]
+fn main() {
+    panic!("process owner probe requires Unix FIFOs, lsof, and Python fcntl");
 }
