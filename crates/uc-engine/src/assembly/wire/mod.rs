@@ -85,7 +85,7 @@ use uc_infra_storage::db::repositories::{
     DieselEntryAvailabilityRepository, DieselEntryResourceReader, DieselFileTransferRepository,
     DieselInboundReceiveCommitRepository, DieselPeerAddressRepository,
     DieselReceiveArtifactLogRepository, DieselSpaceMemberRepository, DieselSpaceSecurityStore,
-    DieselThumbnailRepository, DieselTrustedPeerRepository, EncryptedRelationshipStore,
+    DieselTrustedPeerRepository, EncryptedRelationshipStore,
 };
 use uc_infra_storage::search::{
     HkdfSearchKeyDerivation, SearchPipeline, SqliteSearchIndex, V3SearchKeyDerivation,
@@ -138,7 +138,6 @@ struct InfraLayer {
 
     // Blob storage
     blob_repository: Arc<dyn BlobRepositoryPort>,
-    thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
     thumbnail_generator: Arc<dyn ThumbnailGeneratorPort>,
 
     // Security services
@@ -949,8 +948,6 @@ pub async fn wire_dependencies_from_inputs(
             Arc::clone(&platform.blob_writer),
             Arc::clone(&infra.hash),
             Arc::clone(&infra.clock),
-            Arc::clone(&infra.thumbnail_repo),
-            Arc::clone(&infra.thumbnail_generator),
         ),
     );
 
@@ -1029,7 +1026,6 @@ pub async fn wire_dependencies_from_inputs(
             entry_file_set_repo,
             history_tag_store: history_tag_repo.clone(),
             history_entry_tags: history_tag_repo,
-            thumbnail_repo: infra.thumbnail_repo,
             thumbnail_generator: infra.thumbnail_generator,
             file_transfer,
             directory_receive,

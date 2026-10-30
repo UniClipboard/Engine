@@ -194,7 +194,6 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `QueryHistoryStats` | 返回历史记录总数和总大小 |
 | `GetHistoryEntryResource` | 返回指定记录的资源标识、类型、大小及可用读取方式 |
 | `ReadBlob` | 读取指定 blob 的完整字节和媒体类型 |
-| `ReadThumbnail` | 读取指定表示的缩略图字节和媒体类型 |
 | `ReadEntryThumbnail` | Resolve the current entry preview and read or generate bounded WebP thumbnail bytes. See [entry thumbnails](entry-thumbnails.md). |
 | `ReadEntryFile` | 读取指定记录的首个已物化文件及下载文件名 |
 | `QueryEntryDelivery` | 返回指定记录的来源及每个当前仍有效且可信设备的投递状态；已移除设备不显示，当前成员范围无法确认时查询失败 |
@@ -372,7 +371,7 @@ HarmonyOS 绑定必须公开相同字段、结果、错误和提醒。
 
 `DeleteHistoryEntry` 和 `ClearHistory` 由核心统一清理数据库记录、选择、缓存文件、搜索索引和 blob 引用，宿主不得自行复制清理顺序。批量清空发生部分失败时只返回失败条目标识，不返回底层异常、文件路径或用户内容。
 
-`ReadBlob`、`ReadThumbnail` 和 `ReadEntryFile` 返回完整内存字节及可用媒体类型，文件结果额外返回已清理的下载文件名。三种不存在情况使用不同稳定编号，内部不一致、存储错误和文件路径不得进入公开响应或日志。桌面宿主必须继续限制 blob 与文件的并发完整读取数量，缩略图读取不占用大文件名额。
+`ReadBlob`, `ReadEntryThumbnail`, and `ReadEntryFile` return binary bytes and the available media type. Entry thumbnails use the breaking [entry thumbnail contract](entry-thumbnails.md); the representation-addressed operation and history thumbnail URL/dimension fields are removed. Internal storage errors and paths never enter public responses or logs. Hosts must bound full original blob/file reads and clear their own resources on content lock.
 
 `QueryEntryDelivery` 由核心合并记录来源、当前可信设备集合和已发生的投递事实。来源明确区分本机、远端和无法追溯的历史记录；每个目标明确区分待处理、已送达、重复、不可达和失败。待处理既可以来自尚未接受发送的当前设备差集，也可以来自发送开始前已经持久保存、等待最终结果的恢复依据；两者对宿主保持同一状态。正常结果可以携带设备显示名和失败补充说明供界面展示，但这些内容不得进入调试输出或日志。记录不存在返回 `NotFound`，存储失败只返回脱敏错误。
 

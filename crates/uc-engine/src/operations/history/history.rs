@@ -120,7 +120,6 @@ fn history_entry_summary(entry: EntryProjectionView) -> HistoryEntrySummary {
         size_bytes: entry.size_bytes,
         captured_at_ms: entry.captured_at,
         content_type: entry.content_type,
-        thumbnail_url: entry.thumbnail_url,
         is_encrypted: entry.is_encrypted,
         is_favorited: entry.is_favorited,
         updated_at_ms: entry.updated_at,
@@ -131,8 +130,6 @@ fn history_entry_summary(entry: EntryProjectionView) -> HistoryEntrySummary {
         link_urls: entry.link_urls,
         link_domains: entry.link_domains,
         file_sizes: entry.file_sizes,
-        image_width: entry.image_width,
-        image_height: entry.image_height,
         is_directory: entry.is_directory,
         payload_state: entry.payload_state,
     }
@@ -206,7 +203,6 @@ mod tests {
             size_bytes: 0,
             captured_at: 1,
             content_type: "file".into(),
-            thumbnail_url: None,
             is_encrypted: true,
             is_favorited: false,
             updated_at: 1,
@@ -217,8 +213,6 @@ mod tests {
             link_urls: None,
             link_domains: None,
             file_sizes: None,
-            image_width: None,
-            image_height: None,
             is_directory: true,
             payload_state: None,
         });

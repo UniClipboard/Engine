@@ -6,7 +6,7 @@ use uc_application::facade::{AppFacade, ResourceFacadeError};
 
 use crate::{
     BinaryResourceSummary, BlobResourceInput, EngineError, EngineErrorCategory,
-    EntryFileResourceSummary, HistoryEntryInput, OperationResult, ThumbnailResourceInput,
+    EntryFileResourceSummary, HistoryEntryInput, OperationResult,
 };
 use uc_observability_contract::uc_error;
 
@@ -24,22 +24,6 @@ pub async fn execute_read_blob(
             })
         })
         .map_err(|error| map_resource_error(error, BLOB_NOT_FOUND_CODE))
-}
-
-pub async fn execute_read_thumbnail(
-    facade: &AppFacade,
-    input: ThumbnailResourceInput,
-) -> Result<OperationResult, EngineError> {
-    facade
-        .read_thumbnail_resource(&input.representation_id)
-        .await
-        .map(|resource| {
-            OperationResult::ThumbnailRead(BinaryResourceSummary {
-                bytes: resource.bytes,
-                media_type: resource.mime_type,
-            })
-        })
-        .map_err(|error| map_resource_error(error, THUMBNAIL_NOT_FOUND_CODE))
 }
 
 pub async fn execute_read_entry_thumbnail(
@@ -77,6 +61,11 @@ pub async fn execute_read_entry_file(
 
 fn map_resource_error(error: ResourceFacadeError, not_found_code: u32) -> EngineError {
     match error {
+        ResourceFacadeError::SessionLocked => EngineError::new(
+            ENTRY_THUMBNAIL_LOCKED_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+        ),
         ResourceFacadeError::Busy => EngineError::new(
             ENTRY_THUMBNAIL_BUSY_CODE,
             EngineErrorCategory::Unavailable,

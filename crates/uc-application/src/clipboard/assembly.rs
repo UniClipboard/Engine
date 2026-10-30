@@ -465,7 +465,6 @@ impl ClipboardAssembly {
             representations_for_event: Arc::clone(
                 &self.deps.clipboard.representation_ports.list_for_event,
             ),
-            thumbnail_repo: Arc::clone(&self.deps.storage.thumbnail_repo),
             blob_store: Arc::clone(&self.deps.storage.blob_store),
             entry_repo: Arc::clone(&self.deps.clipboard.entry_ports.get),
         }))
@@ -487,7 +486,6 @@ impl ClipboardAssembly {
             event_writer: Arc::clone(&self.deps.clipboard.clipboard_event_repo),
             payload_resolver: Arc::clone(&self.deps.clipboard.payload_resolver),
             blob_store: Arc::clone(&self.deps.storage.blob_store),
-            thumbnail_repo: Arc::clone(&self.deps.storage.thumbnail_repo),
             file_transfer_repo: Arc::clone(&self.deps.storage.file_transfer.entry_summary),
             entry_file_set_repo: Arc::clone(&self.deps.storage.entry_file_set_repo),
             search_index: Some(Arc::clone(&self.deps.search.search_index)),

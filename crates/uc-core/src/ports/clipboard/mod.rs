@@ -20,7 +20,6 @@ mod spool_queue;
 mod sync_dispatch;
 mod sync_receiver;
 mod thumbnail_generator;
-mod thumbnail_repository;
 
 pub use active_clipboard::{
     ActiveClipboardDispatchError, ActiveClipboardDispatchPort, ActiveClipboardPullClientError,
@@ -66,4 +65,3 @@ pub use sync_receiver::{
     InboundClipboard, InboundClipboardDisposition, InboundClipboardReceipt, InboundClipboardResult,
 };
 pub use thumbnail_generator::{GeneratedThumbnail, ThumbnailGeneratorPort};
-pub use thumbnail_repository::ThumbnailRepositoryPort;

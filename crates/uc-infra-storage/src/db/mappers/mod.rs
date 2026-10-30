@@ -6,4 +6,3 @@ pub mod clipboard_selection_mapper;
 #[cfg(feature = "lan-compat")]
 pub mod mobile_device_mapper;
 pub mod snapshot_representation_mapper;
-pub mod thumbnail_mapper;

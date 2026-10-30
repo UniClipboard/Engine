@@ -57,37 +57,6 @@ impl ThumbnailGeneratorPort for InfraThumbnailGenerator {
         .context("thumbnail blocking task failed")?;
         result
     }
-
-    async fn generate_thumbnail_from_rgba(
-        &self,
-        rgba_bytes: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<GeneratedThumbnail> {
-        let permit = GENERATION_GATE
-            .acquire()
-            .await
-            .context("thumbnail generator closed")?;
-        let expected = u64::from(width) * u64::from(height) * 4;
-        if width > 8192
-            || height > 8192
-            || expected > 64 * 1024 * 1024
-            || expected != rgba_bytes.len() as u64
-        {
-            anyhow::bail!("thumbnail RGBA dimensions exceed limits or mismatch");
-        }
-        let bytes = rgba_bytes.to_vec();
-        let max_edge = self.max_edge;
-        spawn_blocking(move || {
-            let _permit = permit;
-            let rgba_image = image::RgbaImage::from_raw(width, height, bytes)
-                .ok_or_else(|| anyhow::anyhow!("RGBA buffer size mismatch"))?;
-            let decoded = image::DynamicImage::ImageRgba8(rgba_image);
-            Self { max_edge }.generate_from_decoded(decoded, width, height)
-        })
-        .await
-        .context("thumbnail blocking task failed")?
-    }
 }
 
 impl InfraThumbnailGenerator {
@@ -127,10 +96,6 @@ impl InfraThumbnailGenerator {
         Ok(GeneratedThumbnail {
             thumbnail_bytes,
             thumbnail_mime_type: MimeType("image/webp".to_string()),
-            original_width: i32::try_from(original_width)
-                .context("original width exceeds i32 range")?,
-            original_height: i32::try_from(original_height)
-                .context("original height exceeds i32 range")?,
         })
     }
 }

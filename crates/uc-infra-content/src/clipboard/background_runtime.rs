@@ -11,9 +11,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use uc_application::deps::{ClipboardBackgroundError, ClipboardBackgroundPort};
 use uc_core::ids::RepresentationId;
-use uc_core::ports::clipboard::{
-    ClipboardRepresentationStore, ThumbnailGeneratorPort, ThumbnailRepositoryPort,
-};
+use uc_core::ports::clipboard::ClipboardRepresentationStore;
 use uc_core::ports::{ClockPort, ContentHashPort};
 use uc_core::TaskRegistry;
 use uc_observability_contract::{error_source::io_error_kind, uc_info, uc_warn};
@@ -42,8 +40,6 @@ pub struct ClipboardBackgroundRuntime {
     blob_writer: Arc<dyn BlobWriterPort>,
     hasher: Arc<dyn ContentHashPort>,
     clock: Arc<dyn ClockPort>,
-    thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
-    thumbnail_generator: Arc<dyn ThumbnailGeneratorPort>,
 }
 
 impl ClipboardBackgroundRuntime {
@@ -61,8 +57,6 @@ impl ClipboardBackgroundRuntime {
         blob_writer: Arc<dyn BlobWriterPort>,
         hasher: Arc<dyn ContentHashPort>,
         clock: Arc<dyn ClockPort>,
-        thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
-        thumbnail_generator: Arc<dyn ThumbnailGeneratorPort>,
     ) -> Self {
         Self {
             activity: Arc::new(BackgroundActivity::new()),
@@ -78,8 +72,6 @@ impl ClipboardBackgroundRuntime {
             blob_writer,
             hasher,
             clock,
-            thumbnail_repo,
-            thumbnail_generator,
         }
     }
 }
@@ -135,9 +127,6 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
             Arc::clone(&self.representation_repo),
             Arc::clone(&self.blob_writer),
             Arc::clone(&self.hasher),
-            Arc::clone(&self.thumbnail_repo),
-            Arc::clone(&self.thumbnail_generator),
-            Arc::clone(&self.clock),
             self.worker_retry_max_attempts,
             self.worker_retry_backoff,
         );

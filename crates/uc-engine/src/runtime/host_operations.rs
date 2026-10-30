@@ -470,7 +470,8 @@ fn map_export_resource_error(error: ResourceFacadeError) -> EngineError {
         ResourceFacadeError::NotFound => {
             EngineError::new(EXPORT_NOT_FOUND_CODE, EngineErrorCategory::NotFound, false)
         }
-        ResourceFacadeError::Busy
+        ResourceFacadeError::SessionLocked
+        | ResourceFacadeError::Busy
         | ResourceFacadeError::Unavailable
         | ResourceFacadeError::Mismatch(_)
         | ResourceFacadeError::Internal(_) => {

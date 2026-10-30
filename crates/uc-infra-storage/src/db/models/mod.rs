@@ -2,7 +2,6 @@ pub mod blob;
 pub mod blob_reference;
 pub mod clipboard_entry;
 pub mod clipboard_event;
-pub mod clipboard_representation_thumbnail;
 pub mod clipboard_selection;
 pub mod directory_publish_log;
 pub mod encrypted_relationship;
@@ -19,9 +18,6 @@ pub use blob::{BlobRow, NewBlobRow};
 pub use blob_reference::{BlobReferenceRow, NewBlobReferenceRow};
 pub use clipboard_entry::{ClipboardEntryRow, NewClipboardEntryRow};
 pub use clipboard_event::{ClipboardEventRow, NewClipboardEventRow};
-pub use clipboard_representation_thumbnail::{
-    ClipboardRepresentationThumbnailRow, NewClipboardRepresentationThumbnailRow,
-};
 pub use clipboard_selection::{ClipboardSelectionRow, NewClipboardSelectionRow};
 pub use directory_publish_log::{DirectoryPublishLogRow, NewDirectoryPublishLogRow};
 pub use encrypted_relationship::{EncryptedRelationshipRow, NewEncryptedRelationshipRow};

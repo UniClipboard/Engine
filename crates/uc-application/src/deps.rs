@@ -25,7 +25,7 @@ use uc_core::ports::clipboard::{
     ListRepresentationsForEventPort, LoadActiveClipboardPort, LoadMobileConsumableClipboardPort,
     ReplaceEntryContentPort, RepresentationCachePort, ResetActiveClipboardPort,
     SaveClipboardEntryPort, SelfWriteLedgerPort, SetClipboardEntryFavoritePort, SpoolQueuePort,
-    SystemClipboardPort, ThumbnailGeneratorPort, ThumbnailRepositoryPort, TouchClipboardEntryPort,
+    SystemClipboardPort, ThumbnailGeneratorPort, TouchClipboardEntryPort,
     UpdateRepresentationProcessingResultPort,
 };
 use uc_core::ports::search::maintenance::SearchIndexMaintenancePort;
@@ -438,7 +438,6 @@ pub struct StoragePorts {
     /// 读取条目携带的历史标签 id；与 `history_tag_store` 来自同一个存储。
     pub history_entry_tags: Arc<dyn HistoryEntryTagReaderPort>,
     /// 持久化与读取条目缩略图的端口。
-    pub thumbnail_repo: Arc<dyn ThumbnailRepositoryPort>,
     /// 从剪贴板内容生成缩略图的端口。
     pub thumbnail_generator: Arc<dyn ThumbnailGeneratorPort>,
     /// 接收端文件传输投影端口。
