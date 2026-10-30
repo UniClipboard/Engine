@@ -1,0 +1,39 @@
+name: Install apt packages with download cache
+description: Refresh apt indexes and install packages using verified cached downloads.
+inputs:
+  packages:
+    description: Space-separated apt package names.
+    required: true
+runs:
+  using: composite
+  steps:
+    # 只缓存 deb 下载；索引、dpkg 数据库和已安装文件始终来自当前 runner。
+    - name: Resolve current apt downloads
+      id: apt
+      shell: bash
+      env:
+        APT_PACKAGES: ${{ inputs.packages }}
+      run: python3 scripts/ci/apt-download-cache.py prepare
+
+    # PR 缓存由 GitHub 按 merge ref 隔离，主线不能恢复 PR 的缓存。
+    # 不使用 restore-keys；源、平台、包集合和当前解析变化都产生新 key。
+    - name: Restore apt downloads
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/engine-apt/archives/*.deb
+        key: apt-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/actions/apt-download-cache/action.yml', 'scripts/ci/apt-download-cache.py') }}-${{ steps.apt.outputs.key }}
+
+    - name: Verify downloads and install packages
+      shell: bash
+      env:
+        APT_PACKAGES: ${{ inputs.packages }}
+      run: python3 scripts/ci/apt-download-cache.py install
+
+    # 安装成功即保存，后续无关测试失败不丢失本轮下载。
+    - name: Save apt downloads
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/engine-apt/archives/*.deb
+        key: ${{ steps.restore.outputs.cache-primary-key }}
