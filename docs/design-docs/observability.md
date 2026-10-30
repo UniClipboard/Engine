@@ -636,6 +636,18 @@ transfer 原始 ID、摘要、原始错误正文或可恢复派生值。
 `UC_ENGINE_SOURCE_STATE`，缺失或不是完整提交号时读取所在源码树的 git；仍无法确定时记为 `unknown`，
 不从版本号推断。
 
+Git source inspection recursively verifies indexed submodule revisions and source changes. It excludes only
+an untracked, empty, regular `.cargo-ok` file at each checkout root. Cargo creates this checkout-ready marker.
+Within the inspected scope, tracked files, other untracked files, nonempty markers, symlinks, and submodule revision changes remain
+`modified`. Unavailable submodules and failed Git inspections return `unknown`. Local submodule ignore
+settings cannot suppress inspection. The root source scope remains `BUILD_INPUTS`.
+
+Run `python3 scripts/testing/verify-build-source.py --workspace-parent <external-directory> --evidence <new-directory>`
+after sourcing `scripts/build-cache/env.sh` in Bash. The scenario builds a real Cargo Git consumer with the
+actual build script and reads its linked source array. It uses owned workspaces and separate MBX caches for
+each case. The receipt records source hashes, Cargo-generated markers, executable hashes, and results.
+This scenario does not replace Desktop E2E or verify MBX invalidation after a Git environment failure.
+
 来源不以编译期常量编入 rlib。build script 把来源编译为独立原生静态库（固定长度只读数组），默认打包进
 rlib，所有产物（包括 Desktop 等下游 crate 生成的静态库）与以往一样自带来源。显式提供来源的托管构建（CI 经
 `rust-ci-setup`）改为以 `static:-bundle` 声明：rlib 不随提交变化，`uc-observability-runtime` 与
