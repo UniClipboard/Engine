@@ -59,7 +59,7 @@ use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::protocol::Router;
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
-use iroh_mdns_address_lookup::{MdnsAddressLookup, MulticastInterfacesV4};
+use iroh_mdns_address_lookup::{MdnsAddressLookup, MulticastInterfacesV4, MulticastInterfacesV6};
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::instrument::WithSubscriber;
 use tracing::{dispatcher, instrument, Dispatch};
@@ -868,13 +868,17 @@ impl IrohNodeBuilder {
             uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
         // 本机 mDNS 是可降级的发现来源：组播套接字无法建立时节点照常启动，显式地址、已保存的
         // 直连线索与启用时的云端发现仍然可用，长期 mDNS 在后台按有界退避重试。长期设备发现与
-        // 配对发现使用同一接口策略，在全部可用 IPv4 接口上收发。
+        // 配对发现使用同一接口策略，在全部可用 IPv4 接口上收发；长期发现另外在这些接口上
+        // 收发 IPv6 mDNS。
         let local_id = secret.public();
         let mdns = LifetimeMdns::start(
             move || {
                 MdnsAddressLookup::builder()
                     .multicast_interfaces_v4(MulticastInterfacesV4::new(|| {
                         MdnsInterfaceSnapshot::capture().into_parts().1
+                    }))
+                    .multicast_interfaces_v6(MulticastInterfacesV6::new(|| {
+                        MdnsInterfaceSnapshot::capture().into_multicast_v6()
                     }))
                     .build(local_id)
             },
