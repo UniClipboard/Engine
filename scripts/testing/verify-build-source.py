@@ -164,7 +164,20 @@ def main():
         for marker in markers:
             marker.touch()
         check("markers_restored", "clean")
+        git_directory = git(checkout, "rev-parse", "--absolute-git-dir")
+        hook_environment = environment | {
+            "GIT_DIR": git_directory,
+            "GIT_WORK_TREE": str(checkout),
+            "GIT_INDEX_FILE": str(Path(git_directory) / "index"),
+            "GIT_PREFIX": "crates/provenance-source/",
+        }
+        check("inherited_git_repository", "clean", env=hook_environment)
+        alternate_index_environment = environment | {
+            "GIT_INDEX_FILE": str(workspace / "unrelated-index"),
+        }
+        check("inherited_git_index", "clean", env=alternate_index_environment)
         (sub / "lib.rs").write_text("pub fn changed() {}\n")
+        check("inherited_git_repository_with_edit", "modified", env=hook_environment)
         check("marker_and_tracked_edit", "modified")
         git(sub, "add", "lib.rs")
         check("marker_and_staged_edit", "modified")

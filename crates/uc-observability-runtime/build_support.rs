@@ -16,7 +16,20 @@ pub(super) const BUILD_INPUTS: [&str; 9] = [
 ];
 
 fn git_output(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let result = Command::new("git")
+    let mut command = Command::new("git");
+    // Git hook 的仓库选择变量不能覆盖本次要检查的 checkout。
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+    ] {
+        command.env_remove(name);
+    }
+    let result = command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args)
         .current_dir(root)
