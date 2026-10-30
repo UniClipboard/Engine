@@ -420,6 +420,9 @@ jobs:
       - name: Validate relay-only active clipboard complete content
         run: bash scripts/testing/run-active-clipboard-connectivity.sh relay
 
+      - name: Validate cloud outage with only mDNS discovery
+        run: bash scripts/testing/run-discovery-connectivity.sh
+
       - name: Run isolated network pairing smoke
         if: success() || failure()
         run: >-
@@ -440,6 +443,7 @@ jobs:
             target/connection-recovery-evidence
             target/active-clipboard-connectivity-evidence/direct
             target/active-clipboard-connectivity-evidence/relay
+            target/discovery-connectivity-evidence
           if-no-files-found: error
 
       - name: Publish scenario CAS snapshot

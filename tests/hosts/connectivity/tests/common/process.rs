@@ -275,6 +275,33 @@ impl HostProcess {
         self.host_info = host_info;
     }
 
+    /// 发现验收先让双方全部退出，再换端口启动，排除旧连接和有效旧地址。
+    #[allow(dead_code)] // 其他协议测试复用此文件，但不调用发现专属重启。
+    pub(crate) fn stop_for_discovery_restart(&mut self) -> Value {
+        let storage = self.request(json!({"command": "secure_storage"}));
+        self.shutdown();
+        self.join_reader();
+        storage
+    }
+
+    #[allow(dead_code)] // 仅发现对照场景更换双栈端口。
+    pub(crate) fn resume_on_port(&mut self, storage: Value, port: u16) {
+        self.bind_port = Some(port);
+        let (child, input, replies, reader, host_info) = Self::spawn(
+            self.root.path(),
+            &self.rendezvous,
+            Some(storage),
+            &self.binary,
+            self.legacy_group_updates,
+            self.bind_port,
+        );
+        self.child = child;
+        self.input = input;
+        self.replies = replies;
+        self.reader = Some(reader);
+        self.host_info = host_info;
+    }
+
     /// 宿主退出后其 stdout 关闭，读取线程随之结束。
     fn join_reader(&mut self) {
         if let Some(reader) = self.reader.take() {
@@ -310,7 +337,8 @@ fn spawn_host(
     let mut start = json!({
         "root": root,
         "rendezvous": rendezvous,
-        "relay": std::env::var_os("UC_MEMBERSHIP_HISTORY_TEST_RELAY").is_some(),
+        "relay": std::env::var_os("UC_MEMBERSHIP_HISTORY_TEST_RELAY").is_some()
+            || std::env::var_os("UC_TEST_CLOUD_DISCOVERY").is_some(),
         "legacy_group_updates": legacy_group_updates,
         "bind_port": bind_port,
     });

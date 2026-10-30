@@ -109,7 +109,9 @@ pub trait CheckEntryAvailabilityPort: Send + Sync {
     /// Returns `true` only when every representation of `entry_id` is ready —
     /// no placeholder for not-yet-materialized payload, none in a `Failed` or
     /// `Lost` state — and, for a file-backed entry, the local files its
-    /// file-list points at actually exist, are readable, and are regular files.
+    /// file-list所指的普通文件实际存在且可读；目录须通过已认证清单逐成员核对，
+    /// 包括文件内容、嵌套结构和空目录，不能只检查根目录存在；既有内容身份
+    /// 无法区分根结构时仍不能确认可安全复用。
     ///
     /// Returns `false` for a partially materialized entry (e.g. a cancelled
     /// transfer left a missing-payload placeholder) or one whose local files

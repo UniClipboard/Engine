@@ -1,5 +1,6 @@
 //! 三个真实生产Runtime的消息源、提供端与接收结果分别归属；不注入进度或伪造身份。
 use super::{dispatch, join, membership, pending, settled, start, PASSPHRASE};
+use crate::dev::init_test_tracing;
 use crate::engine::EngineRuntime;
 use crate::runtime::ProductionRuntime;
 use crate::testing::{
@@ -102,6 +103,7 @@ pub(super) async fn assert_saved(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn third_party_provider_results_and_two_cold_receivers_keep_separate_ownership() {
+    init_test_tracing();
     for provider_is_source in [true, false] {
         let server = MockServer::start().await;
         mount_engine_rendezvous(&server).await;
