@@ -10,19 +10,22 @@ use uc_engine::{
     CancelEntryReceiveInput, CancelInboundTransferInput, CancelJoinSpaceInput,
     ChangeEncryptionPassphraseInput, ChooseDeviceGroupInput, ClipboardRestoreMode,
     ClipboardRestoreOutcome, CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent,
-    EngineState, EntryReceiveProgressInput, EntryReceiveRetryOutcome, EventStream,
-    ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput, Operation,
-    OperationResult, OperationTerminal, ReceiveProgressSummary, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, RestoreClipboardInput, RetryEntryReceiveInput, SecretString, SendFilesInput,
-    SendImageInput, SendReportSummary, SendTextInput, StartupLifecycle, StartupLifecycleInput,
-    StartupProgress, TransferCancellationReason,
+    EngineState, EntryNotResendableReason, EntryReceiveProgressInput, EntryReceiveRetryOutcome,
+    EventStream, ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput,
+    Operation, OperationResult, OperationTerminal, OutboundProgressInput, OutboundProgressSummary,
+    ReceiveProgressSummary, ReconcileOutboundProgressInput, RecoverSessionInput, RefreshReason,
+    RemoveMemberInput, ResendEntryInput, ResendEntryOutcome, RestoreClipboardInput,
+    RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
+    SendTextInput, StartupLifecycle, StartupLifecycleInput, StartupProgress,
+    TransferCancellationReason,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
-    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhReceiveItem,
-    OhReceiveProgress, OhReceiveRetryOutcome, OhRelayOverview, OhRelayOverviewEntry, OhSendReport,
+    OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhOutboundProgress,
+    OhOutboundProgressItem, OhReceiveItem, OhReceiveProgress, OhReceiveRetryOutcome,
+    OhRelayOverview, OhRelayOverviewEntry, OhResendOutcome, OhResendTargetProgress, OhSendReport,
     OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
 };
 
@@ -535,6 +538,83 @@ impl OhEngine {
         }
     }
 
+    #[napi]
+    pub async fn resend_entry(
+        &self,
+        entry_id: String,
+        target_devices: Vec<String>,
+        confirm_new_transfer: Option<bool>,
+    ) -> napi::Result<OhResendOutcome> {
+        match self
+            .engine
+            .execute(Operation::ResendEntry(ResendEntryInput {
+                entry_id,
+                target_devices,
+                confirm_new_transfer: confirm_new_transfer.unwrap_or(false),
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::EntryResent(outcome) => resend_outcome(outcome),
+            _ => Err(unexpected_result()),
+        }
+    }
+    #[napi]
+    pub async fn query_outbound_progress(
+        &self,
+        entry_id: String,
+        target_device_id: String,
+    ) -> napi::Result<Option<OhOutboundProgress>> {
+        match self
+            .engine
+            .execute(Operation::QueryOutboundProgress(OutboundProgressInput {
+                entry_id,
+                target_device_id,
+            }))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::OutboundProgress(value) => Ok(value.map(outbound_progress)),
+            _ => Err(unexpected_result()),
+        }
+    }
+    #[napi]
+    pub async fn list_outbound_progress(&self) -> napi::Result<Vec<OhOutboundProgress>> {
+        match self
+            .engine
+            .execute(Operation::ListOutboundProgress)
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::OutboundProgressList(values) => {
+                Ok(values.into_iter().map(outbound_progress).collect())
+            }
+            _ => Err(unexpected_result()),
+        }
+    }
+    #[napi]
+    pub async fn reconcile_outbound_progress(
+        &self,
+        entry_id: String,
+        target_device_id: String,
+        expected_attempt_id: Option<String>,
+    ) -> napi::Result<String> {
+        match self
+            .engine
+            .execute(Operation::ReconcileOutboundProgress(
+                ReconcileOutboundProgressInput {
+                    entry_id,
+                    target_device_id,
+                    expected_attempt_id,
+                },
+            ))
+            .await
+            .map_err(engine_error)?
+        {
+            OperationResult::OutboundProgressReconciliation(value) => Ok(value.to_string()),
+            _ => Err(unexpected_result()),
+        }
+    }
     #[napi]
     pub async fn query_entry_receive_progress(
         &self,
@@ -1435,3 +1515,100 @@ fn receive_progress(progress: ReceiveProgressSummary) -> OhReceiveProgress {
 
 #[cfg(test)]
 mod receive_tests;
+
+fn outbound_progress(progress: OutboundProgressSummary) -> OhOutboundProgress {
+    OhOutboundProgress {
+        entry_id: progress.entry_id,
+        target_device_id: progress.target_device_id,
+        attempt_id: progress.attempt_id,
+        revision: progress.revision.to_string(),
+        freshness: progress.freshness.to_string(),
+        freshness_available: progress.freshness_available,
+        state: progress.state.to_string(),
+        items_total: progress.items_total,
+        items_waiting: progress.items_waiting,
+        items_running: progress.items_running,
+        items_completed: progress.items_completed,
+        items_failed: progress.items_failed,
+        items_cancelled: progress.items_cancelled,
+        items_unconfirmed: progress.items_unconfirmed,
+        items: progress
+            .items
+            .into_iter()
+            .map(|item| OhOutboundProgressItem {
+                kind: item.kind.to_string(),
+                index: item.index,
+                state: item.state.to_string(),
+                last_known_phase: item.last_known_phase.map(|value| value.to_string()),
+                round: item.round,
+                completed_bytes: item.completed_bytes.map(|value| value.to_string()),
+                total_bytes: item.total_bytes.map(|value| value.to_string()),
+                failure_reason: item.failure_reason.map(|value| value.to_string()),
+                cancellation_reason: item.cancellation_reason.map(|value| value.to_string()),
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod outbound_progress_tests;
+
+fn resend_outcome(outcome: ResendEntryOutcome) -> napi::Result<OhResendOutcome> {
+    let mut result = OhResendOutcome {
+        kind: String::new(),
+        accepted: None,
+        duplicate: None,
+        offline: None,
+        errored: None,
+        pending: None,
+        reconciled: Vec::new(),
+        entry_id: None,
+        device_id: None,
+        reason: None,
+    };
+    match outcome {
+        ResendEntryOutcome::Completed(report) => {
+            result.kind = "completed".into();
+            result.accepted = Some(count(report.accepted)?);
+            result.duplicate = Some(count(report.duplicate)?);
+            result.offline = Some(count(report.offline)?);
+            result.errored = Some(count(report.errored)?);
+            result.pending = Some(count(report.pending)?);
+            result.reconciled = report
+                .reconciled
+                .into_iter()
+                .map(|target| OhResendTargetProgress {
+                    target_device_id: target.target_device_id,
+                    state: target.state.to_string(),
+                    current: target.current.map(outbound_progress),
+                    new_transfer_requested: target.new_transfer_requested,
+                    duplicate_files_possible: target.duplicate_files_possible,
+                })
+                .collect();
+        }
+        ResendEntryOutcome::SynchronizationDisabled => {
+            result.kind = "synchronization_disabled".into()
+        }
+        ResendEntryOutcome::NoEligibleTargets => result.kind = "no_eligible_targets".into(),
+        ResendEntryOutcome::EntryNotFound { entry_id } => {
+            result.kind = "entry_not_found".into();
+            result.entry_id = Some(entry_id);
+        }
+        ResendEntryOutcome::EntryNotResendable { entry_id, reason } => {
+            result.kind = "entry_not_resendable".into();
+            result.entry_id = Some(entry_id);
+            result.reason = Some(
+                match reason {
+                    EntryNotResendableReason::RemoteOrigin => "remote_origin",
+                    EntryNotResendableReason::PayloadLost => "payload_lost",
+                }
+                .into(),
+            );
+        }
+        ResendEntryOutcome::TargetNotTrusted { device_id } => {
+            result.kind = "target_not_trusted".into();
+            result.device_id = Some(device_id);
+        }
+    }
+    Ok(result)
+}

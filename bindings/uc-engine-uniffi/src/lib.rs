@@ -14,10 +14,11 @@ pub use runtime::{
     CustomRelayMutationRejection, CustomRelayMutationResult, Device, EntryNotResendableReason,
     InvitationAvailability, InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus,
     JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle,
-    PeerConnectionRefresh, ReceiveItem, ReceiveProgress, ReceiveRetryOutcome, RejectedConfigImport,
-    RelayEntrySource, RelayOverview, RelayOverviewEntry, RelayRoutingMode, RelaySaveResult,
-    ResendEntryOutcome, SendReport, SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState,
-    WorkspaceConvergence, WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
+    OutboundProgress, OutboundProgressItem, PeerConnectionRefresh, ReceiveItem, ReceiveProgress,
+    ReceiveRetryOutcome, RejectedConfigImport, RelayEntrySource, RelayOverview, RelayOverviewEntry,
+    RelayRoutingMode, RelaySaveResult, ResendEntryOutcome, ResendTargetProgress, SendReport,
+    SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
+    WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
 uniffi::setup_scaffolding!();
@@ -64,6 +65,51 @@ pub enum BindingError {
     ObservabilityNotInstalled,
     #[error("engine returned an unexpected result")]
     UnexpectedResult,
+}
+
+/// 单 Engine 的释放结果；不包含进程观测与宿主自有文件。
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum BindingResourceRelease {
+    Pending,
+    Released { error: Option<BindingError> },
+    Failed { error: BindingError },
+}
+
+impl BindingResourceRelease {
+    pub fn into_result(self) -> Result<(), BindingError> {
+        match self {
+            Self::Released { error: None } => Ok(()),
+            Self::Released { error: Some(error) } | Self::Failed { error } => Err(error),
+            Self::Pending => Err(BindingError::Engine {
+                code: 1002,
+                category: BindingErrorCategory::DeadlineExceeded,
+                retryable: true,
+            }),
+        }
+    }
+}
+
+impl From<uc_engine::ResourceReleaseOutcome> for BindingResourceRelease {
+    fn from(outcome: uc_engine::ResourceReleaseOutcome) -> Self {
+        match outcome {
+            uc_engine::ResourceReleaseOutcome::Pending => Self::Pending,
+            uc_engine::ResourceReleaseOutcome::Released { error } => Self::Released {
+                error: error.map(BindingError::from),
+            },
+            uc_engine::ResourceReleaseOutcome::Failed { error } => Self::Failed {
+                error: error.into(),
+            },
+        }
+    }
+}
+
+impl From<Result<(), BindingError>> for BindingResourceRelease {
+    fn from(result: Result<(), BindingError>) -> Self {
+        match result {
+            Ok(()) => Self::Released { error: None },
+            Err(error) => Self::Failed { error },
+        }
+    }
 }
 
 impl From<uc_engine::EngineError> for BindingError {
@@ -352,6 +398,7 @@ impl std::fmt::Debug for BindingClipboardRepresentation {
 
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BindingClipboardSnapshot {
+    pub identity: Option<Vec<u8>>,
     pub observed_at_ms: i64,
     pub representations: Vec<BindingClipboardRepresentation>,
 }
@@ -480,6 +527,7 @@ pub enum BindingEvent {
         completed_bytes: u64,
         total_bytes: Option<u64>,
     },
+    OutboundProgressChanged,
     TransferStatusChanged {
         transfer_id: String,
         entry_id: Option<String>,
@@ -529,7 +577,10 @@ pub trait BindingHost: Send + Sync {
     ) -> Result<(), HostBindingError>;
     fn file_finish_write(&self, handle: String) -> Result<(), HostBindingError>;
     fn clipboard_read(&self) -> Result<BindingClipboardSnapshot, HostBindingError>;
-    fn clipboard_write(&self, snapshot: BindingClipboardSnapshot) -> Result<(), HostBindingError>;
+    fn clipboard_write(
+        &self,
+        snapshot: BindingClipboardSnapshot,
+    ) -> Result<Option<Vec<u8>>, HostBindingError>;
 }
 
 #[uniffi::export(with_foreign)]

@@ -2,9 +2,7 @@
 
 ## 状态
 
-等待名单已实施（Engine、绑定与移动测试宿主）。ADR-020 已改变等待名单的含义：它只描述本机
-已知传播，不能证明全局一致；待用户移除决定、分叉关系以及独立在线状态待重新同步。产品仓投影
-和界面验收不在本仓执行。
+Historical. The `waiting_member_device_ids` public contract described below is not present in the current Engine result. `WorkspaceConvergenceChanged` is restricted to `dev-tools`. The production device-group result contains `pending_confirmation_device_ids`; its semantics must not be assumed to match the historical waiting list. See the [current Engine interface](../uc-engine-interface.md) and [`device_group_presentation.rs`](../../../crates/uc-engine/src/contract/device_group_presentation.rs). Product requirements for a waiting list need a separate review.
 
 本文落实 ADR-019，定义工作空间收敛在等待离线成员时如何给出准确的设备名单。它修订
 [工作空间全局收敛](../../exec-plans/completed/016-workspace-wide-convergence.md) 和

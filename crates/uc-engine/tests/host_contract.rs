@@ -9,6 +9,9 @@ use uc_engine::{
     HostFileHandle, HostFileMetadata, HostSecureStorage,
 };
 
+#[path = "host_contract/clipboard_attribution.rs"]
+mod clipboard_attribution;
+
 #[path = "host_contract/clipboard_startup.rs"]
 mod clipboard_startup;
 
@@ -317,3 +320,6 @@ fn host_boundary_debug_output_redacts_user_content_and_details() {
     }
     assert_eq!(error.category(), HostCapabilityErrorCategory::Unavailable);
 }
+
+#[path = "host_contract/resource_release.rs"]
+mod resource_release;

@@ -1,4 +1,5 @@
 //! 同进程重试的原始资料与实际保存事实；不写入持久存储，也不输出敏感字段。
+use super::ReceiveProgressSignal;
 use super::{ReceiveAction, ReceiveBatch, ReceiveWorkRegistry};
 use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::transfer::receive::batch::ReceiveFacts;
@@ -10,16 +11,19 @@ use anyhow::Error as SourceError;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError, Weak};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::{EntryReceiveProgress, ReceiveItemKind, TrackedFileTransferStatus};
 use uc_core::MimeType;
 
+mod progress_snapshot;
 mod projection;
 
 /// 原包只在尚未保存条目时需要；保存后从既有密文快照重建正文。
 #[derive(Clone)]
 pub(crate) struct ReceiveSource {
+    pub(crate) source_entry: Option<EntryId>,
     pub(crate) from_device: DeviceId,
     pub(crate) expected_hash: String,
     pub(crate) blob_refs: Vec<V3BlobRef>,
@@ -45,7 +49,7 @@ pub(crate) struct PlannedReceiveItem {
     pub(crate) kind: ReceiveItemKind,
     pub(crate) blob_index: usize,
     pub(super) members: usize,
-    pub(super) bytes: u64,
+    pub(in crate::transfer::receive) bytes: u64,
 }
 
 pub(super) struct ReceiveReceipt {
@@ -136,7 +140,8 @@ impl ReceiveAction {
         }
     }
 
-    pub(crate) fn retain_source(&self, source: ReceiveSource) {
+    /// 仅在持久attempt的CAS接受后调用；预备计划不产生当前进度权威。
+    pub(crate) fn accept_source(&self, source: ReceiveSource) {
         let progress = self
             .progress
             .lock()
@@ -151,6 +156,7 @@ impl ReceiveAction {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if !state.accepting
+            || progress.completion.borrow().is_some()
             || self.generation.is_cancelled()
             || state.cleaning.contains(progress.entry.as_ref())
             || state.retired.get(&progress.entry).is_some_and(|births| {
@@ -162,12 +168,20 @@ impl ReceiveAction {
         {
             return;
         }
+        // 每个已接受attempt只交接一次；旧动作的重复交接不能按到达顺序重获权威。
+        if progress.source_accepted.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let planned = progress
             .prepared_plan
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get_or_insert_with(|| source.planned(&progress.entry, &progress.attempt).into())
             .clone();
+        if let Some(changed) = state.accept_progress(&progress.entry, &progress.attempt, &source) {
+            self.batch
+                .observe_progress(ReceiveProgressSignal::new(&self.registry, changed));
+        }
         let expected_hash = source.expected_hash.clone();
         let previous = state.receipts.insert(
             progress.entry.clone(),
@@ -280,8 +294,13 @@ impl ReceiveAction {
         else {
             return;
         };
+        if complete {
+            progress.fully_persisted.store(true, Ordering::Release);
+        }
         if complete && receipt.landed.is_empty() {
             state.receipts.remove(&progress.entry);
+            drop(state);
+            self.batch.progress_changed();
             return;
         }
         if complete {
@@ -295,6 +314,8 @@ impl ReceiveAction {
         if let Some(source) = &mut receipt.source {
             source.original_wire = None;
         }
+        drop(state);
+        self.batch.progress_changed();
     }
 }
 

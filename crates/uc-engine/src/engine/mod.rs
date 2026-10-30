@@ -35,6 +35,7 @@ use event_stream::{event_channel, EventSender};
 use in_flight::InFlightOperations;
 use lifecycle::TransitionQueue;
 use log_activity::LogActivity;
+use shutdown::ShutdownProgress;
 pub use startup::{StartupProgress, StartupProgressInput};
 pub use startup_control::{StartupLifecycle, StartupLifecycleInput};
 
@@ -72,6 +73,7 @@ pub struct Engine {
     lifecycle_gate: Arc<Mutex<()>>,
     lifecycle_requests: Arc<TransitionQueue>,
     shutdown_gate: Arc<Mutex<()>>,
+    shutdown_progress: Arc<Mutex<ShutdownProgress>>,
     stop_requested: Arc<AtomicBool>,
     runtime: Arc<dyn EngineRuntime>,
     events: EventSender,
@@ -134,12 +136,13 @@ impl Engine {
                 .await?,
         );
         let log_activity = LogActivity::default();
-        log_activity.begin().await;
+        log_activity.begin().await?;
         let engine = Self {
             state: Arc::new(Mutex::new(EngineState::Running)),
             lifecycle_gate: Arc::new(Mutex::new(())),
             lifecycle_requests: requests,
             shutdown_gate: Arc::new(Mutex::new(())),
+            shutdown_progress: Arc::new(Mutex::new(ShutdownProgress::default())),
             stop_requested: Arc::new(AtomicBool::new(false)),
             runtime,
             events,
@@ -182,6 +185,7 @@ impl Engine {
             lifecycle_gate: Arc::new(Mutex::new(())),
             lifecycle_requests: requests,
             shutdown_gate: Arc::new(Mutex::new(())),
+            shutdown_progress: Arc::new(Mutex::new(ShutdownProgress::default())),
             stop_requested: Arc::new(AtomicBool::new(false)),
             runtime,
             events,

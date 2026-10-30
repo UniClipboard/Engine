@@ -24,8 +24,9 @@ on:
           - profile-upgrade
           - membership-e2e
           - upgrade-matrix
+          - legacy-blob
       case_prefix:
-        description: Optional single scenario prefix such as E01, E02, or E03
+        description: 网络场景前缀；legacy-blob 模式选择 main-direct、main-relay、history-direct 或 history-relay。
         required: false
         type: string
       repeat:
@@ -53,10 +54,10 @@ jobs:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     # 编译缓存凭据：只有 main 上的可信运行绑定限定 main 分支的写入环境，其余运行（PR、合并队列、其他分支）用只读令牌；
-    # fork 与 Dependabot 拿不到任何 secret，回退为按 ref 隔离的 GitHub Actions 缓存。
-    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/029-ci-r2-compile-cache.md。
+    # fork 与 Dependabot 拿不到任何 secret，只进行本地冷编译。
+    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/033-unified-mbx-rust-builds.md。
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: ${{ github.ref == 'refs/heads/main' && matrix.mode == 'direct' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     timeout-minutes: 40
     strategy:
@@ -66,14 +67,14 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install network test tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
-          cache-key: engine-real-environment-${{ matrix.mode }}
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          cache-key: engine-real-environment-network
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -116,6 +117,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Publish scenario CAS snapshot
+        if: success() && matrix.mode == 'direct' && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: engine-real-environment-network
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -126,23 +137,23 @@ jobs:
 
   manual:
     name: Manual real Engine scenario
-    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade' && inputs.mode != 'membership-e2e' && inputs.mode != 'upgrade-matrix'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'profile-upgrade' && inputs.mode != 'membership-e2e' && inputs.mode != 'upgrade-matrix' && inputs.mode != 'legacy-blob'
     runs-on: ubuntu-24.04
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: engine-build-cache-reader
       deployment: false
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install network test tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
-          cache-key: engine-real-environment-${{ inputs.mode }}
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
+          cache-key: engine-real-environment-network
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -199,6 +210,70 @@ jobs:
           path: ${{ runner.temp }}/mbx-evidence
           if-no-files-found: warn
 
+  legacy-blob:
+    name: Fixed legacy blob reproduction
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'legacy-blob'
+    runs-on: ubuntu-24.04
+    environment:
+      name: engine-build-cache-reader
+      deployment: false
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Install network test tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping file clang libclang-dev cmake
+      - name: Prepare Rust build
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cache-key: blob-connectivity-linux
+          compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+      - name: Install just
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+      # 预配对入口本身只执行一轮，重复由这里的独立进程与证据目录明确承担。
+      - name: Replay selected frozen old pair
+        shell: bash
+        env:
+          CASE_LABEL: ${{ inputs.case_prefix }}
+          REPEAT: ${{ inputs.repeat }}
+        run: |
+          [[ "$REPEAT" =~ ^[123]$ ]] || exit 2
+          selected="${CASE_LABEL:-history-relay}"
+          root="$PWD/target/progress-legacy-evidence/reproduction-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          for ((round=1; round<=REPEAT; round++)); do
+            UC_PROGRESS_LEGACY_EVIDENCE_ROOT="$root/round-$round" \
+              bash scripts/testing/run-progress-legacy-baseline.sh --case "$selected"
+          done
+          {
+            echo "## Fixed legacy blob reproduction"
+            echo "- case: $selected"
+            echo "- independent processes: $REPEAT"
+            echo "- scope: selected old/old cell; full compatibility matrix not run"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain fixed old pair evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: legacy-blob-reproduction-${{ github.run_attempt }}
+          path: |
+            target/progress-legacy-evidence/reproduction-*/**/*.json
+            target/progress-legacy-evidence/reproduction-*/**/*.txt
+            target/progress-legacy-evidence/reproduction-*/**/*.log
+          if-no-files-found: error
+      - name: Retain MBX compiler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/mbx-evidence
+          if-no-files-found: warn
+
   profile-upgrade:
     name: Nightly profile upgrade evidence
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'profile-upgrade')
@@ -209,11 +284,12 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-profile-upgrade
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -263,6 +339,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: engine-real-environment-profile-upgrade
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -281,11 +367,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-membership-e2e
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -333,6 +420,16 @@ jobs:
   # 升级兼容矩阵（各锚点到当前源码与 D1 完整链）：先按 rev 构建并缓存全部旧版宿主，再按维度分片运行，最后合并
   # 矩阵表。夜间、锚点定义变化的 PR 与手动触发运行同一矩阵。
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: engine-real-environment-membership-e2e
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -352,6 +449,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
@@ -359,7 +457,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-upgrade-matrix
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -377,6 +474,17 @@ jobs:
           started_at=$(date +%s)
           bash scripts/testing/build-upgrade-anchors.sh --all
           echo "- anchor host build wall time: $(( $(date +%s) - started_at ))s" >> "$GITHUB_STEP_SUMMARY"
+      # 唯一生产者覆盖所有 shard 的共同编译图；dimension 只筛选运行的测试。
+      # 不在此运行矩阵测试，d1-d4 仍分别执行全部既有验证。
+      - name: Install cargo-nextest for shared matrix compilation
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: cargo-nextest@0.9.145
+      - name: Compile shared upgrade matrix actions
+        run: |
+          cargo build --locked -p uc-connectivity-host
+          cargo nextest run --profile ci --locked -p uc-upgrade-matrix -E 'package(uc-upgrade-matrix)' --no-run
+
       - name: Retain anchor build records
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -387,6 +495,16 @@ jobs:
             target/upgrade-anchors/*/build.log
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: engine-real-environment-upgrade-matrix
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain MBX compiler evidence
         if: always()
@@ -401,7 +519,7 @@ jobs:
     needs: upgrade-anchors
     runs-on: ubuntu-24.04
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: engine-build-cache-reader
       deployment: false
     timeout-minutes: 240
     strategy:
@@ -411,6 +529,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake
@@ -418,7 +537,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: engine-real-environment-upgrade-matrix
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -473,6 +591,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Download matrix shards
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:

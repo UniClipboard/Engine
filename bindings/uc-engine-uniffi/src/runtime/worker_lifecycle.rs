@@ -5,21 +5,20 @@ use std::time::Instant;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinSet;
-use uc_engine::Engine;
+use uc_engine::{Engine, ResourceReleaseOutcome};
 
 use super::map_engine_state;
+use super::shutdown_wait::ShutdownReply;
 use crate::observability::schedule_flush_after_lifecycle;
-use crate::{BindingEngineState, BindingError};
-
-type ShutdownReply = mpsc::Sender<Result<(), BindingError>>;
+use crate::{BindingEngineState, BindingError, BindingResourceRelease};
 
 pub(super) enum LifecycleCommand {
     Suspend {
         deadline: Instant,
-        response: ShutdownReply,
+        response: mpsc::Sender<Result<(), BindingError>>,
     },
     Resume {
-        response: ShutdownReply,
+        response: mpsc::Sender<Result<(), BindingError>>,
     },
     Shutdown {
         deadline: Instant,
@@ -56,7 +55,7 @@ pub(super) async fn run(
     requests.close();
     let mut responses: Vec<_> = response.into_iter().collect();
     // 通道离开也由 Engine 完成实际关闭，再回收所有仅负责等待结果的转交任务。
-    let _ = engine.shutdown_until_complete().await;
+    let _ = engine.shutdown_until_released().await;
     while let Some(completed) = pending.join_next().await {
         if let Ok(Some(reply)) = completed {
             responses.push(reply);
@@ -102,12 +101,18 @@ async fn dispatch(engine: Arc<Engine>, command: LifecycleCommand) -> Option<Shut
             let _ = response.send(map_engine_state(engine.lifecycle_state().await));
         }
         LifecycleCommand::Shutdown { deadline, response } => {
-            let result = engine
-                .shutdown(deadline.saturating_duration_since(Instant::now()))
-                .await
-                .map_err(BindingError::from);
+            let outcome = engine
+                .shutdown_with_outcome(deadline.saturating_duration_since(Instant::now()))
+                .await;
+            // 回应属于原清理；调用方等待期限不终止该回应。
+            let outcome = if matches!(outcome, ResourceReleaseOutcome::Pending) {
+                engine.shutdown_until_released().await
+            } else {
+                outcome
+            };
+            let result = BindingResourceRelease::from(outcome);
             schedule_flush_after_lifecycle();
-            if result.is_ok() {
+            if matches!(result, BindingResourceRelease::Released { .. }) {
                 return Some(response);
             }
             let _ = response.send(result);

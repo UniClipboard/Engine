@@ -94,7 +94,22 @@ async fn run_scenario() {
 - `run_child_process` 在显式预算内 wait；超时后 kill 并再次 wait，资源 cleanup 写入报告。非零退出码由业务场景决定属于产品失败还是预期故障注入。
 - 外部资源只有调用方确实拥有其生命周期时才用 `record_external_resource` 登记结果。
 
+涉及等待者退出的用例，先通过既有完整查询或受控能力的开始屏障确认业务动作已进入负责人，再触发等待超时或取消。
+固定睡眠、future创建或等待期限到达本身不能证明动作已开始；调度延后可能让Engine在调用业务入口前就完成取消。
+只在确认开始后验证已启动工作继续受监督，并保持原清理、资源及期限断言；不要为测试扩大稳定Engine的业务步骤接口。
+
 nextest 仍是测试进程的最终超时负责人。场景预算应短于 nextest override，给 JSON/摘要写入和清理留出时间。
+
+进度连接的真实空闲回收用例 `actual_work_leases_survive_thirty_seconds_then_real_idle_timer_closes_the_connection`
+必须先保留实际工作31秒，再等待原30秒空闲回收；默认20秒终止线无法完成该证明。
+`.config/nextest.toml` 为该精确用例在 `default`／`ci` 配置120秒外层期限，并归入 `real-network` 组。
+测试自身90秒截止、产品30秒策略、实际等待断言和零重试均保持不变；不能把这个外层预算泛化到其他用例。
+
+独立进程的`startup_overlapping_a_closing_host_is_never_reported_as_corrupt`连续12轮执行创建、关闭和重启，
+覆盖六种重叠延迟。固定原二进制单CPU直接执行26.42秒完成，而原nextest在20.006秒终止；
+因此该精确用例在`default`／`ci`使用120秒外层预算以覆盖完整流程及coverage开销。
+单次宿主应答30秒、原操作期限、12轮、损坏分类断言及零重试保持，不扩大同文件其他测试的预算。
+这是外层测试预算修正；CI同名超时仍须由候选CI验证，不据此推断所有启动失败的原因。
 
 ## 6. 分组与本地运行
 
@@ -115,6 +130,19 @@ Engine，使用真实 SQLite、MLS 与本机回环 Iroh QUIC，配对 rendezvous
 内施加，使用真实时钟。该文件只在 `dev-tools` feature 下编译，因此 `cargo test -p uc-engine --locked` 不运行
 其中任何场景。nextest 为每个场景单独起进程，并按 `.config/nextest.toml` 的 `membership-e2e` 测试组限制并发、
 放宽慢测试期限；`cargo test` 会在一个进程中顺序运行全部场景，耗时约为前者的数倍且时序失真，只作为兼容入口保留。
+`RejectNewConnections` 的协议选择必须覆盖对应能力的全部当前版本；剪贴板协议新增能力版本时，
+同时更新 dev-tools 的内容拨号选择。真实故障测试必须核对实际拒绝计数，不能只启用开关就假定
+目标交换已经受影响；已有连接的复用与新拨号拒绝分别验收。
+
+组更新 G4 验证真实多节点的收件人隔离、持续故障时队首不变与解除故障、真实重新认证后的连续 epoch 恢复。
+真实网络在观察期间仍可能产生新认证证据，不能把固定睡眠视为“无证据窗口”。退避次数合同由
+`space_security_store::tests::unavailable_recipient_has_at_most_one_due_retry_in_a_quiet_25_second_window`
+在真实 SQLite、明确时钟与重开仓储后严格验证；Application 的
+`each_fresh_online_evidence_allows_one_early_retry_but_quiet_rounds_do_not` 验证证据消费与安静轮次。
+这两项属于 workspace 门禁，G4 仍属于 membership-e2e 门禁。G1 继续覆盖不重启的自动恢复；G4 的接收方
+重启提供真实新认证证据，不清除发送队列。解除接收方本机故障不会自动通知发送方，不能假定任意次数失败后的
+下一次退避仍小于测试固定恢复预算。
+
 场景按类别放在 `crates/uc-engine/tests/space_membership_auto_pairing_e2e/` 的模块中（`admission`、`topology`、
 `removal_convergence`、`space_switch`、`membership_history`、`automatic_connections` 等），共享测试台位于其
 `harness/`。`topology::` 下的多节点拓扑另属 `membership-topology` 测试组，并发更低。每个场景第一行是
@@ -163,6 +191,9 @@ A03、A04 在仅局域网模式下只经 mDNS 解析邀请码并发现对端，�
 登记不一致（包括登记为已知不兼容却通过、未登记的跳过）时测试失败；不得通过修改登记掩盖产品失败。旧版公开接口的
 差异由宿主按能力划分的 feature 表达，锚点与能力的对应见 `tests/upgrade-matrix/host-features.json`；只有能力分层
 无法覆盖时才为锚点新增 `tests/upgrade-matrix/anchors/<锚点>.patch`，且只能改宿主与工作区成员声明。
+`automatic-sync-control` 表达 Engine 1.0.0-rc.8（`ef3ccc2d`）起的独立自动同步开关，a03 起启用；
+a01/rc.1 与 a02/rc.6 不支持时必须明确拒绝 `auto_sync_enabled`，不能映射到语义不同的旧 `auto_sync`。
+`sync_on_restore` 保持独立可用，缺少本地网络配置能力的旧宿主仍在启动时返回 `local_network_unavailable`。
 
 `real-network` 会转交现有 Linux 网络脚本；`device` 要求明确平台与设备，不会自动运行。cargo-nextest 必须为脚本声明的固定版本；脚本不会静默退回语义不同的 runner。
 
@@ -284,3 +315,24 @@ runner 工件中的 `timings.prepare_ms`、`scenario_ms`、`cleanup_ms` 和 `tot
 ## 编译缓存入口
 
 测试分组与连接恢复脚本自动使用仓库固定的 MBX。直接 Cargo 命令用 `just cargo …`，或先 `source scripts/build-cache/env.sh`；不要从绝对路径绕过仓库入口。缓存只恢复编译产物，测试仍每次实际运行并生成自己的工件。统一缓存与 CI/发布信任边界见 [ADR-033](decisions/033-unified-mbx-rust-builds.md)。
+
+## PR 检查范围
+
+PR Check 与 Windows Build 共用 [范围分类器](../../scripts/ci/pr-scope.py)，只对 PR 优化：
+纯 `docs/` Markdown（不含 generated、AGENTS 及被 Rust 测试嵌入的 observability.md）或根 README 运行分类回归与补丁空白检查；
+精确的 `mbx-snapshot.py`、`mbx-snapshot.test.py` 变更（可附带上述文档）运行
+macOS、Linux、Windows x64/arm64 快照 SDK 测试与真实 cold/export/import/hit/失效回归，
+不构建无关产品矩阵。Linux 结果由保留原名的 Engine repository checks 汇总，失败或意外跳过不能通过。
+MBX 专项仍保留既有平台、凭据边界与实际 Engine 迁移/缓存消费者验证。
+
+分类读取 PR base 的脚本，以完整 Git merge-base diff 的原始记录判定；重命名拆为删除和新增，
+两端都必须满足白名单。未知文件、其他脚本、产品代码混合、文件类型/执行位改变、分类器或工作流
+自身变更、空 diff、历史或分类失败均执行完整产品检查。首次引入分类器的 PR 同样执行完整检查。
+主线 push、merge queue、手动运行和 `full-ci` 标签不缩减验证；添加 `full-ci` 会重新运行产品门禁。
+未改变 workflow 的 PR 路径触发条件，范围外 job 以显式 skipped 结束，不冒充产品测试已运行。
+现有检查名称保留；远端必需检查配置由仓库维护者管理，不能从 workflow 文件推断。
+
+[快照测试 action](../../.github/actions/snapshot-tests/action.yml) 独立安装固定 Boto3，显式设置
+测试的 PYTHONPATH 并检查 SDK 导入；安装失败会阻断测试，不会退回 SDK 缺失时的 unittest skip。
+快照传输 action 的可选 SDK 安装路径不能代替测试环境装配。分类回归入口为
+`python3 scripts/ci/pr-scope.test.py`。

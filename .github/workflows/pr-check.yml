@@ -1,7 +1,7 @@
 name: PR Check
 
 # 分两层运行：
-# - 必需门禁（每个 PR 都跑）：macOS 编译与仓库规则检查，以及 Linux 上一次构建完成的全工作区测试、
+# - 产品门禁（完整范围 PR）：macOS 编译与仓库规则检查，以及 Linux 上一次构建完成的全工作区测试、
 #   testkit 证据、成员多设备 smoke、隔离网络配对 smoke、presence 升级／恢复矩阵及移动绑定编译。
 # - 完整检查（合并队列、主线推送、手工触发，或带 full-ci 标签的 PR）：Rust 覆盖率与四种真实网络模式。
 #   各模式的重复轮次与成员多设备全集由 engine-real-environment.yml 的 nightly 负责。
@@ -23,16 +23,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    uses: ./.github/workflows/pr-scope.yml
+
+  snapshot-linux:
+    name: Snapshot tools on Linux
+    timeout-minutes: 15
+    needs: scope
+    if: needs.scope.result == 'success' && needs.scope.outputs.scope == 'snapshot' && github.event.action != 'labeled'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ./.github/actions/snapshot-tests
+
   checks:
     name: Engine repository checks
-    if: github.event.action != 'labeled'
+    needs: [scope, snapshot-linux]
+    if: always() && !cancelled() && (github.event.action != 'labeled' || github.event.label.name == 'full-ci')
     # 保持 Apple Silicon 宿主；固定 Xcode，避免镜像默认工具链漂移。
     runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     # 编译缓存凭据：只有 main 上的可信运行绑定限定 main 分支的写入环境，其余运行（PR、合并队列、其他分支）用只读令牌；
-    # fork 与 Dependabot 拿不到任何 secret，回退为按 ref 隔离的 GitHub Actions 缓存。
-    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/029-ci-r2-compile-cache.md。
+    # fork 与 Dependabot 拿不到任何 secret，只进行本地冷编译。
+    # 本文件其余 Rust job 使用相同绑定；详见 docs/design-docs/decisions/033-unified-mbx-rust-builds.md。
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
@@ -40,65 +54,144 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Check apt download cache boundaries
         run: python3 scripts/ci/apt-download-cache.test.py
 
+      - name: Validate scope policy and patch
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SCOPE: ${{ needs.scope.result == 'success' && needs.scope.outputs.scope || 'full' }}
+          LINUX_RESULT: ${{ needs.snapshot-linux.result }}
+        run: |
+          if [[ "$SCOPE" == snapshot && "$LINUX_RESULT" != success ]]; then
+            echo '::error::Linux snapshot validation did not succeed'
+            exit 1
+          fi
+          python3 scripts/ci/pr-scope.test.py
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            git diff --check "$BASE_SHA...$HEAD_SHA"
+          else
+            git diff --check
+          fi
+
+      # 独立 Git consumer 检查通过 just cargo 运行，先显式准备该工具。
+      - name: Install just
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+
       - name: Prepare Rust build
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-checks-macos
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Validate workspace metadata
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: cargo metadata --locked --format-version 1 > /dev/null
 
       - name: Check all workspace targets
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: cargo check --workspace --all-targets --locked
 
       - name: Check formatting
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: cargo fmt --all -- --check
 
       - name: Check repository ownership and release rules
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: node scripts/architecture/check-engine-repository.mjs
+
+      - name: Install just
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+
+      - name: Verify independent Engine Git consumer
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
+        run: node scripts/architecture/check-engine-git-consumer.mjs
         env:
           RUST_STYLE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
 
       - name: Check no direct tracing log macros
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: node scripts/architecture/check-direct-log-macros.mjs
 
       # 公告库在运行时拉取最新版本，工具版本固定并与本地 cargo audit 一致。漏洞与 unsound 公告都会阻断，
       # 当前锁无需任何例外；新增公告必须通过升级修复，不得以忽略方式放行。
       - name: Install cargo-audit
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
         with:
           tool: cargo-audit@0.22.2
 
+      - name: Check pinned OPAQUE sources
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
+        run: node scripts/architecture/check-opaque-dependency-source.mjs
+
+      - name: Verify fixed-old OPAQUE compatibility
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
+        run: node scripts/testing/run-opaque-dependency-compat.mjs
+
       - name: Audit locked dependencies
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: cargo audit --deny unsound
 
       - name: Check mobile build profiles and CI compile cache boundaries
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: >-
           node --test scripts/architecture/check-mobile-build-profile.test.mjs scripts/release/build-profile.test.mjs
           scripts/architecture/check-direct-log-macros.test.mjs
           scripts/testing/relay-recovery-support.test.mjs
           scripts/testing/connection-recovery-session.test.mjs
+          scripts/testing/clipboard-delivery-evidence.test.mjs
+          scripts/testing/transfer-progress-evidence.test.mjs
+          scripts/testing/verify-progress-connectivity.test.mjs
+
+      - name: Check snapshot-only cache boundaries
+        if: needs.scope.result != 'success' || needs.scope.outputs.scope != 'docs'
+        uses: ./.github/actions/snapshot-tests
 
       - name: Check patch whitespace
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: git diff --check
 
       # 未插桩构建必须能解析出真实符号；Linux 的内联帧只有短名称，该项只在 macOS 校验。
       - name: Validate captured diagnostic stacks
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: cargo test -p uc-infra-profile --test peer_address_read_diagnostics --locked
 
   # 升级兼容冒烟：上一个 Desktop 锚点到当前源码的 5 个单元；旧版宿主按 rev 与宿主摘要缓存，命中时不重建。
 
+      - name: Publish scenario CAS snapshot
+        if: (success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')) && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: rust-checks-macos
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
+      - name: Retain OPAQUE compatibility evidence
+        if: (always()) && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opaque-compatibility-${{ runner.os }}
+          path: target/test-reports/opaque-compat
+          if-no-files-found: warn
+
       - name: Retain MBX compiler evidence
-        if: always()
+        if: (always()) && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: mbx-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
@@ -107,7 +200,8 @@ jobs:
 
   upgrade-matrix-smoke:
     name: Upgrade compatibility smoke
-    if: github.event.action != 'labeled'
+    needs: scope
+    if: always() && !cancelled() && (github.event.action != 'labeled' || github.event.label.name == 'full-ci') && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
     runs-on: ubuntu-24.04
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
@@ -118,6 +212,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Install build tools
@@ -129,7 +224,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-upgrade-matrix-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -177,6 +271,16 @@ jobs:
             target/active-clipboard-connectivity-evidence/fixed-main
           if-no-files-found: error
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: rust-upgrade-matrix-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -187,18 +291,23 @@ jobs:
 
   tests:
     name: Engine tests
-    if: github.event.action != 'labeled'
+    needs: scope
+    if: always() && !cancelled() && (github.event.action != 'labeled' || github.event.label.name == 'full-ci') && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
     runs-on: ubuntu-24.04
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
-    timeout-minutes: 60
+    # 完整 workspace 与原固定资源负载共用构建；冷构建时曾在资源阶段触及60分钟上限。
+    # 仅增加整组CI预算，各场景的原期限、负载和资源阈值保持不变。
+    timeout-minutes: 90
     env:
       # 所有测试组共用同一次全工作区构建，只编译一次。
       UC_TEST_BUILD_SCOPE: workspace
       UC_TEST_ARTIFACTS_DIR: target/test-artifacts/ci
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
 
       - name: Install network test tools
         uses: ./.github/actions/apt-download-cache
@@ -209,7 +318,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-tests-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -231,6 +339,26 @@ jobs:
       - name: Keep workspace test report
         if: always()
         run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/workspace.xml || true
+
+      - name: Run branch recovery process and checkpoint tests
+        if: success() || failure()
+        id: branch_recovery_process
+        run: |
+          rm -f target/nextest/ci/junit.xml
+          cargo nextest run --profile ci --locked -p uc-connectivity-host \
+            --features branch-recovery-fault-tests,uc-engine/branch-recovery-fault-tests --test branch_recovery
+
+      - name: Keep branch recovery process report
+        if: always() && steps.branch_recovery_process.outcome != 'skipped'
+        run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/branch-recovery-process.xml || true
+
+      - name: Install just for current-authority registration proof
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
+        with:
+          tool: just
+
+      - name: Verify registration against actual receive authority
+        run: node scripts/testing/run-progress-registration-proof.mjs
 
       - name: Run mandatory blob lifecycle resources
         if: success() || failure()
@@ -296,6 +424,16 @@ jobs:
             target/active-clipboard-connectivity-evidence/relay
           if-no-files-found: error
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: rust-tests-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -306,7 +444,8 @@ jobs:
 
   peer-reachability:
     name: Peer reachability required network and upgrade matrix
-    if: github.event.action != 'labeled'
+    needs: scope
+    if: always() && !cancelled() && (github.event.action != 'labeled' || github.event.label.name == 'full-ci') && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
     runs-on: ubuntu-24.04
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
@@ -315,6 +454,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install mandatory network and build tools
         uses: ./.github/actions/apt-download-cache
@@ -324,7 +464,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: peer-reachability-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -346,9 +485,20 @@ jobs:
             target/upgrade-anchors/*/host.json
           if-no-files-found: error
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: peer-reachability-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
   blob-connectivity:
     name: Blob transfer required network and upgrade matrix
-    if: github.event.action != 'labeled'
+    needs: scope
+    if: always() && !cancelled() && (github.event.action != 'labeled' || github.event.label.name == 'full-ci') && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
     runs-on: ubuntu-24.04
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
@@ -357,6 +507,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
       - name: Install mandatory network and build tools
         uses: ./.github/actions/apt-download-cache
@@ -366,7 +517,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: blob-connectivity-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -374,6 +524,8 @@ jobs:
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
         with:
           tool: just
+      - name: Run required progress and fixed legacy matrix
+        run: bash scripts/testing/run-progress-connectivity.sh
       - name: Run complete mandatory blob matrix
         run: bash scripts/testing/run-blob-connectivity.sh
       - name: Retain sanitized blob evidence
@@ -386,16 +538,33 @@ jobs:
             target/blob-connectivity-evidence/runs/**/*.txt
             target/blob-connectivity-evidence/runs/**/*.log
             target/blob-connectivity-evidence/frozen-main/*.txt
+            target/progress-connectivity-evidence/runs/**/*.json
+            target/progress-connectivity-evidence/runs/**/*.txt
+            target/progress-connectivity-evidence/runs/**/*.log
+            target/progress-legacy-evidence/runs/**/*.json
+            target/progress-legacy-evidence/runs/**/*.txt
+            target/progress-legacy-evidence/runs/**/*.log
             target/upgrade-anchors/*/host.json
           if-no-files-found: error
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: blob-connectivity-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
   mobile-bindings:
     name: Mobile binding compile ${{ matrix.platform }}
-    if: github.event.action != 'labeled'
+    needs: scope
+    if: always() && !cancelled() && (github.event.action != 'labeled' || github.event.label.name == 'full-ci') && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
     runs-on: macos-15
     timeout-minutes: 60
     environment:
-      name: engine-build-cache-reader
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     strategy:
       fail-fast: false
@@ -407,11 +576,12 @@ jobs:
       UC_ENGINE_UNIFFI_BUILD_PROFILE: dev
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: pr-mobile-${{ matrix.platform }}
-          compile-cache-access: read
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -421,6 +591,15 @@ jobs:
       - name: Build iOS binding
         if: matrix.platform == 'ios'
         run: bash bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
+      - name: Build iOS probe core
+        if: matrix.platform == 'ios'
+        run: |
+          source scripts/build-cache/env.sh
+          export IPHONEOS_DEPLOYMENT_TARGET=17.0
+          # 探针与生产绑定共用已安装目标、dev配置和编译缓存；编译不表示真机验收通过。
+          for probe_target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+            cargo build -p uc-mobile-probe-core --lib --profile dev --target "$probe_target" --locked
+          done
       - name: Install Android targets and helper
         if: matrix.platform == 'android'
         run: |
@@ -430,25 +609,44 @@ jobs:
       - name: Build Android binding
         if: matrix.platform == 'android'
         run: bash bindings/uc-engine-uniffi/scripts/build-android-aar.sh
+      - name: Build Android probe core
+        if: matrix.platform == 'android'
+        run: |
+          source scripts/build-cache/env.sh
+          # 复用原arm64目标和cargo-ndk，不生成第二套JNI打包目录。
+          cargo ndk -t arm64-v8a build -p uc-mobile-probe-core --lib --profile dev --locked
+
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: pr-mobile-${{ matrix.platform }}
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
   harmonyos-binding:
     name: HarmonyOS binding compile
+    needs: scope
     # 外部 fork 不在持有 SDK 的 self-hosted 机器执行源码；其平台验收保留跳过，不登记通过。
     if: >-
-      github.event.action != 'labeled'
+      always() && !cancelled() && (github.event.action != 'labeled' || github.event.label.name == 'full-ci')
+      && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
       && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, macOS, ARM64, deveco]
     timeout-minutes: 45
     environment:
-      name: engine-build-cache-reader
+      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: pr-harmonyos
-          compile-cache-access: read
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -464,6 +662,16 @@ jobs:
           CMAKE="$native_root/build-tools/cmake/bin/cmake" \
             cargo check --locked -p uc-ohos-napi --target aarch64-unknown-linux-ohos
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: pr-harmonyos
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
   coverage:
     name: Rust coverage
     if: >-
@@ -477,13 +685,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
 
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: rust-coverage-linux
           fast-compile-infra: "true"
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -513,6 +722,16 @@ jobs:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
 
+      - name: Publish scenario CAS snapshot
+        if: success() && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: rust-coverage-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
+
       - name: Retain MBX compiler evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -530,7 +749,7 @@ jobs:
       && (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     runs-on: ubuntu-24.04
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
+      name: ${{ github.ref == 'refs/heads/main' && matrix.mode == 'direct' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
     timeout-minutes: 45
     strategy:
@@ -540,6 +759,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          submodules: recursive
           fetch-depth: 0
 
       - name: Install network test tools
@@ -551,7 +771,6 @@ jobs:
         uses: ./.github/actions/rust-ci-setup
         with:
           cache-key: connection-recovery-linux
-          compile-cache-access: ${{ github.ref == 'refs/heads/main' && 'write' || 'read' }}
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
@@ -566,6 +785,21 @@ jobs:
           name: connection-recovery-evidence-${{ matrix.mode }}
           path: target/connection-recovery-evidence
           if-no-files-found: warn
+
+      # 仅可信生产者补齐共同宿主和 relay 变体的编译图；四种模式仍自行编译并执行实际网络验证。
+      - name: Compile remaining shared network host actions
+        if: success() && matrix.mode == 'direct' && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        run: cargo build -p uc-connectivity-host -p uc-connectivity-relay --locked
+      # 仅 direct 发布，其他 shard 不重复归档和覆盖索引。
+      - name: Publish scenario CAS snapshot
+        if: success() && matrix.mode == 'direct' && github.ref == 'refs/heads/main' && github.ref_protected && (github.event_name == 'push' || github.event_name == 'schedule')
+        uses: ./.github/actions/mbx-snapshot
+        with:
+          operation: save
+          scene: connection-recovery-linux
+          endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
+          access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
       - name: Retain MBX compiler evidence
         if: always()

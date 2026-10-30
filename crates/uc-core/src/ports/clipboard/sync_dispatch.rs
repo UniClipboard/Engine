@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::ids::DeviceId;
+use crate::ids::{DeviceId, EntryId};
 use crate::ports::ConnectionChannel;
 
 /// 随密文负载传输、但不包含具体传输格式的剪贴板头。
@@ -25,6 +25,8 @@ use crate::ports::ConnectionChannel;
 ///
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardHeader {
+    /// 原完整发送计划的源条目；仅由支持源身份的传输布局携带。
+    pub source_entry: Option<EntryId>,
     pub version: u8,
     /// Whole-snapshot identity hash as a `"blake3v1:<hex>"` string. Shared
     /// with [`ClipboardEntry`](crate::clipboard::ClipboardEntry) for dedup

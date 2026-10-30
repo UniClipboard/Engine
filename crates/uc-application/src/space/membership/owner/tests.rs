@@ -25,6 +25,25 @@ fn remember_completed_transfer(
 }
 
 #[tokio::test]
+async fn scoped_commit_rejects_replacement_with_the_same_record() {
+    let fixture = active_space();
+    let generation = fixture.owner.generation();
+    fixture.owner.load().await.unwrap();
+    fixture.records.replace_database(fixture.records.record());
+
+    let result = fixture
+        .owner
+        .commit_in_generation(generation, remember_completed_transfer)
+        .await;
+    assert!(matches!(
+        result,
+        Err(MembershipLedgerError::Unavailable { .. })
+    ));
+    assert_eq!(fixture.records.record().revision(), 4);
+    assert_eq!(fixture.records.commit_count(), 0);
+}
+
+#[tokio::test]
 async fn a_change_without_differences_writes_nothing() {
     let fixture = active_space();
 

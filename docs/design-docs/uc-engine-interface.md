@@ -47,6 +47,7 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 | --- | --- |
 | `StateChanged` | 生命周期状态已经改变 |
 | `IncomingEntry` | 收到一条具有完整摘要的新内容 |
+| `OutboundProgressChanged` | 发送侧完整进度已变化，宿主重新读取完整视图 |
 | `TransferProgress` | 文件传输进度发生变化 |
 | `DeviceTrustChanged { revision }` | 正式设备组状态已经变化；宿主重新调用 `QueryDeviceGroupChoices` 读取完整事实与待处理选择 |
 | `WorkspaceConvergenceChanged` | 仅 `dev-tools` 的内部收敛诊断事件；不进入正式宿主和发布产物 |
@@ -197,6 +198,9 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 | `ReadEntryFile` | 读取指定记录的首个已物化文件及下载文件名 |
 | `QueryEntryDelivery` | 返回指定记录的来源及每个当前仍有效且可信设备的投递状态；已移除设备不显示，当前成员范围无法确认时查询失败 |
 | `ClearHistory` | 清空全部历史，并返回删除数量和未删除条目标识 |
+| `QueryOutboundProgress` | 按原源条目和目标设备读取完整发送侧进度；没有保留资料时返回空 |
+| `ListOutboundProgress` | 列出当前授权范围内仍保留的完整发送侧进度 |
+| `ReconcileOutboundProgress` | 执行完整原任务核对，可指定预期尝试；不启动下载 |
 | `QueryEntryReceiveProgress` | 查询指定远端接收任务的当前聚合进度 |
 | `ListEntryReceiveProgress` | 列出全部尚未结束的远端接收任务进度 |
 | `CancelEntryReceive` | 按记录和尝试编号取消一次远端接收任务 |
@@ -381,7 +385,18 @@ HarmonyOS 绑定必须公开相同字段、结果、错误和提醒。
 
 `RestoreClipboard` 的普通模式恢复全部可用格式；纯文本模式优先只恢复纯文本，没有纯文本表示时按既有规则降级为普通模式；文件路径模式只适用于能解析出本机文件路径的记录。成功、内容已经丢失和模式不适用都是稳定业务结果。内容丢失结果保留记录编号、表示编号和状态，模式不适用结果保留稳定原因；记录不存在返回 `NotFound`，真正的恢复故障返回脱敏错误。宿主不得自行复制恢复、触摸最近使用时间或同步广播的顺序。
 
-`ResendEntry` 只允许重发本机来源且内容仍可用的历史记录。空目标列表表示使用全部符合条件的可信设备，非空列表只缩小目标范围。完成结果分别返回已接受、重复、离线、失败和仍在等待的目标数量；记录不存在、记录不可重发、目标不可信和没有可用目标都是稳定业务结果。存储失败与发送失败使用不同的稳定错误编号，底层原因不得进入公开响应、调试输出或日志。
+`ResendEntry` 只处理本机来源且属于当前成员范围的历史记录。空目标列表表示全部符合条件的可信设备，
+非空列表只缩小目标范围。文件和可能经 blob 交付的大图先核对原任务；剪贴板消息头已送达不代表文件已保存。
+`confirm_new_transfer=false` 采用原任务的运行或真实结果，不建立重复下载；明确确认后，只有允许的核对结果
+才交给原重投递及接收 CAS。运行中、已替换、离线或未核实不能由确认标志绕过。
+已有任务核对不要求本机原内容仍可用，实际新投递继续要求原材料可用。
+
+`ResendReportSummary.reconciled` 按目标提供核对分类、可安全采用的完整当前视图、是否请求新传输及重复文件风险；
+原已接受、重复、离线、失败、等待计数只统计实际投递。详细决策只在[切片规格§5.7](../exec-plans/completed/2026-10-24-transfer-progress-connectivity-spec.md#57-原任务核对再次发起与持久化边界)维护。
+记录不存在、记录不可重发、目标不可信和没有可用目标仍是稳定业务结果；核对的访问拒绝、损坏及不可用
+复用发送侧进度的安全错误编号，存储与实际发送继续各自分类。原始底层正文不进入公开响应、Debug 或日志；完整来源继续交给既有安全观测边界。
+UniFFI 在原 `resend_entry` 中接收确认标志并返回同一逐目标结果，N-API 的可选确认标志缺省为 false；
+N-API 当前视图的 64 位修订和字节值保持十进制字符串，不经过浮点数。
 
 导出只写宿主传入的目标句柄。核心看不到目标路径，每次最多写 64 KiB，并在全部数据写入后调用完成写入。取消操作时不会在恢复后续写。
 
@@ -597,3 +612,22 @@ because `QueryDiagnostics` still fails when the retained-import status cannot be
 
 A legacy `general.debug_mode` of any JSON type is ignored on load and not written on the next save.
 The settings schema version does not change.
+
+
+发送侧进度的 `OutboundProgressSummary` 按原始逻辑项保留完整结果和计数，联系状态独立于业务终态。
+失联只把未确认项标为 `Unconfirmed`，不推断远端失败或取消；失败只含固定类别。视图不暴露协议绑定、producer或线上序号。
+`ReconcileOutboundProgress` 返回 Running、Settled、Superseded、NotRetained、Unsupported、Unreachable或Busy；
+授权拒绝、损坏数据及本地读取失败仍走稳定错误，不能伪装成远端离线或没有资料。
+`expected_attempt_id` 已被替换时返回Superseded，宿主无需自行比较协议对象。
+`OutboundProgressChanged` 只提示缓存失效，事件丢失或滞后后可以重读列表；网络采用及ACK不等待宿主渲染。
+UniFFI与HarmonyOS绑定调用同一完整操作；HarmonyOS的字节数及修订号使用十进制字符串，避免JavaScript整数精度损失。
+
+### Clipboard write and observation identity
+
+Engine owns clipboard write attribution. A host may return an opaque identity in the write receipt only when it can prove that the identity belongs to that successful native write. The host must attach the same identity to each snapshot captured from that write. The identity must differ for every distinct user or application write during the Engine lifetime. It must not contain clipboard data, file names, paths, or business identifiers. The identity is local to the host and must not be persisted or logged.
+
+The host must attach the identity at capture time. A delayed captured snapshot must retain its original identity. A later read of the current clipboard must not assign its identity to that snapshot. The host must return no identity when atomic association is unavailable or ambiguous. A timestamp, a content type, and a time window do not prove identity. A native counter is valid only if the host also proves that its receipt and snapshot refer to the same write, including batching, races, resets, and reuse.
+
+Engine waits for in-flight writes before attributing an identified observation. A failed write does not register an identity. A successful write with no identity leaves subsequent observations as local captures. The host must not synchronously wait for an observation to finish inside its write callback. Engine retains at most 256 identities per runtime; an observation whose identity has been evicted is treated as local. Duplicate observations with a retained matching identity have the same origin. This conservative fallback may resend an echo, but does not suppress an unproven user copy.
+
+Existing hosts use the default methods and return no identity. UniFFI hosts must populate `BindingClipboardSnapshot.identity` for a captured observation and return the matching optional identity from `clipboard_write`. Android captured handoff must carry the capture-time identity with the captured data. Swift and Kotlin adapters must prove a platform-specific association before returning an identity. HarmonyOS and Desktop adapters remain on the conservative path until their host boundaries support this contract. Generated declarations do not establish native clipboard acceptance.

@@ -9,16 +9,10 @@ inputs:
     required: true
   fast-compile-infra:
     description: >-
-      Build all seven uc-infra-* crates without the opt-level 3 override from Cargo.toml. Only for jobs whose results do not
-      depend on that optimization level, such as instrumented coverage.
+      仅对允许名单中的 Infra crate 取消 Cargo.toml 优化覆盖，用于已验证不依赖该优化的覆盖率作业。
+      存储与密码算法 crate 保持项目定义的优化口径，原真实配对、加密读写及接收取消回归仍使用相同负载和期限。
     required: false
     default: "false"
-  compile-cache-access:
-    description: >-
-      write only for jobs bound to the branch-restricted engine-build-cache-writer environment; read otherwise.
-      The R2 token itself enforces the permission, this only selects the MBX requested mode; native protected-push policy still applies.
-    required: false
-    default: read
   compile-cache-r2-endpoint:
     description: R2 S3 endpoint secret; empty selects the local MBX cache.
     required: false
@@ -32,7 +26,7 @@ inputs:
     required: false
     default: ""
   dependency-cache:
-    description: Cache Cargo downloads and credential-free local MBX actions; never restore target outputs.
+    description: Cache Cargo downloads only; never restore target or live MBX directories.
     required: false
     default: "true"
 
@@ -45,22 +39,24 @@ runs:
 
     - name: Start MBX compiler cache
       shell: bash
-      env:
-        BUILD_CACHE_ACCESS: ${{ inputs.compile-cache-access }}
-        BUILD_CACHE_R2_ENDPOINT: ${{ inputs.compile-cache-r2-endpoint }}
-        BUILD_CACHE_R2_ACCESS_KEY_ID: ${{ inputs.compile-cache-r2-access-key-id }}
-        BUILD_CACHE_R2_SECRET_ACCESS_KEY: ${{ inputs.compile-cache-r2-secret-access-key }}
       run: bash scripts/build-cache/start-ci-mbx.sh
 
-    # 不恢复 target；所有编译动作由 MBX 按输入决定命中。无 R2 凭据时保存 ref 隔离的本地 CAS。
-    - name: Cache Cargo downloads and local MBX actions
+    - name: Restore compressed MBX snapshot
+      uses: ./.github/actions/mbx-snapshot
+      with:
+        scene: ${{ inputs.cache-key }}
+        endpoint: ${{ inputs.compile-cache-r2-endpoint }}
+        access-key-id: ${{ inputs.compile-cache-r2-access-key-id }}
+        secret-access-key: ${{ inputs.compile-cache-r2-secret-access-key }}
+
+    # 只缓存 Cargo 下载；MBX 必须经导出闭包归档，禁止转储 live cache 或 target。
+    - name: Cache Cargo downloads
       if: inputs.dependency-cache == 'true'
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       with:
         workspaces: . -> target
         shared-key: mbx-${{ inputs.cache-key }}
         cache-targets: 'false'
-        cache-directories: ${{ inputs.compile-cache-r2-access-key-id == '' && format('{0}/engine-mbx-cache', runner.temp) || '' }}
 
     # 显式提供构建来源后，uc-observability-runtime 的 build script 不再跟踪 git 与源码目录的修改时间；
     # 否则同一 job 内每次 cargo 调用都可能重跑它，并连锁重编 uc-infra-profile、uc-engine 与全部宿主。
@@ -74,15 +70,16 @@ runs:
           echo "UC_ENGINE_SOURCE_STATE=$state"
         } >> "$GITHUB_ENV"
 
-    # Cargo.toml 为移动端开发构建把七个 uc-infra-* crate 设为 opt-level 3，测试构建因此多花一倍以上编译时间。
-    # 诊断栈符号校验与真实网络、多设备时序都依赖该优化级别，只有已按 release 口径校验诊断栈的
-    # 插桩覆盖率 job 恢复为 dev 默认值。
+    # 已校验诊断栈的覆盖率作业仅对允许名单恢复 dev 默认值。
+    # 存储沿用 Cargo.toml：未优化插桩会放大完整加密材料和索引维护的 CPU 成本，令原并发回归超时。
+    # 密码算法也沿用项目优化：未优化的 OPAQUE 泛型实例化会增加配对 CPU 成本，挤占接收取消回归的外层预算。
+    # 保持原配对、读写负载、取消等待、时序门限和实现，只为其使用同一产品优化口径。
     - name: Compile uc-infra-* crates without the mobile optimization override
       if: inputs.fast-compile-infra == 'true'
       shell: bash
       run: |
         cargo_home="${CARGO_HOME:-$HOME/.cargo}"
         mkdir -p "$cargo_home"
-        for crate in local crypto security storage content p2p profile; do
+        for crate in local security content p2p profile; do
           printf '\n[profile.dev.package.uc-infra-%s]\nopt-level = 0\n' "$crate" >> "$cargo_home/config.toml"
         done

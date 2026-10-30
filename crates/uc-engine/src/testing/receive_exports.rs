@@ -1,24 +1,34 @@
 //! 真实接收导出边界的存储故障与完成屏障；只由测试组合根安装，不替换网络或保存流程。
 use async_trait::async_trait;
 use std::collections::{BTreeSet, HashMap};
-use std::future::pending;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::bytes::Bytes;
+use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
-    BlobExchangeError, BlobExchangeFailure, BlobReadStorePort, BlobReceived,
+    BlobExchangeError, BlobExchangeFailure, BlobReadStorePort, BlobReceived, ConnectivityBackend,
+    ConnectivityError, PeerConnection, ProgressTerminalNotice,
 };
-use uc_core::file_transfer::{OutboundProgressReporterPort, OutboundProgressStatus};
 use uc_core::ids::DeviceId;
 use uc_core::ports::blob::BlobDigest;
+
+mod acknowledgements;
+mod progress;
+mod queries;
+pub(crate) use acknowledgements::decorate_progress_receiver;
+pub(crate) use progress::decorate_progress_wire;
+pub(crate) use queries::decorate_progress_queries;
 
 static FIXTURES: OnceLock<Mutex<HashMap<PathBuf, Weak<ReceiveExports>>>> = OnceLock::new();
 
 pub(crate) struct ReceiveExports {
+    pub progress_connections: Mutex<Vec<Weak<dyn PeerConnection>>>,
+    pub progress_updates: AtomicUsize,
     pub protects: Mutex<Vec<BlobDigest>>,
+    pub cache_misses: Mutex<Vec<BlobDigest>>,
     pub exports: Mutex<Vec<BlobDigest>>,
     pub paths: Mutex<Vec<PathBuf>>,
     pub obstruct_failure: AtomicBool,
@@ -26,14 +36,35 @@ pub(crate) struct ReceiveExports {
     pub paused_exports: Mutex<BTreeSet<usize>>,
     pub paused: Notify,
     pub release: Semaphore,
-    pub block_reports: AtomicBool,
-    pub report_blocked: Notify,
+    pub block_progress_network: AtomicBool,
+    pub progress_network_blocked: Notify,
+    pub pause_read: AtomicBool,
+    pub read_paused: Notify,
+    pub read_release: Semaphore,
+    pub corrupt_read: AtomicBool,
+    pub hold_registrations: AtomicBool,
+    pub registration_held: Notify,
+    pub registration_release: Semaphore,
+    pub pause_snapshot_reply: AtomicBool,
+    pub snapshot_held: Notify,
+    pub snapshot_release: Semaphore,
+    pub hold_terminals: AtomicBool,
+    pub terminal_held: Notify,
+    pub terminal_release: Semaphore,
+    pub hold_ack_peer: Mutex<Option<DeviceId>>,
+    pub ack_held: Notify,
+    pub ack_release: Notify,
+    terminal_acks: Mutex<Vec<ProgressTerminalNotice>>,
+    terminal_ack_changed: Notify,
 }
 
 impl ReceiveExports {
     pub fn install(root: &Path, fail_at: usize, pause_at: usize) -> Arc<Self> {
         let fixture = Arc::new(Self {
+            progress_connections: Mutex::new(Vec::new()),
+            progress_updates: AtomicUsize::new(0),
             protects: Mutex::new(Vec::new()),
+            cache_misses: Mutex::new(Vec::new()),
             exports: Mutex::new(Vec::new()),
             paths: Mutex::new(Vec::new()),
             obstruct_failure: AtomicBool::new(false),
@@ -41,8 +72,26 @@ impl ReceiveExports {
             paused_exports: Mutex::new(BTreeSet::from([pause_at])),
             paused: Notify::new(),
             release: Semaphore::new(0),
-            block_reports: AtomicBool::new(false),
-            report_blocked: Notify::new(),
+            block_progress_network: AtomicBool::new(false),
+            progress_network_blocked: Notify::new(),
+            pause_read: AtomicBool::new(false),
+            read_paused: Notify::new(),
+            read_release: Semaphore::new(0),
+            corrupt_read: AtomicBool::new(false),
+            hold_registrations: AtomicBool::new(false),
+            registration_held: Notify::new(),
+            registration_release: Semaphore::new(0),
+            pause_snapshot_reply: AtomicBool::new(false),
+            snapshot_held: Notify::new(),
+            snapshot_release: Semaphore::new(0),
+            hold_terminals: AtomicBool::new(false),
+            terminal_held: Notify::new(),
+            terminal_release: Semaphore::new(0),
+            hold_ack_peer: Mutex::new(None),
+            ack_held: Notify::new(),
+            ack_release: Notify::new(),
+            terminal_acks: Mutex::new(Vec::new()),
+            terminal_ack_changed: Notify::new(),
         });
         FIXTURES
             .get_or_init(Mutex::default)
@@ -56,7 +105,13 @@ impl ReceiveExports {
 pub(crate) struct ReleaseOnDrop(pub Arc<ReceiveExports>);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
+        *self.0.hold_ack_peer.lock().unwrap() = None;
+        self.0.ack_release.notify_waiters();
         self.0.release.add_permits(1);
+        self.0.read_release.add_permits(1);
+        self.0.terminal_release.add_permits(1);
+        self.0.registration_release.add_permits(1);
+        self.0.snapshot_release.add_permits(1);
     }
 }
 
@@ -70,12 +125,12 @@ pub(crate) fn decorate(
     }
 }
 
-pub(crate) fn decorate_reporter(
+pub(crate) fn decorate_progress_backend(
     path: &Path,
-    inner: Arc<dyn OutboundProgressReporterPort>,
-) -> Arc<dyn OutboundProgressReporterPort> {
+    inner: Arc<dyn ConnectivityBackend>,
+) -> Arc<dyn ConnectivityBackend> {
     match fixture_for(path) {
-        Some(fixture) => Arc::new(ObservedReports { inner, fixture }),
+        Some(fixture) => Arc::new(ObservedProgressNetwork { inner, fixture }),
         None => inner,
     }
 }
@@ -88,28 +143,31 @@ fn fixture_for(path: &Path) -> Option<Arc<ReceiveExports>> {
         .find_map(|(root, fixture)| path.starts_with(root).then(|| fixture.upgrade()).flatten())
 }
 
-struct ObservedReports {
-    inner: Arc<dyn OutboundProgressReporterPort>,
+struct ObservedProgressNetwork {
+    inner: Arc<dyn ConnectivityBackend>,
     fixture: Arc<ReceiveExports>,
 }
 
 #[async_trait]
-impl OutboundProgressReporterPort for ObservedReports {
-    async fn report(
+impl ConnectivityBackend for ObservedProgressNetwork {
+    async fn connect(
         &self,
-        target: &DeviceId,
-        transfer_id: &str,
-        bytes_transferred: u64,
-        total_bytes: Option<u64>,
-        status: OutboundProgressStatus,
-    ) {
-        if self.fixture.block_reports.load(Ordering::SeqCst) {
-            self.fixture.report_blocked.notify_one();
-            pending::<()>().await;
+        target: DeviceId,
+        address_hint: Option<Vec<u8>>,
+        cancel: CancellationToken,
+    ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+        if self.fixture.block_progress_network.load(Ordering::SeqCst) {
+            self.fixture.progress_network_blocked.notify_one();
+            cancel.cancelled().await;
+            return Err(ConnectivityError::Stopped);
         }
-        self.inner
-            .report(target, transfer_id, bytes_transferred, total_bytes, status)
-            .await;
+        let connection = self.inner.connect(target, address_hint, cancel).await?;
+        self.fixture
+            .progress_connections
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&connection));
+        Ok(connection)
     }
 }
 
@@ -122,11 +180,27 @@ struct ObservedExports {
 impl BlobReadStorePort for ObservedExports {
     async fn protect(&self, digest: BlobDigest) -> Result<Option<BlobReceived>, BlobExchangeError> {
         self.fixture.protects.lock().unwrap().push(digest);
-        self.inner.protect(digest).await
+        let retained = self.inner.protect(digest).await?;
+        if retained.is_none() {
+            self.fixture.cache_misses.lock().unwrap().push(digest);
+        }
+        Ok(retained)
     }
 
     async fn read(&self, digest: BlobDigest) -> Result<Bytes, BlobExchangeError> {
-        self.inner.read(digest).await
+        let bytes = self.inner.read(digest).await?;
+        if self.fixture.pause_read.swap(false, Ordering::SeqCst) {
+            // SDK已完成真实接收；原FetchBlob尚未取得密文字节，实际AEAD尚未执行。
+            self.fixture.read_paused.notify_one();
+            self.fixture.read_release.acquire().await.unwrap().forget();
+        }
+        if self.fixture.corrupt_read.swap(false, Ordering::SeqCst) {
+            // 只破坏本次交给原解密器的副本，原SDK存储及其BAO验证事实不变。
+            let mut corrupted = bytes.to_vec();
+            *corrupted.last_mut().unwrap() ^= 1;
+            return Ok(Bytes::from(corrupted));
+        }
+        Ok(bytes)
     }
 
     async fn export(&self, digest: BlobDigest, target: &Path) -> Result<u64, BlobExchangeError> {

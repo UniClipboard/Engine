@@ -51,6 +51,18 @@ max-threads = 2
 [test-groups.upgrade-matrix]
 max-threads = 4
 
+# 进度连接验证真实31秒活动与随后30秒空闲回收；保留测试内部90秒截止与产品30秒策略。
+# 外层120秒容纳完整场景及清理，仅匹配该用例，默认20秒终止线与零重试保持不变。
+[[profile.default.overrides]]
+filter = "package(uc-infra-p2p) & kind(lib) & test(=network::iroh::connectivity::stream::profile_probe::limits_probe::actual_work_leases_survive_thirty_seconds_then_real_idle_timer_closes_the_connection)"
+test-group = "real-network"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-infra-p2p) & kind(lib) & test(=network::iroh::connectivity::stream::profile_probe::limits_probe::actual_work_leases_survive_thirty_seconds_then_real_idle_timer_closes_the_connection)"
+test-group = "real-network"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 [[profile.default.overrides]]
 filter = "package(uc-testkit)"
 test-group = "fast"
@@ -464,3 +476,64 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 [[profile.ci.overrides]]
 filter = "package(uc-engine) & test(/real_engine_(lock_waits|revocation_during|space_reset_seals|confirmed_local_removal|abandoned_deletion|shutdown_waits_for_failed_file_settlement_repair)/)"
 slow-timeout = { period = "30s", terminate-after = 3 }
+
+# 关闭重叠场景连续12轮创建、关闭并重启独立宿主；单CPU固定二进制实测26.42秒。
+# 只为该完整场景保留120秒外层预算，容纳coverage开销；每次操作原期限、12轮及零重试不变。
+[[profile.default.overrides]]
+filter = "package(uc-connectivity-host) & binary(profile_startup_overlap) & test(=startup_overlapping_a_closing_host_is_never_reported_as_corrupt)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-connectivity-host) & binary(profile_startup_overlap) & test(=startup_overlapping_a_closing_host_is_never_reported_as_corrupt)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 同一表示校验用例依次运行正常密文和真实AEAD损坏两套双Engine流程，主机实测18.86秒。
+# 外层覆盖两套完整fixture及coverage开销；原单次操作期限和零重试不变，仅匹配该新用例。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::settlement_boundaries::representation::real_engine_representation_waits_for_actual_decryption_then_acks_the_verified_result)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::settlement_boundaries::representation::real_engine_representation_waits_for_actual_decryption_then_acks_the_verified_result)"
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+# 两项进度生命周期用例分别包含两套完整双Engine流程；单CPU原20秒外层实际截断正常流程。
+# 精确容纳完整动作及清理，各内层期限、断言、原测试组及零重试保持。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & (test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_receiver_session_retirement_does_not_leave_unretained_retry_running_on_sender) | test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_sender_resume_and_profile_reopen_retire_unpersisted_progress_without_redownload))"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & (test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_receiver_session_retirement_does_not_leave_unretained_retry_running_on_sender) | test(=testing::host_adapter_contract::receive_retry::outbound_progress::lifecycle::real_engine_sender_resume_and_profile_reopen_retire_unpersisted_progress_without_redownload))"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 此项使用实际系统时钟验证原60秒未确认边界，再执行完整核对与双Engine关闭。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::batch_outcomes::mixed::real_engine_missing_terminal_converges_from_unknown_by_full_query_without_redownload)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::batch_outcomes::mixed::real_engine_missing_terminal_converges_from_unknown_by_full_query_without_redownload)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 67项冷缓存接收、64项原生ACK及实际资源收尾，原完整用例实测32.80秒，超过全局20秒外层。
+[[profile.default.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::backpressure::real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-engine) & kind(lib) & test(=testing::host_adapter_contract::receive_retry::backpressure::real_engine_terminal_capacity_overflow_does_not_block_cold_downloads_cancel_or_cleanup)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# 五个独立进程执行成员分叉与恢复；外层覆盖多次原90秒业务等待和正常关闭。
+[[profile.default.overrides]]
+filter = "package(uc-connectivity-host) & binary(branch_recovery)"
+test-group = "process"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[[profile.ci.overrides]]
+filter = "package(uc-connectivity-host) & binary(branch_recovery)"
+test-group = "process"
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 10 }

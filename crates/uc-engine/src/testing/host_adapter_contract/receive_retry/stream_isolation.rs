@@ -311,6 +311,7 @@ async fn prove_engine_streams(shared_content: bool, recover_second: bool, observ
         tokio::spawn(async move {
             source
                 .execute(Operation::ResendEntry(ResendEntryInput {
+                    confirm_new_transfer: true,
                     entry_id: original_a,
                     target_devices: vec![receiver_id],
                 }))

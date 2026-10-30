@@ -688,6 +688,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn each_fresh_online_evidence_allows_one_early_retry_but_quiet_rounds_do_not() {
+        let peer = DeviceId::new("peer-returning");
+        let update = PendingGroupUpdate::persistent(peer, vec![1]);
+        let store = store_with(Vec::new());
+        store.backed_off.lock().unwrap().push(update);
+        let dispatch =
+            dispatch_with((0..3).map(|_| Err(GroupUpdateDispatchError::ReceiverUnavailable)));
+        let (online, receiver) = broadcast::channel(8);
+        let use_case = DeliverPendingGroupUpdatesUseCase::new(
+            store,
+            dispatch.clone(),
+            retaining(&["peer-returning"]),
+            refresh_events().0,
+            Arc::new(FixedClock),
+            receiver,
+        );
+        // 时间完全不前进：两次独立认证证据可以合法地产生两次提前重试。
+        for expected in 1..=2 {
+            online
+                .send(PeerReachabilityChanged {
+                    device_id: peer,
+                    state: ReachabilityState::Online,
+                    at: chrono::Utc::now(),
+                })
+                .unwrap();
+            use_case
+                .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
+                .await;
+            assert_eq!(dispatch.dispatched.lock().unwrap().len(), expected);
+            // 已消费证据不能在后续维护轮次重复使用。
+            for _ in 0..10 {
+                use_case
+                    .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
+                    .await;
+            }
+            assert_eq!(dispatch.dispatched.lock().unwrap().len(), expected);
+        }
+        // 已认证历史的确认走同一加速入口，也不能变成后续轮次的永久许可。
+        use_case
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::StateChanged, &[peer])
+            .await;
+        assert_eq!(dispatch.dispatched.lock().unwrap().len(), 3);
+        use_case
+            .deliver_pending_group_updates(&MembershipMaintenanceTrigger::Periodic, &[])
+            .await;
+        assert_eq!(dispatch.dispatched.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
     async fn unavailable_membership_history_keeps_the_queue_intact() {
         let update = PendingGroupUpdate::persistent(DeviceId::new("peer-a"), vec![1]);
         let store = store_with(vec![update]);

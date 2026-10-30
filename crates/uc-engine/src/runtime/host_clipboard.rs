@@ -154,17 +154,16 @@ impl HostClipboardChangeRuntime {
             return Ok(None);
         }
 
-        let snapshot = self
+        let (snapshot, identity) = self
             .system_clipboard
-            .read_snapshot()
+            .read_observation()
             .map_err(|error| observe_error("clipboard snapshot read", error))?;
         if snapshot.is_empty() {
             return Ok(None);
         }
-        let origin_guard_key = snapshot.origin_guard_key();
         let origin = self
             .change_origin
-            .attribute_observed_change(&origin_guard_key)
+            .attribute_identity(identity.as_deref())
             .await;
         if origin.is_remote_push() {
             return Ok(None);

@@ -2,6 +2,11 @@
 
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
+- [Local history tags](2026-10-04-local-history-tags.md) (Engine PR #158 and Desktop PR #1847 merged; device and release acceptance not verified).
+- [Issue #34 slice 4: membership history connections](2026-10-12-membership-history-connectivity-plan.md) ([specification](2026-10-12-membership-history-connectivity-spec.md); PR #180 merged; skipped jobs and device acceptance remain unverified).
+
+- [Issue #34 第八切片：反向进度与发送侧状态投影](2026-10-24-transfer-progress-connectivity-plan.md)（同head主CI13项及Windows双架构通过；物理挂起／设备后台按用户要求跳过，历史间歇失败保留；[规格](2026-10-24-transfer-progress-connectivity-spec.md)，[验收结论](2026-10-24-transfer-progress-connectivity-feasibility.md#最终候选ci与交付结论)）
+
 - [Issue #34 第六切片：设备可达性、准入与存活检查](2026-10-14-peer-reachability-connectivity-plan.md)（完整 Uni 迁移、20 轮恢复及旧新矩阵完成；本地回归与九项必需 CI 通过，真机和额外历史格跳过；[规格](2026-10-14-peer-reachability-connectivity-spec.md)）
 
 - [Issue #34 第五切片：当前剪贴板状态与按需拉取](2026-10-14-active-clipboard-connectivity-plan.md)（四向 Uni、10 秒交换、4 目标与最新槽完成；本地及代码提交线上门禁通过，设备与完整历史矩阵跳过；[规格](2026-10-14-active-clipboard-connectivity-spec.md)）

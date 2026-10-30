@@ -6,9 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use uc_core::file_transfer::{
-    FileTransferEventPublisherPort, FileTransferEventStorePort, OutboundProgressReporterPort,
-};
+use uc_core::file_transfer::{FileTransferEventPublisherPort, FileTransferEventStorePort};
 use uc_core::ports::atomic_publish::AtomicPublishPort;
 use uc_core::ports::clipboard::{
     AdvanceActiveClipboardPort, CheckEntryAvailabilityPort, FindEntryIdBySnapshotHashPort,
@@ -91,7 +89,7 @@ pub struct InteractiveReceiveIntentDeps {
     pub common: InboundReceiveIntentDeps,
     pub write: Arc<dyn InboundWrite>,
     pub provisional_receive: Arc<dyn FinalizeProvisionalReceivePort>,
-    pub outbound_progress_reporter: Arc<dyn OutboundProgressReporterPort>,
+
     pub active_register: Arc<dyn AdvanceActiveClipboardPort>,
     pub mobile_consumability: MobileConsumabilityProbe,
     pub snapshot_deps: ClipboardSnapshotDeps,
@@ -202,7 +200,7 @@ impl FileTransferAssembly {
                 common: self.common_receive_deps(deps.common),
                 write: deps.write,
                 provisional_receive: deps.provisional_receive,
-                outbound_progress_reporter: deps.outbound_progress_reporter,
+
                 active_register: deps.active_register,
                 mobile_consumability: deps.mobile_consumability,
                 snapshot_deps: deps.snapshot_deps,

@@ -1,0 +1,4 @@
+[submodule "third_party/iroh"]
+	path = third_party/iroh
+	url = https://github.com/UniClipboard/iroh.git
+	shallow = true

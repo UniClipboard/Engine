@@ -1,5 +1,7 @@
 # ADR-002: Clipboard Resource Protocol for Detail Content
 
+Status: Historical. The current Engine resource result also has `inline_data`. See [`result.rs`](../../../crates/uc-engine/src/contract/result.rs). Whether any product host still implements `uc://` has not been verified in this repository.
+
 ## Context
 
 Clipboard entries are displayed in a list with preview data, while full content can be large

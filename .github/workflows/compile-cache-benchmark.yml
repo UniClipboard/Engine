@@ -1,8 +1,8 @@
 name: Compile cache benchmark
 
-# 手工测量 R2 编译缓存的两个独立空 target 的动作缓存恢复：同一 job、同一提交、工具链与 runner 类别，
+# 手工测量快照与本地编译缓存的两个独立空 target 的动作缓存恢复：同一 job、同一提交、工具链与 runner 类别，
 # 每轮从空 target 开始构建全工作区测试二进制，不运行测试。
-# 手工触发只读 R2；本次专属本地 CAS 在首轮填充、次轮恢复，不伪造主线发布身份。
+# 手工触发只读兼容快照；本次专属本地 CAS 在首轮填充、次轮恢复，不伪造主线发布身份。
 on:
   workflow_dispatch:
     inputs:
@@ -29,6 +29,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
 
       # 与 PR 检查及移动端发布使用同一 Apple 工具链。
       - name: Select Xcode 16.4
@@ -42,10 +44,9 @@ jobs:
       - name: Prepare Rust build
         uses: ./.github/actions/rust-ci-setup
         with:
-          cache-key: compile-cache-benchmark
+          cache-key: ${{ runner.os == 'Linux' && 'rust-tests-linux' || 'rust-checks-macos' }}
           # 空 target 对照不能先由 rust-cache 恢复第三方编译产物。
           dependency-cache: "false"
-          compile-cache-access: read
           compile-cache-r2-endpoint: ${{ secrets.BUILD_CACHE_R2_ENDPOINT }}
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}

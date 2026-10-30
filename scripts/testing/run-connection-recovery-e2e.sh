@@ -9,6 +9,9 @@ usage() {
   echo "  --repeat applies to the network scenarios only; the local suite always runs once."
   echo "  --peer-host runs one side of the direct, known-peer or relay scenarios with another version's test host; --relay-binary replaces the relay server; --relay-b gives the second node its own relay server (different home relays)."
   echo "  --blob-baseline adds old/old and upgraded bidirectional file readback, then ends before presence recovery."
+  echo "  --progress-baseline validates actual progress ALPN and complete current-host facts after file readback."
+  echo "  --old-pair-only ends after old/old pairing, profile reopen and bidirectional readback; requires --blob-baseline and matching --host/--prepaired-host."
+  echo "  --host PATH selects the real host binary for both sides; --prebuilt reuses it."
   echo "  --prebuilt reuses the test host already built in the cargo target directory, such as by the workspace test build."
 }
 
@@ -18,6 +21,9 @@ mode=all
 case_prefix=
 prebuilt=0
 blob_baseline=0
+progress_baseline=0
+old_pair_only=0
+host_binary=
 peer_host=
 peer_side=1
 relay_binary=
@@ -33,7 +39,10 @@ while (($#)); do
     --mode) mode=$2; shift 2 ;;
     --case) case_prefix=$2; shift 2 ;;
     --prebuilt) prebuilt=1; shift ;;
+    --host) host_binary=$2; shift 2 ;;
     --blob-baseline) blob_baseline=1; shift ;;
+    --progress-baseline) progress_baseline=1; shift ;;
+    --old-pair-only) old_pair_only=1; shift ;;
     --peer-host) peer_host=$2; shift 2 ;;
     --peer-side) peer_side=$2; shift 2 ;;
     --relay-binary) relay_binary=$2; shift 2 ;;
@@ -49,6 +58,9 @@ done
 [[ "$repeat" =~ ^[1-9][0-9]*$ ]] || exit 2
 [[ "$suite" == all || "$suite" == local || "$suite" == network ]] || exit 2
 [[ "$mode" == all || "$mode" == direct || "$mode" == known-peer || "$mode" == relay || "$mode" == legacy ]] || exit 2
+if ((progress_baseline)); then
+  [[ "$suite" == network && ( "$mode" == direct || "$mode" == relay ) && "$old_pair_only" == 0 && ( "$case_prefix" == E02-file-transfer || ( "$case_prefix" == P00-prepaired-upgrade && "$blob_baseline" == 1 ) ) ]] || { echo '--progress-baseline requires a direct/relay file or paired blob-upgrade cell.' >&2; exit 2; }
+fi
 [[ "$suite" != local || "$mode" == all ]] || { echo '--mode only applies to network validation.' >&2; exit 2; }
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
@@ -74,7 +86,8 @@ if ((!prebuilt)) && [[ "$mode" == all || "$mode" == relay ]]; then hosts+=(-p uc
 if ((${#hosts[@]})); then cargo build "${hosts[@]}" --locked; fi
 target=$(cargo metadata --locked --no-deps --format-version 1 | node -e 'let s="";process.stdin.on("data",x=>s+=x).on("end",()=>process.stdout.write(JSON.parse(s).target_directory))')
 evidence="${UC_CONNECTION_RECOVERY_EVIDENCE:-$target/connection-recovery-evidence}"
-[[ -x "$target/debug/uc-connectivity-host" ]] || { echo 'The test host has not been built; run without --prebuilt.' >&2; exit 2; }
+host_binary=${host_binary:-$target/debug/uc-connectivity-host}
+[[ -x "$host_binary" ]] || { echo 'The test host has not been built; run without --prebuilt.' >&2; exit 2; }
 mkdir -p "$evidence"
 # 旧版互通使用升级兼容矩阵的 a07 锚点（Desktop v1.0.0-alpha.10，Engine v1.1.0-rc.15），由同一构建脚本按 rev 缓存。
 legacy_anchor=a07
@@ -110,7 +123,10 @@ writeFileSync(join(process.argv[2], 'source-tree-sha256.txt'), `${digest.digest(
 NODE
 rustc --version > "$evidence/rust-version.txt"
 node --version > "$evidence/node-version.txt"
-runner=(node "$repo/scripts/testing/connection-recovery-network.mjs" --host "$target/debug/uc-connectivity-host" --repeat "$repeat" --evidence "$evidence" --blob-baseline "$blob_baseline")
+runner=(node "$repo/scripts/testing/connection-recovery-network.mjs" --host "$host_binary" --repeat "$repeat" --evidence "$evidence" --blob-baseline "$blob_baseline" --old-pair-only "$old_pair_only" --progress-baseline "$progress_baseline")
+if ((old_pair_only)); then
+  [[ "$blob_baseline" == 1 && -n "$prepaired_host" && "$host_binary" == "$prepaired_host" ]] || { echo '--old-pair-only requires --blob-baseline and the same --host/--prepaired-host.' >&2; exit 2; }
+fi
 if [[ -n "$case_prefix" ]]; then runner+=(--case "$case_prefix"); fi
 if [[ -n "$peer_host" ]]; then
   [[ "$mode" != all && "$mode" != legacy && -x "$peer_host" && "$peer_side" =~ ^[01]$ ]] || { echo "--peer-host needs an executable, --peer-side 0|1 and a single non-legacy --mode." >&2; exit 2; }

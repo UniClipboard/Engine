@@ -1,4 +1,5 @@
 //! 真实导出后保存与物理清理同时失败，关闭必须等待原动作修复。
+use super::super::settlement_boundaries;
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -47,6 +48,7 @@ async fn real_engine_shutdown_waits_for_failed_save_output_cleanup() {
     assert_eq!(pending.items_completed, 0);
     assert_eq!(pending.completed_bytes, 0);
     assert_eq!(pending.items_total, 3);
+    settlement_boundaries::assert_processing(&case, &case.first, 0).await;
     assert!(path.is_dir());
     let error = case
         .receiver
@@ -148,6 +150,7 @@ async fn real_engine_failed_export_cleanup_keeps_network_failure_and_prior_deliv
     let pending = attempt_settlement(&mut connection, entry);
     assert_eq!(pending.phase, "preparing");
     assert_eq!(pending.resolution, "pending");
+    settlement_boundaries::assert_processing(&case, &case.first, 1).await;
     let error = case
         .receiver
         .shutdown(Duration::from_millis(100))

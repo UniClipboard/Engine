@@ -4,6 +4,8 @@
 
 | 项目 | 状态 | 依赖/退出条件 | 计划 |
 | --- | --- | --- | --- |
+| 冻结a07旧旧Relay文件接收间歇拒绝 | #332／#335原CI失败，当前完整原矩阵通过；根因未定 | 网络／接收及兼容验收负责人定位原B到A文件`peer_rejected`／A的`apply_failed`；旧版已丢失部分source chain，须保留固定旧SHA、原文件断言和失败证据，建立实际反馈环并明确兼容处置；不以通过重跑称修复 | [失败与当前核验](completed/2026-10-24-transfer-progress-connectivity-feasibility.md#映射期间发现的旧旧relay失败) |
+| 成员F2恢复场景偶发多一个issue | 本片首次完整回归失败，隔离及后续完整56项通过；根因未定 | 成员恢复及测试负责人定位实际产生多一个issue的时序，在原全并发场景验证原计数和恢复断言；保留首次结果，不增加超时或将smoke代替全集 | [首次失败与完整回归](completed/2026-10-24-transfer-progress-connectivity-feasibility.md#当前候选完整回归与首次失败保留) |
 | 本地产物统一准备 | 待实现 | 脚本、清单和三目标验证完成 | [计划](active/local-artifacts-preparation.md) |
 | 双设备配对本机耗时仍约 5 秒 | 实施中 | 可信纯网络扣除门禁通过，预热后不少于 20 次的本机耗时 p95 小于 1 秒 | [计划](active/038-pairing-local-latency-budget.md) |
 | 历史本地调试调用点尚未逐项分类 | 待实现，当前默认拒绝输出 | 每个生成清单项完成删除、安全本地化或明确保留，真实 sink 隐私检查通过 | [计划](active/039-local-debug-inventory-cleanup.md) |
@@ -23,6 +25,7 @@
 | 成员 G2 密码学拒绝场景偶发未投影拒绝 | 最新全套失败一次、同源码隔离与此前全套通过；实际原因未证实 | 成员验收负责人记录 tamper 消费、投递结果及接收方 epoch 顺序；以确定性 gate 保证真实拒绝边界，原拒绝/重启/后序 epoch 断言在完整并发全套稳定通过；不增加篡改次数或超时掩盖 | [审查记录](completed/2026-10-11-clipboard-connectivity-review.md) |
 
 | 已完整接收目录的再次激活触发重复 pull 并存储失败 | 独立进程复现两次；冻结 main 可用性实现与当前一致 | Application 内容可用性负责人和 Infra 存储负责人统一目录完整性判断与重复接收结算；真实目录包含嵌套文件及空目录，首次物化后再次激活不重复拉取，缺失成员仍不得判定可用；不得仅把根目录存在当作成员完整 | [发现记录](../../.planning/2026-10-14-active-clipboard-connectivity/findings.md) |
+
 
 关闭项目时记录验证证据，更新稳定文档，并将对应计划移入 `completed/`。
 

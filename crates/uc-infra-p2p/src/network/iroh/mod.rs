@@ -20,7 +20,6 @@ mod discovery;
 pub mod group_update_adapter;
 pub mod identity_store;
 pub(crate) mod inbound_peer;
-mod membership_branch_recovery_adapter;
 pub mod membership_history_exchange_adapter;
 mod membership_identity_adapter;
 mod net_recovery;
@@ -39,7 +38,6 @@ pub(crate) mod runtime_consts;
 mod session_generation;
 pub mod space_admission;
 pub(crate) use super::trace_context;
-pub mod transfer_progress_adapter;
 
 #[cfg(test)]
 pub(crate) struct StaticPeerAdmission(pub(crate) bool);
@@ -61,13 +59,11 @@ pub use active_clipboard::{
 pub(crate) use addr_filter::filter_endpoint_addr;
 pub use admission_transport_material::IrohAdmissionTransportMaterial;
 pub use blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
-pub(crate) use connect::connect_with_staggered_retry;
 pub use connection_channel_adapter::IrohConnectionChannelAdapter;
 pub use group_update_adapter::{
     IrohGroupUpdateAdapter, IrohGroupUpdateHandler, GROUP_UPDATE_ALPN, LEGACY_GROUP_UPDATE_ALPN,
 };
 pub use identity_store::{IrohIdentityStore, IDENTITY_STORE_KEY};
-pub use membership_branch_recovery_adapter::IrohMembershipBranchRecoveryChannel;
 pub use membership_history_exchange_adapter::{
     HistoryConnectionAdmission, IrohMembershipHistoryExchangeHandler,
     IrohVerifiedPeerAddressRefresh, MembershipHistoryWire, SessionMembershipHistoryLocalWork,
@@ -78,7 +74,6 @@ pub use node::{
     ActiveClipboardHandlers, ActiveClipboardPullHandlers, BlobHandlers, ClipboardHandlers,
     IrohNode, IrohNodeBuilder, IrohNodeConfig, IrohNodeError, IrohNodeShutdownError,
     IrohRelayAccessToken, IrohSessionBuilder, PairingInvitationHandlers, PreparedIrohSession,
-    TransferProgressHandlers,
 };
 pub use peer_reachability_adapter::{
     IrohPeerReachabilityHandler, LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN,
@@ -92,13 +87,16 @@ pub use space_admission::{
     SpaceAdmissionChannelCredentialError, SpaceAdmissionChannelCredentialPort,
     SponsorOpaqueMaterial, SPACE_ADMISSION_ALPN,
 };
-pub use uc_sync_protocol::clipboard::{CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN};
+pub use uc_sync_protocol::clipboard::{
+    ATTRIBUTED_CLIPBOARD_ALPN, CLIPBOARD_ALPN, MULTIPLEXED_CLIPBOARD_ALPN,
+};
 
 /// 产品使用的全部 ALPN。网络日志只输出这些已知取值，对端发来的其他字符串一律不保留。
 pub fn product_alpns() -> Vec<&'static [u8]> {
     vec![
         BLOBS_ALPN,
         CLIPBOARD_ALPN,
+        ATTRIBUTED_CLIPBOARD_ALPN,
         MULTIPLEXED_CLIPBOARD_ALPN,
         PEER_REACHABILITY_ALPN,
         LEGACY_PEER_REACHABILITY_ALPN,
@@ -110,10 +108,13 @@ pub fn product_alpns() -> Vec<&'static [u8]> {
         MEMBERSHIP_BRANCH_RECOVERY_ALPN,
         uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN,
         uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN,
-        transfer_progress_adapter::TRANSFER_PROGRESS_ALPN,
+        uc_sync_protocol::transfer_progress::v2::TRANSFER_PROGRESS_ALPN,
+        uc_sync_protocol::transfer_progress::LEGACY_TRANSFER_PROGRESS_ALPN,
     ]
 }
 pub use uc_sync_protocol::membership_branch_recovery::MEMBERSHIP_BRANCH_RECOVERY_ALPN;
 
 #[cfg(feature = "test-util")]
 pub mod test_support;
+
+pub mod transfer_progress_v2;

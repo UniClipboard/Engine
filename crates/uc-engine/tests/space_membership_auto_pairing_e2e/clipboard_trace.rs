@@ -224,6 +224,7 @@ async fn clipboard_trace_case(
     if let Some(entry_id) = resend_entry {
         let result = source
             .execute(Operation::ResendEntry(uc_engine::ResendEntryInput {
+                confirm_new_transfer: false,
                 entry_id,
                 target_devices: vec![target_id],
             }))

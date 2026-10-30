@@ -9,6 +9,7 @@ mod content;
 #[cfg(feature = "current-engine")]
 mod network_faults;
 mod observe;
+mod sync_preferences;
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -23,6 +24,8 @@ use uc_engine::observability::{
     DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityResource,
     OperatingSystem, ProcessObservabilityRuntime,
 };
+#[cfg(feature = "branch-recovery-tests")]
+use uc_engine::ChooseDeviceGroupInput;
 #[cfg(feature = "connectivity-opportunity")]
 use uc_engine::ConnectivityOpportunity;
 use uc_engine::{
@@ -31,8 +34,10 @@ use uc_engine::{
     HostCapabilityErrorCategory, HostDirectories, HostFileAccess, HostFileHandle, HostFileMetadata,
     HostSecureStorage, JoinSpaceInput, ListHistoryEntriesInput, Operation, OperationResult,
     RemoveMemberInput, RestoreClipboardInput, SecretString, SendFilesInput, SendTextInput,
-    SettingsPatch, SyncSettingsPatch, UnlockSpaceInput,
+    UnlockSpaceInput,
 };
+#[cfg(feature = "transfer-progress")]
+use uc_engine::{EntryReceiveProgressInput, OutboundProgressInput, ReconcileOutboundProgressInput};
 
 use content::Clipboard;
 
@@ -453,6 +458,8 @@ async fn operation(
         return Ok(json!(true));
     }
     let op = match command {
+        #[cfg(feature = "branch-recovery-fault-tests")]
+        "reset_space" => Operation::ResetSpace,
         "create" => Operation::CreateSpace(CreateSpaceInput {
             device_name: Some(string(request, "name")?.into()),
             passphrase: SecretString::new(PASSPHRASE),
@@ -476,18 +483,7 @@ async fn operation(
         "unlock" => Operation::UnlockSpace(UnlockSpaceInput {
             passphrase: SecretString::new(PASSPHRASE),
         }),
-        "sync_preference" => Operation::UpdateSettings(Box::new(SettingsPatch {
-            sync: Some(SyncSettingsPatch {
-                auto_sync_enabled: request["auto_sync_enabled"].as_bool(),
-                sync_on_restore: Some(
-                    request["sync_on_restore"]
-                        .as_bool()
-                        .context("missing sync preference")?,
-                ),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })),
+        "sync_preference" => sync_preferences::operation(request)?,
         "active" => Operation::QueryActiveClipboard,
         "delete" => Operation::DeleteHistoryEntry(HistoryEntryInput {
             entry_id: string(request, "entry")?.into(),
@@ -501,6 +497,15 @@ async fn operation(
         "peers" => Operation::QueryPeerConnections,
         #[cfg(feature = "device-group-choices")]
         "eligibility" => Operation::QueryDeviceGroupChoices,
+        #[cfg(feature = "branch-recovery-tests")]
+        "choose_device_group" => Operation::ChooseDeviceGroup(ChooseDeviceGroupInput {
+            issue_id: string(request, "issue_id")?.into(),
+            choice_id: string(request, "choice_id")?.into(),
+            expected_revision: request["revision"]
+                .as_u64()
+                .context("missing or invalid revision")?,
+            confirm_local_removal: request["confirm_local_removal"].as_bool().unwrap_or(false),
+        }),
         #[cfg(feature = "current-engine")]
         "membership_diagnostics" => Operation::QueryMembershipDiagnostics,
         #[cfg(feature = "connectivity-opportunity")]
@@ -529,6 +534,25 @@ async fn operation(
             Operation::SendFiles(SendFilesInput {
                 files: vec![HostFileHandle::new(handle)],
                 target_devices: vec![string(request, "peer")?.into()],
+            })
+        }
+        #[cfg(feature = "transfer-progress")]
+        "receive_progress" => Operation::QueryEntryReceiveProgress(EntryReceiveProgressInput {
+            entry_id: string(request, "entry")?.into(),
+        }),
+        #[cfg(feature = "transfer-progress")]
+        "outbound_progress" => Operation::QueryOutboundProgress(OutboundProgressInput {
+            entry_id: string(request, "entry")?.into(),
+            target_device_id: string(request, "peer")?.into(),
+        }),
+        #[cfg(feature = "transfer-progress")]
+        "outbound_progress_list" => Operation::ListOutboundProgress,
+        #[cfg(feature = "transfer-progress")]
+        "reconcile_outbound_progress" => {
+            Operation::ReconcileOutboundProgress(ReconcileOutboundProgressInput {
+                entry_id: string(request, "entry")?.into(),
+                target_device_id: string(request, "peer")?.into(),
+                expected_attempt_id: request["attempt"].as_str().map(str::to_owned),
             })
         }
         "history" => Operation::ListHistoryEntries(ListHistoryEntriesInput {
@@ -569,8 +593,18 @@ async fn operation(
         OperationResult::PeerConnections(peers) => serde_json::to_value(peers)?,
         #[cfg(feature = "device-group-choices")]
         OperationResult::DeviceGroupChoices(choices) => serde_json::to_value(choices)?,
+        #[cfg(feature = "branch-recovery-tests")]
+        OperationResult::DeviceGroupChosen(result) => serde_json::to_value(result)?,
         #[cfg(feature = "current-engine")]
         OperationResult::MembershipDiagnostics(summary) => serde_json::to_value(summary)?,
+        #[cfg(feature = "transfer-progress")]
+        OperationResult::EntryReceiveProgress(view) => serde_json::to_value(view)?,
+        #[cfg(feature = "transfer-progress")]
+        OperationResult::OutboundProgress(view) => serde_json::to_value(view)?,
+        #[cfg(feature = "transfer-progress")]
+        OperationResult::OutboundProgressList(views) => serde_json::to_value(views)?,
+        #[cfg(feature = "transfer-progress")]
+        OperationResult::OutboundProgressReconciliation(outcome) => serde_json::to_value(outcome)?,
         OperationResult::EntrySent(report) => serde_json::to_value(report)?,
         OperationResult::SettingsUpdated(outcome) => serde_json::to_value(outcome)?,
         OperationResult::ActiveClipboard(active) => serde_json::to_value(active)?,
@@ -596,11 +630,19 @@ fn host_identity() -> Value {
         "clipboard",
     ];
     for (enabled, name) in [
+        (
+            cfg!(feature = "automatic-sync-control"),
+            "automatic-sync-control",
+        ),
         (cfg!(feature = "test-network-config"), "local-network"),
         (cfg!(feature = "network-recovery"), "network-recovery"),
         (
             cfg!(feature = "device-group-choices"),
             "device-group-choices",
+        ),
+        (
+            cfg!(feature = "branch-recovery-tests"),
+            "branch-recovery-tests",
         ),
         (cfg!(feature = "join-status"), "join-status"),
         (
@@ -608,6 +650,7 @@ fn host_identity() -> Value {
             "connectivity-opportunity",
         ),
         (cfg!(feature = "startup-progress"), "startup-progress"),
+        (cfg!(feature = "transfer-progress"), "transfer-progress"),
         (cfg!(feature = "current-engine"), "space-work-events"),
         (
             cfg!(feature = "inbound-network-faults"),
@@ -803,6 +846,18 @@ async fn main() -> Result<()> {
         let request: Value = serde_json::from_str(&line?)?;
         let command = string(&request, "command")?;
         let result = match command {
+            #[cfg(feature = "branch-recovery-fault-tests")]
+            "reset_space" => {
+                let mut reset = Box::pin(operation(&engine, &clipboard, &files, &request));
+                tokio::select! {
+                    biased;
+                    result = &mut reset => result,
+                    _ = tokio::task::yield_now() => {
+                        respond(json!({"reset_polled": true}))?;
+                        reset.await
+                    }
+                }
+            }
             "flush" => {
                 #[cfg(feature = "process-observability")]
                 observability.force_flush(Duration::from_secs(2));

@@ -1,3 +1,4 @@
+use super::{EngineError, EngineErrorCategory};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,4 +39,35 @@ impl EngineState {
 pub enum LifecycleAction {
     Suspend,
     Resume,
+}
+
+/// 单次 Engine 资源释放的完整结果；进程观测由宿主独立负责。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResourceReleaseOutcome {
+    Pending,
+    Released { error: Option<EngineError> },
+    Failed { error: EngineError },
+}
+
+impl ResourceReleaseOutcome {
+    pub fn into_result(self) -> Result<(), EngineError> {
+        match self {
+            Self::Released { error: None } => Ok(()),
+            Self::Released { error: Some(error) } | Self::Failed { error } => Err(error),
+            Self::Pending => Err(EngineError::new(
+                1002,
+                EngineErrorCategory::DeadlineExceeded,
+                true,
+            )),
+        }
+    }
+}
+
+impl From<Result<(), EngineError>> for ResourceReleaseOutcome {
+    fn from(result: Result<(), EngineError>) -> Self {
+        match result {
+            Ok(()) => Self::Released { error: None },
+            Err(error) => Self::Failed { error },
+        }
+    }
 }

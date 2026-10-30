@@ -40,7 +40,6 @@ use crate::assembly::facade::build_mobile_sync_facade;
 use crate::assembly::lifecycle::{
     build_network_runtime, prepare_daemon_session, reconcile_session_peers,
 };
-use crate::assembly::sync_engine::SyncSessionAssembly;
 #[cfg(feature = "dev-tools")]
 use crate::dev::JoinerFinalConfirmationGate;
 use crate::engine::event_stream::{EventSender, RefreshHold};
@@ -126,10 +125,7 @@ pub(super) struct SessionHandoverDiagnostics {
 
 /// 会话激活未完成时回收已准备好的会话；清理失败只记分类，不改变激活失败的结果。
 async fn cleanup_prepared_session(session: ProductionSession, stage: &'static str) {
-    if let Err(error) = session
-        .shutdown(uc_core::FileTransferCancellationReason::Unknown, None)
-        .await
-    {
+    if let Err(error) = session.shutdown(None).await {
         uc_warn!(
             error_kind = "prepared_session_cleanup",
             stage = stage,
@@ -219,7 +215,6 @@ struct ProductionSession {
     application: Arc<ApplicationRuntime>,
     #[cfg(feature = "lan-compat")]
     mobile_sync: Arc<uc_mobile_lan::MobileSyncFacade>,
-    sync_session: SyncSessionAssembly,
     tasks: Arc<TaskRegistry>,
 }
 
@@ -590,10 +585,7 @@ impl SessionSupervisor {
                 .session
                 .take()
                 .ok_or_else(super::operation_unavailable_error)?;
-            session
-                .shutdown(FileTransferCancellationReason::ConnectivityRecovery, None)
-                .await
-                .map_err(lifecycle_error)?;
+            session.shutdown(None).await.map_err(lifecycle_error)?;
             let completed = self
                 .complete_pending_space_transition(&facade, "complete runtime space transition")
                 .await;
@@ -641,10 +633,7 @@ impl SessionSupervisor {
             .take()
             .ok_or_else(super::operation_unavailable_error)?;
         let facade = Arc::clone(&session.facade);
-        session
-            .shutdown(FileTransferCancellationReason::ConnectivityRecovery, None)
-            .await
-            .map_err(lifecycle_error)?;
+        session.shutdown(None).await.map_err(lifecycle_error)?;
         let transfer_result = self
             .application
             .cancel_active_file_transfers(
@@ -741,7 +730,7 @@ impl SessionSupervisor {
         }
         let session = self.runtime.lock().await.session.take();
         if let Some(session) = session {
-            if let Err(error) = session.shutdown(reason, deadline).await {
+            if let Err(error) = session.shutdown(deadline).await {
                 errors.push(error.into());
             }
         }
@@ -929,10 +918,7 @@ impl SessionSupervisor {
                 .session
                 .take()
                 .ok_or_else(operation_unavailable_error)?;
-            session
-                .shutdown(FileTransferCancellationReason::ConnectivityRecovery, None)
-                .await
-                .map_err(lifecycle_error)?;
+            session.shutdown(None).await.map_err(lifecycle_error)?;
             self.complete_pending_space_transition(&facade, "recover pending space transition")
                 .await?;
             observe_local_result(
@@ -1030,7 +1016,6 @@ impl ProductionSessionFactory {
         )
         .await
         .map_err(|error| session_runtime_error("p2p session", error))?;
-        let sync_session = prepared.session;
         let network_adapters = prepared.application;
         let prepared_session = prepared.prepared_session;
         let application_runtime = match observe_local_result(
@@ -1066,16 +1051,9 @@ impl ProductionSessionFactory {
                     None => session_runtime_error("application runtime", error),
                 };
                 prepared_session.shutdown().await;
-                let additional = sync_session
-                    .shutdown(FileTransferCancellationReason::Unknown, None)
-                    .await
-                    .err()
-                    .map(anyhow::Error::new)
-                    .into_iter()
-                    .collect();
                 return Err(lifecycle_error(LifecycleError {
                     primary: primary.into(),
-                    additional,
+                    additional: Vec::new(),
                 }));
             }
         };
@@ -1122,7 +1100,6 @@ impl ProductionSessionFactory {
                 application: application_runtime,
                 #[cfg(feature = "lan-compat")]
                 mobile_sync,
-                sync_session,
                 tasks,
             },
             network_session: prepared_session,

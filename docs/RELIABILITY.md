@@ -34,3 +34,23 @@ HostCapabilityError 保留宿主来源，启动失败映射前通过既有模块
 
 持续演进项目见 [active plans](exec-plans/active/)，详细成员恢复设计见
 [Space Application](design-docs/space-application.md)。
+
+## Partial blob persistence and shutdown
+
+The maintained network stack owns partial blob persistence. Flushing borrows the disk-backed state.
+A flush must preserve the live state on success and failure. Entity retirement releases the file handles.
+A failed flush prevents a successful store shutdown acknowledgement, even when teardown completes.
+The existing shutdown RPC reports this failure through its response-channel error; it does not expose a new public error type.
+
+Store shutdown cancels observers, joins GC, drains accepted imports and exports, persists entities,
+joins the metadata actor, and drops the private runtime before it acknowledges success.
+A caller timeout does not cancel accepted cleanup. A closed observer stream alone does not prove database release.
+Host suspension must use the confirmed lifecycle outcome for the same Engine instance.
+
+Run `bash scripts/testing/run-blob-persistence.sh` for synthetic partial imports, successful and failed flushes,
+reopen recovery, observer termination, and a held-import deadline. The retained-context scenarios isolate a private
+state invariant. They do not establish the trigger or invalid state of a historical iOS crash.
+
+## Engine resource-release outcomes
+
+See [the release contract](design-docs/engine-resource-release.md) for complete outcomes, repeat-call semantics, resource scope and validation limits. `Stopped` is not a process-wide release certificate.

@@ -41,6 +41,8 @@
 pub const CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard-applied/1";
 /// 明确承诺同连接独立多流交换；不改变帧或 ACK。
 pub const MULTIPLEXED_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard-applied/2";
+/// 同一多流能力，并支持原始源条目身份；旧头字节只通过旧能力发送。
+pub const ATTRIBUTED_CLIPBOARD_ALPN: &[u8] = b"uniclipboard/clipboard-applied/3";
 
 use std::convert::TryFrom;
 
@@ -49,7 +51,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use uc_core::ids::EntryId;
 use uc_core::ports::ClipboardHeader;
+use uuid::Uuid;
 
 use crate::trace_context::WireTraceContext;
 
@@ -62,6 +66,7 @@ use crate::trace_context::WireTraceContext;
 /// mis-routed connection fails fast instead of drifting into postcard.
 pub const CLIPBOARD_MAGIC: u8 = 0xC1;
 const WIRE_SCHEMA_MARKER: &[u8; 4] = b"UCT1";
+const SOURCE_SCHEMA_MARKER: &[u8; 4] = b"UCT2";
 
 /// Hard ceiling on the postcard-encoded header size. A typical header is
 /// ~200 bytes; 4 KiB leaves headroom for future optional fields without
@@ -132,12 +137,21 @@ struct CurrentWireHeader {
     trace_context: Option<WireTraceContext>,
 }
 
+/// 源身份布局只在明确协商后使用；嵌套原头避免改变原正文或旧字段的编码。
+#[derive(Serialize, Deserialize)]
+struct SourceWireHeader {
+    header: CurrentWireHeader,
+    source: [u8; 16],
+}
+
 // ============================================================================
 // Errors
 // ============================================================================
 
 #[derive(Debug, Error)]
 pub enum WireEncodeError {
+    #[error("outbound source entry identity is invalid")]
+    SourceIdentity(#[source] uuid::Error),
     #[error("postcard encode failed: {0}")]
     Postcard(#[from] postcard::Error),
     #[error("header too large: {size} bytes (max {max})")]
@@ -190,7 +204,7 @@ pub fn encode_header(
     ) {
         return Err(WireEncodeError::UnsupportedVersion(header.version));
     }
-    let encoded = postcard::to_allocvec(&CurrentWireHeader {
+    let wire = CurrentWireHeader {
         version: header.version,
         snapshot_hash: header.snapshot_hash.clone(),
         captured_at_ms: header.captured_at_ms,
@@ -198,9 +212,23 @@ pub fn encode_header(
         origin_device_name: header.origin_device_name.clone(),
         payload_version: header.payload_version,
         trace_context,
-    })?;
-    let mut bytes = Vec::with_capacity(WIRE_SCHEMA_MARKER.len() + encoded.len());
-    bytes.extend_from_slice(WIRE_SCHEMA_MARKER);
+    };
+    let (marker, encoded) = match &header.source_entry {
+        Some(source) => {
+            let source =
+                Uuid::parse_str(source.as_ref()).map_err(WireEncodeError::SourceIdentity)?;
+            (
+                SOURCE_SCHEMA_MARKER,
+                postcard::to_allocvec(&SourceWireHeader {
+                    header: wire,
+                    source: *source.as_bytes(),
+                })?,
+            )
+        }
+        None => (WIRE_SCHEMA_MARKER, postcard::to_allocvec(&wire)?),
+    };
+    let mut bytes = Vec::with_capacity(marker.len() + encoded.len());
+    bytes.extend_from_slice(marker);
     bytes.extend_from_slice(&encoded);
     if bytes.len() > MAX_HEADER_SIZE as usize {
         return Err(WireEncodeError::HeaderTooLarge {
@@ -223,10 +251,21 @@ struct DecodedWireHeader {
 }
 
 fn decode_wire_header(bytes: &[u8]) -> Result<DecodedWireHeader, WireDecodeError> {
-    let encoded = bytes
-        .strip_prefix(WIRE_SCHEMA_MARKER)
-        .ok_or(WireDecodeError::IncompatibleLayout)?;
-    let (wire, remaining) = postcard::take_from_bytes::<CurrentWireHeader>(encoded)?;
+    let (wire, source_entry, remaining) =
+        if let Some(encoded) = bytes.strip_prefix(SOURCE_SCHEMA_MARKER) {
+            let (wire, remaining) = postcard::take_from_bytes::<SourceWireHeader>(encoded)?;
+            (
+                wire.header,
+                Some(EntryId::from(Uuid::from_bytes(wire.source).to_string())),
+                remaining,
+            )
+        } else {
+            let encoded = bytes
+                .strip_prefix(WIRE_SCHEMA_MARKER)
+                .ok_or(WireDecodeError::IncompatibleLayout)?;
+            let (wire, remaining) = postcard::take_from_bytes::<CurrentWireHeader>(encoded)?;
+            (wire, None, remaining)
+        };
     if !remaining.is_empty() {
         return Err(WireDecodeError::TrailingHeaderBytes);
     }
@@ -241,6 +280,7 @@ fn decode_wire_header(bytes: &[u8]) -> Result<DecodedWireHeader, WireDecodeError
     }
     Ok(DecodedWireHeader {
         header: ClipboardHeader {
+            source_entry,
             version: wire.version,
             snapshot_hash: wire.snapshot_hash,
             captured_at_ms: wire.captured_at_ms,
@@ -391,6 +431,7 @@ mod tests {
 
     fn sample_header() -> ClipboardHeader {
         ClipboardHeader {
+            source_entry: None,
             version: ClipboardHeader::CURRENT_VERSION,
             snapshot_hash: "a".repeat(64),
             captured_at_ms: 1_700_000_000_000,

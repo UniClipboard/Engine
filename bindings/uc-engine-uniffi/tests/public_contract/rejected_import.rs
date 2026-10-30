@@ -30,6 +30,7 @@ fn retained_import_query_uses_engine_state_across_restarts_and_preserves_errors(
             .space_id;
         let content = b"synthetic binding retained history".to_vec();
         host.set_clipboard(BindingClipboardSnapshot {
+            identity: None,
             observed_at_ms: 1,
             representations: vec![BindingClipboardRepresentation::Inline {
                 format: "text/plain".to_owned(),

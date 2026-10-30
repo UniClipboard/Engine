@@ -40,7 +40,7 @@ image = { version = "0.25", default-features = false, features = [
   "webp",
   "tiff",
 ] }
-zstd = "0.13"
+zstd = "0.14.3"
 indexmap = "2"
 
 [dependencies.uuid]

@@ -77,7 +77,7 @@ pub(super) fn target_facade() -> (Arc<BlobTransferFacade>, Arc<BlobTransport>) {
         blob_reference: Arc::new(TestReferences),
         transfer_cipher: Arc::new(TestCipher),
         host_event_emitter: None,
-        outbound_progress_reporter: None,
+
         file_transfer: None,
     }));
     (facade, transport)

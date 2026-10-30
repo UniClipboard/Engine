@@ -259,13 +259,14 @@ fn write_child_report(role: &str, runtime: &ChildRuntime, business_span_pinned_m
         return;
     };
     let _ = ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(2));
-    let status = handle.query_network_log_status().ok();
     let export = handle
         .prepare_network_log_export(Duration::from_secs(2))
         .ok();
+    // 导出是网络 writer 的刷新屏障；状态和计数必须在屏障后取同一份快照。
+    let status = handle.query_network_log_status();
     let report = serde_json::json!({
-        "network_status": status,
-        "network_status_error": handle.query_network_log_status().err().map(|error| error.to_string()),
+        "network_status": status.as_ref().ok(),
+        "network_status_error": status.as_ref().err().map(ToString::to_string),
         "network_export": export,
         "stages": runtime.stages.lock().expect("stages").clone(),
         "host_third_party_events": *runtime.probe.third_party_events.lock().expect("events"),

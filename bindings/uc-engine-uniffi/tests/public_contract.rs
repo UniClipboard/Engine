@@ -213,6 +213,7 @@ impl MemoryHost {
             values: Mutex::new(HashMap::new()),
             files: Mutex::new(HashMap::new()),
             clipboard: Mutex::new(BindingClipboardSnapshot {
+                identity: None,
                 observed_at_ms: 0,
                 representations: Vec::new(),
             }),
@@ -371,9 +372,12 @@ impl BindingHost for MemoryHost {
         Ok(lock(&self.clipboard).clone())
     }
 
-    fn clipboard_write(&self, snapshot: BindingClipboardSnapshot) -> Result<(), HostBindingError> {
+    fn clipboard_write(
+        &self,
+        snapshot: BindingClipboardSnapshot,
+    ) -> Result<Option<Vec<u8>>, HostBindingError> {
         self.clipboard_writes().push(snapshot);
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -688,7 +692,7 @@ fn space_management_preserves_state_devices_resend_outcomes_and_local_history() 
     );
 
     let resend = engine
-        .resend_entry("missing-entry".to_owned(), Vec::new())
+        .resend_entry("missing-entry".to_owned(), Vec::new(), false)
         .expect("missing entry must remain a structured business outcome");
     assert!(matches!(
         resend,
@@ -1349,6 +1353,7 @@ fn capture_current_clipboard_reads_a_structured_host_snapshot() {
     let root = tempfile::tempdir().expect("temporary host root must be available");
     let host = Arc::new(MemoryHost::new(root.path()));
     host.set_clipboard(BindingClipboardSnapshot {
+        identity: None,
         observed_at_ms: 1_700_000_000_000,
         representations: vec![BindingClipboardRepresentation::Inline {
             format: "text/plain".to_owned(),
@@ -1388,6 +1393,7 @@ fn observed_clipboard_change_returns_a_delivery_report_for_local_content() {
     let root = tempfile::tempdir().expect("temporary host root must be available");
     let host = Arc::new(MemoryHost::new(root.path()));
     host.set_clipboard(BindingClipboardSnapshot {
+        identity: None,
         observed_at_ms: 1_700_000_000_000,
         representations: vec![BindingClipboardRepresentation::Inline {
             format: "text/plain".to_owned(),
@@ -1433,6 +1439,7 @@ fn observed_clipboard_change_can_capture_without_dispatching() {
     let root = tempfile::tempdir().expect("temporary host root must be available");
     let host = Arc::new(MemoryHost::new(root.path()));
     host.set_clipboard(BindingClipboardSnapshot {
+        identity: None,
         observed_at_ms: 1_700_000_000_000,
         representations: vec![BindingClipboardRepresentation::Inline {
             format: "text/plain".to_owned(),
@@ -1474,6 +1481,7 @@ fn restore_clipboard_writes_a_structured_snapshot_to_the_host() {
     let host = Arc::new(MemoryHost::new(root.path()));
     let private_text = b"private restored clipboard".to_vec();
     host.set_clipboard(BindingClipboardSnapshot {
+        identity: None,
         observed_at_ms: 1_700_000_000_000,
         representations: vec![BindingClipboardRepresentation::Inline {
             format: "text/plain".to_owned(),
@@ -1525,6 +1533,7 @@ fn active_clipboard_can_be_queried_after_the_activation_event_was_missed() {
     let root = tempfile::tempdir().expect("temporary host root must be available");
     let host = Arc::new(MemoryHost::new(root.path()));
     host.set_clipboard(BindingClipboardSnapshot {
+        identity: None,
         observed_at_ms: 1_700_000_000_000,
         representations: vec![BindingClipboardRepresentation::Inline {
             format: "text/plain".to_owned(),
@@ -1606,6 +1615,7 @@ fn active_clipboard_query_survives_session_recovery() {
     let root = tempfile::tempdir().expect("temporary host root must be available");
     let host = Arc::new(MemoryHost::new(root.path()));
     host.set_clipboard(BindingClipboardSnapshot {
+        identity: None,
         observed_at_ms: 1_700_000_000_000,
         representations: vec![BindingClipboardRepresentation::Inline {
             format: "text/plain".to_owned(),
@@ -1670,6 +1680,7 @@ fn export_entry_writes_to_an_opaque_host_handle_and_finishes_it() {
     let host = Arc::new(MemoryHost::new(root.path()));
     let private_text = b"private exported clipboard".to_vec();
     host.set_clipboard(BindingClipboardSnapshot {
+        identity: None,
         observed_at_ms: 1_700_000_000_000,
         representations: vec![BindingClipboardRepresentation::Inline {
             format: "text/plain".to_owned(),

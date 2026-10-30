@@ -15,9 +15,9 @@ use uc_engine::{
     },
     CreateSpaceInput, Engine, EngineConfig, EngineError, EngineEvent, ExportEntryInput,
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostDirectories,
-    HostSecureStorage, JoinSpaceInput, Operation, OperationResult, QueryHistoryInput,
-    RemoveMemberInput, ResendEntryInput, SecretString, SendFilesInput, SendImageInput,
-    SendTextInput, UnlockSpaceInput,
+    HostSecureStorage, JoinSpaceInput, Operation, OperationResult, OutboundProgressInput,
+    QueryHistoryInput, ReconcileOutboundProgressInput, RemoveMemberInput, ResendEntryInput,
+    SecretString, SendFilesInput, SendImageInput, SendTextInput, UnlockSpaceInput,
 };
 
 #[cfg(target_os = "android")]
@@ -25,6 +25,9 @@ mod android;
 mod clipboard;
 mod file_access;
 mod lifecycle_scenario;
+mod outbound_progress;
+#[cfg(test)]
+mod outbound_progress_tests;
 mod secure_storage;
 
 use clipboard::ProbeClipboard;
@@ -89,11 +92,24 @@ enum ProbeCommand {
         limit: u32,
     },
     QueryActiveClipboard,
+    QueryOutboundProgress {
+        entry_id: String,
+        target_device_id: String,
+    },
+    ListOutboundProgress,
+    ReconcileOutboundProgress {
+        entry_id: String,
+        target_device_id: String,
+        #[serde(default)]
+        expected_attempt_id: Option<String>,
+    },
     ExportEntry {
         entry_id: String,
         path: String,
     },
     ResendEntry {
+        #[serde(default)]
+        confirm_new_transfer: bool,
         entry_id: String,
     },
     Suspend {
@@ -446,6 +462,37 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
         ProbeCommand::QueryActiveClipboard => {
             execute_operation(state, Operation::QueryActiveClipboard).await
         }
+        ProbeCommand::QueryOutboundProgress {
+            entry_id,
+            target_device_id,
+        } => {
+            execute_operation(
+                state,
+                Operation::QueryOutboundProgress(OutboundProgressInput {
+                    entry_id,
+                    target_device_id,
+                }),
+            )
+            .await
+        }
+        ProbeCommand::ListOutboundProgress => {
+            execute_operation(state, Operation::ListOutboundProgress).await
+        }
+        ProbeCommand::ReconcileOutboundProgress {
+            entry_id,
+            target_device_id,
+            expected_attempt_id,
+        } => {
+            execute_operation(
+                state,
+                Operation::ReconcileOutboundProgress(ReconcileOutboundProgressInput {
+                    entry_id,
+                    target_device_id,
+                    expected_attempt_id,
+                }),
+            )
+            .await
+        }
         ProbeCommand::ExportEntry { entry_id, path } => {
             let display_name = PathBuf::from(&path)
                 .file_name()
@@ -464,10 +511,14 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
             )
             .await
         }
-        ProbeCommand::ResendEntry { entry_id } => {
+        ProbeCommand::ResendEntry {
+            entry_id,
+            confirm_new_transfer,
+        } => {
             execute_operation(
                 state,
                 Operation::ResendEntry(ResendEntryInput {
+                    confirm_new_transfer,
                     entry_id,
                     target_devices: Vec::new(),
                 }),
@@ -606,6 +657,18 @@ async fn execute_operation(state: &ProbeState, operation: Operation) -> Value {
 #[allow(unreachable_patterns)]
 fn operation_response(result: OperationResult) -> Value {
     match result {
+        OperationResult::OutboundProgress(progress) => outbound_progress::present(progress),
+        OperationResult::OutboundProgressList(progress) => json!({
+            "ok": true,
+            "kind": "outbound_progress_list",
+            "count": progress.len(),
+            "states": progress.iter().map(|view| view.state).collect::<Vec<_>>(),
+        }),
+        OperationResult::OutboundProgressReconciliation(state) => json!({
+            "ok": true,
+            "kind": "outbound_progress_reconciliation",
+            "state": state,
+        }),
         OperationResult::SpaceCreated { space_id, .. } => {
             json!({"ok": true, "kind": "space_created", "space_id": space_id})
         }
@@ -1328,6 +1391,10 @@ fn operation_response(result: OperationResult) -> Value {
                 "ok": true,
                 "kind": "entry_resent",
                 "outcome": "completed",
+                "reconciled_target_count": report.reconciled.len(),
+                "reconciliation_states": report.reconciled.iter().map(|target| target.state).collect::<Vec<_>>(),
+                "new_transfer_requested": report.reconciled.iter().any(|target| target.new_transfer_requested),
+                "duplicate_files_possible": report.reconciled.iter().any(|target| target.duplicate_files_possible),
                 "accepted": report.accepted,
                 "duplicate": report.duplicate,
                 "offline": report.offline,
@@ -1781,6 +1848,7 @@ mod tests {
 
         let resend = operation_response(OperationResult::EntryResent(
             uc_engine::ResendEntryOutcome::Completed(uc_engine::ResendReportSummary {
+                reconciled: Vec::new(),
                 accepted: 1,
                 duplicate: 2,
                 offline: 3,

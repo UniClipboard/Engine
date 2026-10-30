@@ -64,6 +64,10 @@ impl ReceiveTiming {
         }
     }
 
+    pub fn round(&self) -> u32 {
+        self.attempts_started - 1
+    }
+
     pub fn deadline(&self) -> ReceiveDeadline {
         let data_deadline = match self.last_data_at {
             Some(last_data_at) => ReceiveDeadline {

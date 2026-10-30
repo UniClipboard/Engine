@@ -7,7 +7,8 @@ cd "$repo"
 out="${UC_MEMBERSHIP_HISTORY_RELAY_EVIDENCE_ROOT:-$repo/target/membership-history-relay}"
 mkdir -p "$out"
 if [[ "${1:-}" != --inside ]]; then
-  cargo build --locked -p uc-connectivity-relay
+  # 后续同样按全部工作区目标取得测试二进制，普通relay不能先缩回单包特性图。
+  cargo build --locked --workspace --all-targets
   # 全部编译在普通构建用户下完成；命名空间内只执行已构建二进制，不切换缓存用户。
   cargo test --workspace --all-targets --locked --no-run --message-format=json > "$out/build-artifacts.jsonl"
   test_binary=$(node --input-type=module - "$out/build-artifacts.jsonl" <<'NODE'

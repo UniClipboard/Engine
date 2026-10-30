@@ -56,7 +56,7 @@ pub use representation_normalizer::ClipboardRepresentationNormalizerPort;
 pub use representation_repository::{ClipboardRepresentationStore, ProcessingUpdateOutcome};
 pub use select_representation_policy::SelectRepresentationPolicyPort;
 pub use selection_resolver::SelectionResolverPort;
-pub use self_write_ledger::{SelfWriteAttribution, SelfWriteLedgerPort, SelfWriteMatch};
+pub use self_write_ledger::{SelfWriteAttribution, SelfWriteLedgerPort};
 pub use spool_queue::{SpoolQueuePort, SpoolRequest};
 pub use sync_dispatch::{
     ClipboardDispatchError, ClipboardDispatchPort, ClipboardHeader, DispatchAck, DispatchReport,

@@ -1,5 +1,9 @@
 //! Shared clipboard-entry resend operation.
 
+use super::transfer_progress::{
+    map_error as map_progress_error, present as present_progress,
+    reconciliation as present_reconciliation,
+};
 use crate::error_codes::*;
 
 use uc_application::facade::{
@@ -8,7 +12,7 @@ use uc_application::facade::{
 
 use crate::{
     EngineError, EngineErrorCategory, EntryNotResendableReason, OperationResult, ResendEntryInput,
-    ResendEntryOutcome, ResendReportSummary,
+    ResendEntryOutcome, ResendReportSummary, ResendTargetProgressSummary,
 };
 use uc_observability_contract::uc_error;
 
@@ -25,6 +29,7 @@ pub async fn execute_resend_entry(
     });
     let result =
         crate::assembly::observability::observe_resend(facade.resend_entry(ResendEntryCommand {
+            confirm_new_transfer: input.confirm_new_transfer,
             entry_id: uc_core::ids::EntryId::from(input.entry_id.as_str()),
             target_filter,
         }))
@@ -37,12 +42,24 @@ fn map_resend_result(
 ) -> Result<OperationResult, EngineError> {
     let outcome = match result {
         Ok(report) => ResendEntryOutcome::Completed(ResendReportSummary {
+            reconciled: report
+                .reconciled
+                .into_iter()
+                .map(|target| ResendTargetProgressSummary {
+                    target_device_id: target.target.to_string(),
+                    state: present_reconciliation(target.progress.state),
+                    current: target.progress.current.map(present_progress),
+                    new_transfer_requested: target.new_transfer_requested,
+                    duplicate_files_possible: target.duplicate_files_possible,
+                })
+                .collect(),
             accepted: report.accepted,
             duplicate: report.duplicate,
             offline: report.offline,
             errored: report.errored,
             pending: report.pending,
         }),
+        Err(ResendEntryError::Reconciliation(source)) => return Err(map_progress_error(source)),
         Err(ResendEntryError::SynchronizationDisabled) => {
             ResendEntryOutcome::SynchronizationDisabled
         }
@@ -117,6 +134,7 @@ mod tests {
     #[test]
     fn resend_report_preserves_every_count() {
         let result = map_resend_result(Ok(ResendReport {
+            reconciled: Vec::new(),
             accepted: 1,
             duplicate: 2,
             offline: 3,
@@ -128,6 +146,7 @@ mod tests {
         assert_eq!(
             result,
             OperationResult::EntryResent(ResendEntryOutcome::Completed(ResendReportSummary {
+                reconciled: Vec::new(),
                 accepted: 1,
                 duplicate: 2,
                 offline: 3,

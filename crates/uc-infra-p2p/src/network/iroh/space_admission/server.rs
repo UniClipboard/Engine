@@ -1,5 +1,7 @@
 //! Sponsor 拥有一次入站交换、并发限制、截止时间和关闭责任。
+use super::super::connectivity::IrohPeerConnection;
 use super::super::trace_context::set_remote_parent;
+use super::client::IrohSpaceAdmissionTransport;
 use super::credential::SpaceAdmissionChannelCredentialPort;
 use super::crypto::{calculate_mac, copy_credential, peer_id, random_nonce};
 use super::diagnostics::{
@@ -10,14 +12,17 @@ use super::errors::{
     map_server_wire_error, HandlerError, CLOSE_AUTHENTICATION, CLOSE_BUSY,
     CLOSE_PEER_UPGRADE_REQUIRED, CLOSE_PROTOCOL,
 };
+#[cfg(test)]
+use super::managed::manager;
+use super::managed::{AdmissionEndpoint, EXCHANGE_DEADLINE};
 use iroh::endpoint::{Accepting, ConnectingError, Connection, ConnectionError};
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh::Endpoint;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use uc_application::deps::ConnectionLease;
+
 use tracing::Instrument;
 use uc_application::deps::{
     AuthenticatedSpaceAdmissionMessage, HandleAuthenticatedSpaceAdmissionMessagePort,
@@ -37,29 +42,27 @@ use uc_observability_contract::{
     log_fields::{log_id, log_vocab_debug},
     uc_info, uc_warn,
 };
-const EXCHANGE_DEADLINE: Duration = Duration::from_secs(120);
-const MAX_INBOUND_EXCHANGES: usize = 8;
 
 pub struct IrohSpaceAdmissionHandler {
     local_peer_id: AdmissionChannelPeerId,
     endpoint: Arc<dyn HandleAuthenticatedSpaceAdmissionMessagePort>,
     credentials: Arc<dyn SpaceAdmissionChannelCredentialPort>,
-    permits: Arc<Semaphore>,
+    transport: Arc<IrohSpaceAdmissionTransport>,
     accepting: AtomicBool,
     exchange_deadline: Duration,
 }
 
 impl IrohSpaceAdmissionHandler {
     pub fn new(
-        local_endpoint: &Endpoint,
+        transport: Arc<IrohSpaceAdmissionTransport>,
         endpoint: Arc<dyn HandleAuthenticatedSpaceAdmissionMessagePort>,
         credentials: Arc<dyn SpaceAdmissionChannelCredentialPort>,
     ) -> Result<Self, SpaceAdmissionTransportError> {
         Ok(Self {
-            local_peer_id: peer_id(local_endpoint.id().as_bytes())?,
+            local_peer_id: peer_id(transport.endpoint.id().as_bytes())?,
             endpoint,
             credentials,
-            permits: Arc::new(Semaphore::new(MAX_INBOUND_EXCHANGES)),
+            transport,
             accepting: AtomicBool::new(true),
             exchange_deadline: EXCHANGE_DEADLINE,
         })
@@ -73,7 +76,10 @@ impl IrohSpaceAdmissionHandler {
 
     #[cfg(test)]
     pub(super) fn with_capacity(mut self, permits: usize) -> Self {
-        self.permits = Arc::new(Semaphore::new(permits));
+        self.transport = Arc::new(IrohSpaceAdmissionTransport {
+            endpoint: self.transport.endpoint.clone(),
+            manager: manager(self.transport.endpoint.clone(), permits),
+        });
         self
     }
 
@@ -81,6 +87,7 @@ impl IrohSpaceAdmissionHandler {
         &self,
         connection: &Connection,
         attempt: &OnceLock<AdmissionAttemptRef>,
+        lease: &ConnectionLease<AdmissionEndpoint>,
     ) -> Result<(), HandlerError> {
         let connection_started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + self.exchange_deadline;
@@ -95,9 +102,14 @@ impl IrohSpaceAdmissionHandler {
             envelope,
             canonical_digest,
             attempt_contract,
-        } = self
-            .authenticate(connection, deadline, connection_started, attempt)
-            .await?;
+            _work,
+        } = tokio::select! {
+            biased;
+            result = self.authenticate(connection, lease, deadline, connection_started, attempt) => result?,
+            source = connection.closed() => return Err(HandlerError::Transport {
+                source: anyhow::Error::new(source),
+            }),
+        };
         let span = server_operation_span();
         let _ = set_remote_parent(&span, wire.trace_context.as_ref());
         let started = std::time::Instant::now();
@@ -196,7 +208,7 @@ impl IrohSpaceAdmissionHandler {
         progress.finish(server_completion(started.elapsed(), result.as_ref().err()));
         drop(span);
         if result.is_ok() {
-            let _ = tokio::time::timeout_at(deadline, send.stopped()).await;
+            let _ = tokio::time::timeout_at(deadline, send.settled()).await;
         }
         result
     }
@@ -311,13 +323,22 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
             connection.close(CLOSE_BUSY.into(), b"admission_stopping");
             return Ok(());
         }
-        let Ok(_permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-            uc_warn!(
-                reason = "busy",
-                "Space admission connection rejected while sponsor is at capacity"
-            );
-            connection.close(CLOSE_BUSY.into(), b"admission_busy");
-            return Ok(());
+        let lease = match self
+            .transport
+            .manager
+            .accept(IrohPeerConnection::wrap(connection.clone()))
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) if error.is_busy() => {
+                uc_warn!(
+                    reason = "busy",
+                    "Space admission connection rejected while sponsor is at capacity"
+                );
+                connection.close(CLOSE_BUSY.into(), b"admission_busy");
+                return Ok(());
+            }
+            Err(error) => return Err(AcceptError::from_err(error)),
         };
         let attempt = OnceLock::new();
         // 认证之前还不知道准入尝试；已知时每条记录带上同一个引用，便于与 joiner 端对应。
@@ -326,7 +347,7 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
                 .get()
                 .map_or_else(|| "none".to_owned(), ToString::to_string)
         };
-        match self.run(&connection, &attempt).await {
+        match self.run(&connection, &attempt, &lease).await {
             Ok(()) => {}
             Err(
                 error @ (HandlerError::Authentication { .. }
@@ -377,5 +398,11 @@ impl ProtocolHandler for IrohSpaceAdmissionHandler {
 
     async fn shutdown(&self) {
         self.accepting.store(false, Ordering::Release);
+        if let Err(error) = self.transport.manager.shutdown().await {
+            uc_warn!(
+                error = &error as &dyn std::error::Error,
+                "Space admission connectivity shutdown failed"
+            );
+        }
     }
 }

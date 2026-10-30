@@ -1,6 +1,7 @@
 //! 接收运行世代、实际寿命与同进程来源；持久 attempt 仍是权威。
 
 use super::batch::ReceiveBatch;
+use crate::transfer::progress::ProgressSourceCatalog;
 use anyhow::Error as SourceError;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +15,10 @@ use uc_observability_contract::wire_enum;
 
 mod catalog;
 mod drain;
+mod progress;
+mod progress_changes;
+pub(crate) use progress::ReceiveProgressSignal;
+pub(crate) use progress_changes::ReceiveProgressChange;
 mod settlement;
 pub(crate) use catalog::{PlannedReceiveItem, ReceiveRepresentation, ReceiveSource};
 pub(crate) use settlement::{
@@ -37,6 +42,7 @@ struct RegistryState {
     active: HashMap<Key, Weak<Progress>>,
     cleaning: HashSet<String>,
     receipts: HashMap<EntryId, catalog::ReceiveReceipt>,
+    progress_catalog: ProgressSourceCatalog,
     born: Vec<Weak<Birth>>,
     retired: HashMap<EntryId, Vec<Weak<Birth>>>,
 }
@@ -57,6 +63,7 @@ impl RegistryState {
         self.generation.cancel();
         self.generation = CancellationToken::new();
         self.receipts.clear();
+        self.progress_catalog.retire();
         self.retired.clear();
     }
 }
@@ -74,6 +81,7 @@ impl Default for ReceiveWorkRegistry {
                 active: HashMap::new(),
                 cleaning: HashSet::new(),
                 receipts: HashMap::new(),
+                progress_catalog: ProgressSourceCatalog::default(),
                 born: Vec::new(),
                 retired: HashMap::new(),
             }),
@@ -93,6 +101,8 @@ struct Progress {
     cancel: CancellationToken,
     completion: watch::Sender<Completion>,
     prepared_plan: Mutex<Option<Arc<[PlannedReceiveItem]>>>,
+    source_accepted: AtomicBool,
+    fully_persisted: AtomicBool,
     batch: Weak<ReceiveBatch>,
 }
 
@@ -223,6 +233,7 @@ impl ReceiveWorkRegistry {
         if state.clearing || state.owns_receive(entry) || !state.cleaning.insert(entry.to_owned()) {
             return None;
         }
+        state.progress_catalog.forget(&EntryId::from(entry));
         Some(ReceiveCleanup {
             registry: self.clone(),
             entry: entry.to_owned(),
@@ -242,6 +253,7 @@ impl ReceiveWorkRegistry {
             let births = state.born.clone();
             state.retired.insert(entry.clone(), births);
             state.receipts.remove(entry);
+            state.progress_catalog.forget(entry);
             let waiting = state
                 .active
                 .iter()
@@ -334,6 +346,8 @@ impl ReceiveAction {
             cancel: self.generation.child_token(),
             completion: watch::channel(None).0,
             prepared_plan: Mutex::new(None),
+            source_accepted: AtomicBool::new(false),
+            fully_persisted: AtomicBool::new(false),
             batch: Arc::downgrade(&self.batch),
         });
         state.active.retain(|_, value| value.strong_count() != 0);
@@ -361,6 +375,7 @@ impl ReceiveAction {
         }
         self.batch.finish(result.is_ok());
         self.finish_receipt();
+        self.retain_final_progress();
         self.birth.completion.send_replace(Some(result.clone()));
         if let Some(progress) = self
             .progress

@@ -56,7 +56,8 @@ impl MemoryMembershipRecords {
 
     /// 模拟控制世代切换、恢复出厂等替换数据库：记录换成 `record`，数据库代号改变。
     pub(crate) fn replace_database(&self, record: MembershipRecord) {
-        *self.record.lock().unwrap() = record;
+        let mut current = self.record.lock().unwrap();
+        *current = record;
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -120,6 +121,9 @@ impl MembershipRecordStorePort for MemoryMembershipRecords {
             return Err(MembershipLedgerError::unavailable());
         }
         let mut record = self.record.lock().unwrap();
+        if self.generation.load(Ordering::SeqCst) != commit.expected_generation {
+            return Err(MembershipLedgerError::unavailable());
+        }
         if record.revision() != commit.expected_revision
             || commit.replacement.revision() <= commit.expected_revision
         {

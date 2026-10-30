@@ -34,10 +34,12 @@ impl EngineLogActivity {
 
     /// 结束登记；最后一份登记结束时停车，并等待已接受记录落盘、文件与租约交还。没有网络日志或仍有其他
     /// 工作中的 Engine 时返回 `None`。会等待文件线程，不能在异步运行线程上调用。
-    pub fn end(mut self, deadline: Duration) -> Option<SignalResult> {
-        self.ended = true;
+    pub fn end(&mut self, deadline: Duration) -> Option<SignalResult> {
         let mut active = lock(&ACTIVE_ENGINES);
-        *active = active.saturating_sub(1);
+        if !self.ended {
+            self.ended = true;
+            *active = active.saturating_sub(1);
+        }
         (*active == 0)
             .then(installed_network_log)
             .flatten()

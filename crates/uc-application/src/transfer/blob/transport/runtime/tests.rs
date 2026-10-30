@@ -164,7 +164,7 @@ impl PeerConnection for Connection {
         }
     }
     async fn open_bi(&self) -> Result<StreamPair, ConnectivityError> {
-        panic!("provider must not open a stream");
+        self.accept_bi().await
     }
     async fn accept_bi(&self) -> Result<StreamPair, ConnectivityError> {
         let mut streams = self.streams.lock().await;
@@ -546,3 +546,6 @@ async fn a_new_peer_can_evict_an_idle_connection_when_all_cache_slots_are_occupi
     }
     assert_eq!(exchange.closed.load(Ordering::SeqCst), 1);
 }
+
+#[path = "download_round_tests.rs"]
+mod download_round_tests;

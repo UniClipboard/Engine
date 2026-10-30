@@ -198,6 +198,7 @@ async fn assert_directory_rollback(reuse: bool, failure: DirectoryFailure) {
     let (plaintext, snapshot_hash) = two_root_wire_payload();
     let error = receiver
         .execute(ApplyInboundInput {
+            source_entry: None,
             from_device: DeviceId::new("source"),
             snapshot_hash,
             plaintext,

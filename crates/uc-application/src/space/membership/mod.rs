@@ -91,6 +91,9 @@ pub use record::{
 pub use recover_conflict::{
     AdvanceMembershipBranchTransitionError, AdvanceMembershipBranchTransitionInput,
     AdvanceMembershipBranchTransitionPort, BeginMembershipBranchRecoveryInput,
+    BranchRecoveryLocalWorkPort, BranchRecoveryOperationScopePort, BranchRecoveryPeerPort,
+    BranchRecoveryReceiver, BranchRecoveryRequest, BranchRecoveryResponse, BranchRecoveryTransport,
+    BranchRecoveryWireError, BranchRecoveryWirePort, BranchRecoveryWork,
     IssueMembershipBranchRecoveryError, IssueMembershipBranchRecoveryInput,
     IssueMembershipBranchRecoveryPort, MembershipBranchRecoveryChannelError,
     MembershipBranchRecoveryChannelPort, MembershipBranchRecoveryCommit,
@@ -134,7 +137,9 @@ pub(super) use maintenance::{
     MembershipMaintenanceTrigger, RunMembershipWorkPort, SpaceMembershipMaintenanceActivity,
     SpaceMembershipMaintenanceRuntime, WakeSpaceMembershipMaintenancePort,
 };
-pub(crate) use owner::{ledger_error, pause_reason, MembershipOwner, MembershipView};
+pub(crate) use owner::{
+    ledger_error, pause_reason, MembershipOwner, MembershipView, SpaceMembershipView,
+};
 #[cfg(test)]
 pub(super) use query_admission::{MembershipAdmissionSnapshot, QueryMembershipAdmissionError};
 pub(super) use query_admission::{QueryMembershipAdmissionPort, QueryMembershipAdmissionUseCase};
@@ -151,3 +156,5 @@ pub(crate) use worker::{
 };
 
 pub(crate) use group_update::PrepareMembershipRemovalPort;
+
+pub(crate) use owner::{MemberScopeRetirement, MemberScopeRetirementPort};

@@ -25,9 +25,14 @@
 
 use crate::facade::clipboard::{RetryEntryReceiveError, RetryEntryReceiveOutcome};
 use crate::transfer::blob::facade::TransferCancellationWait;
+use crate::transfer::progress::{
+    ProgressViewOwner, TransferProgressQueryError, TransferProgressReconciliation,
+};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+use uc_core::file_transfer::TransferProgressView;
 
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -159,6 +164,7 @@ use uc_core::SystemClipboardSnapshot;
 /// 外部业务调用只能通过本文件中的顶层方法进入。生产装配一次提供全部能力，
 /// 因此运行期拿到的对象始终可以立即处理所有稳定 Engine 动作。
 pub struct AppFacade {
+    progress: Arc<ProgressViewOwner>,
     space: Arc<SpaceFacade>,
     probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     resource: Arc<ResourceFacade>,
@@ -194,6 +200,7 @@ impl AppFacade {
     /// hands them here — the aggregator never sees raw ports.
     pub(crate) fn new(parts: AppFacadeParts) -> Self {
         Self {
+            progress: parts.progress,
             space: parts.space,
             probe_profile_key_access: parts.probe_profile_key_access,
             resource: parts.resource,
@@ -721,6 +728,30 @@ impl AppFacade {
         self.clipboard_sync.get_entry_delivery_view(entry_id).await
     }
 
+    pub async fn get_transfer_progress(
+        &self,
+        peer: DeviceId,
+        source_entry: &EntryId,
+    ) -> Result<Option<TransferProgressView>, TransferProgressQueryError> {
+        self.progress.get(peer, source_entry).await
+    }
+    pub async fn list_transfer_progress(
+        &self,
+    ) -> Result<Vec<TransferProgressView>, TransferProgressQueryError> {
+        self.progress.list().await
+    }
+    pub async fn reconcile_transfer_progress(
+        &self,
+        peer: DeviceId,
+        source_entry: &EntryId,
+        expected_attempt: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<TransferProgressReconciliation, TransferProgressQueryError> {
+        self.progress
+            .reconcile(peer, source_entry, expected_attempt, cancel)
+            .await
+    }
+
     pub async fn get_entry_receive_progress(
         &self,
         entry_id: &uc_core::ids::EntryId,
@@ -1178,6 +1209,7 @@ fn reachability_state_to_string(state: ReachabilityState) -> String {
 }
 
 pub(crate) struct AppFacadeParts {
+    pub progress: Arc<ProgressViewOwner>,
     pub space: Arc<SpaceFacade>,
     pub probe_profile_key_access: Arc<ProbeProfileKeyAccessUseCase>,
     pub resource: Arc<ResourceFacade>,
