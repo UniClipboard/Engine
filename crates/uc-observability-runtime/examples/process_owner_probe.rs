@@ -659,7 +659,7 @@ fn release_spawn_error_probe() {
                 .is_some_and(|source| source.kind() == std::io::ErrorKind::PermissionDenied)
     });
     let (registration, result) = EngineLogActivity::begin(Duration::from_millis(20));
-    let fenced = !registration.is_admitted() && result == Some(SignalResult::TimedOut);
+    let fenced = !registration.is_admitted() && result == Some(SignalResult::Failed);
     let valid = matches!(first, ProcessReleaseResult::Failed { .. })
         && report.result == first
         && report.cleanup_errors == vec![ProcessFailureKind::ReleaseWorker]

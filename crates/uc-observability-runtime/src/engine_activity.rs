@@ -11,7 +11,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use crate::local_file::lock;
-use crate::runtime::{installed_network_log, notify_engine_closer_changed};
+use crate::runtime::{
+    installed_network_log, installed_process_failure_blocks_registration,
+    notify_engine_closer_changed,
+};
 use crate::SignalResult;
 
 /// 工作中的 Engine 数；同时串行停车与重开，等待期间不让另一次转换交错。
@@ -282,23 +285,38 @@ pub struct EngineLogActivity {
 
 impl EngineLogActivity {
     /// 登记一个开始工作的 Engine；从零变为一时重开停车中的网络日志。没有网络日志时返回 `None`。
+    /// 无法重试的进程释放失败返回 `Failed`；登记超时返回 `TimedOut`。
     /// 会等待文件线程，不能在异步运行线程上调用。
     pub fn begin(deadline: Duration) -> (Self, Option<SignalResult>) {
         let started = Instant::now();
         loop {
             let Some(transition) = lock_transition(started, deadline) else {
-                return not_admitted();
+                return not_admitted(SignalResult::TimedOut);
             };
             let mut state = lock(&ACTIVE_ENGINES);
-            if state.fence.is_some() {
+            if let Some(fence) = state.fence.clone() {
                 #[cfg(feature = "test-process-release")]
                 FENCED_REGISTRATION_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+                drop(state);
                 drop(transition);
+                let failed = installed_process_failure_blocks_registration(&fence);
+                let state = lock(&ACTIVE_ENGINES);
+                if !state
+                    .fence
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &fence))
+                {
+                    continue;
+                }
+                if failed {
+                    return not_admitted(SignalResult::Failed);
+                }
                 let Some(remaining) = deadline.checked_sub(started.elapsed()) else {
-                    return not_admitted();
+                    return not_admitted(SignalResult::TimedOut);
                 };
+                // 进程状态变化使用独立的条件变量；定期核对终止失败以避免漏唤醒。
                 let (next, _) = ACTIVITY_CHANGED
-                    .wait_timeout(state, remaining.min(Duration::from_secs(60)))
+                    .wait_timeout(state, remaining.min(Duration::from_millis(100)))
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 drop(next);
                 continue;
@@ -320,7 +338,7 @@ impl EngineLogActivity {
         }
     }
 
-    /// 超时未通过进程登记门时为 false；不能把它当成有效登记。
+    /// 未通过进程登记门时为 false；不能把它当成有效登记。
     pub fn is_admitted(&self) -> bool {
         self.admitted
     }
@@ -353,13 +371,13 @@ impl EngineLogActivity {
     }
 }
 
-fn not_admitted() -> (EngineLogActivity, Option<SignalResult>) {
+fn not_admitted(result: SignalResult) -> (EngineLogActivity, Option<SignalResult>) {
     (
         EngineLogActivity {
             ended: true,
             admitted: false,
         },
-        Some(SignalResult::TimedOut),
+        Some(result),
     )
 }
 

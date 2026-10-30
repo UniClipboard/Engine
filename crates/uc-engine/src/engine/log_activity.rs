@@ -14,7 +14,7 @@ pub(crate) static PROBE_BEGIN_FAILURE: std::sync::atomic::AtomicBool =
 #[derive(Default)]
 struct State {
     activity: Option<Arc<Mutex<EngineLogActivity>>>,
-    beginning: Option<watch::Receiver<Option<bool>>>,
+    beginning: Option<watch::Receiver<Option<SignalResult>>>,
     release_pending: bool,
     beginning_active: bool,
     settled: Vec<Box<dyn FnOnce() + Send>>,
@@ -66,11 +66,16 @@ impl LogActivity {
                 registration.run();
             });
         }
-        if wait_beginning(beginning).await? {
-            Ok(())
-        } else {
-            self.state().beginning = None;
-            Err(super::operation_cancelled_error())
+        match wait_beginning(beginning).await? {
+            SignalResult::Completed => Ok(()),
+            SignalResult::TimedOut => {
+                self.state().beginning = None;
+                Err(super::operation_cancelled_error())
+            }
+            SignalResult::Failed | SignalResult::AlreadyShutdown => {
+                self.state().beginning = None;
+                Err(EngineError::new(1108, EngineErrorCategory::Internal, false))
+            }
         }
     }
 
@@ -100,7 +105,7 @@ impl LogActivity {
             state.beginning.clone()
         };
         if let Some(beginning) = beginning {
-            if !wait_beginning(beginning).await? {
+            if wait_beginning(beginning).await? != SignalResult::Completed {
                 let mut state = self.state();
                 state.beginning = None;
                 state.release_pending = false;
@@ -145,18 +150,19 @@ impl LogActivity {
 
 struct BeginningRegistration {
     owner: LogActivity,
-    sender: Option<watch::Sender<Option<bool>>>,
-    result: Option<bool>,
+    sender: Option<watch::Sender<Option<SignalResult>>>,
+    result: Option<SignalResult>,
 }
 
 impl BeginningRegistration {
     fn run(&mut self) {
-        let activity = EngineLogActivity::begin(Duration::MAX).0;
-        let admitted = activity.is_admitted();
-        if admitted {
+        let (activity, result) = EngineLogActivity::begin(Duration::MAX);
+        self.result = Some(if activity.is_admitted() {
             self.owner.state().activity = Some(Arc::new(Mutex::new(activity)));
-        }
-        self.result = Some(admitted);
+            SignalResult::Completed
+        } else {
+            result.unwrap_or(SignalResult::Failed)
+        });
     }
 }
 
@@ -168,8 +174,8 @@ impl Drop for BeginningRegistration {
             std::mem::take(&mut state.settled)
         };
         if let Some(sender) = self.sender.take() {
-            if let Some(admitted) = self.result {
-                sender.send_replace(Some(admitted));
+            if let Some(result) = self.result {
+                sender.send_replace(Some(result));
             }
         }
         for callback in callbacks {
@@ -178,10 +184,12 @@ impl Drop for BeginningRegistration {
     }
 }
 
-async fn wait_beginning(mut beginning: watch::Receiver<Option<bool>>) -> Result<bool, EngineError> {
+async fn wait_beginning(
+    mut beginning: watch::Receiver<Option<SignalResult>>,
+) -> Result<SignalResult, EngineError> {
     loop {
-        if let Some(admitted) = *beginning.borrow_and_update() {
-            return Ok(admitted);
+        if let Some(result) = *beginning.borrow_and_update() {
+            return Ok(result);
         }
         // discarded-source[channel]: the closed watch channel only indicates that its sender is gone
         beginning.changed().await.map_err(|_| join_failure())?;
@@ -191,4 +199,82 @@ async fn wait_beginning(mut beginning: watch::Receiver<Option<bool>>) -> Result<
 fn join_failure() -> EngineError {
     record_task_join_failure(DiagnosticTaskKind::EngineLifecycleTransition);
     EngineError::new(1108, EngineErrorCategory::Internal, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use uc_observability_runtime::{
+        retain_engine_closer, DeploymentEnvironment, ObservabilityConfig, ObservabilityResource,
+        OperatingSystem, ProcessObservabilityRuntime, ProcessReleaseResult, RetainedEngineCloser,
+        RetainedEngineResult, RetainedEngineState,
+    };
+
+    use super::{EngineErrorCategory, LogActivity};
+
+    struct TerminalCloser;
+
+    impl RetainedEngineCloser for TerminalCloser {
+        fn wait_accepted_work(&self) {}
+
+        fn retry_close(&self) -> RetainedEngineResult {
+            RetainedEngineResult::TerminalFailure
+        }
+    }
+
+    #[test]
+    fn terminal_process_failure_is_reported_by_engine_registration() {
+        const CHILD: &str = "UC_TEST_TERMINAL_REGISTRATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "engine::log_activity::tests::terminal_process_failure_is_reported_by_engine_registration",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .expect("start isolated test");
+            assert!(status.success());
+            return;
+        }
+
+        let config = ObservabilityConfig::new(
+            ObservabilityResource::new(
+                "1.0.0",
+                DeploymentEnvironment::Test,
+                OperatingSystem::Other,
+                "test",
+            )
+            .expect("resource"),
+        );
+        let process = ProcessObservabilityRuntime::install(config)
+            .expect("install")
+            .handle();
+        let _token = retain_engine_closer(Arc::new(TerminalCloser), RetainedEngineState::Terminal);
+        let (report, _) = process
+            .release_process(Duration::from_secs(5))
+            .expect("release action");
+        assert!(matches!(report.result, ProcessReleaseResult::Failed { .. }));
+        assert!(!report.explicit_retry_supported);
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let activity = LogActivity::default();
+        for _ in 0..2 {
+            let error = match runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), activity.begin()).await
+            }) {
+                Ok(result) => result.expect_err("terminal failure must reject registration"),
+                // spawn_blocking 的任务不会因超时取消；子进程直接退出以免测试挂起。
+                Err(_) => std::process::exit(1),
+            };
+            assert_eq!(error.category(), EngineErrorCategory::Internal);
+            assert!(!error.is_retryable());
+        }
+        runtime
+            .block_on(activity.end())
+            .expect("no registration to close");
+    }
 }

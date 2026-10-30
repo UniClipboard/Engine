@@ -253,7 +253,7 @@ pub(crate) struct FileQueue {
 }
 
 pub(crate) struct LocalFileRuntime {
-    queue: FileQueue,
+    pub(crate) queue: FileQueue,
     statistics: Arc<FileStatistics>,
 }
 
@@ -384,18 +384,6 @@ impl LocalFileRuntime {
 
     pub(crate) fn flush_result(&self, deadline: Duration) -> SignalResult {
         self.queue.flush_result(deadline)
-    }
-
-    pub(crate) fn park(&self, deadline: Duration) -> SignalResult {
-        self.queue.park(deadline)
-    }
-
-    pub(crate) fn has_live_closer(&self) -> bool {
-        self.queue.has_live_closer()
-    }
-
-    pub(crate) fn unpark(&self, deadline: Duration) -> SignalResult {
-        self.queue.unpark(deadline)
     }
 
     pub(crate) fn shutdown(&self, deadline: Duration) -> bool {

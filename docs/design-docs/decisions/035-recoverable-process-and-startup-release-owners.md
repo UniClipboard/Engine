@@ -1,41 +1,48 @@
-# ADR-035: Recoverable process and startup release owners
+<!-- coderabbit-ai-generated:v1 -->
 
-- Status: Proposed; not implemented or accepted as a shipped contract.
-- Date: 2026-10-27.
-- Related: [Engine resource-release contract](../engine-resource-release.md), [implementation specification](../../exec-plans/active/2026-10-27-process-startup-release-spec.md), [observability design](../observability.md).
+<!-- coderabbit-ai-generated-section:v1:218856de59e13fbf4978de515fd26df2f8f583a3ddc1a139303bece56e5f8a15 -->
 
-## Context
+# ADR-035：可恢复的进程与启动释放负责人
 
-A host must not hand a shared runtime lock to another process while an owner can still use a protected resource. The existing per-Engine outcome covers the documented Engine scope. It excludes process observability and host-owned files. A successful flush does not close the daily log file or stop later producers. Process observability shutdown is terminal and is not a foreground resume mechanism.
+- 状态：已提议；尚未实现或作为已交付契约接受。
+- 日期：2026-10-27。
+- 关联：[Engine 资源释放契约](../engine-resource-release.md)、[实现规格](../../exec-plans/active/2026-10-27-process-startup-release-spec.md)、[观测设计](../observability.md)。
 
-A failed startup can return no `MobileEngine`. The startup lifecycle control does not expose a complete cleanup receipt. Capability preparation can fail before its input is taken. Later failures can occur after storage or workers start. An error, a stopped worker, a timeout, or an absent object does not certify the complete resource scope.
+## 背景
 
-## Decision
+当负责人仍可能使用受保护资源时，宿主不得将共享运行期锁交给另一个进程。现有的单 Engine 结果覆盖文档规定的 Engine 范围，不包括进程观测与宿主拥有的文件。成功 flush 不会关闭每日日志文件，也不会阻止后续生产者。进程观测的 shutdown 是终止操作，不能用作前台恢复机制。
 
-Use a complete owner for each distinct lifetime:
+启动失败时可能不会返回 `MobileEngine`。启动生命周期控制并未提供完整的清理回执。能力准备可能在取用其输入之前失败；后续失败也可能发生在存储或工作线程启动之后。错误、工作线程停止、超时或对象不存在，都不能证明完整资源范围已经释放。
 
-1. The process observability owner controls the installation and its covered producers, accepted work, writers, and leases. It offers one recoverable release action and one resume action to the host.
-2. A startup-attempt owner exists before the first fallible resource-producing step. It retains construction and cleanup ownership until the attempt is delivered or its scoped cleanup has a terminal result. It is available even if no `MobileEngine` is returned.
-3. The existing per-Engine owner remains responsible for its own documented scope. Host-owned resources retain their own owners and receipts.
+## 决策
 
-Each owner returns `Pending`, `Released`, or `Failed` with the existing meanings. `Released` applies only to the owner's explicitly listed resources. It can carry an independent operational error. `Failed` means release is unconfirmed; it retains a strong owner for any live failed closer. A terminal worker cannot be restarted by polling. A wait deadline ends only the caller's wait. Accepted cleanup remains owned.
+为每种不同的生命周期设置完整的负责人：
 
-Process release fences producer admission before draining accepted work. It joins all covered work and receives positive close acknowledgements before returning `Released`. A later flush or old producer cannot reopen a released file. Resume invalidates the prior generation before it opens admission or files. An old result cannot confirm release of the new generation. The owner coordinates all Engine registrations; it cannot park shared writers while another active Engine still requires them.
+1. 进程观测负责人控制观测装配及其覆盖的生产者、已接受的工作、写入器和租约，并向宿主提供一个可恢复的释放操作和一个恢复操作。
+2. 启动尝试的负责人在第一个可能失败且会产生资源的步骤之前就已存在，并持续持有构造和清理责任，直到启动结果交付或其范围内的清理达到终态。即使没有返回 `MobileEngine`，该负责人仍可使用。
+3. 现有单 Engine 负责人继续负责其文档规定的范围。宿主拥有的资源仍由各自的负责人和回执负责。
 
-The startup attempt owns its execution runtime independently of the caller's executor. On successful delivery, the Engine takes that runtime responsibility. A successful cleanup or Engine release requires the owned execution runtime to stop after its accepted work settles. A creation failure before any work is accepted remains an operation failure; the cleanup result depends on the actual resource acknowledgements.
+各负责人按既有含义返回 `Pending`、`Released` 或 `Failed`。`Released` 仅适用于该负责人明确列出的资源，可以同时携带独立的操作错误。`Failed` 表示释放尚未确认；对仍存活但失败的 closer，必须保留强引用负责人。不能通过轮询重启已终止的工作线程。等待期限只结束调用方的等待；已接受的清理仍由负责人持有。
 
-Startup ownership covers pre-input failure, partial construction, rollback, failed delivery, and late completion. The owner records the primary startup error independently from cleanup errors and resource classification. It distinguishes a retryable live closer from a terminal failure. It never infers release from object absence or thread termination alone.
+进程释放先封住生产者准入，再排空已接受的工作。返回 `Released` 之前，必须等待所有覆盖的工作完成并收到明确的关闭确认。后续 flush 或旧生产者不能重新打开已释放的文件。恢复在开放准入或文件之前使上一代失效；旧结果不能确认新一代已释放。负责人协调所有 Engine 登记；当其他活动 Engine 仍需要共享写入器时，不能将其停车。
 
-## Alternatives
+启动尝试独立于调用方的 executor 持有自己的执行运行时。成功交付后，Engine 接管该运行时的责任。要确认清理或 Engine 释放成功，必须在该运行时已接受的工作结算后停止它。在任何工作被接受前发生的创建失败仍属于操作失败；清理结果取决于实际收到的资源确认。
 
-- Treat flush or per-Engine suspension as process release: rejected. Neither closes every process writer or fences later work.
-- Terminate and reinstall the process singleton: rejected. Terminal shutdown does not provide the required recoverable foreground path.
-- Let the host combine individual writer acknowledgements: rejected. The host cannot account for internal detached work or reliably order all producers and closers.
-- Return a generic startup error or rely on worker join: rejected. These observations do not provide a complete scoped cleanup result or retain a failed closer.
-- Combine Engine, process, and host resources into one Engine receipt: rejected. Those resources have different lifetimes and owners. An Engine receipt cannot certify host-owned SQLite, JS, cache, diagnostic files, or the runtime lock.
+启动责任覆盖输入取用前失败、部分构造、回滚、交付失败和延迟完成。负责人独立记录主要启动错误、清理错误和资源分类，区分可重试的存活 closer 与终态失败。它绝不只凭对象不存在或线程终止推断资源已释放。
 
-## Consequences
+## 备选方案
 
-The process owner must coordinate shared Engine registrations, background/foreground generations, telemetry and file worker lifetimes. The startup owner must retain cleanup resources across constructor and caller lifetimes. Both require explicit bounded waits and reproducible resource evidence. The host must still collect its own file acknowledgements before lock handoff.
+- 将 flush 或单 Engine 暂停视为进程释放：拒绝。两者都不会关闭所有进程写入器，也不会封住后续工作。
+- 终止并重新安装进程单例：拒绝。终止性 shutdown 无法提供所需的可恢复前台路径。
+- 由宿主组合各个写入器的确认：拒绝。宿主无法掌握内部分离工作，也无法可靠地排列所有生产者与 closer 的顺序。
+- 返回通用启动错误或依赖工作线程 join：拒绝。这些观察无法提供完整的范围内清理结果，也无法保留失败的 closer。
+- 将 Engine、进程和宿主资源合并为一个 Engine 回执：拒绝。这些资源的生命周期和负责人不同。Engine 回执不能证明宿主拥有的 SQLite、JS、缓存、诊断文件或运行期锁已释放。
 
-This decision does not select a logging coexistence or exclusion policy between products or processes. It does not select Share interruption recovery or termination. A real policy choice must be presented separately. This decision does not identify the historical `0xdead10cc` lock or claim a device crash fix.
+## 后果
+
+进程负责人必须协调共享 Engine 登记、后台与前台代次，以及遥测和文件工作线程的生命周期。启动负责人必须跨越构造过程和调用方生命周期保留清理资源。两者都需要明确的有界等待和可复现的资源证据。宿主在交接锁之前仍须收集自己的文件确认。
+
+本决策不选择产品或进程之间的日志共存或互斥策略，也不选择 Share 中断后的恢复或终止方式。实际策略选择必须单独提出。本决策既不确定历史上 `0xdead10cc` 涉及的锁，也不声称已修复设备崩溃。
+
+
+<!-- /coderabbit-ai-generated:v1 -->

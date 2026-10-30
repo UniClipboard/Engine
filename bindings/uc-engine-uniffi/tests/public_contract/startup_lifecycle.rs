@@ -482,6 +482,30 @@ fn mobile_startup_accepts_a_pause_before_the_engine_is_returned() {
         thread::spawn(move || lifecycle.probe_complete_startup(20_000))
     };
 
+    #[cfg(feature = "test-binding-worker-panic")]
+    let (duplicate_finished, duplicate) = {
+        // 给等待线程机会进入已接受启动的等待，再并发复用同一生命周期。
+        thread::sleep(Duration::from_millis(50));
+        let (sent, received) = mpsc::channel();
+        let lifecycle = lifecycle.clone();
+        let host = host.clone();
+        let config = config.clone();
+        let duplicate = thread::spawn(move || {
+            let rejected = matches!(
+                MobileEngine::start_with_lifecycle(config, host, lifecycle),
+                Err(BindingError::Engine {
+                    category: BindingErrorCategory::InvalidState,
+                    ..
+                })
+            );
+            sent.send(rejected).unwrap();
+        });
+        (
+            received.recv_timeout(Duration::from_secs(1)).ok(),
+            duplicate,
+        )
+    };
+
     let started_at = Instant::now();
     assert!(matches!(
         lifecycle.suspend_with_deadline(0),
@@ -494,6 +518,11 @@ fn mobile_startup_accepts_a_pause_before_the_engine_is_returned() {
     *lock(&release.0) = true;
     release.1.notify_all();
 
+    #[cfg(feature = "test-binding-worker-panic")]
+    {
+        duplicate.join().unwrap();
+        assert_eq!(duplicate_finished, Some(true));
+    }
     let engine = starting.join().unwrap().unwrap();
     #[cfg(feature = "test-binding-worker-panic")]
     assert_eq!(complete_waiter.join().unwrap().0, "delivered");

@@ -26,6 +26,9 @@ mod runtime {
     pub(crate) fn installed_network_log() -> Option<Arc<Network>> {
         None
     }
+    pub(crate) fn installed_process_failure_blocks_registration(_: &Arc<()>) -> bool {
+        false
+    }
     pub(crate) fn notify_engine_closer_changed() {}
 }
 

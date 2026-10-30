@@ -50,7 +50,7 @@ fn main() {
         .next()
         .expect("daily file");
     let initially_open = descriptor_open(&file);
-    let first_park = daily.park(Duration::from_secs(5));
+    let first_park = daily.queue.park(Duration::from_secs(5));
     let closed_after_park = !descriptor_open(&file);
     writer.write_record(b"late\n", LocalDiagnosticSource::Runtime);
     let late_flush = daily.flush_result(Duration::from_secs(5));
@@ -58,14 +58,14 @@ fn main() {
     let parked_directory = root.path().join("parked-logs");
     std::fs::rename(&logs, &parked_directory).expect("move parked directory");
     std::fs::write(&logs, b"block directory").expect("block reopening");
-    let failed_resume = daily.unpark(Duration::from_secs(5));
+    let failed_resume = daily.queue.unpark(Duration::from_secs(5));
     std::fs::remove_file(&logs).expect("remove reopening block");
     std::fs::rename(&parked_directory, &logs).expect("restore logs");
     let flush_after_failure = daily.flush_result(Duration::from_secs(5));
     let closed_after_failure = !descriptor_open(&file);
-    let resume = daily.unpark(Duration::from_secs(5));
+    let resume = daily.queue.unpark(Duration::from_secs(5));
     let reopened = descriptor_open(&file);
-    let last_park = daily.park(Duration::from_secs(5));
+    let last_park = daily.queue.park(Duration::from_secs(5));
     let finally_closed = !descriptor_open(&file);
     if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
         std::fs::create_dir_all(&directory).expect("evidence directory");
