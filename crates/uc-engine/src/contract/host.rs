@@ -244,6 +244,11 @@ pub enum HostClipboardChange {
 pub trait HostClipboardChangeStream: Send {
     async fn next(&mut self) -> Result<HostClipboardChange, HostCapabilityError>;
     async fn shutdown(&mut self) -> Result<(), HostCapabilityError>;
+
+    /// 仅当失败后同一关闭器仍可再次执行关闭时返回 true；此查询不得产生副作用。
+    fn supports_shutdown_retry(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]

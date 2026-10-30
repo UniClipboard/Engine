@@ -17,6 +17,16 @@ pub use compatibility::mobile_lan::*;
 pub use contract::*;
 #[cfg(feature = "dev-tools")]
 pub use dev::*;
+#[cfg(feature = "dev-tools")]
+pub use engine::probe_fail_next_orphan_retry_executor;
+#[cfg(feature = "test-binding-worker-panic")]
+pub use engine::StartupProbeOutcome;
+#[cfg(feature = "test-binding-worker-panic")]
+#[doc(hidden)]
+pub use engine::{
+    probe_release_startup_retry, probe_startup_retry_calls, probe_startup_retry_entered,
+    probe_wrap_startup_host,
+};
 pub use engine::{Engine, EventStream};
-pub use engine::{StartupLifecycle, StartupLifecycleInput};
+pub use engine::{StartupLifecycle, StartupLifecycleInput, StartupReleaseOutcome};
 pub use engine::{StartupProgress, StartupProgressInput};

@@ -18,6 +18,8 @@ mod task_shutdown;
 use std::error::Error;
 use std::io::Write as _;
 use std::path::PathBuf;
+#[cfg(feature = "dev-tools")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +42,9 @@ use crate::assembly::mobile_lan::MobileLanEndpointUpdater;
 #[cfg(feature = "dev-tools")]
 use crate::dev::JoinerFinalConfirmationGate;
 use crate::engine::event_stream::EventSender;
+use crate::engine::startup_owner::StartupCleanupOwner;
 use crate::error_codes::{PROFILE_RECOVERY_REQUIRED_CODE, PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE};
+use crate::operations::space::factory_reset::map_profile_factory_reset_error;
 use crate::{
     AdmissionRecoverySummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
     HostCapabilities, HostFileAccess, NetworkRecoveryPhaseSummary, NetworkRecoveryStatusSummary,
@@ -48,7 +52,12 @@ use crate::{
 };
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
 pub(crate) use profile_recovery::RecoverableRuntime;
+pub(crate) use reusable_host::ReusableHost;
 use session_supervisor::{lifecycle_error, SessionSupervisor};
+/// 仅供端到端程序注入已登记任务的终止失败。
+#[cfg(feature = "dev-tools")]
+pub(crate) static PROBE_STARTUP_TASK_PANIC: AtomicBool = AtomicBool::new(false);
+
 const START_FAILED_CODE: u32 = 1101;
 const OPERATION_UNAVAILABLE_CODE: u32 = 1103;
 
@@ -167,6 +176,7 @@ impl ProductionRuntime {
         events: EventSender,
         progress: Arc<crate::engine::startup::StartupProgressStore>,
         profile_key_recovery: Arc<uc_infra_profile::security::ProfileKeyRecoveryStore>,
+        cleanup: Option<&Arc<StartupCleanupOwner>>,
     ) -> Result<Self, EngineError> {
         let app_version = config.app_version().to_string();
         let rendezvous_base_url = config.rendezvous_base_url_override();
@@ -189,6 +199,7 @@ impl ProductionRuntime {
             emitter,
             progress.clone(),
             profile_key_recovery,
+            cleanup,
         )
         .await;
         let HostWiring {
@@ -215,6 +226,12 @@ impl ProductionRuntime {
             Arc::clone(&wired.sync_engine.local_resources),
         );
         let task_registry = Arc::new(TaskRegistry::new());
+        #[cfg(feature = "dev-tools")]
+        if PROBE_STARTUP_TASK_PANIC.swap(false, Ordering::AcqRel) {
+            task_registry
+                .spawn(|_| async { panic!("controlled startup task panic") })
+                .await;
+        }
         let profile_runtime = Arc::new(shutdown::ProfileRuntimeStopper::new(
             Arc::clone(&security_lifecycle),
             Arc::clone(&session_supervisor),
@@ -222,24 +239,52 @@ impl ProductionRuntime {
         ));
         let profile_runtime_port: Arc<dyn uc_application::deps::StopProfileRuntimePort> =
             profile_runtime.clone();
+        if let Some(cleanup) = cleanup {
+            if !cleanup.register_profile(Arc::clone(&profile_runtime_port)) {
+                return Err(EngineError::new(1108, EngineErrorCategory::Internal, false));
+            }
+            // 注册后由停止器统一关闭安全会话；构造取消不能越过其依赖。
+            security_guard.0 = None;
+        }
         let profile_reset = Arc::new(ProfileFactoryResetFacade::new(
             Arc::clone(&wired.profile_reset.lifecycle_repository),
-            profile_runtime_port,
+            Arc::clone(&profile_runtime_port),
             Arc::clone(&wired.profile_reset.keys),
             Arc::clone(&wired.profile_reset.backup_security),
             Arc::clone(&wired.profile_reset.state),
         ));
-        if profile_reset
+        let reset_result = profile_reset
             .execute(ProfileFactoryResetRequest::ResumeIfNeeded)
             .await
-            .map_err(crate::operations::space::factory_reset::map_profile_factory_reset_error)?
-            == ProfileFactoryResetOutcome::Completed
-        {
-            return Err(EngineError::new(
+            .map_err(map_profile_factory_reset_error);
+        let reset_failure = match reset_result {
+            Ok(ProfileFactoryResetOutcome::Completed) => Some(EngineError::new(
                 crate::error_codes::FACTORY_RESET_UNAVAILABLE_CODE,
                 EngineErrorCategory::Unavailable,
                 true,
-            ));
+            )),
+            Ok(_) => None,
+            Err(error) => Some(error),
+        };
+        if let Some(primary) = reset_failure {
+            match profile_runtime_port.stop_profile_runtime().await {
+                Ok(()) => {
+                    if let Some(cleanup) = cleanup {
+                        cleanup.confirm_rollback();
+                    }
+                }
+                Err(rollback) => {
+                    if let Some(cleanup) = cleanup {
+                        cleanup.fail_rollback(primary.clone(), rollback);
+                        return Err(primary);
+                    }
+                    return Err(lifecycle_error(LifecycleError {
+                        primary: primary.into(),
+                        additional: vec![rollback.into()],
+                    }));
+                }
+            }
+            return Err(primary);
         }
         let recovery_port: Arc<dyn uc_application::facade::RebuildNetworkSessionPort> =
             Arc::clone(&session_supervisor)
@@ -247,6 +292,11 @@ impl ProductionRuntime {
         let network_recovery = Arc::new(uc_application::facade::NetworkRecoveryFacade::new(
             recovery_port,
         ));
+        if let Some(cleanup) = cleanup {
+            if !cleanup.register_network(Arc::clone(&network_recovery)) {
+                return Err(EngineError::new(1108, EngineErrorCategory::Internal, false));
+            }
+        }
         session_supervisor.configure_factory(
             wired.clone(),
             #[cfg(feature = "lan-compat")]
@@ -272,13 +322,22 @@ impl ProductionRuntime {
         }
         .await;
         if let Err(primary) = started {
-            if let Err(rollback) =
-                shutdown::shutdown_failed_start(&network_recovery, &profile_runtime).await
-            {
-                return Err(lifecycle_error(LifecycleError {
-                    primary: primary.into(),
-                    additional: vec![rollback.into()],
-                }));
+            match shutdown::shutdown_failed_start(&network_recovery, &profile_runtime).await {
+                Ok(()) => {
+                    if let Some(cleanup) = cleanup {
+                        cleanup.confirm_rollback();
+                    }
+                }
+                Err(rollback) => {
+                    if let Some(cleanup) = cleanup {
+                        cleanup.fail_rollback(primary.clone(), rollback);
+                        return Err(primary);
+                    }
+                    return Err(lifecycle_error(LifecycleError {
+                        primary: primary.into(),
+                        additional: vec![rollback.into()],
+                    }));
+                }
             }
             return Err(primary);
         }
@@ -433,8 +492,13 @@ fn startup_error(
         error = &error as &dyn std::error::Error,
         "engine startup failed"
     );
+    classify_startup_error(&error)
+}
+
+/// 保持启动错误的稳定分类，调用者负责实际错误记录。
+pub(crate) fn classify_startup_error(error: &(dyn std::error::Error + 'static)) -> EngineError {
     if error_chain_contains::<uc_infra_profile::security::ProfileUpgradeBackupRecordKeyMissing>(
-        &error,
+        error,
     ) {
         return EngineError::new(
             PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE,
@@ -564,6 +628,7 @@ mod tests {
             events,
             Arc::clone(&progress.store),
             profile_key_recovery,
+            None,
         )
         .await
         .unwrap();

@@ -1,7 +1,8 @@
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -27,6 +28,7 @@ use crate::assembly::host::{
 };
 use crate::engine::event_stream::EventSender;
 use crate::engine::startup::StartupProgressStore;
+use crate::engine::startup_owner::StartupCleanupOwner;
 use crate::engine::EngineRuntime;
 use crate::error_codes::{
     FACTORY_RESET_RESTART_REQUIRED_CODE, HOST_CONFIGURATION_FILES_INVALID_CODE,
@@ -70,23 +72,157 @@ struct RecoveryBootstrap {
     gate: Mutex<()>,
     summary: StdMutex<ProfileRecoverySummary>,
     progress: Arc<StartupProgressStore>,
+    recovered_runtime: StdMutex<Option<Arc<ProductionRuntime>>>,
+    construction: StdMutex<Option<Arc<StartupCleanupOwner>>>,
+    construction_inflight: AtomicBool,
+    construction_interrupted: AtomicBool,
+    construction_changed: Notify,
+    construction_blocking_changed: Condvar,
+    construction_blocking_gate: StdMutex<()>,
+}
+
+/// 构造尚未返回时也保留它已登记的资源和回滚负责人。
+struct RecoveryConstructionGuard {
+    bootstrap: Arc<RecoveryBootstrap>,
+    owner: Arc<StartupCleanupOwner>,
+    events: EventSender,
+    completed: bool,
+}
+
+impl RecoveryConstructionGuard {
+    fn new(
+        bootstrap: Arc<RecoveryBootstrap>,
+        host: Arc<ReusableHost>,
+        events: EventSender,
+    ) -> Self {
+        let owner = Arc::new(StartupCleanupOwner::default());
+        owner.accept_host(host);
+        *bootstrap.lock_construction() = Some(Arc::clone(&owner));
+        {
+            let _gate = bootstrap
+                .construction_blocking_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            bootstrap
+                .construction_inflight
+                .store(true, Ordering::Release);
+        }
+        Self {
+            bootstrap,
+            owner,
+            events,
+            completed: false,
+        }
+    }
+
+    fn handoff(mut self, runtime: Arc<ProductionRuntime>) -> RecoveryRuntimeGuard {
+        let guard =
+            RecoveryRuntimeGuard::new(Arc::clone(&self.bootstrap), runtime, self.events.clone());
+        self.owner.deliver();
+        *self.bootstrap.lock_construction() = None;
+        self.completed = true;
+        self.bootstrap.finish_construction();
+        guard
+    }
+
+    fn handoff_mode(mut self) {
+        self.owner.deliver();
+        *self.bootstrap.lock_construction() = None;
+        self.completed = true;
+        self.bootstrap.finish_construction();
+    }
+
+    fn finish_without_runtime(mut self) -> bool {
+        let settled = self.owner.settle_recovery_construction();
+        if settled {
+            *self.bootstrap.lock_construction() = None;
+        }
+        self.completed = true;
+        self.bootstrap.finish_construction();
+        settled
+    }
+}
+
+impl Drop for RecoveryConstructionGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.bootstrap
+                .construction_interrupted
+                .store(true, Ordering::Release);
+            let summary = {
+                let mut summary = self.bootstrap.lock_summary();
+                summary.state = ProfileRecoveryState::Failed;
+                summary.can_submit_passphrase = false;
+                summary.restart_required = true;
+                summary.background_ready = false;
+                summary.clone()
+            };
+            publish_profile_recovery(&self.events, summary);
+            self.bootstrap.finish_construction();
+        }
+    }
+}
+
+struct RecoveryRuntimeGuard {
+    bootstrap: Arc<RecoveryBootstrap>,
+    events: EventSender,
+    completed: bool,
+}
+
+impl RecoveryRuntimeGuard {
+    fn new(
+        bootstrap: Arc<RecoveryBootstrap>,
+        runtime: Arc<ProductionRuntime>,
+        events: EventSender,
+    ) -> Self {
+        *bootstrap.lock_recovered_runtime() = Some(runtime);
+        Self {
+            bootstrap,
+            events,
+            completed: false,
+        }
+    }
+
+    fn complete(mut self) {
+        *self.bootstrap.lock_recovered_runtime() = None;
+        self.completed = true;
+    }
+}
+
+impl Drop for RecoveryRuntimeGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let summary = {
+            let mut summary = self.bootstrap.lock_summary();
+            summary.state = ProfileRecoveryState::Failed;
+            summary.can_submit_passphrase = false;
+            summary.restart_required = true;
+            summary.background_ready = false;
+            summary.clone()
+        };
+        publish_profile_recovery(&self.events, summary);
+    }
 }
 
 pub(crate) struct RecoverableRuntime {
     mode: RwLock<RuntimeMode>,
     config: EngineConfig,
-    host: ReusableHost,
+    host: Arc<ReusableHost>,
     recovery: Arc<ProfileKeyRecoveryStore>,
     ready_summary_override: StdMutex<Option<ProfileRecoverySummary>>,
+    reconstruction: StdMutex<Option<Arc<RecoveryBootstrap>>>,
     events: EventSender,
 }
 
 impl RecoverableRuntime {
     pub(crate) async fn start(
         config: EngineConfig,
-        host: HostCapabilities,
+        host: Arc<ReusableHost>,
         events: EventSender,
         progress: Arc<StartupProgressStore>,
+        cleanup: Arc<StartupCleanupOwner>,
     ) -> Result<Self, EngineError> {
         // 声明在任何资料读写之前校验：导入恢复和恢复出厂都只按校验后的名字处理宿主文件。
         if let Err(error) = config.validated_host_configuration_files() {
@@ -100,11 +236,12 @@ impl RecoverableRuntime {
                 "host configuration file declaration rejected"
             );
             // discarded-source[core-pure-validation]: the Core rule is fully classified by the variant logged above
-            return Err(EngineError::new(
+            let error = EngineError::new(
                 HOST_CONFIGURATION_FILES_INVALID_CODE,
                 EngineErrorCategory::InvalidInput,
                 false,
-            ));
+            );
+            return Err(finish_without_runtime_start(&host, &cleanup, error).await);
         }
         // 日志档位名称会进入诊断状态与导出清单，同样在任何资料读写之前校验。
         if config.validated_host_log_profile().is_err() {
@@ -113,24 +250,75 @@ impl RecoverableRuntime {
                 "host log profile declaration rejected"
             );
             // discarded-source[core-pure-validation]: the Core rule has a single failure, fully classified above
-            return Err(EngineError::new(
+            let error = EngineError::new(
                 HOST_LOG_PROFILE_INVALID_CODE,
                 EngineErrorCategory::InvalidInput,
                 false,
-            ));
+            );
+            return Err(finish_without_runtime_start(&host, &cleanup, error).await);
         }
         let paths = derive_app_paths(host.directories());
-        let recovery = profile_key_recovery_store(&config, &paths, &host);
-        let host = ReusableHost::new(host);
-        let mode = start_profile_mode(&config, &host, &events, &progress, &recovery).await?;
+        let recovery = profile_key_recovery_store(&config, &paths, &host.capabilities());
+        let mode = match start_profile_mode(
+            &config,
+            &host,
+            &events,
+            &progress,
+            &recovery,
+            Some(&cleanup),
+        )
+        .await
+        {
+            Ok(mode) => mode,
+            Err(error) => return Err(finish_without_runtime_start(&host, &cleanup, error).await),
+        };
         Ok(Self {
             mode: RwLock::new(mode),
             config,
             host,
             recovery,
             ready_summary_override: StdMutex::new(None),
+            reconstruction: StdMutex::new(None),
             events,
         })
+    }
+
+    fn reconstruction(&self) -> Option<Arc<RecoveryBootstrap>> {
+        self.reconstruction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn settle_reconstruction(&self) -> bool {
+        let Some(bootstrap) = self.reconstruction() else {
+            return true;
+        };
+        bootstrap.wait_for_construction().await;
+        let owner = bootstrap.lock_construction().clone();
+        if let Some(owner) = owner {
+            if !owner.wait_recovery_backup().await
+                || bootstrap.construction_interrupted.load(Ordering::Acquire)
+                || !owner.settle_recovery_construction()
+            {
+                return false;
+            }
+            *bootstrap.lock_construction() = None;
+        }
+        if bootstrap.construction_interrupted.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut current = self
+            .reconstruction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current
+            .as_ref()
+            .is_some_and(|value| Arc::ptr_eq(value, &bootstrap))
+        {
+            *current = None;
+        }
+        true
     }
 
     async fn mode(&self) -> RuntimeMode {
@@ -253,15 +441,19 @@ impl RecoverableRuntime {
             }
             Operation::UnlockSpace(input) => {
                 let _gate = bootstrap.gate.lock().await;
-                if let RuntimeMode::Ready { runtime, recovered } = self.mode().await {
-                    return self
-                        .execute_ready(
-                            runtime,
-                            recovered,
-                            Operation::UnlockSpace(input),
-                            cancellation,
-                        )
-                        .await;
+                match self.mode().await {
+                    RuntimeMode::Ready { runtime, recovered } => {
+                        return self
+                            .execute_ready(
+                                runtime,
+                                recovered,
+                                Operation::UnlockSpace(input),
+                                cancellation,
+                            )
+                            .await;
+                    }
+                    RuntimeMode::Recovery(current) if Arc::ptr_eq(&current, &bootstrap) => {}
+                    _ => return Err(profile_recovery_required_error()),
                 }
                 if !bootstrap.lock_summary().can_submit_passphrase {
                     return Err(profile_recovery_required_error());
@@ -290,6 +482,11 @@ impl RecoverableRuntime {
                             return Err(profile_recovery_required_error());
                         }
                         let paths = derive_app_paths(self.host.directories());
+                        let construction = RecoveryConstructionGuard::new(
+                            Arc::clone(&bootstrap),
+                            Arc::clone(&self.host),
+                            self.events.clone(),
+                        );
                         let runtime = match ProductionRuntime::start(
                             self.config.clone(),
                             self.recovery_host_capabilities(),
@@ -297,11 +494,17 @@ impl RecoverableRuntime {
                             self.events.clone(),
                             Arc::clone(&bootstrap.progress),
                             Arc::clone(&self.recovery),
+                            Some(&construction.owner),
                         )
                         .await
                         {
                             Ok(runtime) => Arc::new(runtime),
                             Err(error) => {
+                                let settled = construction.finish_without_runtime();
+                                if !settled {
+                                    self.publish_restart_required(&bootstrap);
+                                    return Err(restart_required_error(error));
+                                }
                                 if let Some(summary) = error.admission_recovery() {
                                     bootstrap.progress.recovery_available();
                                     self.enter_admission_recovery(summary, None).await;
@@ -311,6 +514,7 @@ impl RecoverableRuntime {
                                 return Err(restart_required_error(error));
                             }
                         };
+                        let runtime_guard = construction.handoff(Arc::clone(&runtime));
                         let result = match self
                             .execute_ready(
                                 Arc::clone(&runtime),
@@ -322,13 +526,19 @@ impl RecoverableRuntime {
                         {
                             Ok(result) => result,
                             Err(error) => {
-                                if let Err(shutdown) = runtime.shutdown(None).await {
+                                let retained = if let Err(shutdown) = runtime.shutdown(None).await {
                                     uc_warn!(
                                         error_kind = "profile_recovery_shutdown",
                                         io_error_kind = io_error_kind(&shutdown),
                                         "profile recovery unlock failed and the runtime did not shut down cleanly"
                                     );
-                                }
+                                    Some(Arc::clone(&runtime))
+                                } else {
+                                    None
+                                };
+                                *self.mode.write().await =
+                                    RuntimeMode::RestartRequired { runtime: retained };
+                                runtime_guard.complete();
                                 self.publish_restart_required(&bootstrap);
                                 return Err(restart_required_error(error));
                             }
@@ -337,6 +547,7 @@ impl RecoverableRuntime {
                             runtime,
                             recovered: true,
                         };
+                        runtime_guard.complete();
                         if self.lock_ready_summary_override().is_none() {
                             self.publish_summary(&bootstrap, |summary| {
                                 summary.state = ProfileRecoveryState::Recovered;
@@ -384,7 +595,7 @@ impl RecoverableRuntime {
     /// 恢复模式不启动业务运行时；资料密钥完好时只装配恢复出厂依赖并执行重置，完成后须重启 Engine。
     async fn factory_reset_from_recovery(
         &self,
-        bootstrap: &RecoveryBootstrap,
+        bootstrap: &Arc<RecoveryBootstrap>,
     ) -> Result<OperationResult, EngineError> {
         let _gate = bootstrap.gate.lock().await;
         if !*bootstrap.input_available.lock().await {
@@ -397,6 +608,11 @@ impl RecoverableRuntime {
             return Err(profile_recovery_required_error());
         }
         let paths = derive_app_paths(self.host.directories());
+        let construction = RecoveryConstructionGuard::new(
+            Arc::clone(bootstrap),
+            Arc::clone(&self.host),
+            self.events.clone(),
+        );
         let wiring = wire_host_capabilities_with_emitter(
             &self.config,
             self.recovery_host_capabilities(),
@@ -404,11 +620,13 @@ impl RecoverableRuntime {
             Arc::new(EngineHostEventEmitter::new(self.events.clone())),
             Arc::clone(&bootstrap.progress),
             Arc::clone(&self.recovery),
+            Some(&construction.owner),
         )
         .await;
         let wired = match wiring {
             Ok(wiring) => wiring.wired,
             Err(error) => {
+                construction.finish_without_runtime();
                 self.publish_restart_required(bootstrap);
                 return Err(restart_required_error(startup_error(
                     "factory reset dependency wiring",
@@ -425,6 +643,12 @@ impl RecoverableRuntime {
         );
         let result = execute_factory_reset_space(&reset).await;
         self.recovery.forget_after_factory_reset();
+        drop(reset);
+        drop(wired);
+        if !construction.finish_without_runtime() {
+            self.publish_restart_required(bootstrap);
+            return Err(EngineError::new(1108, EngineErrorCategory::Internal, false));
+        }
         match result {
             Ok(result) => {
                 self.publish_summary(bootstrap, |summary| {
@@ -478,18 +702,38 @@ impl RecoverableRuntime {
         }
         // 启动进度属于宿主观察过的那一次启动，这里重建使用不被任何人观察的独立进度。
         let (detached_progress, _) = StartupProgress::channel();
+        let bootstrap = Arc::new(RecoveryBootstrap::new(
+            Arc::clone(&detached_progress.store),
+            restart_required_summary(),
+            false,
+        ));
+        *self
+            .reconstruction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&bootstrap));
+        let construction = RecoveryConstructionGuard::new(
+            Arc::clone(&bootstrap),
+            Arc::clone(&self.host),
+            self.events.clone(),
+        );
         match start_profile_mode(
             &self.config,
             &self.host,
             &self.events,
             &detached_progress.store,
             &self.recovery,
+            Some(&construction.owner),
         )
         .await
         {
             Ok(next) => {
                 uc_info!("space left and a fresh runtime is ready");
                 *mode = next;
+                construction.handoff_mode();
+                *self
+                    .reconstruction
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 Ok(result)
             }
             Err(error) => {
@@ -497,6 +741,12 @@ impl RecoverableRuntime {
                     error_code = error.code(),
                     "space left but the fresh runtime could not start"
                 );
+                if construction.finish_without_runtime() {
+                    *self
+                        .reconstruction
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                }
                 Err(self.require_restart(&mut mode, None))
             }
         }
@@ -550,6 +800,21 @@ impl RecoverableRuntime {
     }
 }
 
+async fn finish_without_runtime_start(
+    host: &Arc<ReusableHost>,
+    cleanup: &Arc<StartupCleanupOwner>,
+    primary: EngineError,
+) -> EngineError {
+    cleanup.record_primary(primary.clone());
+    if cleanup.rollback_unconfirmed() {
+        return primary;
+    }
+    let waiting = cleanup.start_host_close(Arc::clone(host), primary.clone());
+    // 关闭任务属于启动负责人；此处仅等待其完成。
+    let _ = waiting.await;
+    primary
+}
+
 /// 按资料当前状态决定运行模式：正常装配运行期，或进入口令恢复/准入恢复。
 /// 进程启动与离开空间后的重建使用同一条路径。
 async fn start_profile_mode(
@@ -558,6 +823,7 @@ async fn start_profile_mode(
     events: &EventSender,
     progress: &Arc<StartupProgressStore>,
     recovery: &Arc<ProfileKeyRecoveryStore>,
+    cleanup: Option<&Arc<StartupCleanupOwner>>,
 ) -> Result<RuntimeMode, EngineError> {
     let paths = derive_app_paths(host.directories());
     match recovery.prepare_startup().await? {
@@ -573,6 +839,7 @@ async fn start_profile_mode(
                 events.clone(),
                 Arc::clone(progress),
                 Arc::clone(recovery),
+                cleanup,
             )
             .await
             {
@@ -580,6 +847,9 @@ async fn start_profile_mode(
                     runtime: Arc::new(runtime),
                     recovered: false,
                 }),
+                Err(error) if cleanup.is_some_and(|owner| owner.rollback_unconfirmed()) => {
+                    Err(error)
+                }
                 Err(error) => match error.admission_recovery() {
                     Some(summary) => {
                         progress.recovery_available();
@@ -609,12 +879,11 @@ async fn start_profile_mode(
                 admission: None,
             };
             publish_profile_recovery(events, summary.clone());
-            Ok(RuntimeMode::Recovery(Arc::new(RecoveryBootstrap {
-                input_available: Mutex::new(true),
-                gate: Mutex::new(()),
-                progress: Arc::clone(progress),
-                summary: StdMutex::new(summary),
-            })))
+            Ok(RuntimeMode::Recovery(Arc::new(RecoveryBootstrap::new(
+                Arc::clone(progress),
+                summary,
+                true,
+            ))))
         }
     }
 }
@@ -657,8 +926,93 @@ fn publish_profile_recovery(events: &EventSender, summary: ProfileRecoverySummar
 }
 
 impl RecoveryBootstrap {
+    fn new(
+        progress: Arc<StartupProgressStore>,
+        summary: ProfileRecoverySummary,
+        input_available: bool,
+    ) -> Self {
+        Self {
+            input_available: Mutex::new(input_available),
+            gate: Mutex::new(()),
+            progress,
+            summary: StdMutex::new(summary),
+            recovered_runtime: StdMutex::new(None),
+            construction: StdMutex::new(None),
+            construction_inflight: AtomicBool::new(false),
+            construction_interrupted: AtomicBool::new(false),
+            construction_changed: Notify::new(),
+            construction_blocking_changed: Condvar::new(),
+            construction_blocking_gate: StdMutex::new(()),
+        }
+    }
+
     fn lock_summary(&self) -> StdMutexGuard<'_, ProfileRecoverySummary> {
         self.summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn finish_construction(&self) {
+        {
+            let _gate = self
+                .construction_blocking_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.construction_inflight.store(false, Ordering::Release);
+            self.construction_blocking_changed.notify_all();
+        }
+        self.construction_changed.notify_waiters();
+    }
+
+    fn wait_for_construction_blocking(&self) {
+        let mut gate = self
+            .construction_blocking_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while self.construction_inflight.load(Ordering::Acquire) {
+            gate = self
+                .construction_blocking_changed
+                .wait(gate)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    async fn wait_for_construction(&self) {
+        loop {
+            let notified = self.construction_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.construction_inflight.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn wait_accepted_work(&self) {
+        self.wait_for_construction().await;
+        let owner = self.lock_construction().clone();
+        if let Some(owner) = owner {
+            let _ = owner.wait_recovery_backup().await;
+        }
+    }
+
+    fn wait_accepted_work_blocking(&self) {
+        self.wait_for_construction_blocking();
+        let owner = self.lock_construction().clone();
+        if let Some(owner) = owner {
+            let _ = owner.wait_recovery_backup_blocking();
+        }
+    }
+
+    fn lock_construction(&self) -> StdMutexGuard<'_, Option<Arc<StartupCleanupOwner>>> {
+        self.construction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_recovered_runtime(&self) -> StdMutexGuard<'_, Option<Arc<ProductionRuntime>>> {
+        self.recovered_runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -741,8 +1095,15 @@ impl EngineRuntime for RecoverableRuntime {
                 Ok(())
             }
             // 重置后的旧运行期已经停止，没有可挂起的内容。
-            RuntimeMode::Recovery(_)
-            | RuntimeMode::AdmissionRecovery { runtime: None, .. }
+            RuntimeMode::Recovery(bootstrap) => {
+                if bootstrap.lock_construction().is_some()
+                    || bootstrap.lock_recovered_runtime().is_some()
+                {
+                    return Err(EngineError::new(1108, EngineErrorCategory::Internal, false));
+                }
+                Ok(())
+            }
+            RuntimeMode::AdmissionRecovery { runtime: None, .. }
             | RuntimeMode::Stopped
             | RuntimeMode::RestartRequired { .. } => Ok(()),
         }
@@ -763,35 +1124,93 @@ impl EngineRuntime for RecoverableRuntime {
                 },
             },
             // 受限模式不重建业务会话；已启动的运行期保持挂起直到关闭。
-            RuntimeMode::Recovery(_)
-            | RuntimeMode::AdmissionRecovery { .. }
+            RuntimeMode::Recovery(bootstrap) => {
+                if bootstrap.lock_construction().is_some()
+                    || bootstrap.lock_recovered_runtime().is_some()
+                {
+                    return Err(EngineError::new(1108, EngineErrorCategory::Internal, false));
+                }
+                Ok(())
+            }
+            RuntimeMode::AdmissionRecovery { .. }
             | RuntimeMode::Stopped
             | RuntimeMode::RestartRequired { .. } => Ok(()),
         }
     }
 
     async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError> {
-        match self.mode().await {
-            RuntimeMode::Ready { runtime, .. }
-            | RuntimeMode::AdmissionRecovery {
-                runtime: Some(runtime),
-                ..
-            }
-            | RuntimeMode::RestartRequired {
-                runtime: Some(runtime),
-            } => {
-                runtime.shutdown(deadline).await?;
-                self.recovery.suspend();
-            }
-            RuntimeMode::Recovery(_)
-            | RuntimeMode::AdmissionRecovery { runtime: None, .. }
-            | RuntimeMode::Stopped
-            | RuntimeMode::RestartRequired { runtime: None } => {}
+        if !self.settle_reconstruction().await {
+            return Err(EngineError::new(1108, EngineErrorCategory::Internal, false));
         }
+        let stopped_in_recovery = loop {
+            let current = self.mode().await;
+            // 读取模式时可能等待正在登记的重建；拿到模式后再核对其责任。
+            if !self.settle_reconstruction().await {
+                return Err(EngineError::new(1108, EngineErrorCategory::Internal, false));
+            }
+            match current {
+                RuntimeMode::Ready { runtime, .. }
+                | RuntimeMode::AdmissionRecovery {
+                    runtime: Some(runtime),
+                    ..
+                }
+                | RuntimeMode::RestartRequired {
+                    runtime: Some(runtime),
+                } => {
+                    runtime.shutdown(deadline).await?;
+                    self.recovery.suspend();
+                }
+                RuntimeMode::Recovery(bootstrap) => {
+                    // 恢复动作持有同一门直到模式交接完成。
+                    let _recovery = bootstrap.gate.lock().await;
+                    bootstrap.wait_for_construction().await;
+                    if !matches!(self.mode().await, RuntimeMode::Recovery(current) if Arc::ptr_eq(&current, &bootstrap))
+                    {
+                        continue;
+                    }
+                    let construction = bootstrap.lock_construction().clone();
+                    if let Some(owner) = construction {
+                        if !owner.wait_recovery_backup().await {
+                            return Err(EngineError::new(
+                                1108,
+                                EngineErrorCategory::Internal,
+                                false,
+                            ));
+                        }
+                        if bootstrap.construction_interrupted.load(Ordering::Acquire)
+                            || !owner.settle_recovery_construction()
+                        {
+                            return Err(EngineError::new(
+                                1108,
+                                EngineErrorCategory::Internal,
+                                false,
+                            ));
+                        }
+                        *bootstrap.lock_construction() = None;
+                    }
+                    if bootstrap.lock_recovered_runtime().is_some() {
+                        return Err(EngineError::new(1108, EngineErrorCategory::Internal, false));
+                    }
+                    let mut mode = self.mode.write().await;
+                    if !matches!(&*mode, RuntimeMode::Recovery(current) if Arc::ptr_eq(current, &bootstrap))
+                    {
+                        continue;
+                    }
+                    *mode = RuntimeMode::Stopped;
+                    break true;
+                }
+                RuntimeMode::AdmissionRecovery { runtime: None, .. }
+                | RuntimeMode::Stopped
+                | RuntimeMode::RestartRequired { runtime: None } => {}
+            }
+            break false;
+        };
         // 最终关闭成功后释放本实例保留的生产运行期。
         // 不修改停止参与者为重置流程保留数据库的契约。
-        let previous = std::mem::replace(&mut *self.mode.write().await, RuntimeMode::Stopped);
-        drop(previous);
+        if !stopped_in_recovery {
+            let previous = std::mem::replace(&mut *self.mode.write().await, RuntimeMode::Stopped);
+            drop(previous);
+        }
         self.host.close_change_stream().await.map_err(|source| {
             uc_warn!(
                 error_kind = "change_stream_shutdown",
@@ -804,6 +1223,36 @@ impl EngineRuntime for RecoverableRuntime {
             })
         })?;
         Ok(())
+    }
+
+    async fn wait_shutdown_obligations(&self) {
+        if let Some(bootstrap) = self.reconstruction() {
+            bootstrap.wait_accepted_work().await;
+        }
+        let mode = self.mode().await;
+        if let Some(bootstrap) = self.reconstruction() {
+            bootstrap.wait_accepted_work().await;
+        }
+        if let RuntimeMode::Recovery(bootstrap) = mode {
+            bootstrap.wait_accepted_work().await;
+        }
+    }
+
+    fn wait_shutdown_obligations_blocking(&self) {
+        if let Some(bootstrap) = self.reconstruction() {
+            bootstrap.wait_accepted_work_blocking();
+        }
+        let mode = self.mode.blocking_read().clone();
+        if let Some(bootstrap) = self.reconstruction() {
+            bootstrap.wait_accepted_work_blocking();
+        }
+        if let RuntimeMode::Recovery(bootstrap) = mode {
+            bootstrap.wait_accepted_work_blocking();
+        }
+    }
+
+    async fn supports_shutdown_retry(&self) -> bool {
+        matches!(self.mode().await, RuntimeMode::Stopped) && self.host.has_retryable_change_stream()
     }
 }
 

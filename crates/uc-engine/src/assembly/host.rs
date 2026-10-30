@@ -32,6 +32,7 @@ use crate::assembly::platform::SystemClipboardLayer;
 use crate::assembly::wire::{wire_dependencies_from_inputs, CoreWiringInputs};
 use crate::engine::event_stream::EventSender;
 use crate::engine::startup::StartupProgressStore;
+use crate::engine::startup_owner::StartupCleanupOwner;
 use crate::{
     EngineConfig, EngineEvent, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardChangeStream, HostClipboardRepresentation, HostDirectories,
@@ -504,6 +505,7 @@ pub async fn wire_host_capabilities(
         Arc::new(NoopHostEventEmitter),
         progress.store.clone(),
         profile_key_recovery,
+        None,
     )
     .await
 }
@@ -515,6 +517,7 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
     host_event_emitter: Arc<dyn HostEventEmitterPort>,
     startup_progress: Arc<StartupProgressStore>,
     profile_key_recovery: Arc<uc_infra_profile::security::ProfileKeyRecoveryStore>,
+    cleanup: Option<&Arc<StartupCleanupOwner>>,
 ) -> WiringResult<HostWiring> {
     let host_configuration_files = config
         .validated_host_configuration_files()
@@ -531,6 +534,9 @@ pub(crate) async fn wire_host_capabilities_with_emitter(
         Arc::clone(&secure_storage),
         directories.upgrade_backups().to_path_buf(),
     ));
+    if let Some(cleanup) = cleanup {
+        cleanup.register_backup_activity(upgrade_backup_store.activity());
+    }
     let profile_upgrade_backups: Arc<dyn ProfileUpgradeBackupPort> = upgrade_backup_store.clone();
     let profile_lifecycle = PrepareProfileStartupUseCase::new(
         Arc::new(super::startup_progress::StartupProfileUpgradeBackup::new(

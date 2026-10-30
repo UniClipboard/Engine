@@ -1,10 +1,12 @@
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::time::Duration;
 
 use opentelemetry::logs::{AnyValue, LogRecord as _, Severity};
-use opentelemetry::trace::{SpanKind, Status};
+use opentelemetry::trace::{Span as _, SpanId, SpanKind, Status, TraceId};
 use opentelemetry::{Context, InstrumentationScope, Value};
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{
@@ -177,6 +179,7 @@ pub(crate) struct CapacityGate {
 struct CapacityState {
     pending: usize,
     closed: bool,
+    paused: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -222,7 +225,7 @@ impl CapacityGate {
             }
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
         };
-        if state.closed {
+        if state.closed || state.paused {
             drop(state);
             self.record_drop(DropReason::Closed);
             return false;
@@ -252,6 +255,25 @@ impl CapacityGate {
             .closed = true;
     }
 
+    fn pause(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .paused = true;
+    }
+
+    fn resume(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            return false;
+        }
+        state.paused = false;
+        true
+    }
+
     fn synchronize_submissions(&self) {
         drop(
             self.state
@@ -279,6 +301,288 @@ impl CapacityGate {
 pub(crate) struct RemoteSubmissionControl {
     spans: CapacityGate,
     logs: CapacityGate,
+    active_spans: Arc<ActiveSpans>,
+    tracing_spans: Arc<TracingSpans>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TracingSpans {
+    state: Mutex<TracingSpanState>,
+    changed: Condvar,
+}
+
+thread_local! {
+    static TRACE_CALLBACK_ADMISSIONS: RefCell<Vec<TraceCallbackFrame>> = const { RefCell::new(Vec::new()) };
+}
+
+struct TraceCallbackFrame {
+    owner: *const TracingSpans,
+    admitted: bool,
+    span: Option<tracing::span::Id>,
+}
+
+pub(crate) struct TraceCallbackGuard {
+    owner: Arc<TracingSpans>,
+    admitted: bool,
+}
+
+#[derive(Debug, Default)]
+struct TracingSpanState {
+    closed: bool,
+    callbacks: usize,
+    failed: bool,
+    spans: HashSet<tracing::span::Id>,
+}
+
+impl TracingSpans {
+    pub(crate) fn callback(self: &Arc<Self>) -> TraceCallbackGuard {
+        let owner = Arc::as_ptr(self);
+        let inherited_rejection = TRACE_CALLBACK_ADMISSIONS.with(|admissions| {
+            admissions
+                .borrow()
+                .iter()
+                .rev()
+                .find(|frame| frame.owner == owner)
+                .is_some_and(|frame| !frame.admitted)
+        });
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admitted =
+            !inherited_rejection && !state.closed && state.callbacks.checked_add(1).is_some();
+        if admitted {
+            state.callbacks += 1;
+        }
+        TRACE_CALLBACK_ADMISSIONS.with(|admissions| {
+            admissions.borrow_mut().push(TraceCallbackFrame {
+                owner,
+                admitted,
+                span: None,
+            })
+        });
+        TraceCallbackGuard {
+            owner: Arc::clone(self),
+            admitted,
+        }
+    }
+
+    pub(crate) fn start(&self, id: &tracing::span::Id) -> bool {
+        let owner = self as *const Self;
+        let admission = TRACE_CALLBACK_ADMISSIONS.with(|admissions| {
+            admissions
+                .borrow_mut()
+                .iter_mut()
+                .rev()
+                .find(|frame| frame.owner == owner)
+                .map(|frame| {
+                    if frame.admitted {
+                        frame.span = Some(id.clone());
+                    }
+                    frame.admitted
+                })
+        });
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match admission {
+            Some(false) => false,
+            Some(true) => state.spans.insert(id.clone()),
+            None => !state.closed && state.spans.insert(id.clone()),
+        }
+    }
+
+    pub(crate) fn contains(&self, id: &tracing::span::Id) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spans
+            .contains(id)
+    }
+
+    pub(crate) fn replace(&self, old: &tracing::span::Id, new: &tracing::span::Id) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.spans.remove(old) {
+            state.spans.insert(new.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn end(&self, id: &tracing::span::Id) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.spans.remove(id);
+        if state.spans.is_empty() {
+            self.changed.notify_all();
+        }
+    }
+
+    fn close(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed = true;
+    }
+
+    fn open(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed = false;
+    }
+
+    fn wait_idle(&self, interrupted: &impl Fn() -> bool) -> Option<bool> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if interrupted() {
+                return None;
+            }
+            if state.spans.is_empty() && state.callbacks == 0 {
+                return Some(!state.failed);
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn notify_interrupt(&self) {
+        let _state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.changed.notify_all();
+    }
+}
+
+impl Drop for TraceCallbackGuard {
+    fn drop(&mut self) {
+        let frame = TRACE_CALLBACK_ADMISSIONS.with(|admissions| admissions.borrow_mut().pop());
+        if self.admitted {
+            let mut state = self
+                .owner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.callbacks -= 1;
+            if std::thread::panicking() {
+                state.failed = true;
+                if let Some(span) = frame.and_then(|frame| frame.span) {
+                    state.spans.remove(&span);
+                }
+            }
+            if state.callbacks == 0 && state.spans.is_empty() {
+                self.owner.changed.notify_all();
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ActiveSpans {
+    state: Mutex<ActiveSpanState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct ActiveSpanState {
+    closed: bool,
+    spans: HashSet<(TraceId, SpanId)>,
+}
+
+struct ActiveSpanGuard {
+    owner: Arc<ActiveSpans>,
+    id: (TraceId, SpanId),
+}
+
+impl ActiveSpans {
+    fn start(&self, id: (TraceId, SpanId)) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.closed {
+            state.spans.insert(id);
+        }
+    }
+
+    fn ending(self: &Arc<Self>, id: (TraceId, SpanId)) -> Option<ActiveSpanGuard> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.spans.contains(&id).then(|| ActiveSpanGuard {
+            owner: Arc::clone(self),
+            id,
+        })
+    }
+
+    fn close(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed = true;
+    }
+
+    fn open(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed = false;
+    }
+
+    fn wait_idle(&self, interrupted: &impl Fn() -> bool) -> Option<()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if interrupted() {
+                return None;
+            }
+            if state.spans.is_empty() {
+                return Some(());
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn notify_interrupt(&self) {
+        let _state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.changed.notify_all();
+    }
+}
+
+impl Drop for ActiveSpanGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .owner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.spans.remove(&self.id);
+        if state.spans.is_empty() {
+            self.owner.changed.notify_all();
+        }
+    }
 }
 
 impl RemoteSubmissionControl {
@@ -286,6 +590,8 @@ impl RemoteSubmissionControl {
         Self {
             spans: CapacityGate::new(counters.clone(), Signal::Spans),
             logs: CapacityGate::new(counters, Signal::Logs),
+            active_spans: Arc::new(ActiveSpans::default()),
+            tracing_spans: Arc::new(TracingSpans::default()),
         }
     }
 
@@ -293,13 +599,53 @@ impl RemoteSubmissionControl {
         self.spans.clone()
     }
 
+    pub(crate) fn span_activity(&self) -> Arc<ActiveSpans> {
+        Arc::clone(&self.active_spans)
+    }
+
+    pub(crate) fn close_span_admission(&self) {
+        self.tracing_spans.close();
+    }
+
+    pub(crate) fn wait_spans(&self, interrupted: &impl Fn() -> bool) -> Option<bool> {
+        let confirmed = self.tracing_spans.wait_idle(interrupted)?;
+        self.active_spans.close();
+        self.active_spans.wait_idle(interrupted)?;
+        Some(confirmed)
+    }
+
+    pub(crate) fn notify_span_wait(&self) {
+        self.tracing_spans.notify_interrupt();
+        self.active_spans.notify_interrupt();
+    }
+
+    pub(crate) fn tracing_activity(&self) -> Arc<TracingSpans> {
+        Arc::clone(&self.tracing_spans)
+    }
+
     pub(crate) fn log_gate(&self) -> CapacityGate {
         self.logs.clone()
     }
 
     pub(crate) fn close(&self) {
+        self.tracing_spans.close();
+        self.active_spans.close();
         self.spans.close();
         self.logs.close();
+    }
+
+    pub(crate) fn pause(&self) {
+        self.spans.pause();
+        self.logs.pause();
+    }
+
+    pub(crate) fn resume(&self) -> bool {
+        if !self.spans.resume() || !self.logs.resume() {
+            return false;
+        }
+        self.active_spans.open();
+        self.tracing_spans.open();
+        true
     }
 }
 
@@ -323,6 +669,7 @@ mod tests {
             .with_span_processor(TrackedSpanProcessor::new(
                 exporter.clone(),
                 CapacityGate::new(counters.clone(), Signal::Spans),
+                Arc::new(ActiveSpans::default()),
             ))
             .build();
         let tracer = provider.tracer("uc-observability-runtime");
@@ -447,10 +794,11 @@ mod tests {
 pub(crate) struct TrackedSpanProcessor {
     inner: BatchSpanProcessor,
     gate: CapacityGate,
+    active_spans: Arc<ActiveSpans>,
 }
 
 impl TrackedSpanProcessor {
-    pub(crate) fn new<E>(exporter: E, gate: CapacityGate) -> Self
+    pub(crate) fn new<E>(exporter: E, gate: CapacityGate, active_spans: Arc<ActiveSpans>) -> Self
     where
         E: SpanExporter + Send + 'static,
     {
@@ -469,16 +817,24 @@ impl TrackedSpanProcessor {
                 .with_batch_config(config)
                 .build(),
             gate,
+            active_spans,
         }
     }
 }
 
 impl SpanProcessor for TrackedSpanProcessor {
     fn on_start(&self, span: &mut Span, context: &Context) {
+        let context_id = span.span_context();
+        self.active_spans
+            .start((context_id.trace_id(), context_id.span_id()));
         self.inner.on_start(span, context);
     }
 
     fn on_end(&self, mut span: SpanData) {
+        let id = (span.span_context.trace_id(), span.span_context.span_id());
+        let Some(_active) = self.active_spans.ending(id) else {
+            return;
+        };
         // tracing-opentelemetry 已启动的 span 忽略 otel.name 更新。
         // 流程负责人只提供固定显示名，编码前转换并移除内部字段。
         let mut display_names = span

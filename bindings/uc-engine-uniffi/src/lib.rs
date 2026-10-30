@@ -1,16 +1,22 @@
 //! UniFFI bindings for the public `uc-engine` interface.
 
+#[cfg(feature = "test-process-release")]
+use std::time::Duration;
+
 #[cfg(target_os = "android")]
 mod android;
 mod local_diagnostics;
 mod network_log;
 pub use network_log::*;
 mod observability;
+mod process_release;
 pub use local_diagnostics::*;
+pub use process_release::*;
 mod runtime;
 
 pub use runtime::{
-    ActiveClipboard, ConfigImportRejectionReason, ConnectivityOpportunity, CustomRelay,
+    ActiveClipboard, BindingStartupReleaseReport, BindingStartupReleaseState,
+    ConfigImportRejectionReason, ConnectivityOpportunity, CustomRelay,
     CustomRelayMutationRejection, CustomRelayMutationResult, Device, EntryNotResendableReason,
     InvitationAvailability, InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus,
     JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle,
@@ -601,6 +607,96 @@ pub trait BindingAnalyticsHost: Send + Sync {
 #[uniffi::export]
 pub fn core_version() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_process_release(deadline_ms: u64) -> Result<(String, u64), BindingError> {
+    let handle = observability::process_handle().ok_or(BindingError::ObservabilityNotInstalled)?;
+    let (result, generation) =
+        handle.test_process_release_snapshot(Duration::from_millis(deadline_ms));
+    Ok((result.to_owned(), generation))
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_process_release_report(
+    deadline_ms: u64,
+) -> Result<(String, u64, Vec<String>, Vec<String>, bool), BindingError> {
+    let handle = observability::process_handle().ok_or(BindingError::ObservabilityNotInstalled)?;
+    let (status, generation, cleanup, operation, retry) =
+        handle.test_process_release_report(Duration::from_millis(deadline_ms));
+    Ok((status.to_owned(), generation, cleanup, operation, retry))
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_fail_next_network_park() -> Result<(), BindingError> {
+    let handle = observability::process_handle().ok_or(BindingError::ObservabilityNotInstalled)?;
+    if handle.test_fail_next_network_park() {
+        Ok(())
+    } else {
+        Err(BindingError::ObservabilityConfigInvalid)
+    }
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_network_park_hold(hold: bool) -> Result<(), BindingError> {
+    let handle = observability::process_handle().ok_or(BindingError::ObservabilityNotInstalled)?;
+    handle.test_network_park_hold(hold);
+    Ok(())
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_network_park_entered() -> Result<bool, BindingError> {
+    let handle = observability::process_handle().ok_or(BindingError::ObservabilityNotInstalled)?;
+    Ok(handle.test_network_park_entered())
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_retry_join_count() -> Result<u64, BindingError> {
+    let handle = observability::process_handle().ok_or(BindingError::ObservabilityNotInstalled)?;
+    Ok(handle.test_retry_join_count())
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_process_retry_report(
+    deadline_ms: u64,
+) -> Result<(String, u64, Vec<String>, Vec<String>, bool), BindingError> {
+    let handle = observability::process_handle().ok_or(BindingError::ObservabilityNotInstalled)?;
+    let (status, generation, cleanup, operation, retry) =
+        handle.test_process_retry_report(Duration::from_millis(deadline_ms));
+    Ok((status.to_owned(), generation, cleanup, operation, retry))
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_hold_process_terminal_gate(
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+) -> Result<(), BindingError> {
+    let handle = observability::process_handle().ok_or(BindingError::ObservabilityNotInstalled)?;
+    handle.probe_hold_terminal_gate(entered, release);
+    Ok(())
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_process_resume(deadline_ms: u64) -> Result<(String, u64), BindingError> {
+    let handle = observability::process_handle().ok_or(BindingError::ObservabilityNotInstalled)?;
+    let (result, generation) =
+        handle.test_process_resume_snapshot(Duration::from_millis(deadline_ms));
+    Ok((result.to_owned(), generation))
+}
+
+#[cfg(feature = "test-process-release")]
+#[doc(hidden)]
+pub fn probe_fenced_engine_attempts() -> u64 {
+    observability::process_handle().map_or(0, |handle| handle.test_fenced_registration_attempts())
 }
 
 #[uniffi::export]

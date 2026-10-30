@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use tokio::sync::watch;
 
+use super::startup_owner::StartupCleanupOwner;
 use crate::{
     EngineError, StartupAllowedActions, StartupFailure, StartupFailureReason, StartupSnapshot,
     StartupState, StartupStepProgress, StartupUpgradeProgress, StartupUpgradeStep,
@@ -17,6 +18,7 @@ pub struct StartupProgress {
 /// 只能交给一次启动；未使用的输入直接结算为 Interrupted，已接受的启动在完整收尾后结算。
 pub struct StartupProgressInput {
     pub(crate) store: Arc<StartupProgressStore>,
+    cleanup: Option<Weak<StartupCleanupOwner>>,
 }
 
 pub(crate) struct StartupProgressStore {
@@ -44,6 +46,7 @@ impl StartupProgress {
                     sender,
                     started: Instant::now(),
                 }),
+                cleanup: None,
             },
             Self { receiver },
         )
@@ -68,6 +71,30 @@ impl StartupProgressStore {
                 return false;
             }
             change(snapshot);
+            snapshot.sequence = snapshot.sequence.saturating_add(1);
+            snapshot.elapsed_ms =
+                self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            true
+        });
+    }
+
+    /// 只有该次清理确认释放后，才恢复原始启动错误允许的重试。
+    pub(super) fn confirm_cleanup_released(&self, interrupted: bool) {
+        self.sender.send_if_modified(|snapshot| {
+            if snapshot.state != StartupState::Failed || snapshot.allowed_actions.retry {
+                return false;
+            }
+            if interrupted {
+                snapshot.state = StartupState::Interrupted;
+                snapshot.failure = None;
+            } else if !snapshot
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.retryable)
+            {
+                return false;
+            }
+            snapshot.allowed_actions.retry = true;
             snapshot.sequence = snapshot.sequence.saturating_add(1);
             snapshot.elapsed_ms =
                 self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
@@ -152,6 +179,10 @@ impl StartupProgressStore {
 }
 
 impl StartupProgressInput {
+    pub(super) fn track_cleanup(&mut self, cleanup: &Arc<StartupCleanupOwner>) {
+        self.cleanup = Some(Arc::downgrade(cleanup));
+    }
+
     pub(crate) fn finish<T>(&self, result: &Result<T, EngineError>) {
         self.store.update(|snapshot| match result {
             Ok(_) => {
@@ -172,13 +203,39 @@ impl StartupProgressInput {
             }
         });
     }
+
+    /// 清理未确认时，错误本身可重试也不能授权再次启动。
+    pub(crate) fn finish_cleanup_failed(&self, error: &EngineError) {
+        self.store.update(|snapshot| {
+            snapshot.state = StartupState::Failed;
+            snapshot.failure.get_or_insert(StartupFailure {
+                reason: StartupFailureReason::StartupFailed,
+                retryable: error.is_retryable(),
+            });
+            snapshot.allowed_actions.retry = false;
+        });
+    }
 }
 
 impl Drop for StartupProgressInput {
     fn drop(&mut self) {
+        let unconfirmed = self
+            .cleanup
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|cleanup| cleanup.unconfirmed());
         self.store.update(|snapshot| {
-            snapshot.state = StartupState::Interrupted;
-            snapshot.allowed_actions.retry = true;
+            if unconfirmed {
+                snapshot.state = StartupState::Failed;
+                snapshot.failure.get_or_insert(StartupFailure {
+                    reason: StartupFailureReason::StartupFailed,
+                    retryable: false,
+                });
+                snapshot.allowed_actions.retry = false;
+            } else {
+                snapshot.state = StartupState::Interrupted;
+                snapshot.allowed_actions.retry = true;
+            }
         });
     }
 }

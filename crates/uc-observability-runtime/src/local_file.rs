@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, TryLockError};
@@ -15,10 +16,40 @@ use crate::remote_health::{record_local_file_failed, record_local_file_recovered
 use crate::{SignalResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS};
 
 const ASYNC_QUEUE_CAPACITY: usize = 4_096;
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_DAILY_PARK_FAILURE: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_DAILY_PARK_PANIC: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_DAILY_PARK_BLOCK: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_DAILY_PARK_ENTERED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_DAILY_EXIT_GATE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+#[cfg(feature = "test-process-release")]
+struct ProbeDailyExitGate;
+
+#[cfg(feature = "test-process-release")]
+impl Drop for ProbeDailyExitGate {
+    fn drop(&mut self) {
+        let gate = lock(&PROBE_DAILY_EXIT_GATE).take();
+        if let Some(gate) = gate {
+            let _ = std::fs::write(gate.join("worker-exiting"), b"exiting");
+            let limit = Instant::now() + Duration::from_secs(20);
+            while !gate.join("allow-exit").is_file() && Instant::now() < limit {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct BoundedDailyMakeWriter {
-    state: Arc<Mutex<WriterState>>,
+    state: Arc<Mutex<Option<WriterState>>>,
+    directory: PathBuf,
+    retention_days: u64,
+    max_bytes: u64,
     dropped_records: Arc<AtomicU64>,
     statistics: Arc<FileStatistics>,
     /// 最近一次落盘是否失败；由文件线程在状态变化时更新，`health()` 据此动态报告。
@@ -38,7 +69,10 @@ impl BoundedDailyMakeWriter {
         let dropped_records = Arc::new(AtomicU64::new(0));
         Ok((
             Self {
-                state: Arc::new(Mutex::new(state)),
+                state: Arc::new(Mutex::new(Some(state))),
+                directory: directory.to_path_buf(),
+                retention_days,
+                max_bytes,
                 dropped_records: Arc::clone(&dropped_records),
                 statistics: Arc::new(FileStatistics::default()),
                 unavailable: Arc::new(AtomicBool::new(false)),
@@ -156,6 +190,47 @@ impl RecordStore for BoundedDailyMakeWriter {
     fn settle(&mut self) -> io::Result<()> {
         Write::flush(self)
     }
+
+    fn park(&mut self) -> io::Result<()> {
+        #[cfg(feature = "test-process-release")]
+        if PROBE_DAILY_PARK_PANIC.swap(false, Ordering::SeqCst) {
+            panic!("controlled daily park worker panic");
+        }
+        #[cfg(feature = "test-process-release")]
+        if PROBE_DAILY_PARK_FAILURE.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                io::Error::from_raw_os_error(libc::EACCES),
+            ));
+        }
+        #[cfg(feature = "test-process-release")]
+        if PROBE_DAILY_PARK_BLOCK.load(Ordering::SeqCst) {
+            PROBE_DAILY_PARK_ENTERED.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while PROBE_DAILY_PARK_BLOCK.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let mut state = lock(&self.state);
+        if let Some(open) = state.as_mut() {
+            open.file.flush()?;
+        }
+        *state = None;
+        Ok(())
+    }
+
+    fn unpark(&mut self) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        if state.is_none() {
+            *state = Some(WriterState::open(
+                self.directory.clone(),
+                Utc::now().date_naive(),
+                self.retention_days,
+                self.max_bytes,
+            )?);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -183,12 +258,15 @@ pub(crate) struct LocalFileRuntime {
 }
 
 struct LocalFileWorker {
+    transition: Mutex<()>,
     sender: mpsc::SyncSender<FileMessage>,
     thread: Arc<Mutex<Option<JoinHandle<()>>>>,
     closed: Arc<AtomicBool>,
     parked: Arc<AtomicBool>,
     submission: Arc<Mutex<()>>,
+    transition_id: Arc<Mutex<Arc<()>>>,
     shutdown: Arc<FileShutdownCoordinator>,
+    park_error: Arc<Mutex<Option<Arc<io::Error>>>>,
 }
 
 struct FileShutdownCoordinator {
@@ -221,12 +299,38 @@ impl Default for FileShutdownCoordinator {
 enum FileMessage {
     Line(Vec<u8>, usize),
     Flush(mpsc::Sender<bool>),
-    Park(mpsc::Sender<bool>),
-    Unpark(mpsc::Sender<bool>),
+    Park(mpsc::Sender<bool>, ParkCompletion),
+    Unpark(mpsc::Sender<bool>, Box<dyn FnOnce(bool) + Send>),
     Shutdown(mpsc::Sender<bool>),
 }
 
+struct ParkCompletion {
+    observer: Option<Box<dyn FnOnce(bool) + Send>>,
+    enqueued: bool,
+}
+
+impl ParkCompletion {
+    fn finish(mut self, success: bool) {
+        if let Some(observer) = self.observer.take() {
+            observer(success);
+        }
+    }
+}
+
+impl Drop for ParkCompletion {
+    fn drop(&mut self) {
+        if self.enqueued {
+            if let Some(observer) = self.observer.take() {
+                observer(false);
+            }
+        }
+    }
+}
+
 impl LocalFileRuntime {
+    pub(crate) fn park_error(&self) -> Option<Arc<io::Error>> {
+        self.queue.park_error()
+    }
     pub(crate) fn new(directory: &Path) -> io::Result<Self> {
         Self::new_internal(directory, LOCAL_LOG_RETENTION_DAYS, LOCAL_LOG_MAX_BYTES)
     }
@@ -282,6 +386,18 @@ impl LocalFileRuntime {
         self.queue.flush_result(deadline)
     }
 
+    pub(crate) fn park(&self, deadline: Duration) -> SignalResult {
+        self.queue.park(deadline)
+    }
+
+    pub(crate) fn has_live_closer(&self) -> bool {
+        self.queue.has_live_closer()
+    }
+
+    pub(crate) fn unpark(&self, deadline: Duration) -> SignalResult {
+        self.queue.unpark(deadline)
+    }
+
     pub(crate) fn shutdown(&self, deadline: Duration) -> bool {
         self.queue.shutdown(deadline)
     }
@@ -292,6 +408,15 @@ impl LocalFileRuntime {
 }
 
 impl FileQueue {
+    pub(crate) fn park_error(&self) -> Option<Arc<io::Error>> {
+        lock(&self.worker.park_error).clone()
+    }
+    pub(crate) fn has_live_closer(&self) -> bool {
+        !self.worker.closed.load(Ordering::Acquire)
+            && lock(&self.worker.thread)
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+    }
     /// 在独立线程上启动队列；`store` 与线程只属于这一个队列。
     pub(crate) fn spawn<S: RecordStore>(
         store: S,
@@ -347,16 +472,43 @@ impl FileQueue {
         self.worker.shutdown(deadline)
     }
 
+    /// 等待同一次已接受的关闭结束；等待超时不启动新的关闭尝试。
+    pub(crate) fn shutdown_until_complete(&self) -> bool {
+        self.worker.shutdown(Duration::ZERO);
+        loop {
+            if let Some(result) = self.worker.shutdown.wait(Duration::from_secs(60)) {
+                return result;
+            }
+        }
+    }
+
     pub(crate) fn shutdown_cleanup_incomplete(&self) -> bool {
         self.worker.shutdown_cleanup_incomplete()
     }
 
     pub(crate) fn park(&self, deadline: Duration) -> SignalResult {
-        self.worker.park(deadline)
+        self.worker.park(deadline, None, Box::new(|| {}))
+    }
+
+    pub(crate) fn park_with_observer(
+        &self,
+        deadline: Duration,
+        observer: Box<dyn FnOnce(bool) + Send>,
+        accepted: Box<dyn FnOnce() + Send>,
+    ) -> SignalResult {
+        self.worker.park(deadline, Some(observer), accepted)
     }
 
     pub(crate) fn unpark(&self, deadline: Duration) -> SignalResult {
-        self.worker.unpark(deadline)
+        self.worker.unpark(deadline, None)
+    }
+
+    pub(crate) fn unpark_with_observer(
+        &self,
+        deadline: Duration,
+        observer: Box<dyn FnOnce(bool) + Send>,
+    ) -> SignalResult {
+        self.worker.unpark(deadline, Some(observer))
     }
 }
 
@@ -392,9 +544,16 @@ fn spawn_file_queue<S: RecordStore>(
     let submission = Arc::new(Mutex::new(()));
     let worker_dropped_records = Arc::clone(&dropped_records);
     let worker_counters = Arc::clone(&counters);
+    let worker_closed = Arc::clone(&closed);
+    let park_error = Arc::new(Mutex::new(None));
+    let worker_park_error = Arc::clone(&park_error);
+    #[cfg(feature = "test-process-release")]
+    let daily_worker = thread_name == "uc-observability-file";
     let thread = std::thread::Builder::new()
         .name(thread_name.to_owned())
         .spawn(move || {
+            #[cfg(feature = "test-process-release")]
+            let _exit_gate = daily_worker.then(|| ProbeDailyExitGate);
             run_file_worker(
                 store,
                 receiver,
@@ -402,6 +561,8 @@ fn spawn_file_queue<S: RecordStore>(
                 worker_counters,
                 unavailable,
                 hooks,
+                worker_closed,
+                worker_park_error,
             )
         })?;
     Ok((
@@ -414,12 +575,15 @@ fn spawn_file_queue<S: RecordStore>(
             counters,
         },
         Arc::new(LocalFileWorker {
+            transition: Mutex::new(()),
             sender,
             thread: Arc::new(Mutex::new(Some(thread))),
             closed,
             parked,
             submission,
+            transition_id: Arc::new(Mutex::new(Arc::new(()))),
             shutdown: Arc::new(FileShutdownCoordinator::default()),
+            park_error,
         }),
     ))
 }
@@ -479,28 +643,87 @@ impl LocalFileWorker {
     }
 
     /// 先在提交门内停止接收新记录，再把停车请求排在已入队记录之后：已接受的记录全部落盘后才交还文件。
-    pub(crate) fn park(&self, deadline: Duration) -> SignalResult {
+    pub(crate) fn park(
+        &self,
+        deadline: Duration,
+        observer: Option<Box<dyn FnOnce(bool) + Send>>,
+        accepted: Box<dyn FnOnce() + Send>,
+    ) -> SignalResult {
+        let started = Instant::now();
+        let Some(_transition) = lock_before_deadline(&self.transition, started, deadline) else {
+            return SignalResult::TimedOut;
+        };
+        *lock(&self.park_error) = None;
         {
-            let _submission = lock(&self.submission);
+            let Some(_submission) = lock_before_deadline(&self.submission, started, deadline)
+            else {
+                return SignalResult::TimedOut;
+            };
             if self.closed.load(Ordering::Acquire) {
                 return SignalResult::AlreadyShutdown;
             }
+            *lock(&self.transition_id) = Arc::new(());
             self.parked.store(true, Ordering::Release);
         }
-        self.signal(FileMessage::Park, deadline, || {})
+        self.signal(
+            |reply| {
+                FileMessage::Park(
+                    reply,
+                    ParkCompletion {
+                        observer,
+                        enqueued: false,
+                    },
+                )
+            },
+            deadline.saturating_sub(started.elapsed()),
+            accepted,
+        )
     }
 
-    /// 重开请求入队与放行写入在同一提交门内完成：之后到达的记录必然排在重开之后。
-    pub(crate) fn unpark(&self, deadline: Duration) -> SignalResult {
-        self.signal(FileMessage::Unpark, deadline, || {
-            self.parked.store(false, Ordering::Release);
-        })
+    /// 重开成功后才放行写入；等待超时不撤销已接受的重开。
+    pub(crate) fn unpark(
+        &self,
+        deadline: Duration,
+        observer: Option<Box<dyn FnOnce(bool) + Send>>,
+    ) -> SignalResult {
+        let started = Instant::now();
+        let Some(_transition) = lock_before_deadline(&self.transition, started, deadline) else {
+            return SignalResult::TimedOut;
+        };
+        let operation = Arc::new(());
+        let transition_id = Arc::clone(&self.transition_id);
+        let current = Arc::clone(&operation);
+        let submission = Arc::clone(&self.submission);
+        let closed = Arc::clone(&self.closed);
+        let parked = Arc::clone(&self.parked);
+        let accepted_id = Arc::clone(&self.transition_id);
+        self.signal(
+            |reply| {
+                FileMessage::Unpark(
+                    reply,
+                    Box::new(move |success| {
+                        let _submission = lock(&submission);
+                        if success
+                            && !closed.load(Ordering::Acquire)
+                            && Arc::ptr_eq(&lock(&transition_id), &current)
+                        {
+                            parked.store(false, Ordering::Release);
+                        }
+                        if let Some(observer) = observer {
+                            observer(success);
+                        }
+                    }),
+                )
+            },
+            deadline.saturating_sub(started.elapsed()),
+            || *lock(&accepted_id) = operation,
+        )
     }
 
     /// 把一次带回复的控制请求（刷新、停车、重开）排入队列并等待回复；`enqueued` 在请求入队后、仍持有提交门时执行。
     fn signal(
         &self,
-        request: fn(mpsc::Sender<bool>) -> FileMessage,
+        request: impl FnOnce(mpsc::Sender<bool>) -> FileMessage,
         deadline: Duration,
         enqueued: impl FnOnce(),
     ) -> SignalResult {
@@ -521,6 +744,9 @@ impl LocalFileWorker {
                 if self.closed.load(Ordering::Acquire) {
                     return SignalResult::AlreadyShutdown;
                 }
+                if let FileMessage::Park(_, completion) = &mut message {
+                    completion.enqueued = true;
+                }
                 match self.sender.try_send(message) {
                     Ok(()) => {
                         if let Some(enqueued) = enqueued.take() {
@@ -528,8 +754,18 @@ impl LocalFileWorker {
                         }
                         break;
                     }
-                    Err(mpsc::TrySendError::Full(returned)) => message = returned,
-                    Err(mpsc::TrySendError::Disconnected(_)) => return SignalResult::Failed,
+                    Err(mpsc::TrySendError::Full(mut returned)) => {
+                        if let FileMessage::Park(_, completion) = &mut returned {
+                            completion.enqueued = false;
+                        }
+                        message = returned;
+                    }
+                    Err(mpsc::TrySendError::Disconnected(mut returned)) => {
+                        if let FileMessage::Park(_, completion) = &mut returned {
+                            completion.enqueued = false;
+                        }
+                        return SignalResult::Failed;
+                    }
                 }
             }
             if started.elapsed() >= deadline {
@@ -703,6 +939,8 @@ fn run_file_worker<S: RecordStore>(
     counters: Arc<dyn RecordCounters>,
     unavailable: Arc<AtomicBool>,
     hooks: HealthHooks,
+    closed: Arc<AtomicBool>,
+    park_error: Arc<Mutex<Option<Arc<io::Error>>>>,
 ) {
     let mut health = WorkerHealth::new(unavailable, hooks);
     if writer.prepare().is_err() {
@@ -726,16 +964,37 @@ fn run_file_worker<S: RecordStore>(
                 // 刷新是明确的重试点：失败态下也尝试重新打开，不受退避限制。
                 let _ = reply.send(settle_flush(&mut writer, &mut health));
             }
-            FileMessage::Park(reply) => {
-                let _ = reply.send(writer.park().is_ok());
+            FileMessage::Park(reply, observer) => {
+                let result = match catch_unwind(AssertUnwindSafe(|| writer.park())) {
+                    Ok(result) => match result {
+                        Ok(()) => {
+                            *lock(&park_error) = None;
+                            true
+                        }
+                        Err(error) => {
+                            *lock(&park_error) = Some(Arc::new(error));
+                            false
+                        }
+                    },
+                    Err(_) => {
+                        *lock(&park_error) = None;
+                        closed.store(true, Ordering::Release);
+                        observer.finish(false);
+                        let _ = reply.send(false);
+                        return;
+                    }
+                };
+                observer.finish(result);
+                let _ = reply.send(result);
             }
-            FileMessage::Unpark(reply) => {
+            FileMessage::Unpark(reply, observer) => {
                 let reopened = writer.unpark().is_ok();
                 if reopened {
                     health.succeeded();
                 } else {
                     health.failed("open_failed");
                 }
+                observer(reopened);
                 let _ = reply.send(reopened);
             }
             FileMessage::Shutdown(reply) => {
@@ -758,6 +1017,9 @@ fn settle_flush<S: RecordStore>(writer: &mut S, health: &mut WorkerHealth) -> bo
 impl BoundedDailyMakeWriter {
     fn write_record(&self, buffer: &[u8], source: LocalDiagnosticSource) -> io::Result<()> {
         let mut state = lock(&self.state);
+        let state = state
+            .as_mut()
+            .ok_or_else(|| io::Error::other("daily log is parked"))?;
         state.rotate_if_needed()?;
         state.ensure_current()?;
         let additional = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
@@ -789,6 +1051,9 @@ impl Write for BoundedDailyWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         let mut state = lock(&self.owner.state);
+        let Some(state) = state.as_mut() else {
+            return Ok(());
+        };
         state.ensure_current()?;
         state.file.flush()
     }
@@ -1313,12 +1578,15 @@ mod tests {
     fn concurrent_flush_deadline_includes_waiting_for_the_submission_gate() {
         let (sender, receiver) = mpsc::sync_channel(0);
         let worker = Arc::new(LocalFileWorker {
+            transition: Mutex::new(()),
             sender,
             thread: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             parked: Arc::new(AtomicBool::new(false)),
             submission: Arc::new(Mutex::new(())),
+            transition_id: Arc::new(Mutex::new(Arc::new(()))),
             shutdown: Arc::new(FileShutdownCoordinator::default()),
+            park_error: Arc::new(Mutex::new(None)),
         });
         let long_worker = Arc::clone(&worker);
         let long_flush = std::thread::spawn(move || long_worker.flush(Duration::from_millis(100)));
@@ -1382,12 +1650,15 @@ mod tests {
     fn control_request_honors_deadline_when_the_queue_cannot_accept_it() {
         let (sender, receiver) = mpsc::sync_channel(0);
         let worker = Arc::new(LocalFileWorker {
+            transition: Mutex::new(()),
             sender,
             thread: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             parked: Arc::new(AtomicBool::new(false)),
             submission: Arc::new(Mutex::new(())),
+            transition_id: Arc::new(Mutex::new(Arc::new(()))),
             shutdown: Arc::new(FileShutdownCoordinator::default()),
+            park_error: Arc::new(Mutex::new(None)),
         });
         let (result_sender, result_receiver) = mpsc::channel();
         let worker_for_request = Arc::clone(&worker);
@@ -1408,12 +1679,15 @@ mod tests {
     fn timed_out_shutdown_still_queues_and_a_later_call_observes_completion() {
         let (sender, receiver) = mpsc::sync_channel(0);
         let worker = LocalFileWorker {
+            transition: Mutex::new(()),
             sender,
             thread: Arc::new(Mutex::new(Some(std::thread::spawn(|| {})))),
             closed: Arc::new(AtomicBool::new(false)),
             parked: Arc::new(AtomicBool::new(false)),
             submission: Arc::new(Mutex::new(())),
+            transition_id: Arc::new(Mutex::new(Arc::new(()))),
             shutdown: Arc::new(FileShutdownCoordinator::default()),
+            park_error: Arc::new(Mutex::new(None)),
         };
 
         assert!(!worker.shutdown(Duration::from_millis(1)));
@@ -1429,12 +1703,15 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(0);
         drop(receiver);
         let worker = LocalFileWorker {
+            transition: Mutex::new(()),
             sender,
             thread: Arc::new(Mutex::new(Some(std::thread::spawn(|| {})))),
             closed: Arc::new(AtomicBool::new(false)),
             parked: Arc::new(AtomicBool::new(false)),
             submission: Arc::new(Mutex::new(())),
+            transition_id: Arc::new(Mutex::new(Arc::new(()))),
             shutdown: Arc::new(FileShutdownCoordinator::default()),
+            park_error: Arc::new(Mutex::new(None)),
         };
 
         assert!(!worker.shutdown(Duration::from_secs(1)));

@@ -1,3 +1,4 @@
+mod activity;
 mod diagnostics;
 mod inventory;
 mod record;
@@ -5,6 +6,7 @@ mod security_materials;
 mod security_stream;
 mod store;
 
+pub use activity::{BackupWorkerAbnormal, ProfileUpgradeBackupActivity};
 pub(crate) use record::RECORD_KEY as PROFILE_UPGRADE_BACKUP_RECORD_KEY;
 pub use store::ProfileUpgradeBackupStore;
 

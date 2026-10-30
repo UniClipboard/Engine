@@ -19,6 +19,25 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{Builder, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "test-process-release")]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_CENSUS_ENABLED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-process-release")]
+pub(crate) static PROBE_CENSUS_READS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "test-process-release")]
+struct ProbeSource;
+
+#[cfg(feature = "test-process-release")]
+impl ProcessSource for ProbeSource {
+    fn read(&mut self) -> ProcessReading {
+        PROBE_CENSUS_READS.fetch_add(1, Ordering::SeqCst);
+        ProcessReading::default()
+    }
+}
+
 use uc_observability_contract::{uc_info, uc_warn};
 
 /// 资源记录周期。
@@ -244,6 +263,10 @@ pub(crate) struct ProcessCensus {
 impl ProcessCensus {
     /// 按平台选择来源并启动；不支持的平台不启动线程，也不写记录。
     pub(crate) fn start() -> Option<Self> {
+        #[cfg(feature = "test-process-release")]
+        if PROBE_CENSUS_ENABLED.load(Ordering::SeqCst) {
+            return Self::start_with(ProbeSource, Duration::ZERO, Duration::from_millis(10));
+        }
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             Self::start_with(ProcSource::new(), INITIAL_DELAY, CADENCE)

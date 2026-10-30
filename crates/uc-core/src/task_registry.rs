@@ -5,19 +5,21 @@
 //! All long-lived spawned tasks are tracked here, enabling graceful shutdown
 //! with cooperative cancellation and bounded join timeout.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{error::Error, fmt};
-use tokio::task::{JoinError, JoinSet};
+use tokio::task::{AbortHandle, Id, JoinError, JoinSet};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct TaskShutdownReport {
     pub completed_count: usize,
     pub timed_out_count: usize,
     pub join_error_count: usize,
-    failures: Vec<JoinError>,
+    failures: Arc<Vec<JoinError>>,
 }
 
 impl TaskShutdownReport {
@@ -30,7 +32,7 @@ impl TaskShutdownReport {
     }
 
     pub fn failures(&self) -> &[JoinError] {
-        &self.failures
+        self.failures.as_slice()
     }
 }
 
@@ -59,6 +61,43 @@ impl Error for TaskShutdownReport {
     }
 }
 
+#[derive(Default)]
+struct PendingReport {
+    completed_count: usize,
+    timed_out_count: usize,
+    join_error_count: usize,
+    failures: Vec<JoinError>,
+    deadline_fired: bool,
+    deadline_targets: HashSet<Id>,
+}
+
+impl PendingReport {
+    fn finish(self) -> TaskShutdownReport {
+        TaskShutdownReport {
+            completed_count: self.completed_count,
+            timed_out_count: self.timed_out_count,
+            join_error_count: self.join_error_count,
+            failures: Arc::new(self.failures),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RegistryState {
+    tasks: JoinSet<()>,
+    handles: HashMap<Id, AbortHandle>,
+    pending: PendingReport,
+    completed: Option<TaskShutdownReport>,
+}
+
+impl RegistryState {
+    fn complete(&mut self) -> TaskShutdownReport {
+        let report = std::mem::take(&mut self.pending).finish();
+        self.completed = Some(report.clone());
+        report
+    }
+}
+
 /// Centralized registry for tracking and managing long-lived async tasks.
 ///
 /// Provides:
@@ -68,7 +107,7 @@ impl Error for TaskShutdownReport {
 /// - `token()` for direct access to the root cancellation token
 pub struct TaskRegistry {
     token: CancellationToken,
-    tasks: tokio::sync::Mutex<JoinSet<()>>,
+    state: tokio::sync::Mutex<RegistryState>,
     closed: AtomicBool,
 }
 
@@ -77,7 +116,7 @@ impl TaskRegistry {
     pub fn new() -> Self {
         Self {
             token: CancellationToken::new(),
-            tasks: tokio::sync::Mutex::new(JoinSet::new()),
+            state: tokio::sync::Mutex::new(RegistryState::default()),
             closed: AtomicBool::new(false),
         }
     }
@@ -107,18 +146,19 @@ impl TaskRegistry {
         if self.closed.load(Ordering::Acquire) {
             return false;
         }
-        let mut tasks = self.tasks.lock().await;
+        let mut state = self.state.lock().await;
         if self.closed.load(Ordering::Acquire) {
             return false;
         }
         let token = self.token.child_token();
-        tasks.spawn(async move { f(token).await });
+        let handle = state.tasks.spawn(async move { f(token).await });
+        state.handles.insert(handle.id(), handle);
         true
     }
 
     /// Returns the number of currently tracked tasks.
     pub async fn task_count(&self) -> usize {
-        self.tasks.lock().await.len()
+        self.state.lock().await.tasks.len()
     }
 
     /// Cancel all tracked tasks and join with a bounded timeout.
@@ -136,7 +176,16 @@ impl TaskRegistry {
         self.closed.store(true, Ordering::Release);
         self.token.cancel();
 
-        let mut tasks = self.tasks.lock().await;
+        let mut state = self.state.lock().await;
+        if let Some(report) = &state.completed {
+            return report.clone();
+        }
+        if state.pending.deadline_fired {
+            while let Some(result) = state.tasks.join_next_with_id().await {
+                add_join_result(&mut state, result);
+            }
+            return state.complete();
+        }
         let deadline = async {
             match deadline {
                 Some(deadline) => sleep_until(deadline).await,
@@ -144,26 +193,30 @@ impl TaskRegistry {
             }
         };
         tokio::pin!(deadline);
-        let mut report = TaskShutdownReport::default();
-
         loop {
             tokio::select! {
                 biased;
                 _ = &mut deadline => {
                     // 截止已到时先固定进入收尾；已经完成的任务仍在这里完整计入报告。
-                    while let Some(result) = tasks.try_join_next() {
-                        add_join_result(&mut report, result);
+                    while let Some(result) = state.tasks.try_join_next_with_id() {
+                        add_join_result(&mut state, result);
                     }
-                    tasks.abort_all();
-                    while let Some(result) = tasks.join_next().await {
-                        add_join_result(&mut report, result);
+                    let targets: Vec<_> = state.handles.values()
+                        .filter(|handle| !handle.is_finished())
+                        .map(AbortHandle::id)
+                        .collect();
+                    state.pending.deadline_targets.extend(targets);
+                    state.pending.deadline_fired = true;
+                    state.tasks.abort_all();
+                    while let Some(result) = state.tasks.join_next_with_id().await {
+                        add_join_result(&mut state, result);
                     }
-                    return report;
+                    return state.complete();
                 }
-                result = tasks.join_next() => {
+                result = state.tasks.join_next_with_id() => {
                     match result {
-                        Some(result) => add_join_result(&mut report, result),
-                        None => return report,
+                        Some(result) => add_join_result(&mut state, result),
+                        None => return state.complete(),
                     }
                 }
             }
@@ -171,16 +224,23 @@ impl TaskRegistry {
     }
 }
 
-fn add_join_result(report: &mut TaskShutdownReport, result: Result<(), JoinError>) {
+fn add_join_result(state: &mut RegistryState, result: Result<(Id, ()), JoinError>) {
     match result {
-        Ok(()) => report.completed_count += 1,
+        Ok((id, ())) => {
+            state.handles.remove(&id);
+            state.pending.deadline_targets.remove(&id);
+            state.pending.completed_count += 1;
+        }
         Err(error) => {
-            if error.is_cancelled() {
-                report.timed_out_count += 1;
+            let id = error.id();
+            state.handles.remove(&id);
+            let deadline_target = state.pending.deadline_targets.remove(&id);
+            if error.is_cancelled() && deadline_target {
+                state.pending.timed_out_count += 1;
             } else {
-                report.join_error_count += 1;
+                state.pending.join_error_count += 1;
             }
-            report.failures.push(error);
+            state.pending.failures.push(error);
         }
     }
 }
@@ -290,7 +350,7 @@ mod tests {
                 })
                 .await
         );
-        let guard = registry.tasks.lock().await;
+        let guard = registry.state.lock().await;
         let started = Instant::now();
         let closing = tokio::spawn({
             let registry = Arc::clone(&registry);

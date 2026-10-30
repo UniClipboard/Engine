@@ -6,6 +6,9 @@ edition = "2021"
 description = "Process-owned OpenTelemetry and local diagnostic runtime"
 publish = false
 
+[features]
+test-process-release = []
+
 [dependencies]
 chrono = "0.4"
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace", "logs"] }
@@ -20,6 +23,7 @@ sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
+tracing-core = "0.1"
 tracing-log = { version = "0.2", default-features = false, features = ["log-tracer", "std"] }
 tracing-opentelemetry = { version = "=0.33.0", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "registry", "std"] }

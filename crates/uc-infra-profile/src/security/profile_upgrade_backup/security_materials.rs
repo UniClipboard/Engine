@@ -23,10 +23,13 @@ impl RetireUpgradeBackupSecurityRecordsPort for ProfileUpgradeBackupStore {
         &self,
     ) -> Result<(), ProfileFactoryResetCapabilityError> {
         let store = self.clone();
-        let result = tokio::task::spawn_blocking(move || store.retire_security_records_locked())
-            .await
-            .map_err(backup_error)
-            .and_then(|retired| retired);
+        let activity = self.activity.begin();
+        let result = tokio::task::spawn_blocking(move || {
+            activity.finish(store.retire_security_records_locked())
+        })
+        .await
+        .map_err(backup_error)
+        .and_then(|retired| retired);
         if let Err(error) = &result {
             Self::record_failure("retire_security_records", error);
         }

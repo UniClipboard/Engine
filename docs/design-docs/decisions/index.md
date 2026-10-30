@@ -33,3 +33,4 @@ ADR 记录重要取舍的背景、备选方案和后果。编号保持历史稳�
 
 - [ADR-033：Rust 构建与测试统一使用 MBX](033-unified-mbx-rust-builds.md)
 - [ADR-034：iroh 固定到包含路径队列修复的上游提交](034-pin-iroh-to-unreleased-upstream-commit.md)
+- [ADR-035: Recoverable process and startup release owners](035-recoverable-process-and-startup-release-owners.md) (proposed)

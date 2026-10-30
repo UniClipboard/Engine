@@ -11,6 +11,11 @@ mod runtime;
 mod status;
 mod store;
 
+#[cfg(feature = "test-process-release")]
+pub(crate) use store::{
+    PROBE_NETWORK_PARK_BLOCK, PROBE_NETWORK_PARK_ENTERED, PROBE_NETWORK_PARK_FAILURE,
+};
+
 pub use config::{NetworkLogBudget, NetworkLogConfig, NetworkProcessRole};
 pub(crate) use runtime::NetworkLogRuntime;
 pub use status::{

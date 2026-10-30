@@ -26,6 +26,18 @@ A required closer failure retains its original handle. Host stream shutdown rest
 
 The receipt excludes process observability, detached observability flushes, another active Engine's shared network writer, and Mobile-owned SQLite/history/diagnostic/Share/runtime-lock resources. The last active Engine waits for network-log parking. Another active Engine can legitimately keep that process writer alive. A per-Engine receipt is not a process-wide all-descriptor certificate.
 
+## Process observability release in the current worktree
+
+The process owner has provisional release, explicit retry, and resume actions through `uc-engine::observability` and UniFFI. The complete ADR-035 implementation and native delivery are not yet accepted. The process result covers its registered Engine activity, accepted observability work, telemetry, census, daily file, network writer and network export work. It does not certify host-owned files or the host runtime lock.
+
+Each action returns a generation-qualified report and may return an observation object. An observation represents the same accepted operation on every wait, including after another generation starts. A deadline error during admission means no new operation was accepted; the caller may submit a new action. A `Pending` report always has an observation for accepted work. A terminal report can have no new observation. A timeout while waiting on accepted work does not cancel it. Resume invalidates the authority of an older release before reopening. A superseded resume reports its own generation.
+
+Release reports keep cleanup categories separate from operation categories. `Released` confirms the process scope even if an operation category is present. `Failed` leaves release unconfirmed. The explicit retry flag describes current eligibility; another caller can change it before retry. Categories do not include raw errors, paths, or user content. The host must independently confirm its own resource obligations.
+
+## Startup release in the current worktree
+
+A `StartupLifecycle` identifies one attempt and exists before host preparation. Its provisional result interface reports whether the attempt is pending, delivered, released, or failed. The binding also reports an unused lifecycle as not started. It preserves the startup error separately from cleanup and operation errors. Successful delivery transfers the obligation to the Engine; it is not a release receipt. A failed cleanup remains unconfirmed. Explicit retry applies only to a retained live closer or delivery settlement. A wait timeout does not cancel cleanup. Host-owned files and the host runtime lock remain outside this scope.
+
 ## Repeated calls
 
 Repeated outcome shutdown waits on the existing reply after a caller timeout. It does not close the lifecycle channel or abandon its cleanup. Concurrent waiters have independent deadlines. After confirmation, repeated shutdown returns the cached final receipt. The new outcome suspend method waits for the same shutdown once shutdown has taken over the instance.

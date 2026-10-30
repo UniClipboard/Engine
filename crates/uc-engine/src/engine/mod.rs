@@ -1,5 +1,8 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+#[cfg(feature = "dev-tools")]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,14 +19,18 @@ mod log_activity;
 mod operation;
 #[cfg(test)]
 mod operation_tests;
+mod owned_executor;
+#[cfg(feature = "test-binding-worker-panic")]
+mod probe_startup_host;
 mod shutdown;
 #[cfg(test)]
 mod shutdown_tests;
 pub(crate) mod startup;
 mod startup_control;
-mod startup_owner;
+mod startup_outcome;
+pub(crate) mod startup_owner;
 
-use crate::runtime::RecoverableRuntime;
+use crate::runtime::{RecoverableRuntime, ReusableHost};
 #[cfg(feature = "dev-tools")]
 use crate::{DevOperation, DevOperationResult};
 use crate::{
@@ -35,12 +42,28 @@ use event_stream::{event_channel, EventSender};
 use in_flight::InFlightOperations;
 use lifecycle::TransitionQueue;
 use log_activity::LogActivity;
-use shutdown::ShutdownProgress;
+use owned_executor::OwnedExecutor;
+#[cfg(feature = "test-binding-worker-panic")]
+pub use probe_startup_host::{
+    probe_release_startup_retry, probe_startup_retry_calls, probe_startup_retry_entered,
+    probe_wrap_startup_host,
+};
+use shutdown::{OrphanRetention, ShutdownProgress};
 pub use startup::{StartupProgress, StartupProgressInput};
-pub use startup_control::{StartupLifecycle, StartupLifecycleInput};
+#[cfg(feature = "test-binding-worker-panic")]
+pub use startup_control::StartupProbeOutcome;
+pub use startup_control::{StartupLifecycle, StartupLifecycleInput, StartupReleaseOutcome};
+pub(crate) use startup_outcome::StartupOutcomeSnapshot;
+use startup_owner::UnpolledStartupCleanup;
 
 const INVALID_STATE_CODE: u32 = 1001;
 const OPERATION_CANCELLED_CODE: u32 = 1002;
+
+#[cfg(feature = "dev-tools")]
+#[doc(hidden)]
+pub fn probe_fail_next_orphan_retry_executor() {
+    shutdown::PROBE_ORPHAN_RETRY_EXECUTOR_FAILURE.store(true, Ordering::SeqCst);
+}
 
 #[async_trait]
 pub(crate) trait EngineRuntime: Send + Sync {
@@ -66,7 +89,31 @@ pub(crate) trait EngineRuntime: Send + Sync {
     async fn suspend(&self, deadline: Option<Instant>) -> Result<(), EngineError>;
     async fn resume(&self, cancellation: CancellationToken) -> Result<(), EngineError>;
     async fn shutdown(&self, deadline: Option<Instant>) -> Result<(), EngineError>;
+
+    /// 等待已接受的工作结算；本动作不重新执行关闭，也不确认资源释放。
+    async fn wait_shutdown_obligations(&self) {}
+    /// 进程工作线程的同步等待，不创建新的异步执行器。
+    fn wait_shutdown_obligations_blocking(&self) {}
+
+    async fn supports_shutdown_retry(&self) -> bool {
+        false
+    }
 }
+
+#[cfg(feature = "dev-tools")]
+pub(crate) fn probe_fail_owned_start(stage: u8) {
+    owned_executor::PROBE_START_FAILURE.store(stage, Ordering::Release);
+}
+
+#[cfg(feature = "dev-tools")]
+pub(crate) fn probe_fail_log_begin() {
+    log_activity::PROBE_BEGIN_FAILURE.store(true, Ordering::Release);
+}
+
+#[cfg(feature = "dev-tools")]
+static PROBE_HOLD_LIFECYCLE: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "dev-tools")]
+static PROBE_LIFECYCLE_HELD: AtomicBool = AtomicBool::new(false);
 
 pub struct Engine {
     state: Arc<Mutex<EngineState>>,
@@ -74,8 +121,11 @@ pub struct Engine {
     lifecycle_requests: Arc<TransitionQueue>,
     shutdown_gate: Arc<Mutex<()>>,
     shutdown_progress: Arc<Mutex<ShutdownProgress>>,
+    orphan_retention: Arc<OrphanRetention>,
+    retain_on_drop: bool,
     stop_requested: Arc<AtomicBool>,
     runtime: Arc<dyn EngineRuntime>,
+    owned_executor: Option<Arc<OwnedExecutor>>,
     events: EventSender,
     operations: Arc<InFlightOperations>,
     log_activity: LogActivity,
@@ -84,39 +134,52 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub async fn start(
+    pub fn start(
         config: EngineConfig,
         host: HostCapabilities,
-    ) -> Result<(Self, EventStream), EngineError> {
+    ) -> impl Future<Output = Result<(Self, EventStream), EngineError>> + Send {
         let (input, _) = StartupProgress::channel();
-        Self::start_with_progress(config, host, input).await
+        Self::start_with_progress(config, host, input)
     }
 
     /// 启动前交入只读进度通道；关闭观察者不影响本次启动。
-    pub async fn start_with_progress(
+    pub fn start_with_progress(
         config: EngineConfig,
         host: HostCapabilities,
         progress: StartupProgressInput,
-    ) -> Result<(Self, EventStream), EngineError> {
+    ) -> impl Future<Output = Result<(Self, EventStream), EngineError>> + Send {
         let (lifecycle, _) = StartupLifecycle::channel();
-        Self::start_with_lifecycle(config, host, progress, lifecycle).await
+        Self::start_with_lifecycle(config, host, progress, lifecycle)
     }
 
-    /// 启动前接受宿主生命周期通知；构造完成后先处理已接收的通知再交出实例。
-    pub async fn start_with_lifecycle(
+    /// 创建 future 时接管宿主能力；构造完成后先处理已接收的通知再交出实例。
+    pub fn start_with_lifecycle(
         config: EngineConfig,
         host: HostCapabilities,
-        progress: StartupProgressInput,
+        mut progress: StartupProgressInput,
         lifecycle: StartupLifecycleInput,
-    ) -> Result<(Self, EventStream), EngineError> {
-        Self::start_owned(config, host, progress, lifecycle).await
+    ) -> impl Future<Output = Result<(Self, EventStream), EngineError>> + Send {
+        let host = Arc::new(ReusableHost::new(host));
+        lifecycle.cleanup.accept_host(Arc::clone(&host));
+        lifecycle
+            .cleanup
+            .register_requests(Arc::clone(&lifecycle.requests));
+        lifecycle
+            .cleanup
+            .register_progress(Arc::clone(&progress.store));
+        progress.track_cleanup(&lifecycle.cleanup);
+        let unpolled =
+            UnpolledStartupCleanup::new(Arc::clone(&lifecycle.cleanup), Arc::clone(&host));
+        Self::start_owned(config, host, progress, lifecycle, unpolled)
     }
 
     async fn start_runtime(
         config: EngineConfig,
-        host: HostCapabilities,
+        host: Arc<ReusableHost>,
         progress: &StartupProgressInput,
         requests: Arc<TransitionQueue>,
+        cleanup: Arc<startup_owner::StartupCleanupOwner>,
+        owned_executor: Arc<OwnedExecutor>,
     ) -> Result<(Self, EventStream), EngineError> {
         const EVENT_CAPACITY: usize = 256;
 
@@ -132,19 +195,34 @@ impl Engine {
         .map(Path::to_path_buf)
         .collect();
         let runtime = Arc::new(
-            RecoverableRuntime::start(config, host, events.clone(), Arc::clone(&progress.store))
-                .await?,
+            RecoverableRuntime::start(
+                config,
+                host,
+                events.clone(),
+                Arc::clone(&progress.store),
+                Arc::clone(&cleanup),
+            )
+            .await?,
         );
         let log_activity = LogActivity::default();
-        log_activity.begin().await?;
+        cleanup.accept_runtime(Arc::clone(&runtime), log_activity.clone());
+        if let Err(error) = log_activity.begin().await {
+            cleanup.record_primary(error.clone());
+            cleanup.start_runtime_cleanup(Arc::clone(&runtime), log_activity);
+            return Err(error);
+        }
+        cleanup.finish_runtime_construction();
         let engine = Self {
             state: Arc::new(Mutex::new(EngineState::Running)),
             lifecycle_gate: Arc::new(Mutex::new(())),
             lifecycle_requests: requests,
             shutdown_gate: Arc::new(Mutex::new(())),
             shutdown_progress: Arc::new(Mutex::new(ShutdownProgress::default())),
+            orphan_retention: Arc::new(OrphanRetention::default()),
+            retain_on_drop: true,
             stop_requested: Arc::new(AtomicBool::new(false)),
             runtime,
+            owned_executor: Some(owned_executor),
             events,
             operations: Arc::new(InFlightOperations::new()),
             log_activity,
@@ -186,8 +264,11 @@ impl Engine {
             lifecycle_requests: requests,
             shutdown_gate: Arc::new(Mutex::new(())),
             shutdown_progress: Arc::new(Mutex::new(ShutdownProgress::default())),
+            orphan_retention: Arc::new(OrphanRetention::default()),
+            retain_on_drop: false,
             stop_requested: Arc::new(AtomicBool::new(false)),
             runtime,
+            owned_executor: None,
             events,
             operations: Arc::new(InFlightOperations::new()),
             log_activity: LogActivity::default(),
@@ -197,6 +278,79 @@ impl Engine {
         (engine, stream)
     }
 
+    #[cfg(feature = "dev-tools")]
+    #[doc(hidden)]
+    pub fn probe_spawn_owned_blocking(&self, work: impl FnOnce() + Send + 'static) -> bool {
+        let Some(executor) = &self.owned_executor else {
+            return false;
+        };
+        executor.handle().spawn_blocking(work);
+        true
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn probe_hold_lifecycle(&self) {
+        PROBE_LIFECYCLE_HELD.store(false, Ordering::Release);
+        PROBE_HOLD_LIFECYCLE.store(true, Ordering::Release);
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn probe_lifecycle_held(&self) -> bool {
+        PROBE_LIFECYCLE_HELD.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn probe_owned_executor_stopping(&self) -> bool {
+        self.owned_executor.as_ref().is_some_and(|executor| {
+            executor.wait_if_stopping(std::time::Duration::ZERO)
+                == Some(owned_executor::ExecutorStop::Pending)
+        })
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn probe_unfenced_executor_panic(&self) {
+        if let Some(executor) = &self.owned_executor {
+            executor.probe_unfenced_panic();
+        }
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn probe_owned_executor_admission(&self) -> bool {
+        self.owned_executor
+            .as_ref()
+            .is_some_and(|executor| executor.spawn(async {}).is_ok())
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn probe_unfenced_executor_panic_caught(&self) -> bool {
+        self.owned_executor
+            .as_ref()
+            .is_some_and(|executor| executor.probe_unfenced_caught())
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn probe_fail_owned_executor(&self) {
+        if let Some(executor) = &self.owned_executor {
+            executor.probe_panic();
+        }
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn probe_owned_executor_failed(&self) -> bool {
+        self.owned_executor.as_ref().is_some_and(|executor| {
+            executor.wait_if_stopping(std::time::Duration::ZERO)
+                == Some(owned_executor::ExecutorStop::Failed)
+        })
+    }
+
+    #[cfg(feature = "dev-tools")]
+    pub(crate) fn probe_owned_executor_stopped(&self) -> bool {
+        self.owned_executor.as_ref().is_some_and(|executor| {
+            executor.wait_if_stopping(std::time::Duration::ZERO)
+                == Some(owned_executor::ExecutorStop::Stopped)
+        })
+    }
+
     pub async fn lifecycle_state(&self) -> EngineState {
         *self.state.lock().await
     }
@@ -204,7 +358,10 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.lifecycle_requests.abandon_owner();
+        if self.retain_on_drop {
+            self.lifecycle_requests.abandon_owner();
+            self.orphan_retention.retain(self);
+        }
     }
 }
 

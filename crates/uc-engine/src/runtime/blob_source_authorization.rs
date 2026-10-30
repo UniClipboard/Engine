@@ -48,6 +48,7 @@ async fn start(root: &Path, server: &MockServer) -> (ProductionRuntime, EventStr
         events,
         Arc::clone(&progress.store),
         recovery,
+        None,
     )
     .await
     .unwrap();

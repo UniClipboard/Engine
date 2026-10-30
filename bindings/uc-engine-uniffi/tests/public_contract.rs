@@ -35,6 +35,764 @@ fn core_version_uses_the_binding_package_version() {
     assert_eq!(core_version(), format!("v{}", env!("CARGO_PKG_VERSION")));
 }
 
+#[cfg(feature = "test-process-release")]
+#[test]
+fn binding_test_loopback_keeps_endpoint_policy() {
+    use std::process::Command;
+    const CHILD: &str = "UC_TEST_BINDING_LOOPBACK_POLICY_CHILD";
+    const MARKER: &str = "UC_TEST_BINDING_OTLP_LOOPBACK";
+    if std::env::var_os(CHILD).is_none() {
+        for case in ["loopback-disabled", "nonloopback-denied"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "binding_test_loopback_keeps_endpoint_policy",
+                    "--nocapture",
+                ])
+                .env(CHILD, case)
+                .env("UC_TEST_BINDING_LOOPBACK_POLICY_ROOT", root.path());
+            if case == "nonloopback-denied" {
+                child.env(MARKER, "1");
+            } else {
+                child.env_remove(MARKER);
+            }
+            assert!(child.status().unwrap().success(), "{case}");
+        }
+        return;
+    }
+    let case = std::env::var(CHILD).unwrap();
+    let root = PathBuf::from(std::env::var_os("UC_TEST_BINDING_LOOPBACK_POLICY_ROOT").unwrap());
+    let address = if case == "loopback-disabled" {
+        "http://127.0.0.1:4318"
+    } else {
+        "http://192.0.2.1:4318"
+    };
+    let result = install_process_observability(
+        BindingObservabilityConfig {
+            service_version: "1.2.3".into(),
+            environment: BindingDeploymentEnvironment::Test,
+            app_channel: "test".into(),
+            remote_diagnostics_enabled: true,
+            collector: Some(BindingCollectorConfig {
+                trace_endpoint: format!("{address}/v1/traces"),
+                log_endpoint: format!("{address}/v1/logs"),
+                auth_header_name: None,
+                auth_header_value: None,
+            }),
+        },
+        Arc::new(MemoryHost::new(&root)),
+    );
+    assert!(matches!(
+        result,
+        Err(BindingError::ObservabilityConfigInvalid)
+    ));
+    assert!(matches!(
+        query_process_observability_health(),
+        Err(BindingError::ObservabilityNotInstalled)
+    ));
+    if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(Path::new(&directory).join(format!("binding-test-{case}.json")), serde_json::to_vec_pretty(&serde_json::json!({"scope":"actual binding endpoint validation with test feature", "case":case, "invalid_configuration":true, "process_not_installed":true, "native_device":"not established"})).unwrap()).unwrap();
+    }
+}
+
+#[cfg(feature = "test-process-release")]
+#[test]
+fn binding_process_release_waits_for_accepted_remote_span() {
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use prost::Message;
+    use std::process::Command;
+    use std::time::Duration;
+    use uc_engine::observability::diagnostics::{
+        complete_operation, operation_span, DiagnosticDomain, DiagnosticOperation, DiagnosticRole,
+        DiagnosticSpanKind, OperationCompletion, OperationContext,
+    };
+    use uc_engine_uniffi::{
+        probe_process_release, probe_process_release_report, probe_process_resume,
+    };
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+    const CHILD: &str = "UC_TEST_BINDING_REMOTE_RELEASE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "binding_process_release_waits_for_accepted_remote_span",
+                "--nocapture",
+            ])
+            .env(CHILD, root.path())
+            .env("UC_TEST_BINDING_OTLP_LOOPBACK", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let receiver = executor.block_on(async {
+        let receiver = MockServer::start().await;
+        for route in ["/v1/traces", "/v1/logs"] {
+            Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&receiver)
+                .await;
+        }
+        receiver
+    });
+    let root = PathBuf::from(std::env::var_os(CHILD).unwrap());
+    let host = Arc::new(MemoryHost::new(&root));
+    let setup = install_process_observability(
+        BindingObservabilityConfig {
+            service_version: "1.2.3".into(),
+            environment: BindingDeploymentEnvironment::Test,
+            app_channel: "test".into(),
+            remote_diagnostics_enabled: true,
+            collector: Some(BindingCollectorConfig {
+                trace_endpoint: format!("{}/v1/traces", receiver.uri()),
+                log_endpoint: format!("{}/v1/logs", receiver.uri()),
+                auth_header_name: None,
+                auth_header_value: None,
+            }),
+        },
+        host.clone(),
+    )
+    .unwrap();
+    assert_eq!(setup.remote, BindingObservabilitySetupStatus::Ready);
+    let engine = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".into(),
+            profile_id: "remote-release".into(),
+        },
+        host,
+    )
+    .unwrap();
+    assert_eq!(
+        flush_process_observability(10_000).unwrap().traces,
+        BindingObservabilitySignalResult::Completed
+    );
+    let count_spans = || {
+        executor
+            .block_on(receiver.received_requests())
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/v1/traces")
+            .flat_map(|request| {
+                ExportTraceServiceRequest::decode(request.body.as_slice())
+                    .unwrap()
+                    .resource_spans
+            })
+            .flat_map(|resource| resource.scope_spans)
+            .flat_map(|scope| scope.spans)
+            .filter(|span| span.name == "profile_storage_upgrade")
+            .count()
+    };
+    let before = count_spans();
+    let span = || {
+        operation_span(OperationContext {
+            domain: DiagnosticDomain::Storage,
+            operation: DiagnosticOperation::ProfileStorageUpgrade,
+            role: DiagnosticRole::Local,
+            kind: DiagnosticSpanKind::Internal,
+        })
+    };
+    let complete = || {
+        complete_operation(OperationCompletion::succeeded(
+            DiagnosticDomain::Storage,
+            DiagnosticOperation::ProfileStorageUpgrade,
+            DiagnosticRole::Local,
+            Duration::from_millis(1),
+        ))
+    };
+    let held = span();
+    {
+        let _entered = held.enter();
+        complete();
+    }
+    let pending = probe_process_release(0).unwrap();
+    assert_eq!(pending.0, "pending");
+    engine.shutdown(30_000).unwrap();
+    let waiting = probe_process_release(100).unwrap();
+    assert_eq!(waiting, pending);
+    let rejected = span();
+    {
+        let _entered = rejected.enter();
+        complete();
+    }
+    drop(rejected);
+    drop(held);
+    let released = probe_process_release(30_000).unwrap();
+    assert_eq!(released.0, "released");
+    assert_eq!(released.1, pending.1);
+    let after_release = count_spans();
+    assert_eq!(after_release, before + 1);
+    let resumed = probe_process_resume(30_000).unwrap();
+    assert_eq!(resumed.0, "resumed");
+    assert!(resumed.1 > released.1);
+    let next = span();
+    {
+        let _entered = next.enter();
+        complete();
+    }
+    drop(next);
+    assert_eq!(
+        flush_process_observability(10_000).unwrap().traces,
+        BindingObservabilitySignalResult::Completed
+    );
+    let after_resume = count_spans();
+    assert_eq!(after_resume, after_release + 1);
+    executor.block_on(async {
+        receiver.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/traces"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(3)))
+            .mount(&receiver)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/logs"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&receiver)
+            .await;
+    });
+    let delayed = span();
+    {
+        let _entered = delayed.enter();
+        complete();
+    }
+    drop(delayed);
+    let flush = std::thread::spawn(|| flush_process_observability(10_000).unwrap());
+    let limit = std::time::Instant::now() + Duration::from_secs(5);
+    while count_spans() == 0 && std::time::Instant::now() < limit {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(count_spans(), 1);
+    assert!(!flush.is_finished());
+    let blocked_release = probe_process_release(50).unwrap();
+    assert_eq!(blocked_release.0, "pending");
+    let flushed = flush.join().unwrap();
+    assert_eq!(flushed.traces, BindingObservabilitySignalResult::Completed);
+    let final_release = probe_process_release(30_000).unwrap();
+    assert_eq!(final_release.0, "released");
+    assert_eq!(final_release.1, blocked_release.1);
+    assert_eq!(count_spans(), 1);
+    executor.block_on(async {
+        receiver.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/traces"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&receiver)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/logs"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&receiver)
+            .await;
+    });
+    assert_eq!(probe_process_resume(30_000).unwrap().0, "resumed");
+    let rejected_export = span();
+    {
+        let _entered = rejected_export.enter();
+        complete();
+    }
+    let rejection_pending = probe_process_release_report(0).unwrap();
+    assert_eq!(rejection_pending.0, "pending");
+    drop(rejected_export);
+    let rejection_report = probe_process_release_report(30_000).unwrap();
+    assert_eq!(
+        rejection_report,
+        (
+            "released".to_owned(),
+            rejection_pending.1,
+            vec![],
+            vec!["TraceExport".to_owned()],
+            false
+        )
+    );
+    assert_eq!(count_spans(), 1);
+    if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(Path::new(&directory).join("binding-process-remote-span.json"), serde_json::to_vec_pretty(&serde_json::json!({"scope":"actual binding installation, real Engine, synthetic approved span, controlled loopback OTLP receiver", "pending_with_engine":pending, "pending_after_engine":waiting, "released":released, "synthetic_spans_before":before, "synthetic_spans_after_release":after_release, "fenced_span_rejected":true, "resumed":resumed, "synthetic_spans_after_resume":after_resume, "accepted_export_pending":true, "blocked_release":blocked_release, "final_release":final_release, "rejection_report":rejection_report, "rejected_span_requests":count_spans(), "production_collector":"not established", "native_device":"not established"})).unwrap()).unwrap();
+    }
+}
+
+#[cfg(all(feature = "test-process-release", target_os = "macos"))]
+#[test]
+fn binding_process_release_waits_for_two_engines_and_resumes() {
+    use std::process::Command;
+    use uc_engine_uniffi::{
+        configure_network_log, prepare_network_log_export, probe_fail_next_network_park,
+        probe_fenced_engine_attempts, probe_hold_process_terminal_gate, probe_network_park_entered,
+        probe_network_park_hold, probe_process_release, probe_process_release_report,
+        probe_process_resume, probe_process_retry_report, probe_retry_join_count,
+        release_process_observability, resume_process_observability,
+        retry_process_observability_release, BindingNetworkLogConfig, BindingNetworkProcessRole,
+        BindingProcessFailure, BindingProcessReleaseState, BindingProcessResumeState,
+    };
+    const CHILD: &str = "UC_TEST_BINDING_PROCESS_RELEASE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "binding_process_release_waits_for_two_engines_and_resumes",
+                "--nocapture",
+            ])
+            .env(CHILD, root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let root = PathBuf::from(std::env::var_os(CHILD).unwrap());
+    let host = Arc::new(MemoryHost::new(&root));
+    let second_host = Arc::new(MemoryHost::new(&root.join("second")));
+    configure_network_log(BindingNetworkLogConfig {
+        role: BindingNetworkProcessRole::MobileApp,
+        record_bytes: 1024,
+        queue_records: 32,
+        file_bytes: 8192,
+        run_bytes: 32768,
+        root_bytes: 131072,
+        retention_seconds: 60,
+    })
+    .unwrap();
+    let setup = install_process_observability(
+        BindingObservabilityConfig {
+            service_version: "1.2.3".into(),
+            environment: BindingDeploymentEnvironment::Test,
+            app_channel: "test".into(),
+            remote_diagnostics_enabled: false,
+            collector: None,
+        },
+        host.clone(),
+    )
+    .unwrap();
+    assert_eq!(setup.local_file, BindingObservabilitySetupStatus::Ready);
+    let first = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".into(),
+            profile_id: "process-first".into(),
+        },
+        host.clone(),
+    )
+    .unwrap();
+    let second = MobileEngine::start(
+        BindingConfig {
+            app_version: "1.2.3".into(),
+            profile_id: "process-second".into(),
+        },
+        second_host,
+    )
+    .unwrap();
+    let daily = uc_engine::observability::managed_log_files(&host.private_data.join("logs"))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let network =
+        PathBuf::from(prepare_network_log_export(5_000).unwrap().run_directory).join("lease.lock");
+    let lease_available = || {
+        let status = Command::new("python3").args(["-c", "import fcntl,sys\nf=open(sys.argv[1], 'r+')\ntry:\n fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n sys.exit(1)"]).arg(&network).status().unwrap();
+        assert!(matches!(status.code(), Some(0 | 1)));
+        status.success()
+    };
+    let descriptor_open = || {
+        let output = Command::new("lsof")
+            .args(["-n", "-P", "-F", "n", "-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let path = daily.canonicalize().unwrap();
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .any(|line| line.strip_prefix('n') == path.to_str())
+    };
+    assert!(descriptor_open());
+    assert!(!lease_available());
+    let first_wait = probe_process_release(0).unwrap();
+    assert_eq!(first_wait.0, "pending");
+    let pending_report = probe_process_release_report(0).unwrap();
+    assert_eq!(
+        pending_report,
+        ("pending".to_owned(), first_wait.1, vec![], vec![], false)
+    );
+    let (waiting_started, waiting_entered) = std::sync::mpsc::channel();
+    let long_waiter = std::thread::spawn(move || {
+        waiting_started.send(()).unwrap();
+        probe_process_release(30_000).unwrap()
+    });
+    waiting_entered
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let previous_attempts = probe_fenced_engine_attempts();
+    let later_host = Arc::new(MemoryHost::new(&root.join("later")));
+    let (starting, started) = std::sync::mpsc::channel();
+    let later_worker = std::thread::spawn(move || {
+        let result = MobileEngine::start(
+            BindingConfig {
+                app_version: "1.2.3".into(),
+                profile_id: "process-later".into(),
+            },
+            later_host,
+        );
+        let _ = starting.send(result);
+    });
+    let limit = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while probe_fenced_engine_attempts() == previous_attempts && std::time::Instant::now() < limit {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(probe_fenced_engine_attempts() > previous_attempts);
+    assert!(matches!(
+        started.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    first.shutdown(30_000).unwrap();
+    let second_wait = probe_process_release(50).unwrap();
+    assert_eq!(second_wait, first_wait);
+    assert!(!long_waiter.is_finished());
+    assert!(descriptor_open());
+    assert!(!lease_available());
+    second.shutdown(30_000).unwrap();
+    let released = probe_process_release(30_000).unwrap();
+    assert_eq!(released.0, "released");
+    assert_eq!(released.1, first_wait.1);
+    assert_eq!(long_waiter.join().unwrap(), released);
+    let released_report = probe_process_release_report(0).unwrap();
+    assert_eq!(
+        released_report,
+        ("released".to_owned(), released.1, vec![], vec![], false)
+    );
+    assert!(!descriptor_open());
+    assert!(lease_available());
+    assert!(matches!(
+        started.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    let _ = flush_process_observability(250).unwrap();
+    assert!(!descriptor_open());
+    assert!(lease_available());
+    let resumed = probe_process_resume(30_000).unwrap();
+    assert_eq!(resumed.0, "resumed");
+    assert!(resumed.1 > released.1);
+    assert!(descriptor_open());
+    assert!(!lease_available());
+    let later = started
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    later_worker.join().unwrap();
+    later.shutdown(30_000).unwrap();
+    let final_release = probe_process_release(30_000).unwrap();
+    assert_eq!(final_release.0, "released");
+    assert!(final_release.1 > resumed.1);
+    assert!(!descriptor_open());
+    assert!(lease_available());
+    let recovered = probe_process_resume(30_000).unwrap();
+    assert_eq!(recovered.0, "resumed");
+    assert!(!lease_available());
+    probe_fail_next_network_park().unwrap();
+    let failed_report = probe_process_release_report(30_000).unwrap();
+    assert_eq!(failed_report.0, "failed");
+    assert_eq!(failed_report.2, vec!["NetworkFile"]);
+    assert!(failed_report.4);
+    assert!(!lease_available());
+    probe_network_park_hold(true).unwrap();
+    let retry_pending = probe_process_retry_report(50).unwrap();
+    assert_eq!(retry_pending.0, "pending");
+    assert!(retry_pending.1 > failed_report.1);
+    assert_eq!(
+        (
+            retry_pending.2.clone(),
+            retry_pending.3.clone(),
+            retry_pending.4
+        ),
+        (vec![], vec![], false)
+    );
+    let limit = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !probe_network_park_entered().unwrap() && std::time::Instant::now() < limit {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(probe_network_park_entered().unwrap());
+    assert!(!lease_available());
+    let joined_before = probe_retry_join_count().unwrap();
+    let waiter = std::thread::spawn(|| probe_process_retry_report(30_000).unwrap());
+    let limit = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while probe_retry_join_count().unwrap() == joined_before && std::time::Instant::now() < limit {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(probe_retry_join_count().unwrap() > joined_before);
+    let queued_resume = probe_process_resume(0).unwrap();
+    assert_eq!(queued_resume.0, "pending");
+    assert!(queued_resume.1 > retry_pending.1);
+    probe_network_park_hold(false).unwrap();
+    let retry = waiter.join().unwrap();
+    assert_eq!(retry.0, "released");
+    assert_eq!(retry.1, retry_pending.1);
+    assert_eq!(retry.2, Vec::<String>::new());
+    assert_eq!(retry.3, vec!["NetworkFile"]);
+    assert!(!retry.4);
+    let resumed_after_retry = probe_process_resume(30_000).unwrap();
+    assert_eq!(resumed_after_retry, ("resumed".to_owned(), queued_resume.1));
+    assert!(!lease_available());
+    let retry_report = retry.clone();
+    let final_after_retry = probe_process_release_report(30_000).unwrap();
+    assert_eq!(final_after_retry.0, "released");
+    assert!(final_after_retry.1 > resumed_after_retry.1);
+    assert!(lease_available());
+    let active_again = resume_process_observability(30_000).unwrap();
+    assert_eq!(
+        active_again.report.state,
+        BindingProcessResumeState::Resumed
+    );
+    probe_network_park_hold(true).unwrap();
+    let old_release = release_process_observability(50).unwrap();
+    assert_eq!(
+        old_release.report.state,
+        BindingProcessReleaseState::Pending
+    );
+    let old_observation = old_release.observation.expect("accepted release");
+    let limit = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !probe_network_park_entered().unwrap() && std::time::Instant::now() < limit {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(probe_network_park_entered().unwrap());
+    let resume = resume_process_observability(0).unwrap();
+    let resume_before = resume.report;
+    assert_eq!(resume_before.state, BindingProcessResumeState::Pending);
+    let resume_observation = resume.observation.expect("accepted resume");
+    let newer_release = release_process_observability(0).unwrap();
+    assert_eq!(
+        newer_release.report.state,
+        BindingProcessReleaseState::Pending
+    );
+    assert!(
+        newer_release.report.generation > resume_before.generation
+            && resume_before.generation > old_release.report.generation
+    );
+    let newer_observation = newer_release.observation.expect("accepted newer release");
+    probe_network_park_hold(false).unwrap();
+    let resume_after = resume_observation.wait(30_000);
+    assert_eq!(
+        (resume_after.state, resume_after.generation),
+        (
+            BindingProcessResumeState::Superseded,
+            resume_before.generation
+        )
+    );
+    let newer_settled = newer_observation.wait(30_000);
+    assert_eq!(
+        (newer_settled.state, newer_settled.generation),
+        (
+            BindingProcessReleaseState::Released,
+            newer_release.report.generation
+        )
+    );
+    let repeated_resume = resume_observation.wait(0);
+    assert_eq!(
+        (repeated_resume.state, repeated_resume.generation),
+        (resume_after.state, resume_after.generation)
+    );
+    let old_settled = old_observation.wait(0);
+    assert_eq!(
+        (old_settled.state, old_settled.generation),
+        (
+            BindingProcessReleaseState::Released,
+            old_release.report.generation
+        )
+    );
+    assert!(lease_available());
+    let reopened = resume_process_observability(30_000).unwrap();
+    assert_eq!(reopened.report.state, BindingProcessResumeState::Resumed);
+    probe_fail_next_network_park().unwrap();
+    let public_failure = release_process_observability(30_000).unwrap();
+    assert_eq!(
+        public_failure.report.state,
+        BindingProcessReleaseState::Failed
+    );
+    assert_eq!(
+        public_failure.report.cleanup_errors,
+        vec![BindingProcessFailure::NetworkFile]
+    );
+    assert!(public_failure.report.explicit_retry_supported);
+    assert!(!lease_available());
+    let public_retry = retry_process_observability_release(30_000).unwrap();
+    assert_eq!(
+        public_retry.report.state,
+        BindingProcessReleaseState::Released
+    );
+    assert!(public_retry.report.generation > public_failure.report.generation);
+    assert_eq!(
+        public_retry.report.operation_errors,
+        vec![BindingProcessFailure::NetworkFile]
+    );
+    assert!(public_retry.report.cleanup_errors.is_empty());
+    assert!(lease_available());
+    let failed_observation = public_failure
+        .observation
+        .expect("failed attempt observation");
+    let old_failed = failed_observation.wait(0);
+    assert_eq!(
+        (old_failed.state, old_failed.generation),
+        (
+            BindingProcessReleaseState::Failed,
+            public_failure.report.generation
+        )
+    );
+    assert!(!old_failed.explicit_retry_supported);
+    let reopened = resume_process_observability(30_000).unwrap();
+    assert_eq!(reopened.report.state, BindingProcessResumeState::Resumed);
+    let (entered, waiting) = std::sync::mpsc::channel();
+    let (unlock, blocked) = std::sync::mpsc::channel();
+    let gate =
+        std::thread::spawn(move || probe_hold_process_terminal_gate(entered, blocked).unwrap());
+    waiting
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let deadline_error = BindingError::Engine {
+        code: 1002,
+        category: BindingErrorCategory::DeadlineExceeded,
+        retryable: true,
+    };
+    let (sent, returned) = std::sync::mpsc::channel();
+    let mut callers = Vec::new();
+    for action in ["release", "retry", "resume"] {
+        let sent = sent.clone();
+        callers.push(std::thread::spawn(move || {
+            let result = match action {
+                "release" => release_process_observability(40).map(|_| ()),
+                "retry" => retry_process_observability_release(40).map(|_| ()),
+                _ => resume_process_observability(40).map(|_| ()),
+            };
+            let _ = sent.send((action, result));
+        }));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut early = Vec::new();
+    while early.len() < 3 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match returned.recv_timeout(remaining) {
+            Ok(result) => early.push(result),
+            Err(_) => break,
+        }
+    }
+    let returned_in_time = early.len() == 3;
+    let release_rejected = early.iter().any(|(action, result)| {
+        *action == "release" && result.as_ref().err() == Some(&deadline_error)
+    });
+    let retry_rejected = early.iter().any(|(action, result)| {
+        *action == "retry" && result.as_ref().err() == Some(&deadline_error)
+    });
+    let resume_rejected = early.iter().any(|(action, result)| {
+        *action == "resume" && result.as_ref().err() == Some(&deadline_error)
+    });
+    let lease_held = !lease_available();
+    unlock.send(()).unwrap();
+    gate.join().unwrap();
+    for caller in callers {
+        caller.join().unwrap();
+    }
+    assert!(
+        release_rejected && retry_rejected && resume_rejected && returned_in_time && lease_held
+    );
+    let final_public_release = release_process_observability(30_000).unwrap();
+    assert_eq!(
+        final_public_release.report.state,
+        BindingProcessReleaseState::Released
+    );
+    assert!(lease_available());
+    if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(Path::new(&directory).join("binding-process-release.json"), serde_json::to_vec_pretty(&serde_json::json!({"scope":"actual binding process install, three Engines, real daily log descriptor and network lease", "first_wait":first_wait, "pending_report":pending_report, "second_wait":second_wait, "independent_waiters_same_release":true, "fenced_engine_waited":true, "released":released, "released_report":released_report, "failed_report":failed_report, "retry_pending":retry_pending, "queued_resume":queued_resume, "retry_report":retry_report, "resumed_after_retry":resumed_after_retry, "final_after_retry":final_after_retry, "old_release":format!("{:?}",old_release.report), "resume_before":format!("{resume_before:?}"), "resume_after":format!("{resume_after:?}"), "newer_release":format!("{:?}",newer_release.report), "newer_settled":format!("{newer_settled:?}"), "formal_binding_interface":true, "admission_deadline_errors":release_rejected && retry_rejected && resume_rejected, "admission_returned_in_time":returned_in_time, "final_public_release":format!("{:?}",final_public_release.report), "public_failure":format!("{:?}",public_failure.report), "public_retry":format!("{:?}",public_retry.report), "old_failed":format!("{old_failed:?}"), "daily_and_lease_closed":true, "late_flush_kept_closed":true, "resumed":resumed, "waiting_engine_admitted_after_resume":true, "daily_and_lease_reopened":true, "final_release":final_release, "final_daily_and_lease_closed":true, "remote_collector":"not configured", "native_device":"not established"})).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn process_release_public_contract_without_test_features() {
+    use std::process::Command;
+    use uc_engine_uniffi::{
+        release_process_observability, resume_process_observability, BindingProcessReleaseState,
+        BindingProcessResumeState,
+    };
+    const CHILD: &str = "UC_PUBLIC_PROCESS_RELEASE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "process_release_public_contract_without_test_features",
+                "--nocapture",
+            ])
+            .env(CHILD, root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let root = PathBuf::from(std::env::var_os(CHILD).unwrap());
+    let host = Arc::new(MemoryHost::new(&root));
+    install_process_observability(
+        BindingObservabilityConfig {
+            service_version: "1.2.3".to_owned(),
+            environment: BindingDeploymentEnvironment::Test,
+            app_channel: "test".to_owned(),
+            remote_diagnostics_enabled: false,
+            collector: None,
+        },
+        host.clone(),
+    )
+    .unwrap();
+    let startup = uc_engine_uniffi::MobileStartupLifecycle::new();
+    let startup_before = startup.wait_release(0);
+    let engine = MobileEngine::start_with_lifecycle(
+        BindingConfig {
+            app_version: "1.2.3".to_owned(),
+            profile_id: "public-process".to_owned(),
+        },
+        host,
+        startup.clone(),
+    )
+    .unwrap();
+    let startup_delivered = startup.wait_release(30_000);
+    assert_eq!(
+        startup_delivered.state,
+        uc_engine_uniffi::BindingStartupReleaseState::Delivered
+    );
+    assert_eq!(startup_delivered.attempt_id, startup_before.attempt_id);
+    let release = release_process_observability(20).unwrap();
+    assert_eq!(release.report.state, BindingProcessReleaseState::Pending);
+    let observation = release.observation.expect("accepted release");
+    engine.shutdown(30_000).unwrap();
+    let released = observation.wait(30_000);
+    assert_eq!(released.state, BindingProcessReleaseState::Released);
+    assert_eq!(released.generation, release.report.generation);
+    let resume = resume_process_observability(30_000).unwrap();
+    assert_eq!(resume.report.state, BindingProcessResumeState::Resumed);
+    assert!(resume.report.generation > released.generation);
+    let final_release = release_process_observability(30_000).unwrap();
+    assert_eq!(
+        final_release.report.state,
+        BindingProcessReleaseState::Released
+    );
+    assert!(final_release.report.generation > resume.report.generation);
+    if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(Path::new(&directory).join("binding-public-process-production.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({"scope":"production binding, actual Engine and process observability", "startup_before":format!("{startup_before:?}"), "startup_delivered":format!("{startup_delivered:?}"), "initial":format!("{:?}", release.report), "released":format!("{released:?}"), "resume":format!("{:?}",resume.report), "final_release":format!("{:?}",final_release.report), "fault_injection":"none", "device_acceptance":"not established"})).unwrap()).unwrap();
+    }
+}
+
 #[test]
 fn process_observability_is_host_owned_reused_and_lifecycle_safe() {
     let _guard = lock(&ENGINE_TEST_LOCK);
@@ -197,6 +955,7 @@ struct MemoryHost {
     clipboard_writes: Mutex<Vec<BindingClipboardSnapshot>>,
     finished_files: Mutex<Vec<String>>,
     secure_read_gate: Mutex<Option<lifecycle_targets::ReadGate>>,
+    startup_probe_lease: Mutex<Option<std::fs::File>>,
 }
 
 struct TestFile {
@@ -219,6 +978,7 @@ impl MemoryHost {
             clipboard_writes: Mutex::new(Vec::new()),
             finished_files: Mutex::new(Vec::new()),
             secure_read_gate: Mutex::new(None),
+            startup_probe_lease: Mutex::new(None),
         }
     }
 

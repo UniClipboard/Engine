@@ -27,12 +27,14 @@ pub use uc_observability_runtime::{
     NetworkCaptureStatus, NetworkLibraryStatus, NetworkLogBudget, NetworkLogConfig,
     NetworkLogCounters, NetworkLogError, NetworkLogExportReport, NetworkLogFile, NetworkLogState,
     NetworkLogStatus, NetworkProcessRole, ObservabilityConfig, ObservabilityHealth,
-    ObservabilityResource, OperatingSystem, OtlpHttpConfig, ProcessObservabilityHandle,
-    ProcessObservabilityRuntime, RemoteSetupFailure as ObservabilityRemoteSetupFailure,
-    SecretHeaderValue, SetupStatus as ObservabilitySetupStatus,
-    ShutdownSummary as ObservabilityShutdownSummary, SignalResult as ObservabilitySignalResult,
-    SourceCapability, SourceCollection, SourceCoverage, StopCaptureResult, LOCAL_LOG_MAX_BYTES,
-    LOCAL_LOG_RETENTION_DAYS, NETWORK_LOG_SCHEMA_VERSION,
+    ObservabilityResource, OperatingSystem, OtlpHttpConfig, ProcessAdmissionError,
+    ProcessFailureKind, ProcessObservabilityHandle, ProcessObservabilityRuntime,
+    ProcessReleaseObservation, ProcessReleaseReport, ProcessReleaseResult,
+    ProcessResumeObservation, ProcessResumeResult,
+    RemoteSetupFailure as ObservabilityRemoteSetupFailure, SecretHeaderValue,
+    SetupStatus as ObservabilitySetupStatus, ShutdownSummary as ObservabilityShutdownSummary,
+    SignalResult as ObservabilitySignalResult, SourceCapability, SourceCollection, SourceCoverage,
+    StopCaptureResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS, NETWORK_LOG_SCHEMA_VERSION,
 };
 
 /// 产品使用的全部 ALPN，用于登记独立网络日志允许输出的协议取值（见 `NetworkLogConfig::with_known_alpns`）。

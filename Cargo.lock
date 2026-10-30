@@ -7301,6 +7301,8 @@ dependencies = [
  "jni 0.21.1",
  "libc",
  "ndk-context",
+ "opentelemetry-proto",
+ "prost",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -7309,6 +7311,7 @@ dependencies = [
  "uc-engine",
  "uniffi",
  "uuid",
+ "wiremock",
  "zeroize",
 ]
 
@@ -7718,6 +7721,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-android",
+ "tracing-core",
  "tracing-log",
  "tracing-opentelemetry",
  "tracing-oslog",
