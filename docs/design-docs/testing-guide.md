@@ -205,6 +205,22 @@ a01/rc.1 与 a02/rc.6 不支持时必须明确拒绝 `auto_sync_enabled`，不�
 4. 先保留原 `cargo test` 入口并双轨运行，不直接删除旧门禁。
 5. 在 PR workflow 的 evidence 入口增加测试时，同步上传其 JSON/摘要目录。
 
+### 双1GiB资源基线仅在开发者本机运行
+
+`managed_engine_two_one_gib_files_stream_with_bounded_memory_and_settle_fd_and_tasks` 标记为
+`#[ignore]`。按用户确认的验收范围，工作区、覆盖率和默认CI生命周期分组都不运行该用例；
+CI仍强制执行其余8项生命周期、下载配额与容量场景，报告中大文件项明确记为 `skipped`，不读取旧的大文件报告。
+
+在支持 `/proc` 资源采样的Linux开发机上显式运行完整资源验收：
+
+```bash
+bash scripts/testing/run-blob-lifecycle-resources.sh --include-local-large
+```
+
+此入口额外运行原双1GiB用例并严格校验其报告；CI环境拒绝该选项。原两轮真实传输、逐块内容读回、
+SDK tag／原生连接、FD／线程／任务和内存阈值均保留。默认不传选项仍是CI的8项入口。
+主线覆盖率运行曾在第二轮任务数增长断言失败，按原记录保留；移出CI只调整验收场所，不把该失败改记为通过。
+
 ## 7. 查看和复现失败
 
 nextest 的 JUnit 位于：

@@ -2,8 +2,8 @@
 """校验原生生命周期原始报告，独立重放同一 CI 验收入口。"""
 from collections import Counter
 from pathlib import Path
+import argparse
 import json
-import sys
 
 PREFIX = "testing::host_adapter_contract::receive_retry::"
 EXPECTED_CASE_COUNTS = {
@@ -70,15 +70,22 @@ def verify_large_report(large):
     assert closed[0]>initial[0] and closed[1]==initial[1], 'actual progress native handles must return to baseline'
 
 
-def main():
-    root=Path(sys.argv[1])
+def main(argv=None):
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('root',type=Path)
+    parser.add_argument('--include-local-large',action='store_true',help='显式校验开发者本机双1GiB报告；缺失或不合格时失败')
+    args=parser.parse_args(argv)
+    root=args.root
     reports=[json.loads(path.read_text()) for path in root.glob('receive-lifecycle-*.json')]
     verify_lifecycle_reports(reports)
     tags=[json.loads(path.read_text()) for path in root.glob('sdk-tags-*.json')]
     assert len(tags)>=12, 'SDK store shutdown observations missing'
     assert all(report['store_open_during_count'] and report['sdk_temp_tags']==0 for report in tags)
-    large=json.loads((root/'managed-engine-large.json').read_text())
-    verify_large_report(large)
+    # CI默认不读取大文件报告；旧文件也不能被冒认为本轮运行成功。
+    large=None
+    if args.include_local_large:
+        large=json.loads((root/'managed-engine-large.json').read_text())
+        verify_large_report(large)
     schedulers=[]
     for path in root.glob('download-scheduler-*.jsonl'):
      records=[json.loads(line) for line in path.read_text().splitlines()]
@@ -95,8 +102,11 @@ def main():
      'fd_threads_and_runtime_tasks_verified':True,'download_quota_counters_verified':True,
      'sdk_tags_and_native_connection_counts_directly_observed':True,
      'sdk_store_tag_observations':tags,'large_file_engine':large,
+     'large_file_engine_status':'passed' if args.include_local_large else 'skipped',
+     'large_file_engine_skip_reason':None if args.include_local_large else 'developer-local-only',
      'download_schedulers':schedulers,'cases':reports},indent=2)+'\n')
-    print(f'{len(EXPECTED_CASE_COUNTS)} native lifecycle scenarios and two 1GiB files: kernel resources, SDK tags and native handles, and download quotas passed')
+    print(f'{len(EXPECTED_CASE_COUNTS)} native lifecycle scenarios: kernel resources, SDK tags and native handles, and download quotas passed')
+    print('developer-only two 1GiB files: '+('passed' if args.include_local_large else 'skipped'))
 
 
 if __name__ == "__main__":

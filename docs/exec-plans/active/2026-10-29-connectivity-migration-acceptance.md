@@ -112,7 +112,7 @@ D15已由[后续处理计划](../completed/2026-10-30-issue-34-followups.md)补�
 | 本地成功／远端保存／系统写入分别结算 | 第七、八片真实输出、接收权威、ACK 与 Collector／Jaeger；发送 ACK 不表示系统剪贴板写入成功 |
 | 重启、积压和事务边界 | 第三、四、七、九片真实 SQLite／MLS、强杀与幂等；第二 backend 的虚拟时间不能代替网络及持久证明 |
 | 设备网络运行期与 Space 会话 | 原 generation／迟到结果／切 Space／关闭测试；#68 的完整 endpoint 生命周期仍按其所属计划独立验收，不因 #34 切片完成自动关闭 |
-| 有界资源与关闭 | 两轮各 1GiB、SDK worker／tag／staging、连接／任务／FD；第九片跨进程容量不执行 MLS，不能外推全部真实恢复压力 |
+| 有界资源与关闭 | 双Engine两轮各1GiB资源基线按用户要求仅开发者本机显式运行；CI保留其余生命周期、SDK tag／连接／任务／FD、配额与容量验收，详见[测试指南](../../design-docs/testing-guide.md#双1gib资源基线仅在开发者本机运行)。第九片跨进程容量不执行MLS，不能外推全部真实恢复压力 |
 | 平台 | 原 CI 按实际 macOS／Windows／iOS／Android／HarmonyOS 编译步骤结算；编译成功不代表设备运行 |
 
 ## 首次失败与未完成清单
