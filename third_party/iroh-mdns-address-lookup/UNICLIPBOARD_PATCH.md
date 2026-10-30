@@ -14,7 +14,7 @@
 - 不通告 IPv6 link-local 地址（fe80::/10）。AAAA 记录无法携带 scope id，对端收到这类地址时不知道经哪个接口到达，无法拨号。iroh 本身不把 IPv6 link-local 列为本机直连地址，此过滤保证即使发布数据中出现这类地址也不会写进记录；其他 IPv4 与 IPv6 地址照常通告。
 - 长期actor的span显式无parent；启动acto发现服务时不捕获短期调用span，防止延长启动计时或在跨subscriber的取消析构中释放错误parent。实际发现轮询和网络诊断仍正常运行。
 
-独立单元测试保留 `rand`、`rand_chacha` 与 Tokio 测试依赖，不安装原始 tracing 测试订阅器，避免把第三方原始地址诊断写入测试日志。独立运行生成的锁文件与构建目录不纳入版本管理，与 `swarm-discovery` 一致。
+独立单元测试保留 `rand`、`rand_chacha` 与 Tokio 测试依赖，并仅为测试启用 iroh 的 `tls-ring`（文档示例的 `presets::Minimal` 需要 TLS 后端），不安装原始 tracing 测试订阅器，避免把第三方原始地址诊断写入测试日志。独立运行生成的锁文件与构建目录不纳入版本管理，与 `swarm-discovery` 一致。
 
 这些行为由 Engine 的 `mdns_discovery_contract` 验证；目录自身用有限 TTL 处理丢失的订阅事件。
 
