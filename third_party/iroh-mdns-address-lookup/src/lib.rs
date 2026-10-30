@@ -751,13 +751,11 @@ mod tests {
         use iroh_base::{SecretKey, TransportAddr};
         use n0_error::{AnyError as Error, Result, StdResultExt, bail_any};
         use n0_future::StreamExt;
-        use n0_tracing_test::traced_test;
         use rand::{CryptoRng, RngExt, SeedableRng};
 
         use super::super::*;
 
         #[tokio::test]
-        #[traced_test]
         async fn mdns_publish_resolve() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
@@ -822,7 +820,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn mdns_publish_expire() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
             let (_, address_lookup_a) = make_address_lookup(&mut rng, false)?;
@@ -879,7 +876,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn mdns_subscribe() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
@@ -928,7 +924,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn non_advertising_endpoint_not_discovered() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
@@ -962,7 +957,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn test_service_names() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
@@ -1022,7 +1016,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn mdns_publish_relay_url() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
