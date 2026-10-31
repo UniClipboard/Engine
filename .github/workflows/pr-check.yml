@@ -322,7 +322,7 @@ jobs:
     # 仅将整组CI预算调整为120分钟，保留各测试原期限、负载、资源阈值和零重试。
     timeout-minutes: 120
     env:
-      # 所有测试组共用同一次全工作区构建，只编译一次。
+      # 普通测试组复用全工作区构建；特殊故障注入特性在最后单独构建。
       UC_TEST_BUILD_SCOPE: workspace
       UC_TEST_ARTIFACTS_DIR: target/test-artifacts/ci
     steps:
@@ -371,18 +371,6 @@ jobs:
           name: engine-workspace-failure
           path: target/test-reports/workspace.xml
           if-no-files-found: ignore
-
-      - name: Run branch recovery process and checkpoint tests
-        if: success() || failure()
-        id: branch_recovery_process
-        run: |
-          rm -f target/nextest/ci/junit.xml
-          cargo nextest run --profile ci --locked -p uc-connectivity-host \
-            --features branch-recovery-fault-tests,uc-engine/branch-recovery-fault-tests --test branch_recovery
-
-      - name: Keep branch recovery process report
-        if: always() && (steps.branch_recovery_process.outcome == 'success' || steps.branch_recovery_process.outcome == 'failure')
-        run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/branch-recovery-process.xml || true
 
       - name: Install just for current-authority registration proof
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532
@@ -447,6 +435,20 @@ jobs:
         run: >-
           bash scripts/testing/run-connection-recovery-e2e.sh
           --suite network --mode direct --repeat 1 --case E02 --prebuilt
+
+      # 普通工作区构建消费者全部结束后再启用故障注入，避免切回默认特性时重复编译。
+      # 保留 success() || failure()：前面的测试失败仍执行恢复组，恢复失败仍阻断 job。
+      - name: Run branch recovery process and checkpoint tests
+        if: success() || failure()
+        id: branch_recovery_process
+        run: |
+          rm -f target/nextest/ci/junit.xml
+          cargo nextest run --profile ci --locked -p uc-connectivity-host \
+            --features branch-recovery-fault-tests,uc-engine/branch-recovery-fault-tests --test branch_recovery
+
+      - name: Keep branch recovery process report
+        if: always() && (steps.branch_recovery_process.outcome == 'success' || steps.branch_recovery_process.outcome == 'failure')
+        run: mkdir -p target/test-reports && cp target/nextest/ci/junit.xml target/test-reports/branch-recovery-process.xml || true
 
       - name: Retain test evidence
         if: always()
