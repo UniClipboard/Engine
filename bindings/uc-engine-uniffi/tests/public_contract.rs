@@ -955,6 +955,9 @@ struct MemoryHost {
     clipboard_writes: Mutex<Vec<BindingClipboardSnapshot>>,
     finished_files: Mutex<Vec<String>>,
     secure_read_gate: Mutex<Option<lifecycle_targets::ReadGate>>,
+    // 租约只留给 macOS 执行器用例和 test-binding-worker-panic，Windows 默认检查看不到这个字段。
+    #[cfg(all(test, any(target_os = "macos", feature = "test-binding-worker-panic")))]
+    startup_probe_lease: Mutex<Option<std::fs::File>>,
 }
 
 struct TestFile {
@@ -978,6 +981,8 @@ impl MemoryHost {
             clipboard_writes: Mutex::new(Vec::new()),
             finished_files: Mutex::new(Vec::new()),
             secure_read_gate: Mutex::new(None),
+            #[cfg(all(test, any(target_os = "macos", feature = "test-binding-worker-panic")))]
+            startup_probe_lease: Mutex::new(None),
         }
     }
 
