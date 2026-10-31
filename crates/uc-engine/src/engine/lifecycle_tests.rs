@@ -171,11 +171,21 @@ async fn cancelled_resume_waiter_does_not_leave_a_running_runtime_marked_suspend
 
 #[tokio::test]
 async fn queued_suspend_survives_waiter_and_engine_destruction() {
+    struct QueueOwner(Engine);
+
+    impl Drop for QueueOwner {
+        fn drop(&mut self) {
+            self.0.lifecycle_requests.abandon_owner();
+        }
+    }
+
     let runtime = Arc::new(HeldRuntime::default());
     let resource = Arc::clone(&runtime.resource);
     let (engine, mut events) = Engine::from_runtime(Arc::clone(&runtime), 16);
-    let gate = Arc::clone(&engine.lifecycle_gate).lock_owned().await;
-    let mut request = Box::pin(engine.suspend());
+    let engine = QueueOwner(engine);
+    let queue = Arc::downgrade(&engine.0.lifecycle_requests);
+    let gate = Arc::clone(&engine.0.lifecycle_gate).lock_owned().await;
+    let mut request = Box::pin(engine.0.suspend());
     poll_fn(|context| {
         assert!(request.as_mut().poll(context).is_pending());
         Poll::Ready(())
@@ -187,6 +197,13 @@ async fn queued_suspend_survives_waiter_and_engine_destruction() {
     assert_eq!(Arc::strong_count(&resource), 2);
     drop(gate);
     wait_state(&mut events, EngineState::Suspended).await;
+    timeout(Duration::from_secs(2), async {
+        while queue.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(Arc::strong_count(&resource), 1);
 }
 
