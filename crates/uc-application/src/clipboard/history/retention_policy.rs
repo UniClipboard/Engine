@@ -456,4 +456,142 @@ mod tests {
         );
         assert!(victims.is_empty());
     }
+
+    struct RecordingReclaim {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::clipboard::history::blob_reclaim::BlobReclaimPort for RecordingReclaim {
+        async fn reclaim_unreferenced(
+            &self,
+            blob_ids: &[uc_core::BlobId],
+        ) -> Result<
+            crate::clipboard::history::blob_reclaim::BlobReclaimReport,
+            crate::clipboard::history::blob_reclaim::BlobReclaimError,
+        > {
+            self.seen
+                .lock()
+                .unwrap()
+                .extend(blob_ids.iter().map(|blob_id| blob_id.to_string()));
+            Ok(Default::default())
+        }
+
+        fn release_write_leases(&self, _: &[uc_core::BlobId]) {}
+    }
+
+    struct RetentionStore;
+
+    #[async_trait::async_trait]
+    impl SettingsPort for RetentionStore {
+        async fn load(&self) -> Result<uc_core::settings::model::Settings> {
+            let mut settings = uc_core::settings::model::Settings::default();
+            settings.retention_policy.enabled = true;
+            settings.retention_policy.skip_pinned = false;
+            settings.retention_policy.rules = vec![RetentionRule::ByAge {
+                max_age: Duration::from_secs(1),
+            }];
+            Ok(settings)
+        }
+
+        async fn save(&self, _: &uc_core::settings::model::Settings) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ListClipboardEntriesPort for RetentionStore {
+        async fn list_entries(
+            &self,
+            _: usize,
+            offset: usize,
+        ) -> Result<Vec<ClipboardEntry>, uc_core::clipboard::ClipboardRepositoryError> {
+            if offset == 0 {
+                Ok(vec![ClipboardEntry::new(
+                    EntryId::from("old"),
+                    uc_core::ids::EventId::from("ev-old"),
+                    0,
+                    1,
+                )])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::ports::clipboard::GetClipboardEntryPort for RetentionStore {
+        async fn get_entry(
+            &self,
+            _: &EntryId,
+        ) -> Result<Option<ClipboardEntry>, uc_core::clipboard::ClipboardRepositoryError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::ports::clipboard::ListRepresentationsForEventPort for RetentionStore {
+        async fn get_representations_for_event(
+            &self,
+            _: &uc_core::ids::EventId,
+        ) -> Result<
+            Vec<uc_core::clipboard::PersistedClipboardRepresentation>,
+            uc_core::clipboard::ClipboardRepositoryError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::ports::clipboard::DeleteClipboardEntryWithReceiveStatePort for RetentionStore {
+        async fn delete_entry_with_receive_state(
+            &self,
+            _: &EntryId,
+        ) -> Result<
+            uc_core::ports::clipboard::ClipboardEntryRemoval,
+            uc_core::clipboard::ClipboardRepositoryError,
+        > {
+            Ok(uc_core::ports::clipboard::ClipboardEntryRemoval {
+                removed: true,
+                candidate_blob_ids: vec![uc_core::BlobId::from("blob-retention")],
+            })
+        }
+    }
+
+    struct ZeroClock;
+    impl crate::connectivity::ElapsedClockPort for ZeroClock {
+        fn elapsed(&self) -> Result<std::time::Duration, crate::connectivity::ElapsedClockError> {
+            Ok(Duration::ZERO)
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_reclaims_the_blob_of_an_evicted_entry() {
+        use crate::clipboard::history::delete_entry::DeleteClipboardEntryUseCase;
+        use crate::transfer::progress::ProgressProjectionRegistry;
+        use crate::transfer::receive::work::ReceiveWorkRegistry;
+
+        let reclaim = Arc::new(RecordingReclaim {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let work = Arc::new(ReceiveWorkRegistry::default());
+        let (progress, _worker) = ProgressProjectionRegistry::new(Arc::new(ZeroClock));
+        let store = Arc::new(RetentionStore);
+        let delete_uc = Arc::new(DeleteClipboardEntryUseCase::from_ports(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            work,
+            progress,
+            reclaim.clone(),
+        ));
+        let usecase = EnforceRetentionPolicyUseCase::new(store.clone(), store, delete_uc);
+        let result = usecase.execute().await.unwrap();
+        assert_eq!(result.entries_deleted, 1);
+        assert_eq!(result.errors, 0);
+        assert_eq!(
+            reclaim.seen.lock().unwrap().as_slice(),
+            ["blob-retention".to_string()]
+        );
+    }
 }

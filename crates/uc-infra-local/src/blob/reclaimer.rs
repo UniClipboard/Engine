@@ -1,6 +1,7 @@
-//! 先删除无引用的 blob 行并提交，再删除文件。
+//! 先删除无引用且已过认领宽限的 blob 行并提交，再删除文件。
 //!
-//! 文件删除失败只记警告，不把行插回去。留下的文件由后续扫描重试。
+//! 文件删除失败只记警告，不把行插回去。留下的文件由 PR2（WF-engine-39 GC sweep）重试。
+//! 仍在宽限内的无引用 blob 记入 `skipped_recently_claimed`，同样留给那次扫描。
 //! 文件已经不在则视为成功，计入 `missing_files`。
 
 use std::collections::BTreeSet;
@@ -8,38 +9,48 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use uc_application::deps::{BlobReclaimError, BlobReclaimPort, BlobReclaimReport};
+use uc_core::ports::ClockPort;
 use uc_core::BlobId;
 use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_warn};
 
-use super::lease::BlobLeaseRegistry;
+use super::lease::{BlobLeaseRegistry, BLOB_RECLAIM_CLAIM_GRACE};
 use super::store_port::BlobFileRemoval;
 use super::{BlobRepositoryPort, BlobStorePort, UnreferencedBlobDeletion};
 
-pub struct BlobReclaimer<S, R> {
+pub struct BlobReclaimer<S, R, C> {
     store: S,
     repository: R,
     leases: Arc<BlobLeaseRegistry>,
+    clock: C,
 }
 
-impl<S, R> BlobReclaimer<S, R>
+impl<S, R, C> BlobReclaimer<S, R, C>
 where
     S: BlobStorePort,
     R: BlobRepositoryPort,
+    C: ClockPort,
 {
-    pub fn new(store: S, repository: R, leases: Arc<BlobLeaseRegistry>) -> Self {
+    pub fn new(store: S, repository: R, leases: Arc<BlobLeaseRegistry>, clock: C) -> Self {
         Self {
             store,
             repository,
             leases,
+            clock,
         }
     }
 }
 
+fn claimed_before_ms(now_ms: i64) -> i64 {
+    let grace_ms = i64::try_from(BLOB_RECLAIM_CLAIM_GRACE.as_millis()).unwrap_or(i64::MAX);
+    now_ms.saturating_sub(grace_ms)
+}
+
 #[async_trait]
-impl<S, R> BlobReclaimPort for BlobReclaimer<S, R>
+impl<S, R, C> BlobReclaimPort for BlobReclaimer<S, R, C>
 where
     S: BlobStorePort,
     R: BlobRepositoryPort,
+    C: ClockPort,
 {
     async fn reclaim_unreferenced(
         &self,
@@ -47,6 +58,7 @@ where
     ) -> Result<BlobReclaimReport, BlobReclaimError> {
         let mut report = BlobReclaimReport::default();
         let mut seen = BTreeSet::new();
+        let claimed_before_ms = claimed_before_ms(self.clock.now_ms());
         for blob_id in blob_ids {
             if !seen.insert(blob_id.inner().clone()) {
                 continue;
@@ -56,8 +68,16 @@ where
             if self.leases.holds(blob_id) {
                 continue;
             }
-            match self.repository.delete_if_unreferenced(blob_id).await {
+            match self
+                .repository
+                .delete_if_unreferenced(blob_id, claimed_before_ms)
+                .await
+            {
                 Ok(UnreferencedBlobDeletion::Retained) => {}
+                Ok(UnreferencedBlobDeletion::RecentlyClaimed) => {
+                    report.skipped_recently_claimed =
+                        report.skipped_recently_claimed.saturating_add(1);
+                }
                 Ok(UnreferencedBlobDeletion::Deleted { bytes_on_disk }) => {
                     report.rows_deleted = report.rows_deleted.saturating_add(1);
                     match self.store.remove_stored_file(blob_id).await {
@@ -74,7 +94,7 @@ where
                                 error_kind = "blob_file_remove",
                                 io_error_kind = io_error_kind(error.as_ref()),
                                 blob_id = log_id(blob_id),
-                                "unreferenced blob row was deleted but its file remains for a later sweep"
+                                "unreferenced blob row was deleted but its file remains for PR2 (WF-engine-39 GC sweep)"
                             );
                         }
                     }
@@ -137,6 +157,7 @@ mod tests {
         async fn delete_if_unreferenced(
             &self,
             _: &BlobId,
+            _: i64,
         ) -> anyhow::Result<UnreferencedBlobDeletion> {
             self.events.lock().expect("events").push("row");
             Ok(self.deleted)
@@ -171,11 +192,18 @@ mod tests {
         }
     }
 
+    struct FixedClock(i64);
+    impl uc_core::ports::ClockPort for FixedClock {
+        fn now_ms(&self) -> i64 {
+            self.0
+        }
+    }
+
     fn reclaimer(
         deleted: UnreferencedBlobDeletion,
         removal: Result<BlobFileRemoval, &'static str>,
     ) -> (
-        BlobReclaimer<Store, Repo>,
+        BlobReclaimer<Store, Repo, FixedClock>,
         Arc<Mutex<Vec<&'static str>>>,
         Arc<BlobLeaseRegistry>,
     ) {
@@ -191,6 +219,7 @@ mod tests {
                 deleted,
             },
             Arc::clone(&leases),
+            FixedClock(0),
         );
         (reclaimer, events, leases)
     }
@@ -241,5 +270,22 @@ mod tests {
         assert_eq!(report.missing_files, 1);
         assert_eq!(report.failures, 0);
         assert_eq!(report.bytes_freed, 0);
+    }
+
+    #[tokio::test]
+    async fn recently_claimed_blob_is_counted_and_its_file_stays() {
+        let (reclaimer, events, _) = reclaimer(
+            UnreferencedBlobDeletion::RecentlyClaimed,
+            Ok(BlobFileRemoval::Deleted),
+        );
+        let report = BlobReclaimPort::reclaim_unreferenced(&reclaimer, &[BlobId::from("fresh")])
+            .await
+            .unwrap();
+        assert_eq!(events.lock().unwrap().as_slice(), ["row"]);
+        assert_eq!(report.checked, 1);
+        assert_eq!(report.skipped_recently_claimed, 1);
+        assert_eq!(report.rows_deleted, 0);
+        assert_eq!(report.files_deleted, 0);
+        assert_eq!(report.failures, 0);
     }
 }

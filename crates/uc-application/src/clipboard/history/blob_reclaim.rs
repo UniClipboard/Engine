@@ -15,6 +15,8 @@ pub struct BlobReclaimReport {
     pub bytes_freed: u64,
     pub missing_files: u64,
     pub failures: u64,
+    /// 无引用但 `last_claimed_at_ms` 仍在宽限内，留给 PR2（WF-engine-39 GC sweep）。
+    pub skipped_recently_claimed: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,9 +41,10 @@ pub trait BlobReclaimPort: Send + Sync {
         blob_ids: &[BlobId],
     ) -> Result<BlobReclaimReport, BlobReclaimError>;
 
-    /// 引用已经落库，释放这些 blob 的进程内写入租约。
+    /// 引用已经落库，或本次写入失败，释放这些 blob 的进程内写入租约。
     ///
-    /// 租约只减少同进程竞争。捕获成功后必须释放，否则刚写入的 blob
-    /// 会在租约到期前被回收跳过。未释放的租约在 TTL 后过期，该时长需实测确认。
+    /// 租约只减少同进程竞争，按持有者计数。多释放一次没有对应租约时不做任何事。
+    /// 未释放的租约在 TTL 后过期，该时长需实测确认。跨进程窗口由认领宽限保证，
+    /// 宽限内的无引用 blob 记入 [`BlobReclaimReport::skipped_recently_claimed`]。
     fn release_write_leases(&self, blob_ids: &[BlobId]);
 }

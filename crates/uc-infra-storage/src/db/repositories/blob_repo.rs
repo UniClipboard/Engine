@@ -115,12 +115,48 @@ where
             .transpose()
     }
 
-    async fn delete_if_unreferenced(&self, blob_id: &BlobId) -> Result<UnreferencedBlobDeletion> {
+    async fn delete_if_unreferenced(
+        &self,
+        blob_id: &BlobId,
+        claimed_before_ms: i64,
+    ) -> Result<UnreferencedBlobDeletion> {
         let blob_id = blob_id.to_string();
         self.executor.run(move |conn| {
             conn.immediate_transaction(|conn| {
+                let probe = diesel::sql_query(
+                    "SELECT last_claimed_at_ms, \
+                     CASE WHEN \
+                         EXISTS ( \
+                             SELECT 1 FROM clipboard_snapshot_representation \
+                             WHERE clipboard_snapshot_representation.blob_id = blob.blob_id \
+                         ) \
+                         OR EXISTS ( \
+                             SELECT 1 FROM clipboard_representation_thumbnail \
+                             WHERE thumbnail_blob_id = blob.blob_id \
+                         ) \
+                         OR EXISTS ( \
+                             SELECT 1 FROM entry_file_set \
+                             WHERE entry_file_set.blob_id = blob.blob_id \
+                         ) \
+                     THEN 1 ELSE 0 END AS referenced \
+                     FROM blob WHERE blob_id = ?",
+                )
+                .bind::<Text, _>(&blob_id)
+                .get_result::<BlobReclaimProbe>(conn)
+                .optional()
+                .context("probe blob references before reclaim")?;
+                let Some(probe) = probe else {
+                    return Ok(UnreferencedBlobDeletion::Retained);
+                };
+                if probe.referenced != 0 {
+                    return Ok(UnreferencedBlobDeletion::Retained);
+                }
+                if probe.last_claimed_at_ms >= claimed_before_ms {
+                    return Ok(UnreferencedBlobDeletion::RecentlyClaimed);
+                }
                 let deleted = diesel::sql_query(
                     "DELETE FROM blob WHERE blob_id = ? \
+                     AND last_claimed_at_ms < ? \
                      AND NOT EXISTS ( \
                          SELECT 1 FROM clipboard_snapshot_representation \
                          WHERE clipboard_snapshot_representation.blob_id = blob.blob_id \
@@ -136,6 +172,7 @@ where
                      RETURNING size_bytes, compressed_size",
                 )
                 .bind::<Text, _>(&blob_id)
+                .bind::<BigInt, _>(claimed_before_ms)
                 .get_result::<DeletedBlobBytes>(conn)
                 .optional()
                 .context("delete blob if unreferenced")?;
@@ -148,6 +185,14 @@ where
             })
         })
     }
+}
+
+#[derive(QueryableByName)]
+struct BlobReclaimProbe {
+    #[diesel(sql_type = BigInt)]
+    last_claimed_at_ms: i64,
+    #[diesel(sql_type = BigInt)]
+    referenced: i64,
 }
 
 #[derive(QueryableByName)]
@@ -245,7 +290,7 @@ mod tests {
         let executor = DieselSqliteExecutor::new(pool);
         insert_blob(&executor, "only", "hash-only", 40);
         let deleted = repository
-            .delete_if_unreferenced(&BlobId::from("only"))
+            .delete_if_unreferenced(&BlobId::from("only"), i64::MAX)
             .await
             .unwrap();
         assert_eq!(
@@ -254,7 +299,7 @@ mod tests {
         );
         assert_eq!(blob_count(&executor, "only"), 0);
         let again = repository
-            .delete_if_unreferenced(&BlobId::from("only"))
+            .delete_if_unreferenced(&BlobId::from("only"), i64::MAX)
             .await
             .unwrap();
         assert_eq!(again, UnreferencedBlobDeletion::Retained);
@@ -332,7 +377,7 @@ mod tests {
                 })
                 .unwrap();
             let outcome = repository
-                .delete_if_unreferenced(&BlobId::from("shared"))
+                .delete_if_unreferenced(&BlobId::from("shared"), i64::MAX)
                 .await
                 .unwrap();
             assert_eq!(outcome, UnreferencedBlobDeletion::Retained, "{label}");
@@ -365,7 +410,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             repository
-                .delete_if_unreferenced(&BlobId::from("shared"))
+                .delete_if_unreferenced(&BlobId::from("shared"), i64::MAX)
                 .await
                 .unwrap(),
             UnreferencedBlobDeletion::Retained
@@ -399,7 +444,7 @@ mod tests {
         assert_eq!(claimed.last_claimed_at_ms, 99);
         assert_eq!(claimed.blob_id.as_ref(), "live");
         repository
-            .delete_if_unreferenced(&BlobId::from("live"))
+            .delete_if_unreferenced(&BlobId::from("live"), i64::MAX)
             .await
             .unwrap();
         assert!(repository
@@ -407,5 +452,54 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn claim_inside_grace_is_skipped_and_aged_claim_is_deleted() {
+        let (repository, dir) = repo();
+        let pool = init_db_pool(dir.path().join("blobs.sqlite").to_str().unwrap()).unwrap();
+        let executor = DieselSqliteExecutor::new(pool);
+        insert_blob(&executor, "fresh", "hash-fresh", 7);
+        let skipped = repository
+            .delete_if_unreferenced(&BlobId::from("fresh"), 0)
+            .await
+            .unwrap();
+        assert_eq!(skipped, UnreferencedBlobDeletion::RecentlyClaimed);
+        assert_eq!(blob_count(&executor, "fresh"), 1);
+
+        let deleted = repository
+            .delete_if_unreferenced(&BlobId::from("fresh"), 11)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted,
+            UnreferencedBlobDeletion::Deleted { bytes_on_disk: 7 }
+        );
+        assert_eq!(blob_count(&executor, "fresh"), 0);
+    }
+
+    #[test]
+    fn migration_backfills_last_claimed_at_from_created_at() {
+        use crate::db::pool::MIGRATIONS;
+        use diesel_migrations::MigrationHarness;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("backfill.sqlite");
+        let pool = init_db_pool(path.to_str().unwrap()).unwrap();
+        let mut connection = pool.get().unwrap();
+        connection.revert_last_migration(MIGRATIONS).unwrap();
+        diesel::sql_query(
+            "INSERT INTO blob (blob_id, storage_path, storage_backend, size_bytes, \
+             content_hash, created_at_ms) \
+             VALUES ('old', '/vault/old', 'local_fs', 4, 'hash-old', 42)",
+        )
+        .execute(&mut connection)
+        .unwrap();
+        connection.run_pending_migrations(MIGRATIONS).unwrap();
+        let claimed =
+            diesel::sql_query("SELECT last_claimed_at_ms AS n FROM blob WHERE blob_id = 'old'")
+                .get_result::<CountRow>(&mut connection)
+                .unwrap();
+        assert_eq!(claimed.n, 42);
     }
 }

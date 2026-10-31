@@ -22,6 +22,8 @@ pub enum UnreferencedBlobDeletion {
     Deleted { bytes_on_disk: u64 },
     /// 行不存在，或三类引用者仍有其一。
     Retained,
+    /// 没有引用，但 `last_claimed_at_ms` 仍在认领宽限内。留给 PR2 sweep。
+    RecentlyClaimed,
 }
 
 #[async_trait]
@@ -37,10 +39,14 @@ pub trait BlobRepositoryPort: Send + Sync {
         claimed_at_ms: i64,
     ) -> Result<Option<Blob>>;
 
-    /// 在 `BEGIN IMMEDIATE` 事务里执行
-    /// `DELETE FROM blob WHERE blob_id=? AND NOT EXISTS(三类引用者)`。
-    /// 仍被引用时不删除，避免外键 `ON DELETE SET NULL` 悄悄改掉表示。
-    async fn delete_if_unreferenced(&self, blob_id: &BlobId) -> Result<UnreferencedBlobDeletion>;
+    /// 在同一个 `BEGIN IMMEDIATE` 事务里删除无引用、且认领时间早于
+    /// `claimed_before_ms` 的 blob 行。仍被引用或仍在宽限内时不删除，
+    /// 避免外键 `ON DELETE SET NULL` 悄悄改掉表示，也避免认领后引用还没落库就被删掉。
+    async fn delete_if_unreferenced(
+        &self,
+        blob_id: &BlobId,
+        claimed_before_ms: i64,
+    ) -> Result<UnreferencedBlobDeletion>;
 }
 
 #[async_trait]
@@ -61,7 +67,13 @@ impl<T: BlobRepositoryPort + ?Sized> BlobRepositoryPort for Arc<T> {
         (**self).claim_existing(content_hash, claimed_at_ms).await
     }
 
-    async fn delete_if_unreferenced(&self, blob_id: &BlobId) -> Result<UnreferencedBlobDeletion> {
-        (**self).delete_if_unreferenced(blob_id).await
+    async fn delete_if_unreferenced(
+        &self,
+        blob_id: &BlobId,
+        claimed_before_ms: i64,
+    ) -> Result<UnreferencedBlobDeletion> {
+        (**self)
+            .delete_if_unreferenced(blob_id, claimed_before_ms)
+            .await
     }
 }
