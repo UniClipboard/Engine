@@ -199,6 +199,7 @@ pub async fn prepare_sync_session(
         PeerReachabilityTransportPorts {
             wire: Arc::new(PeerReachabilityWire),
             environment: presence_environment,
+            address_refresh: verified_peer_address_refresh.clone(),
         },
         space_setup.clock.clone(),
         known_peer_contact_tx,

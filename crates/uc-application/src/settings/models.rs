@@ -1,6 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::net::IpAddr;
 use std::time::Duration;
 
+use uc_core::ids::DeviceId;
 use uc_core::settings::model as core;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +119,32 @@ pub struct NetworkSettingsView {
     pub allow_overlay_network_addrs: bool,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionControllerView,
+    /// 固定的 P2P UDP 端口；`None` 表示随机端口。
+    pub bind_port: Option<u16>,
+    /// 用户为已配对设备配置的地址，键为设备的 `DeviceId` 字符串。
+    pub peer_addresses: BTreeMap<String, PeerAddressView>,
+}
+
+/// 用户为一个已配对设备配置的地址：IP 字面量加端口（不接受主机名）。属于明文配置，`Debug` 不输出。
+#[derive(Clone, PartialEq, Eq)]
+pub struct PeerAddressView {
+    pub ip: String,
+    pub port: u16,
+}
+
+impl fmt::Debug for PeerAddressView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PeerAddressView([REDACTED])")
+    }
+}
+
+impl From<core::ConfiguredPeerAddress> for PeerAddressView {
+    fn from(value: core::ConfiguredPeerAddress) -> Self {
+        Self {
+            ip: value.ip,
+            port: value.port,
+        }
+    }
 }
 
 /// Mirror of `uc_core::settings::model::CongestionController` for the
@@ -216,6 +245,11 @@ pub struct NetworkSettingsPatch {
     pub allow_overlay_network_addrs: Option<bool>,
     pub custom_relay_urls: Option<Vec<String>>,
     pub congestion_controller: Option<CongestionControllerView>,
+    /// `None` = 不修改；`Some(0)` = 恢复随机端口；其他值 = 固定该端口。
+    pub bind_port: Option<u16>,
+    /// `None` = 不修改；`Some(map)` 只修改其中列出的设备：值为 `Some` 时设置或替换该设备的地址，
+    /// 值为 `None` 时删除；未列出的设备保持不变。
+    pub peer_addresses: Option<BTreeMap<String, Option<PeerAddressView>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -398,6 +432,13 @@ impl From<core::Settings> for SettingsView {
                 allow_overlay_network_addrs: value.network.allow_overlay_network_addrs,
                 custom_relay_urls: value.network.custom_relay_urls,
                 congestion_controller: value.network.congestion_controller.into(),
+                bind_port: value.network.bind_port,
+                peer_addresses: value
+                    .network
+                    .peer_addresses
+                    .into_iter()
+                    .map(|(device, address)| (device, address.into()))
+                    .collect(),
             },
         }
     }
@@ -521,6 +562,29 @@ pub(crate) fn apply_settings_patch(
         if let Some(v) = network.congestion_controller {
             existing.network.congestion_controller = v.into();
         }
+        if let Some(port) = network.bind_port {
+            // 0 是“随机端口”哨兵，保存为未设置，使持久值保持规范形态。
+            existing.network.bind_port = (port != 0).then_some(port);
+        }
+        if let Some(changes) = network.peer_addresses {
+            for (device, address) in changes {
+                let device = device.trim().to_string();
+                match address {
+                    Some(address) => {
+                        existing.network.peer_addresses.insert(
+                            device,
+                            core::ConfiguredPeerAddress {
+                                ip: normalize_peer_ip(&address.ip),
+                                port: address.port,
+                            },
+                        );
+                    }
+                    None => {
+                        existing.network.peer_addresses.remove(&device);
+                    }
+                }
+            }
+        }
     }
 
     existing
@@ -533,8 +597,43 @@ fn normalize_relay_urls(urls: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// 去掉首尾空白；带方括号的 IPv6 字面量保存为不带方括号的规范形态。
+fn normalize_peer_ip(ip: &str) -> String {
+    let ip = ip.trim();
+    ip.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .filter(|inner| inner.parse::<std::net::Ipv6Addr>().is_ok())
+        .unwrap_or(ip)
+        .to_string()
+}
+
 pub(crate) fn validate_settings(settings: &core::Settings) -> Result<(), String> {
-    validate_custom_relay_urls(&settings.network.custom_relay_urls)
+    validate_custom_relay_urls(&settings.network.custom_relay_urls)?;
+    validate_peer_addresses(&settings.network.peer_addresses)
+}
+
+/// 拒绝原因只说明哪一类不合法，不回显设备标识、IP 或端口。
+fn validate_peer_addresses(
+    addresses: &BTreeMap<String, core::ConfiguredPeerAddress>,
+) -> Result<(), String> {
+    for (device, address) in addresses {
+        if device.is_empty() || DeviceId::try_new(device).is_none() {
+            return Err("invalid peer address: the device id is not valid".to_string());
+        }
+        if !is_valid_peer_ip(&address.ip) {
+            return Err("invalid peer address: ip must be an IPv4 or IPv6 address".to_string());
+        }
+        if address.port == 0 {
+            return Err("invalid peer address: port must not be zero".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// 只接受单播 IPv4/IPv6 字面量；主机名会让查询走系统 DNS，LAN-only 下可能离开本地网络，不接受。
+fn is_valid_peer_ip(ip: &str) -> bool {
+    ip.parse::<IpAddr>()
+        .is_ok_and(|ip| !ip.is_unspecified() && !ip.is_multicast())
 }
 
 fn validate_custom_relay_urls(urls: &[String]) -> Result<(), String> {
@@ -598,6 +697,8 @@ mod network_settings_apply_patch_tests {
             allow_overlay_network_addrs: false,
             custom_relay_urls: Vec::new(),
             congestion_controller: Default::default(),
+            bind_port: None,
+            peer_addresses: Default::default(),
         };
         s
     }
@@ -609,8 +710,121 @@ mod network_settings_apply_patch_tests {
             allow_overlay_network_addrs: allow_overlay,
             custom_relay_urls: Vec::new(),
             congestion_controller: Default::default(),
+            bind_port: None,
+            peer_addresses: Default::default(),
         };
         s
+    }
+
+    /// 固定端口 patch：未带字段不修改，0 恢复随机端口，其他值固定该端口。
+    #[test]
+    fn bind_port_patch_sets_clears_and_keeps() {
+        let mut existing = baseline_with_network(true);
+        existing.network.bind_port = Some(51821);
+        let patch = |bind_port| SettingsPatch {
+            network: Some(NetworkSettingsPatch {
+                bind_port,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let kept = apply_settings_patch(existing.clone(), patch(None));
+        assert_eq!(kept.network.bind_port, Some(51821));
+        let changed = apply_settings_patch(existing.clone(), patch(Some(40000)));
+        assert_eq!(changed.network.bind_port, Some(40000));
+        let cleared = apply_settings_patch(existing, patch(Some(0)));
+        assert_eq!(cleared.network.bind_port, None);
+        assert_eq!(SettingsView::from(changed).network.bind_port, Some(40000));
+    }
+
+    /// 设备地址 patch：未带字段不修改；只修改列出的设备，`Some` 设置或替换，`None` 删除；
+    /// IP 去掉空白，带方括号的 IPv6 保存为规范形态。
+    #[test]
+    fn peer_addresses_patch_sets_replaces_removes_and_keeps() {
+        let mut existing = baseline_with_network(false);
+        for (device, ip) in [("device-a", "10.8.0.2"), ("device-b", "10.8.0.3")] {
+            existing.network.peer_addresses.insert(
+                device.into(),
+                core::ConfiguredPeerAddress {
+                    ip: ip.into(),
+                    port: 51821,
+                },
+            );
+        }
+        let address = |ip: &str, port| PeerAddressView {
+            ip: ip.into(),
+            port,
+        };
+        let patch = |peer_addresses| SettingsPatch {
+            network: Some(NetworkSettingsPatch {
+                peer_addresses,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let kept = apply_settings_patch(existing.clone(), patch(None));
+        assert_eq!(kept.network.peer_addresses, existing.network.peer_addresses);
+
+        let changed = apply_settings_patch(
+            existing,
+            patch(Some(BTreeMap::from([
+                ("device-a".to_string(), Some(address(" [fd00::2] ", 40000))),
+                ("device-b".to_string(), None),
+                ("device-c".to_string(), Some(address("192.168.1.9", 51822))),
+            ]))),
+        );
+        let view = SettingsView::from(changed.clone()).network.peer_addresses;
+        assert_eq!(
+            view,
+            BTreeMap::from([
+                ("device-a".to_string(), address("fd00::2", 40000)),
+                ("device-c".to_string(), address("192.168.1.9", 51822)),
+            ])
+        );
+        validate_settings(&changed).expect("normalized entries are valid");
+    }
+
+    /// 设备地址校验只接受单播 IP 字面量：拒绝主机名、空值、未指定或组播地址、端口 0 与非法设备
+    /// 标识，且拒绝原因不回显该值。
+    #[test]
+    fn validate_peer_addresses_accepts_only_ip_literals_without_echoing_them() {
+        let check = |device: &str, ip: &str, port| {
+            let mut settings = baseline_with_network(false);
+            settings.network.peer_addresses.insert(
+                device.into(),
+                core::ConfiguredPeerAddress {
+                    ip: ip.into(),
+                    port,
+                },
+            );
+            validate_settings(&settings)
+        };
+        for ip in ["10.8.0.2", "fd00::2", "fe80::1", "127.0.0.1"] {
+            check("device-a", ip, 51821).expect("valid ip");
+        }
+        for value in [
+            "",
+            "laptop.wg",
+            "localhost",
+            "0.0.0.0",
+            "::",
+            "224.0.0.251",
+            "10.8.0.2:51821",
+            "[fd00::2]",
+        ] {
+            let reason = check("device-a", value, 51821).expect_err("not an ip literal");
+            assert!(reason.contains("ip must be an IPv4 or IPv6 address"));
+            if !value.is_empty() {
+                assert!(!reason.contains(value));
+            }
+        }
+        assert!(check("device-a", "10.8.0.2", 0)
+            .expect_err("port")
+            .contains("port"));
+        assert!(check("", "10.8.0.2", 51821).is_err());
+        assert!(check(&"d".repeat(65), "10.8.0.2", 51821).is_err());
     }
 
     /// NETSET-02 #2 硬约束：旧客户端 PUT 不带 `network` 段时，

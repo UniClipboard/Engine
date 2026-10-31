@@ -25,6 +25,10 @@ use uc_core::ports::peer_reachability::{PeerReachabilityChanged, PeerReachabilit
 use uc_core::settings::model::Settings;
 use uc_core::{ClipboardChangeOrigin, SystemClipboardSnapshot};
 
+mod dispatch_path_retry_scenarios;
+mod online_retry_scenarios;
+mod support;
+
 struct NeverDispatch;
 
 #[derive(Clone, Default)]
@@ -611,6 +615,7 @@ fn recovery_deps(
         device_identity: Arc::new(LocalDevice(DeviceId::new("local"))),
         clock: Arc::new(FixedClock),
         delivery,
+        delivery_results: DeliveryResultFeed::new(),
         delivery_gate: Arc::new(tokio::sync::Mutex::new(())),
     }
 }
@@ -1184,7 +1189,7 @@ async fn every_recovery_round_ends_with_one_fixed_outcome_record() {
     }
     let target = DeviceId::new("recovered");
     for (setup, expected) in [
-        (Setup::Normal, "dispatched"),
+        (Setup::Normal, "delivered"),
         (Setup::NoEntries, "nothing_to_recover"),
         (Setup::AutoSyncOff, "sync_disabled"),
         (Setup::Paused, "target_paused"),

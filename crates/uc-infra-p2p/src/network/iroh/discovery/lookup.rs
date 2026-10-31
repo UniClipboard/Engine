@@ -11,17 +11,24 @@ use iroh::{
     },
     Endpoint, EndpointId,
 };
-use iroh_mdns_address_lookup::MdnsAddressLookup;
 use uc_application::deps::{DiscoveryError, DiscoveryManager, DiscoveryProvider, PeerDirectory};
 use uc_observability_contract::diagnostics::connectivity::{DiscoverySource, NetworkRecorder};
 
+use super::super::addr_filter::restrict_to_local_network;
 use super::super::observed_address_lookup::ObservedAddressLookupBuilder;
-use super::{cloud::CloudDiscoveryProvider, mdns::MdnsDiscoveryProvider};
+use super::{
+    cloud::CloudDiscoveryProvider, configured::ConfiguredAddressProvider,
+    mdns::MdnsDiscoveryProvider, ConfiguredPeerAddresses, LifetimeMdns,
+};
 use super::{decode, peer_id};
 
 pub(in super::super) struct DirectoryAddressLookupBuilder {
-    pub(in super::super) mdns: MdnsAddressLookup,
-    pub(in super::super) cloud_enabled: bool,
+    /// 长期 mDNS；启动时无法建立则由其在后台重试，目录在此期间只使用其余来源。
+    pub(in super::super) mdns: LifetimeMdns,
+    /// LAN-only Mode：不装配云端解析，地址发现结果只交出本地网络范围内的直连地址。
+    pub(in super::super) lan_only: bool,
+    /// 用户为配对设备配置的地址；两种模式都装配，LAN-only 下结果同样经过本地网络范围收敛。
+    pub(in super::super) configured: Option<Arc<ConfiguredPeerAddresses>>,
     pub(in super::super) recorder: NetworkRecorder,
     pub(in super::super) manager: Arc<OnceLock<Arc<DiscoveryManager>>>,
 }
@@ -37,7 +44,8 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
         self,
         endpoint: &Endpoint,
     ) -> Result<impl AddressLookup, AddressLookupBuilderError> {
-        let mdns: Arc<dyn AddressLookup> = Arc::new(
+        let mut providers: Vec<Arc<dyn DiscoveryProvider>> = Vec::new();
+        let lookup: Arc<dyn AddressLookup> = Arc::new(
             ObservedAddressLookupBuilder::new(
                 self.mdns.clone(),
                 DiscoverySource::Mdns,
@@ -45,12 +53,14 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
             )
             .into_address_lookup(endpoint)?,
         );
-        let mut providers: Vec<Arc<dyn DiscoveryProvider>> =
-            vec![Arc::new(MdnsDiscoveryProvider {
-                mdns: self.mdns,
-                lookup: mdns.clone(),
-            })];
-        if self.cloud_enabled {
+        providers.push(Arc::new(MdnsDiscoveryProvider {
+            mdns: self.mdns,
+            lookup: lookup.clone(),
+        }));
+        if let Some(configured) = self.configured {
+            providers.push(Arc::new(ConfiguredAddressProvider(configured)));
+        }
+        if !self.lan_only {
             let cloud = ObservedAddressLookupBuilder::new(
                 DnsAddressLookup::n0_dns(),
                 DiscoverySource::Dns,
@@ -67,14 +77,21 @@ impl AddressLookupBuilder for DirectoryAddressLookupBuilder {
         self.manager.set(manager.clone()).map_err(|_| {
             AddressLookupBuilderError::from_err("uni-directory", DiscoveryError::AlreadyInitialized)
         })?;
-        Ok(DirectoryAddressLookup { manager, mdns })
+        Ok(DirectoryAddressLookup {
+            manager,
+            mdns: lookup,
+            lan_only: self.lan_only,
+        })
     }
 }
 
 /// 原连接调用继续交给 iroh；iroh 的 lookup 统一从发现负责人获得各来源候选。
 pub(in super::super) struct DirectoryAddressLookup {
     pub(in super::super) manager: Arc<DiscoveryManager>,
+    /// 长期 mDNS 的发布入口；服务尚未建立时发布只被记录，建立后补发。
     pub(in super::super) mdns: Arc<dyn AddressLookup>,
+    /// 与 [`DirectoryAddressLookupBuilder::lan_only`] 相同。
+    pub(in super::super) lan_only: bool,
 }
 
 impl fmt::Debug for DirectoryAddressLookup {
@@ -90,10 +107,15 @@ impl AddressLookup for DirectoryAddressLookup {
 
     fn resolve(&self, endpoint: EndpointId) -> Option<BoxStream<'static, Result<Item, Error>>> {
         let results = self.manager.resolve(peer_id(endpoint));
-        Some(Box::pin(results.map(|candidate| {
+        let lan_only = self.lan_only;
+        Some(Box::pin(results.map(move |candidate| {
             let candidate = candidate.map_err(|source| Error::from_err("uni-directory", source))?;
-            let address = decode(&candidate.peer, &candidate.locator)
+            let mut address = decode(&candidate.peer, &candidate.locator)
                 .map_err(|source| Error::from_err("uni-directory", source))?;
+            // mDNS 结果来自对端自行发布的全部地址，可能含公网或反射地址。
+            if lan_only {
+                address = restrict_to_local_network(address);
+            }
             Ok(Item::new(
                 EndpointInfo::from(address),
                 candidate.source.0,

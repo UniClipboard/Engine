@@ -31,6 +31,12 @@ pub enum ConnectivityError {
     Capability(#[source] StreamCapabilityRefusal),
     #[error("peer admission denied")]
     Denied,
+    /// 请求的撤销快照已失效（例如锁定准备暂停全部连接），但成员权威未确认拒绝。旧请求仍被
+    /// 围栏拒绝；只有新请求才会重新读取当前成员权威。
+    ///
+    /// 撤销快照失效后读取成员权威失败时保留该来源；确认仍准入时没有来源。
+    #[error("peer admission request invalidated")]
+    Invalidated(#[source] Option<Box<dyn Error + Send + Sync>>),
     #[error("connection operation deadline expired")]
     DeadlineExpired,
     #[error("connection operation timed out")]
@@ -92,8 +98,36 @@ impl ConnectivityError {
     }
     pub fn is_unavailable(&self) -> bool {
         match self {
-            Self::Offline | Self::AddressMissing | Self::Backend(_) | Self::Denied => true,
+            Self::Offline
+            | Self::AddressMissing
+            | Self::Backend(_)
+            | Self::Denied
+            | Self::Invalidated(_) => true,
             Self::Shared(error) => error.is_unavailable(),
+            _ => false,
+        }
+    }
+    /// 准入授权拒绝（含经共享拨号结果返回的拒绝）：成员权威拒绝或身份不符。`is_unavailable`
+    /// 为既有调用方把它算作不可用；需要区分终态授权失败的边界必须先用本判断。请求失效
+    /// （`Invalidated`）不是拒绝。
+    pub fn is_denied(&self) -> bool {
+        match self {
+            Self::Denied => true,
+            Self::Shared(error) => error.is_denied(),
+            _ => false,
+        }
+    }
+    /// 暂时性的传输或容量失败：稍后重试同一请求可能成功。准入拒绝、本机负责人
+    /// 停止、本机时钟失效、流能力不可用、地址资料读取失败与本机结算失败都不属于此类。
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Busy(_)
+            | Self::DeadlineExpired
+            | Self::TimedOut(_)
+            | Self::AdmissionDeadlineExpired
+            | Self::AdmissionTimedOut(_)
+            | Self::Stream(_) => true,
+            Self::Shared(error) => error.is_transient(),
             _ => false,
         }
     }
@@ -114,6 +148,7 @@ impl ErrorClass for ConnectivityError {
             Self::ExchangeAlreadyUsed => "connection_exchange_already_used",
             Self::Capability(_) => "connection_stream_capability_unavailable",
             Self::Denied => "connection_admission_denied",
+            Self::Invalidated(_) => "connection_admission_invalidated",
             Self::DeadlineExpired | Self::TimedOut(_) => "connection_timeout",
             Self::AdmissionTimedOut(_) | Self::AdmissionDeadlineExpired => {
                 "connection_admission_timeout"
@@ -164,5 +199,80 @@ mod inbound_handoff_tests {
                 .kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 只有暂时性的传输与容量失败可重试；准入拒绝、本机停止与地址资料失败不可重试。
+    #[tokio::test]
+    async fn only_transport_and_capacity_failures_are_transient() {
+        let busy = std::sync::Arc::new(tokio::sync::Semaphore::new(0))
+            .try_acquire_owned()
+            .map(drop)
+            .unwrap_err();
+        let elapsed = tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        let stream = || Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        for error in [
+            ConnectivityError::Busy(busy),
+            ConnectivityError::DeadlineExpired,
+            ConnectivityError::TimedOut(elapsed),
+            ConnectivityError::AdmissionDeadlineExpired,
+            ConnectivityError::Stream(stream()),
+            ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Stream(stream()))),
+        ] {
+            assert!(error.is_transient(), "{}", error.class());
+        }
+        for error in [
+            ConnectivityError::Denied,
+            ConnectivityError::Invalidated(None),
+            ConnectivityError::Stopped,
+            ConnectivityError::Offline,
+            ConnectivityError::AddressMissing,
+            ConnectivityError::ExchangeAlreadyUsed,
+            ConnectivityError::Capability(StreamCapabilityRefusal::UnidirectionalUnavailable),
+            ConnectivityError::AddressLookup(stream()),
+            ConnectivityError::Admission(stream()),
+        ] {
+            assert!(!error.is_transient(), "{}", error.class());
+        }
+    }
+
+    /// 撤销快照失效后读取成员权威失败：保留来源链，同时仍按请求失效分类（可恢复、非拒绝）。
+    #[test]
+    fn invalidation_keeps_the_admission_read_source() {
+        let error = ConnectivityError::Invalidated(Some(Box::new(std::io::Error::other(
+            "membership read failed",
+        ))));
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(error.is_unavailable());
+        assert!(!error.is_denied());
+        assert!(!error.is_transient());
+        assert!(std::error::Error::source(&ConnectivityError::Invalidated(None)).is_none());
+    }
+
+    /// 授权拒绝可穿过共享拨号结果识别；请求失效不是拒绝。两者都不改变既有不可用判断。
+    #[test]
+    fn denial_is_recognized_through_shared_results() {
+        let shared = ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Shared(
+            std::sync::Arc::new(ConnectivityError::Denied),
+        )));
+        assert!(shared.is_denied());
+        assert!(shared.is_unavailable());
+        for error in [
+            ConnectivityError::Offline,
+            ConnectivityError::AddressMissing,
+            ConnectivityError::Invalidated(None),
+            ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Invalidated(None))),
+            ConnectivityError::Backend(Box::new(std::io::Error::other("unreachable"))),
+            ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Offline)),
+        ] {
+            assert!(!error.is_denied(), "{}", error.class());
+            assert!(error.is_unavailable(), "{}", error.class());
+        }
     }
 }

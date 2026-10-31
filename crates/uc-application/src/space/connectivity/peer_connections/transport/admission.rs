@@ -125,6 +125,7 @@ impl Runner {
         // 初轮 FIN 与证据提交后才释放暂态额度；保留集合继续持有强租约。
         drop(stream);
         self.watch(attempt, lease);
+        self.refresh_contact_address(peer);
         Ok(())
     }
     pub fn promote(
