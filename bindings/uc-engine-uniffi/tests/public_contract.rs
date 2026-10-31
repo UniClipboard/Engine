@@ -955,7 +955,6 @@ struct MemoryHost {
     clipboard_writes: Mutex<Vec<BindingClipboardSnapshot>>,
     finished_files: Mutex<Vec<String>>,
     secure_read_gate: Mutex<Option<lifecycle_targets::ReadGate>>,
-    startup_probe_lease: Mutex<Option<std::fs::File>>,
 }
 
 struct TestFile {
@@ -979,7 +978,6 @@ impl MemoryHost {
             clipboard_writes: Mutex::new(Vec::new()),
             finished_files: Mutex::new(Vec::new()),
             secure_read_gate: Mutex::new(None),
-            startup_probe_lease: Mutex::new(None),
         }
     }
 

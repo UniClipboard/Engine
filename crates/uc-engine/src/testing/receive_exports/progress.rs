@@ -127,6 +127,7 @@ impl ProgressWirePort for ObservedWire {
     }
 }
 impl ReceiveExports {
+    #[cfg(target_os = "linux")]
     pub fn matching_ack_count(&self, source: ProgressIdentity, attempt: ProgressIdentity) -> usize {
         self.terminal_acks
             .lock()

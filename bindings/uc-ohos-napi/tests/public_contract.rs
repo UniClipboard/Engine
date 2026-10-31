@@ -1,10 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use uc_ohos_napi::{
-    core_version, install_process_observability, query_process_observability_health,
-    shutdown_process_observability, OhHostDirectories, OhObservabilityConfig,
-};
+use uc_ohos_napi::core_version;
 
 #[test]
 fn core_version_uses_the_binding_package_version() {

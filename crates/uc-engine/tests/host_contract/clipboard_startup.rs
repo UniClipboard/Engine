@@ -47,7 +47,7 @@ struct Clipboard {
     snapshot: Arc<Mutex<HostClipboardSnapshot>>,
     reads: Arc<AtomicUsize>,
     fault: Arc<Mutex<Fault>>,
-    import_root: PathBuf,
+    _import_root: PathBuf,
 }
 
 impl Clipboard {
@@ -59,7 +59,7 @@ impl Clipboard {
             })),
             reads: Arc::new(AtomicUsize::new(0)),
             fault: Arc::new(Mutex::new(Fault::None)),
-            import_root: root.join("temporary/clipboard-imports"),
+            _import_root: root.join("temporary/clipboard-imports"),
         }
     }
 
@@ -103,8 +103,11 @@ impl HostClipboard for Clipboard {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&self.import_root, std::fs::Permissions::from_mode(0o500))
-                    .unwrap();
+                std::fs::set_permissions(
+                    &self._import_root,
+                    std::fs::Permissions::from_mode(0o500),
+                )
+                .unwrap();
             }
         }
         Ok(self.snapshot.lock().unwrap().clone())
@@ -135,7 +138,7 @@ fn host_error(kind: io::ErrorKind) -> HostCapabilityError {
 #[derive(Clone)]
 struct Files {
     fault: Arc<Mutex<Fault>>,
-    import_root: PathBuf,
+    _import_root: PathBuf,
     export: PathBuf,
 }
 
@@ -147,7 +150,7 @@ impl HostFileAccess for Files {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    for directory in std::fs::read_dir(&self.import_root).unwrap() {
+                    for directory in std::fs::read_dir(&self._import_root).unwrap() {
                         std::fs::set_permissions(
                             directory.unwrap().path(),
                             std::fs::Permissions::from_mode(0o500),
@@ -219,7 +222,7 @@ fn host(root: &Path, storage: MemorySecureStorage, clipboard: Clipboard) -> Host
         Box::new(clipboard.clone()),
         Box::new(Files {
             fault: clipboard.fault,
-            import_root: root.join("temporary/clipboard-imports"),
+            _import_root: root.join("temporary/clipboard-imports"),
             export: root.join("diagnostics.zip"),
         }),
     )
@@ -353,7 +356,7 @@ async fn daemon_child() {
         if matches!(fault, Fault::Directory) {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(
-                &clipboard.import_root,
+                &clipboard._import_root,
                 std::fs::Permissions::from_mode(0o700),
             )
             .unwrap();

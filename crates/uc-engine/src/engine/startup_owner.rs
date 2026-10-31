@@ -592,6 +592,7 @@ impl StartupCleanupOwner {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_owned_start_failure(&self) -> Option<(&'static str, io::ErrorKind)> {
         let error = self
             .owned_start_error
@@ -669,6 +670,7 @@ impl StartupCleanupOwner {
 
     /// 仅供端到端程序验证回滚错误保留了真实的任务终止来源。
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_rollback_task_panic(&self) -> bool {
         let retained = self.failed.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(error) = retained
@@ -859,6 +861,7 @@ impl StartupCleanupOwner {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_cleanup_worker_failure(&self) -> Option<(&'static str, io::ErrorKind)> {
         let retained = self.failed.lock().unwrap_or_else(PoisonError::into_inner);
         match retained.as_ref()?._worker_error.as_ref()? {
@@ -872,6 +875,7 @@ impl StartupCleanupOwner {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_retry_executor_panic(&self) -> bool {
         self.failed
             .lock()
@@ -886,6 +890,7 @@ impl StartupCleanupOwner {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_retry_executor_drop_panic(&self) -> bool {
         self.failed
             .lock()
@@ -900,6 +905,7 @@ impl StartupCleanupOwner {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_retry_callback_and_drop_panic(&self) -> bool {
         self.failed
             .lock()
@@ -914,6 +920,7 @@ impl StartupCleanupOwner {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_host_cleanup_errors(
         &self,
     ) -> Vec<(HostCapabilityErrorCategory, Option<io::ErrorKind>)> {

@@ -333,9 +333,11 @@ async fn repeated_leaves_do_not_accumulate_tasks_or_descriptors() {
 /// 参与趋势判断的离开轮数。
 const LEAK_ROUNDS: usize = 8;
 /// 允许的句柄增长上限（每轮）。逐轮泄漏一个句柄的斜率为 1。
+#[cfg(unix)]
 const MAX_DESCRIPTOR_GROWTH_PER_CYCLE: f64 = 0.5;
 
 /// 逐轮样本的最小二乘斜率。
+#[cfg(unix)]
 fn least_squares_slope(values: &[f64]) -> f64 {
     let count = values.len() as f64;
     let mean_x = (count - 1.0) / 2.0;

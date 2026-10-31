@@ -23,6 +23,7 @@ macro_rules! wire_enum {
 
         impl $name {
             /// 该变体的线上取值。
+            #[allow(dead_code, reason = "Generated vocabulary accessor; some enums only use serde")]
             pub(crate) const fn wire(self) -> $ty {
                 match self {
                     $(Self::$variant => $wire,)+
@@ -44,6 +45,7 @@ macro_rules! wire_enum {
 
         impl $name {
             /// 该变体的线上取值，与序列化结果相同。
+            #[allow(dead_code, reason = "Generated vocabulary accessor; some enums only use serde")]
             pub(crate) const fn wire(self) -> &'static str {
                 match self {
                     $(Self::$variant => $wire,)+

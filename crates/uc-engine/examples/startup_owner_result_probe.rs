@@ -2710,8 +2710,8 @@ fn independent_registration_cleanup(root: &Path) {
         .status()
         .expect("mkfifo")
         .success());
-    let (mut blocker, blocked_resume) = EngineLogActivity::begin(Duration::from_millis(50));
-    let blocked_park = blocker.end(Duration::from_millis(50));
+    let (mut blocker, _blocked_resume) = EngineLogActivity::begin(Duration::from_millis(50));
+    let _blocked_park = blocker.end(Duration::from_millis(50));
     let blocked_fifo = log_root.join("network/blocked.fifo");
     std::fs::rename(&fifo, &blocked_fifo).expect("rename fifo");
     std::fs::write(&fifo, []).expect("restore lock");

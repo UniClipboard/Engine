@@ -33,6 +33,10 @@ impl SecureStoragePort for MemorySecrets {
     }
 }
 pub struct PresenceNode {
+    #[allow(
+        dead_code,
+        reason = "Retains the transport; only rejection diagnostics access it directly"
+    )]
     pub owner: Arc<PeerReachabilityTransport>,
     pub address: iroh::EndpointAddr,
     node: IrohNode,

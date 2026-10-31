@@ -100,6 +100,10 @@ pub(crate) struct HostProcess {
 }
 
 impl HostProcess {
+    #[allow(
+        dead_code,
+        reason = "Shared test helper; some suites select start_binary instead"
+    )]
     pub(crate) fn start(rendezvous: &str) -> Self {
         Self::start_binary(
             rendezvous,

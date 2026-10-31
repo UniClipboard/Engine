@@ -1,6 +1,7 @@
 //! 隔离验证进程登记门；不代表完整进程释放回执。
 
 #[path = "../src/engine_activity.rs"]
+#[allow(dead_code, reason = "Probe uses a subset of this module")]
 mod engine_activity;
 
 mod local_file {

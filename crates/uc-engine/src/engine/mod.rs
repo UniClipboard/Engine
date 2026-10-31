@@ -44,6 +44,10 @@ use lifecycle::TransitionQueue;
 use log_activity::LogActivity;
 use owned_executor::OwnedExecutor;
 #[cfg(feature = "test-binding-worker-panic")]
+#[allow(
+    unused_imports,
+    reason = "Facade exports unused by source-including probes"
+)]
 pub use probe_startup_host::{
     probe_release_startup_retry, probe_startup_retry_calls, probe_startup_retry_entered,
     probe_wrap_startup_host,
@@ -51,8 +55,17 @@ pub use probe_startup_host::{
 use shutdown::{OrphanRetention, ShutdownProgress};
 pub use startup::{StartupProgress, StartupProgressInput};
 #[cfg(feature = "test-binding-worker-panic")]
+#[allow(
+    unused_imports,
+    reason = "Facade export unused by source-including probes"
+)]
 pub use startup_control::StartupProbeOutcome;
-pub use startup_control::{StartupLifecycle, StartupLifecycleInput, StartupReleaseOutcome};
+#[allow(
+    unused_imports,
+    reason = "Facade re-export; standalone startup probe uses StartupProbeOutcome"
+)]
+pub use startup_control::StartupReleaseOutcome;
+pub use startup_control::{StartupLifecycle, StartupLifecycleInput};
 pub(crate) use startup_outcome::StartupOutcomeSnapshot;
 use startup_owner::UnpolledStartupCleanup;
 
@@ -101,11 +114,13 @@ pub(crate) trait EngineRuntime: Send + Sync {
 }
 
 #[cfg(feature = "dev-tools")]
+#[allow(dead_code, reason = "Used by source-including probes")]
 pub(crate) fn probe_fail_owned_start(stage: u8) {
     owned_executor::PROBE_START_FAILURE.store(stage, Ordering::Release);
 }
 
 #[cfg(feature = "dev-tools")]
+#[allow(dead_code, reason = "Used by source-including probes")]
 pub(crate) fn probe_fail_log_begin() {
     log_activity::PROBE_BEGIN_FAILURE.store(true, Ordering::Release);
 }
@@ -289,17 +304,20 @@ impl Engine {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_hold_lifecycle(&self) {
         PROBE_LIFECYCLE_HELD.store(false, Ordering::Release);
         PROBE_HOLD_LIFECYCLE.store(true, Ordering::Release);
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_lifecycle_held(&self) -> bool {
         PROBE_LIFECYCLE_HELD.load(Ordering::Acquire)
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_owned_executor_stopping(&self) -> bool {
         self.owned_executor.as_ref().is_some_and(|executor| {
             executor.wait_if_stopping(std::time::Duration::ZERO)
@@ -308,6 +326,7 @@ impl Engine {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_unfenced_executor_panic(&self) {
         if let Some(executor) = &self.owned_executor {
             executor.probe_unfenced_panic();
@@ -315,6 +334,7 @@ impl Engine {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_owned_executor_admission(&self) -> bool {
         self.owned_executor
             .as_ref()
@@ -322,6 +342,7 @@ impl Engine {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_unfenced_executor_panic_caught(&self) -> bool {
         self.owned_executor
             .as_ref()
@@ -329,6 +350,7 @@ impl Engine {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_fail_owned_executor(&self) {
         if let Some(executor) = &self.owned_executor {
             executor.probe_panic();
@@ -336,6 +358,7 @@ impl Engine {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_owned_executor_failed(&self) -> bool {
         self.owned_executor.as_ref().is_some_and(|executor| {
             executor.wait_if_stopping(std::time::Duration::ZERO)
@@ -344,6 +367,7 @@ impl Engine {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_owned_executor_stopped(&self) -> bool {
         self.owned_executor.as_ref().is_some_and(|executor| {
             executor.wait_if_stopping(std::time::Duration::ZERO)

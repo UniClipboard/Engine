@@ -314,12 +314,14 @@ pub(super) fn create_private_directory_new(path: &Path) -> io::Result<()> {
 }
 
 fn private_directory_builder() -> DirBuilder {
-    let mut builder = DirBuilder::new();
+    let builder = DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     builder
 }
 

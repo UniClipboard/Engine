@@ -38,8 +38,10 @@ pub(crate) enum ExecutorStop {
 enum StopRequest {
     Stop,
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     Panic,
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     UnfencedPanic,
 }
 
@@ -244,6 +246,7 @@ impl OwnedExecutor {
 
     /// 仅供端到端场景模拟执行器线程异常。
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_panic(&self) {
         let (lock, _) = &*self.state;
         let mut state = lock.lock().unwrap_or_else(PoisonError::into_inner);
@@ -254,6 +257,7 @@ impl OwnedExecutor {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_unfenced_panic(&self) {
         PROBE_UNFENCED_CAUGHT.store(false, std::sync::atomic::Ordering::Release);
         let (lock, _) = &*self.state;
@@ -268,6 +272,7 @@ impl OwnedExecutor {
     }
 
     #[cfg(feature = "dev-tools")]
+    #[allow(dead_code, reason = "Used by source-including probes")]
     pub(crate) fn probe_unfenced_caught(&self) -> bool {
         PROBE_UNFENCED_CAUGHT.load(std::sync::atomic::Ordering::Acquire)
     }

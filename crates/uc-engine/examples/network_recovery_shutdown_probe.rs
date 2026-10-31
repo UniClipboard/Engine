@@ -1,5 +1,6 @@
 //! 验证网络恢复工作中断后，本地资源保持由关闭负责人持有。
 #[path = "../src/runtime/shutdown/coordination.rs"]
+#[allow(dead_code, reason = "Probe uses a subset of this module")]
 mod coordination;
 
 use std::fs::File;

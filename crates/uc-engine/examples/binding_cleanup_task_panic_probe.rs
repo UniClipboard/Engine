@@ -13,21 +13,9 @@ use uc_engine::{
 };
 
 #[allow(unexpected_cfgs, reason = "直接复用绑定模块；测试特性属于绑定 crate")]
+#[allow(dead_code, reason = "Probe uses a subset of this module")]
 mod startup_delivery {
     include!("../../../bindings/uc-engine-uniffi/src/runtime/startup_delivery.rs");
-
-    pub(super) fn failed_result(owner: &StartupDeliveryOwner) -> bool {
-        let state = owner
-            .retained
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        matches!(
-            state
-                .as_ref()
-                .and_then(|retained| retained.cleanup_result.as_ref()),
-            Some(BindingResourceRelease::Failed { .. })
-        )
-    }
 }
 
 type BindingError = uc_engine::EngineError;
