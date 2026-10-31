@@ -5,6 +5,7 @@
 //! `docs/design-docs/layers/application.md` every type here stays `pub(crate)` —
 //! external callers reach them exclusively through `ClipboardHistoryFacade`.
 
+pub(crate) mod blob_reclaim;
 pub(crate) mod cleanup;
 pub(crate) mod clear_history;
 pub(crate) mod delete_entry;

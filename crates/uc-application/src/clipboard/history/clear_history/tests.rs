@@ -13,9 +13,14 @@ use uc_core::clipboard::{
 };
 use uc_core::ids::{EntryId, EventId};
 use uc_core::ports::clipboard::{
-    DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
+    ClipboardEntryRemoval, DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
     ListRepresentationsForEventPort,
 };
+
+use crate::clipboard::history::blob_reclaim::{
+    BlobReclaimError, BlobReclaimPort, BlobReclaimReport,
+};
+use uc_core::BlobId;
 
 struct Targets {
     second_succeeds: bool,
@@ -49,14 +54,34 @@ impl DeleteClipboardEntryWithReceiveStatePort for Targets {
     async fn delete_entry_with_receive_state(
         &self,
         entry: &EntryId,
-    ) -> Result<bool, ClipboardRepositoryError> {
+    ) -> Result<ClipboardEntryRemoval, ClipboardRepositoryError> {
         if entry.as_ref() == "second" && self.second_succeeds {
-            return Ok(true);
+            return Ok(ClipboardEntryRemoval {
+                removed: true,
+                candidate_blob_ids: Vec::new(),
+            });
         }
         Err(ClipboardRepositoryError::Storage(
             io::Error::new(io::ErrorKind::PermissionDenied, "PRIVATE_CLEAR_ERROR_BODY").into(),
         ))
     }
+}
+
+struct IgnoringReclaim;
+
+#[async_trait]
+impl BlobReclaimPort for IgnoringReclaim {
+    async fn reclaim_unreferenced(
+        &self,
+        blob_ids: &[BlobId],
+    ) -> Result<BlobReclaimReport, BlobReclaimError> {
+        Ok(BlobReclaimReport {
+            checked: blob_ids.len() as u64,
+            ..BlobReclaimReport::default()
+        })
+    }
+
+    fn release_write_leases(&self, _: &[BlobId]) {}
 }
 
 #[tokio::test]
@@ -72,6 +97,7 @@ async fn clear_keeps_each_deletion_source_and_leaves_failed_admission_closed() {
             targets.clone(),
             work.clone(),
             progress,
+            Arc::new(IgnoringReclaim),
         ));
         let clear = ClearClipboardHistoryUseCase::new(targets, deletion, work.clone());
         let result = clear.execute().await;

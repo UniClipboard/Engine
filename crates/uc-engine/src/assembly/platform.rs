@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::assembly::deps::{WiringError, WiringResult};
+use uc_application::deps::BlobReclaimPort;
 use uc_core::blob::ports::{BlobContentIngestPort, BlobReaderPort, BlobWriterPort};
 use uc_core::ids::ProfileId;
 use uc_core::ports::clipboard::ClipboardRepresentationNormalizerPort;
@@ -15,7 +16,8 @@ use uc_core::ports::*;
 use uc_infra_content::clipboard::ClipboardRepresentationNormalizer;
 use uc_infra_content::config::ClipboardStorageConfig;
 use uc_infra_local::blob::{
-    BlobRepositoryPort, BlobStorePort, BlobWriter, SwitchableFilesystemBlobStore,
+    BlobLeaseRegistry, BlobReclaimer, BlobRepositoryPort, BlobStorePort, BlobWriter,
+    SwitchableFilesystemBlobStore,
 };
 use uc_infra_local::device::LocalDeviceIdentity;
 use uc_infra_profile::security::{
@@ -89,6 +91,9 @@ pub struct PlatformLayer {
     // Path-ingest view of the same blob writer that also returns the content
     // hash (used by capture to derive file snapshot identity).
     pub blob_content_ingest: Arc<dyn BlobContentIngestPort>,
+
+    /// 与 `blob_writer` 共享同一 profile 的进程内写入租约。
+    pub blob_reclaim: Arc<dyn BlobReclaimPort>,
 
     // Blob store (encrypted) — exposed to use cases as a read-only port.
     pub blob_store: Arc<dyn BlobReaderPort>,
@@ -251,13 +256,23 @@ pub fn create_platform_layer(
     // read-side (BlobReaderPort). Both views point at the same concrete
     // EncryptedBlobStore instance.
     let encrypted_blob_store_for_writer = payload_adapters.blob_store();
+    // 同一 profile、同一进程共享一份租约。15 分钟只挡住尚未释放的在途写入，
+    // 捕获或后台物化把引用落库后会释放。该时长需实测确认。
+    let leases = BlobLeaseRegistry::for_profile(profile_id.inner());
+    let blob_repository_for_reclaim = Arc::clone(&blob_repository);
     // One concrete BlobWriter, surfaced as both the write-side port and the
     // content-ingest port (capture needs the content hash; other writers need
     // only the BlobId). Both views point at the same instance.
     let blob_writer_concrete = Arc::new(BlobWriter::new(
-        encrypted_blob_store_for_writer,
+        Arc::clone(&encrypted_blob_store_for_writer),
         blob_repository,
         clock,
+        Arc::clone(&leases),
+    ));
+    let blob_reclaim: Arc<dyn BlobReclaimPort> = Arc::new(BlobReclaimer::new(
+        encrypted_blob_store_for_writer,
+        blob_repository_for_reclaim,
+        leases,
     ));
     let blob_writer: Arc<dyn BlobWriterPort> = blob_writer_concrete.clone();
     let blob_content_ingest: Arc<dyn BlobContentIngestPort> = blob_writer_concrete;
@@ -274,6 +289,7 @@ pub fn create_platform_layer(
         representation_normalizer,
         blob_writer,
         blob_content_ingest,
+        blob_reclaim,
         blob_store: blob_store_reader,
         blob_cipher,
         payload_runtime,

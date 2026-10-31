@@ -1,9 +1,11 @@
 # 数据库 Schema 快照
 
-> 生成日期：2026-09-01
+> 生成日期：2026-10-31
 >
 > 权威来源：`crates/uc-infra-storage/src/db/schema.rs` 与 `crates/uc-infra-storage/migrations/`
 > 本文件是导航快照；字段、约束和迁移顺序以源码为准。
+
+`blob.last_claimed_at_ms` 是毫秒时间戳，与 `created_at_ms` 同类，不是用户内容或凭据。引用回收使用 `idx_snapshot_representation_blob_id`、`idx_representation_thumbnail_blob_id`、`idx_entry_file_set_blob_id`。
 
 当前 Diesel schema 声明 28 张表：
 

@@ -609,7 +609,7 @@ mod tests {
                 &self,
                 entry_id: &EntryId,
                 file_set: &EntryFileSet,
-            ) -> Result<(), EntryFileSetError>;
+            ) -> Result<Vec<BlobId>, EntryFileSetError>;
 
             async fn load(
                 &self,

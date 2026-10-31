@@ -43,6 +43,8 @@ pub struct Blob {
     pub size_bytes: i64,
     pub content_hash: ContentHash,
     pub created_at_ms: i64,
+    /// 最近一次插入或去重认领的毫秒时间戳。不是用户内容。
+    pub last_claimed_at_ms: i64,
     /// On-disk byte count after compression+encryption, if applicable.
     /// `None` for uncompressed or inline data.
     pub compressed_size: Option<i64>,
@@ -55,6 +57,7 @@ impl Blob {
         size_bytes: i64,
         content_hash: ContentHash,
         created_at_ms: i64,
+        last_claimed_at_ms: i64,
         compressed_size: Option<i64>,
     ) -> Self {
         Self {
@@ -63,6 +66,7 @@ impl Blob {
             size_bytes,
             content_hash,
             created_at_ms,
+            last_claimed_at_ms,
             compressed_size,
         }
     }

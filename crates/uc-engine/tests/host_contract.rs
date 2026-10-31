@@ -330,3 +330,6 @@ mod entry_thumbnails;
 #[cfg(feature = "lan-compat")]
 #[path = "host_contract/staged_capture_commit.rs"]
 mod staged_capture_commit;
+
+#[path = "host_contract/blob_reclaim.rs"]
+mod blob_reclaim;

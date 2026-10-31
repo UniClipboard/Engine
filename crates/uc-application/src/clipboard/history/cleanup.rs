@@ -21,17 +21,13 @@
 //! fine. If cleanup frequency ever grows (e.g. per-hour sweep), revisit
 //! this trade-off.
 //!
-//! `execute` runs two passes:
-//!   1. the file-cache TTL sweep described above (copied files only), and
-//!   2. a total-size quota over disk-backed entries — the only pass that
-//!      bounds the content-addressed image-blob store, which the TTL sweep
-//!      never sees (issue #957).
+//! `execute` 跑两轮：
+//!   1. 上面的文件缓存 TTL，只处理复制出来的文件；
+//!   2. 按总容量选择要删除的磁盘条目。TTL 扫不到图片 blob。
 //!
-//! The quota pass is **quota-only** (no age rule for image blobs) and
-//! **grandfathers** everything that predates the persisted quota baseline, so
-//! it never retroactively reclaims a user's pre-upgrade history — the failure
-//! mode that got the earlier age-retention variant reverted (#957). See
-//! `CleanupExpiredFilesUseCase::run_quota`.
+//! 用户删除、清空、保留策略和本用例在删除条目成功后，都会立刻回收已经没有
+//! 引用的 vault blob。配额本身没有年龄规则，并豁免配额基线之前的数据，因此
+//! 不会回头清掉升级前的历史。见 `CleanupExpiredFilesUseCase::run_quota`。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -266,9 +262,8 @@ impl CleanupExpiredFilesUseCase {
         Ok(())
     }
 
-    /// Pass 2: enforce a total-size quota over disk-backed entries (blob-backed
-    /// images and file-cache files alike), evicting oldest-first. This is the
-    /// only pass that reclaims clipboard image blobs.
+    /// 第二轮：按总容量、从最旧开始选出要删除的落盘条目（含 blob 图片和文件缓存）。
+    /// 条目删除成功后会回收无引用的 vault blob；这一轮只负责选出超额条目。
     ///
     /// Two safety rules distinguish this from the reverted age-retention
     /// variant (#957) that deleted users' history on first upgrade:
@@ -410,7 +405,7 @@ impl CleanupExpiredFilesUseCase {
             quota_mb = quota_bytes / (1024 * 1024),
             grandfathered = grandfathered,
             baseline_ms = baseline_ms,
-            "Cache quota enforcement complete (oldest-first; pre-baseline data grandfathered; disk reclaimed by iroh-blobs GC on its next sweep)"
+            "Cache quota enforcement complete (oldest-first; pre-baseline data grandfathered; unreferenced vault blobs reclaimed with each deleted entry)"
         );
     }
 

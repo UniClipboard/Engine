@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use diesel::prelude::*;
+use uc_application::deps::BlobReclaimPort;
 use uc_core::file_transfer::receive_no_entry_confirmation;
 use uc_core::ports::security::current_profile::CurrentProfilePort;
 use uc_core::ports::space::DeriveSpaceSubkeyPort;
@@ -16,6 +17,8 @@ use uc_core::ports::{
     PartialReceiveArtifacts, PartialReceiveTerminal, ReceiveArtifactPhase,
     ReceiveArtifactResolution,
 };
+use uc_core::BlobId;
+use uc_observability_contract::{error_source::io_error_kind, uc_warn};
 
 use super::clipboard_entry_repo::insert_entry_and_selection_rows;
 use super::clipboard_event_repo::insert_clipboard_event_rows;
@@ -47,6 +50,9 @@ pub struct DieselInboundReceiveCommitRepository<E> {
     executor: E,
     file_set_protection: EntryFileSetProtection,
     artifact_protection: ReceiveArtifactProtection,
+    /// 生产装配必须调用 [`Self::with_blob_reclaim`]。测试构造器保持原样，
+    /// 未注入时提交仍然成功，只是不回收被替换的 blob。
+    blob_reclaim: Option<Arc<dyn BlobReclaimPort>>,
 }
 
 impl<E> DieselInboundReceiveCommitRepository<E> {
@@ -65,6 +71,7 @@ impl<E> DieselInboundReceiveCommitRepository<E> {
                 derive_subkey,
                 current_profile,
             },
+            blob_reclaim: None,
         }
     }
 
@@ -75,7 +82,14 @@ impl<E> DieselInboundReceiveCommitRepository<E> {
             artifact_protection: ReceiveArtifactProtection::V3(V3ReceiveArtifactCipher::new(
                 protection,
             )),
+            blob_reclaim: None,
         }
+    }
+
+    /// 事务提交成功后再回收被替换的 blob。回收失败只记警告，不让提交失败。
+    pub fn with_blob_reclaim(mut self, blob_reclaim: Arc<dyn BlobReclaimPort>) -> Self {
+        self.blob_reclaim = Some(blob_reclaim);
+        self
     }
 }
 
@@ -353,9 +367,11 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
             None
         };
 
-        self.executor
+        let replaced_blob_ids = self
+            .executor
             .run(move |conn| {
                 conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+                    let mut replaced_blob_ids = Vec::new();
                     if let Some((terminal, artifacts)) = no_entry_replay {
                         if confirm_no_entry_replay(
                             conn,
@@ -364,7 +380,7 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                             terminal,
                             artifacts,
                         )? {
-                            return Ok(());
+                            return Ok(replaced_blob_ids);
                         }
                     }
                     if let Some(prepared_record) = &prepared_record {
@@ -379,12 +395,17 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                                 insert_entry_and_selection_rows(conn, entry, selection)?;
                             }
                             PreparedRecord::Replace(prepared) => {
-                                replace_entry_content_rows(conn, prepared, true)?;
+                                replaced_blob_ids
+                                    .extend(replace_entry_content_rows(conn, prepared, true)?);
                             }
                         }
                     }
                     if let Some(file_set_rows) = &file_set_rows {
-                        replace_entry_file_set_rows(conn, &entry_id, file_set_rows)?;
+                        replaced_blob_ids.extend(replace_entry_file_set_rows(
+                            conn,
+                            &entry_id,
+                            file_set_rows,
+                        )?);
                     }
 
                     let attempt_updated = diesel::update(
@@ -424,10 +445,43 @@ impl<E: DbExecutor> CommitInboundReceivePort for DieselInboundReceiveCommitRepos
                             return Err(CommitInvariantError::DeliveryItemMismatch.into());
                         }
                     }
-                    Ok(())
+                    Ok(replaced_blob_ids)
                 })
             })
-            .map_err(map_error)
+            .map_err(map_error)?;
+        self.reclaim_replaced_blobs(replaced_blob_ids).await;
+        Ok(())
+    }
+}
+
+impl<E> DieselInboundReceiveCommitRepository<E> {
+    async fn reclaim_replaced_blobs(&self, blob_ids: Vec<String>) {
+        let Some(reclaim) = &self.blob_reclaim else {
+            return;
+        };
+        if blob_ids.is_empty() {
+            return;
+        }
+        let blob_ids: Vec<BlobId> = blob_ids.into_iter().map(BlobId::from).collect();
+        match reclaim.reclaim_unreferenced(&blob_ids).await {
+            Ok(report) if report.failures == 0 => {}
+            Ok(report) => {
+                uc_warn!(
+                    error_kind = "blob_reclaim",
+                    errors = report.failures,
+                    deleted = report.rows_deleted,
+                    bytes_reclaimed = report.bytes_freed,
+                    "unreferenced blob reclaim left failures after inbound receive commit"
+                );
+            }
+            Err(error) => {
+                uc_warn!(
+                    error_kind = "blob_reclaim",
+                    io_error_kind = io_error_kind(&error),
+                    "unreferenced blob reclaim failed after inbound receive commit"
+                );
+            }
+        }
     }
 }
 

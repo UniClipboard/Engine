@@ -9,9 +9,7 @@
 
 use std::sync::Arc;
 
-#[cfg(test)]
-use diesel::query_dsl::methods::SelectDsl;
-use diesel::query_dsl::methods::{FilterDsl, OrderDsl};
+use diesel::query_dsl::methods::{FilterDsl, OrderDsl, SelectDsl};
 use diesel::Connection;
 use diesel::ExpressionMethods;
 use diesel::RunQueryDsl;
@@ -505,7 +503,14 @@ pub(super) fn replace_entry_file_set_rows(
     conn: &mut SqliteConnection,
     entry_id: &str,
     new_rows: &[NewEntryFileSetRow],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
+    let previous_blob_ids = entry_file_set::table
+        .filter(entry_file_set::entry_id.eq(entry_id))
+        .select(entry_file_set::blob_id)
+        .load::<Option<String>>(conn)?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     diesel::delete(entry_file_set::table)
         .filter(entry_file_set::entry_id.eq(entry_id))
         .execute(conn)?;
@@ -514,7 +519,7 @@ pub(super) fn replace_entry_file_set_rows(
             .values(chunk)
             .execute(conn)?;
     }
-    Ok(())
+    Ok(previous_blob_ids)
 }
 
 #[async_trait]
@@ -536,7 +541,7 @@ where
         &self,
         entry_id: &EntryId,
         file_set: &EntryFileSet,
-    ) -> Result<(), EntryFileSetError> {
+    ) -> Result<Vec<BlobId>, EntryFileSetError> {
         // An empty manifest is a pure DELETE, so it needs no key — deriving one
         // would fail an otherwise-valid replace when the session is locked.
         let new_rows: Vec<NewEntryFileSetRow> = if file_set.lines.is_empty() {
@@ -552,6 +557,7 @@ where
                 conn.transaction(|conn| replace_entry_file_set_rows(conn, &entry_id_str, &new_rows))
             })
             .map_err(|err| translate_storage_error(err, &entry_id_for_err))
+            .map(|blob_ids| blob_ids.into_iter().map(BlobId::from).collect())
     }
 
     #[instrument(

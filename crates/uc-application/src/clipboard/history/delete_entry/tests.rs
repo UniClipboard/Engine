@@ -14,8 +14,13 @@ use uc_core::clipboard::{
 };
 use uc_core::ids::{EntryId, EventId, FormatId, RepresentationId};
 use uc_core::ports::clipboard::{
-    DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
+    ClipboardEntryRemoval, DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
     ListRepresentationsForEventPort,
+};
+use uc_core::BlobId;
+
+use crate::clipboard::history::blob_reclaim::{
+    BlobReclaimError, BlobReclaimPort, BlobReclaimReport,
 };
 use uc_core::MimeType;
 use url::Url;
@@ -43,14 +48,44 @@ impl DeleteClipboardEntryWithReceiveStatePort for Store {
     async fn delete_entry_with_receive_state(
         &self,
         _: &EntryId,
-    ) -> Result<bool, ClipboardRepositoryError> {
+    ) -> Result<ClipboardEntryRemoval, ClipboardRepositoryError> {
         let entry = self.entry.lock().unwrap().take();
         let had_entry = entry.is_some();
         if let Some(entry) = entry {
             self.deleted.lock().unwrap().push(entry.event_id);
         }
-        Ok(self.receive.swap(false, Ordering::SeqCst) || had_entry)
+        Ok(ClipboardEntryRemoval {
+            removed: self.receive.swap(false, Ordering::SeqCst) || had_entry,
+            candidate_blob_ids: vec![BlobId::from("blob-under-test")],
+        })
     }
+}
+
+struct ScriptedReclaim {
+    fail: bool,
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl BlobReclaimPort for ScriptedReclaim {
+    async fn reclaim_unreferenced(
+        &self,
+        blob_ids: &[BlobId],
+    ) -> Result<BlobReclaimReport, BlobReclaimError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .extend(blob_ids.iter().map(|blob_id| blob_id.to_string()));
+        if self.fail {
+            return Err(BlobReclaimError::storage(anyhow::anyhow!("reclaim failed")));
+        }
+        Ok(BlobReclaimReport {
+            checked: blob_ids.len() as u64,
+            ..BlobReclaimReport::default()
+        })
+    }
+
+    fn release_write_leases(&self, _: &[BlobId]) {}
 }
 
 #[tokio::test]
@@ -195,12 +230,28 @@ async fn deletion_preserves_actual_stop_failure_and_does_not_delete_after_it() {
 }
 
 fn deletion(store: Arc<Store>, work: Arc<ReceiveWorkRegistry>) -> DeleteClipboardEntryUseCase {
+    deletion_with_reclaim(
+        store,
+        work,
+        Arc::new(ScriptedReclaim {
+            fail: false,
+            seen: Mutex::new(Vec::new()),
+        }),
+    )
+}
+
+fn deletion_with_reclaim(
+    store: Arc<Store>,
+    work: Arc<ReceiveWorkRegistry>,
+    reclaim: Arc<dyn BlobReclaimPort>,
+) -> DeleteClipboardEntryUseCase {
     DeleteClipboardEntryUseCase::from_ports(
         store.clone(),
         store.clone(),
         store.clone(),
         work,
         store.progress.registry.clone(),
+        reclaim,
     )
 }
 #[async_trait]
@@ -371,6 +422,39 @@ async fn deleting_through_the_configured_cache_root_alias_keeps_the_root_itself(
     assert!(!file.exists());
     assert!(cache.is_dir() && alias.is_dir());
     assert!(store.entry.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn reclaim_failure_does_not_fail_entry_deletion() {
+    let entry = EntryId::from("entry");
+    let store = Arc::new(Store {
+        progress: ProjectionLife::new(),
+        entry: Mutex::new(Some(ClipboardEntry::new(
+            entry.clone(),
+            EventId::new(),
+            1,
+            1,
+        ))),
+        receive: AtomicBool::new(false),
+        read_error: AtomicBool::new(false),
+        deleted: Mutex::new(Vec::new()),
+        read_reps: Mutex::new(Vec::new()),
+        reps: Mutex::new(Vec::new()),
+    });
+    let reclaim = Arc::new(ScriptedReclaim {
+        fail: true,
+        seen: Mutex::new(Vec::new()),
+    });
+    deletion_with_reclaim(
+        store.clone(),
+        Arc::new(ReceiveWorkRegistry::default()),
+        reclaim.clone(),
+    )
+    .execute(&entry)
+    .await
+    .unwrap();
+    assert!(store.entry.lock().unwrap().is_none());
+    assert_eq!(reclaim.seen.lock().unwrap().as_slice(), ["blob-under-test"]);
 }
 
 struct ProjectionLife {

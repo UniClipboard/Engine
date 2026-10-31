@@ -1080,7 +1080,7 @@ mod tests {
         ClipboardSelection, ClipboardSelectionDecision, ObservedClipboardRepresentation,
         PersistedClipboardRepresentation, SelectionPolicyVersion,
     };
-    use uc_core::ids::{DeviceId, EntryId, EventId, FormatId, RepresentationId};
+    use uc_core::ids::{BlobId, DeviceId, EntryId, EventId, FormatId, RepresentationId};
     use uc_core::search::document::{ContentType, SearchDocument, SearchIndexMeta, SearchPosting};
     use uc_core::search::key::{SearchKey, SearchKeyContext};
     use uc_core::search::query::SearchQuery;
@@ -1203,7 +1203,7 @@ mod tests {
             &self,
             _entry_id: &EntryId,
             _file_set: &uc_core::clipboard::EntryFileSet,
-        ) -> Result<(), uc_core::clipboard::EntryFileSetError> {
+        ) -> Result<Vec<BlobId>, uc_core::clipboard::EntryFileSetError> {
             unimplemented!("not used by search projection tests")
         }
 

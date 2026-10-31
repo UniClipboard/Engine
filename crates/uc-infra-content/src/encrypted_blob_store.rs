@@ -32,7 +32,7 @@ use uc_core::{blob::ports::BlobReaderPort, crypto::aad, BlobId, ContentHash};
 
 use uc_infra_crypto::key_epoch_aad;
 use uc_infra_crypto::v1_aead;
-use uc_infra_local::blob::{BlobStorePort, StoredPathBlob};
+use uc_infra_local::blob::{BlobFileRemoval, BlobStorePort, StoredPathBlob};
 use uc_infra_security::InMemorySession;
 use uc_observability_contract::{log_fields::log_id, uc_debug};
 
@@ -319,6 +319,10 @@ impl BlobStorePort for EncryptedBlobStore {
         // Encryption is transparent to deletion: drop the stored bytes via the
         // inner store.
         self.inner.delete(blob_id).await
+    }
+
+    async fn remove_stored_file(&self, blob_id: &BlobId) -> Result<BlobFileRemoval> {
+        self.inner.remove_stored_file(blob_id).await
     }
 }
 

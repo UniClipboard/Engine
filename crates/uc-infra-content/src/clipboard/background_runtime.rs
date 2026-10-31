@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
 
-use uc_application::deps::{ClipboardBackgroundError, ClipboardBackgroundPort};
+use uc_application::deps::{BlobReclaimPort, ClipboardBackgroundError, ClipboardBackgroundPort};
 use uc_core::ids::RepresentationId;
 use uc_core::ports::clipboard::ClipboardRepresentationStore;
 use uc_core::ports::{ClockPort, ContentHashPort};
@@ -38,6 +38,7 @@ pub struct ClipboardBackgroundRuntime {
     representation_repo: Arc<dyn ClipboardRepresentationStore>,
     worker_tx: mpsc::Sender<RepresentationId>,
     blob_writer: Arc<dyn BlobWriterPort>,
+    blob_reclaim: Arc<dyn BlobReclaimPort>,
     hasher: Arc<dyn ContentHashPort>,
     clock: Arc<dyn ClockPort>,
 }
@@ -55,6 +56,7 @@ impl ClipboardBackgroundRuntime {
         representation_repo: Arc<dyn ClipboardRepresentationStore>,
         worker_tx: mpsc::Sender<RepresentationId>,
         blob_writer: Arc<dyn BlobWriterPort>,
+        blob_reclaim: Arc<dyn BlobReclaimPort>,
         hasher: Arc<dyn ContentHashPort>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
@@ -70,6 +72,7 @@ impl ClipboardBackgroundRuntime {
             representation_repo,
             worker_tx,
             blob_writer,
+            blob_reclaim,
             hasher,
             clock,
         }
@@ -126,6 +129,7 @@ impl ClipboardBackgroundPort for ClipboardBackgroundRuntime {
             Arc::clone(&self.spool_manager),
             Arc::clone(&self.representation_repo),
             Arc::clone(&self.blob_writer),
+            Arc::clone(&self.blob_reclaim),
             Arc::clone(&self.hasher),
             self.worker_retry_max_attempts,
             self.worker_retry_backoff,

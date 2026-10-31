@@ -31,7 +31,7 @@ impl EntryFileSetRepositoryPort for FixedFileSets {
         &self,
         _entry_id: &EntryId,
         _file_set: &EntryFileSet,
-    ) -> Result<(), EntryFileSetError> {
+    ) -> Result<Vec<BlobId>, EntryFileSetError> {
         unreachable!()
     }
 
