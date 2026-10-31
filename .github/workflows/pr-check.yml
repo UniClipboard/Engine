@@ -94,6 +94,26 @@ jobs:
           compile-cache-r2-access-key-id: ${{ secrets.BUILD_CACHE_R2_ACCESS_KEY_ID }}
           compile-cache-r2-secret-access-key: ${{ secrets.BUILD_CACHE_R2_SECRET_ACCESS_KEY }}
 
+      - name: Verify Cargo Git source provenance
+        if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          UC_ENGINE_MBX_LOCAL_ONLY: '1'
+        run: |
+          source scripts/build-cache/env.sh
+          python3 scripts/testing/verify-build-source.py \
+            --workspace-parent "$RUNNER_TEMP" \
+            --evidence "$RUNNER_TEMP/build-source-evidence" \
+            --source-revision "$SOURCE_SHA"
+
+      - name: Retain Cargo Git source provenance evidence
+        if: always() && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: build-source-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/build-source-evidence
+          if-no-files-found: warn
+
       - name: Validate workspace metadata
         if: (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'snapshot'))
         run: cargo metadata --locked --format-version 1 > /dev/null
