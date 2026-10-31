@@ -21,6 +21,7 @@ use uc_observability_contract::{
 
 use super::background_activity::BackgroundActivity;
 use crate::clipboard::{RepresentationCache, SpoolManager};
+use uc_application::deps::BlobReclaimPort;
 use uc_infra_local::blob::BlobWriterPort;
 
 /// Check if an image MIME type needs conversion to PNG before blob storage.
@@ -64,6 +65,7 @@ pub struct BackgroundBlobWorker {
     spool: Arc<SpoolManager>,
     repo: Arc<dyn ClipboardRepresentationStore>,
     blob_writer: Arc<dyn BlobWriterPort>,
+    blob_reclaim: Arc<dyn BlobReclaimPort>,
     hasher: Arc<dyn ContentHashPort>,
     retry_max_attempts: u32,
     retry_backoff: Duration,
@@ -77,6 +79,7 @@ impl BackgroundBlobWorker {
         spool: Arc<SpoolManager>,
         repo: Arc<dyn ClipboardRepresentationStore>,
         blob_writer: Arc<dyn BlobWriterPort>,
+        blob_reclaim: Arc<dyn BlobReclaimPort>,
         hasher: Arc<dyn ContentHashPort>,
         retry_max_attempts: u32,
         retry_backoff: Duration,
@@ -87,6 +90,7 @@ impl BackgroundBlobWorker {
             spool,
             repo,
             blob_writer,
+            blob_reclaim,
             hasher,
             retry_max_attempts,
             retry_backoff,
@@ -340,6 +344,11 @@ impl BackgroundBlobWorker {
                 None,
             )
             .await;
+        // 引用已经尝试落库。去重命中的旧 id 在此之前一直持有租约；
+        // 新插入的 id 由 Writer 在返回前释放，这里再释放一次是幂等的。
+        // 必须先于下一次 await，缩短“行已可见、租约仍挡住删除”的窗口。
+        self.blob_reclaim
+            .release_write_leases(std::slice::from_ref(&blob_id));
 
         match updated {
             Ok(ProcessingUpdateOutcome::Updated(_)) => {
@@ -423,9 +432,27 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
+    use uc_application::deps::{BlobReclaimError, BlobReclaimReport};
     use uc_core::clipboard::PersistedClipboardRepresentation;
     use uc_core::ids::FormatId;
     use uc_core::{BlobId, ContentHash};
+
+    struct NoopReclaim;
+
+    #[async_trait]
+    impl BlobReclaimPort for NoopReclaim {
+        async fn reclaim_unreferenced(
+            &self,
+            blob_ids: &[BlobId],
+        ) -> Result<BlobReclaimReport, BlobReclaimError> {
+            Ok(BlobReclaimReport {
+                checked: blob_ids.len() as u64,
+                ..BlobReclaimReport::default()
+            })
+        }
+
+        fn release_write_leases(&self, _: &[BlobId]) {}
+    }
     use uc_infra_crypto::hashing::Blake3Hasher;
 
     struct FakeBlobWriter;
@@ -509,6 +536,7 @@ mod tests {
                 release: Arc::clone(&release),
                 completed: Arc::clone(&completed),
             }),
+            Arc::new(NoopReclaim),
             Arc::new(Blake3Hasher),
             3,
             Duration::from_millis(1),
@@ -571,6 +599,7 @@ mod tests {
             spool.clone(),
             repo,
             Arc::new(FakeBlobWriter),
+            Arc::new(NoopReclaim),
             Arc::new(Blake3Hasher),
             3,
             Duration::from_millis(1),

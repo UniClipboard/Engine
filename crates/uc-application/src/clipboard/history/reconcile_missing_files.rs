@@ -247,4 +247,177 @@ mod tests {
             ]
         );
     }
+
+    struct ReconcileReclaim {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::clipboard::history::blob_reclaim::BlobReclaimPort for ReconcileReclaim {
+        async fn reclaim_unreferenced(
+            &self,
+            blob_ids: &[uc_core::BlobId],
+        ) -> Result<
+            crate::clipboard::history::blob_reclaim::BlobReclaimReport,
+            crate::clipboard::history::blob_reclaim::BlobReclaimError,
+        > {
+            self.seen
+                .lock()
+                .unwrap()
+                .extend(blob_ids.iter().map(|id| id.to_string()));
+            Ok(Default::default())
+        }
+        fn release_write_leases(&self, _: &[uc_core::BlobId]) {}
+    }
+
+    struct ReconcileRefs {
+        item: super::super::file_references::HistoryFileReference,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::file_references::HistoryFileReferencePort for ReconcileRefs {
+        async fn list_file_references(
+            &self,
+            after: Option<&uc_core::ids::RepresentationId>,
+            _: usize,
+        ) -> Result<Vec<super::super::file_references::HistoryFileReference>> {
+            if after.is_some() {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![self.item.clone()])
+            }
+        }
+    }
+
+    struct ReconcileStore;
+
+    #[async_trait::async_trait]
+    impl uc_core::ports::clipboard::GetClipboardEntryPort for ReconcileStore {
+        async fn get_entry(
+            &self,
+            _: &EntryId,
+        ) -> Result<Option<uc_core::ClipboardEntry>, uc_core::clipboard::ClipboardRepositoryError>
+        {
+            Ok(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::ports::clipboard::ListRepresentationsForEventPort for ReconcileStore {
+        async fn get_representations_for_event(
+            &self,
+            _: &uc_core::ids::EventId,
+        ) -> Result<
+            Vec<uc_core::clipboard::PersistedClipboardRepresentation>,
+            uc_core::clipboard::ClipboardRepositoryError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::ports::clipboard::DeleteClipboardEntryWithReceiveStatePort for ReconcileStore {
+        async fn delete_entry_with_receive_state(
+            &self,
+            _: &EntryId,
+        ) -> Result<
+            uc_core::ports::clipboard::ClipboardEntryRemoval,
+            uc_core::clipboard::ClipboardRepositoryError,
+        > {
+            Ok(uc_core::ports::clipboard::ClipboardEntryRemoval {
+                removed: true,
+                candidate_blob_ids: vec![uc_core::BlobId::from("blob-reconcile")],
+            })
+        }
+    }
+
+    struct PresentCacheDir {
+        cache_dir: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl CacheFsPort for PresentCacheDir {
+        async fn exists(&self, path: &Path) -> bool {
+            path == self.cache_dir
+        }
+        async fn read_dir(&self, _: &Path) -> Result<Vec<uc_core::ports::cache_fs::DirEntry>> {
+            Ok(Vec::new())
+        }
+        async fn remove_dir_all(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_file(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        async fn dir_size(&self, _: &Path) -> Result<u64> {
+            Ok(0)
+        }
+        async fn read_file(&self, _: &Path) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn write_file(&self, _: &Path, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn metadata(
+            &self,
+            _: &Path,
+        ) -> Result<Option<uc_core::ports::cache_fs::FileMetadata>> {
+            Ok(None)
+        }
+        async fn remove_dir(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ZeroClock;
+    impl crate::connectivity::ElapsedClockPort for ZeroClock {
+        fn elapsed(&self) -> Result<std::time::Duration, crate::connectivity::ElapsedClockError> {
+            Ok(std::time::Duration::ZERO)
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_reclaims_the_blob_of_a_missing_cache_file() {
+        use crate::clipboard::history::delete_entry::DeleteClipboardEntryUseCase;
+        use crate::transfer::progress::ProgressProjectionRegistry;
+        use crate::transfer::receive::work::ReceiveWorkRegistry;
+
+        let cache_dir = PathBuf::from("/var/cache/uniclipboard");
+        let missing = cache_dir.join("gone.bin");
+        let uri = format!("file://{}\n", missing.display()).into_bytes();
+        let refs = Arc::new(ReconcileRefs {
+            item: super::super::file_references::HistoryFileReference {
+                entry_id: EntryId::from("stale"),
+                representation_id: uc_core::ids::RepresentationId::from("rep-stale"),
+                uri_list: uri,
+            },
+        });
+        let store = Arc::new(ReconcileStore);
+        let reclaim = Arc::new(ReconcileReclaim {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let work = Arc::new(ReceiveWorkRegistry::default());
+        let (progress, _worker) = ProgressProjectionRegistry::new(Arc::new(ZeroClock));
+        let delete_uc = Arc::new(DeleteClipboardEntryUseCase::from_ports(
+            store.clone(),
+            store.clone(),
+            store,
+            work,
+            progress,
+            reclaim.clone(),
+        ));
+        let usecase = ReconcileMissingFilesUseCase::new(
+            cache_dir.clone(),
+            refs,
+            delete_uc,
+            Arc::new(PresentCacheDir { cache_dir }),
+        );
+        let result = usecase.execute().await.unwrap();
+        assert_eq!(result.entries_deleted, 1);
+        assert_eq!(result.errors, 0);
+        assert_eq!(
+            reclaim.seen.lock().unwrap().as_slice(),
+            ["blob-reconcile".to_string()]
+        );
+    }
 }

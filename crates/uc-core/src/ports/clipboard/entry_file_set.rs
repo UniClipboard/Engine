@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 
 use crate::clipboard::{EntryFileSet, EntryFileSetError};
-use crate::ids::EntryId;
+use crate::ids::{BlobId, EntryId};
 
 /// 文件清单的持久化端口。
 ///
@@ -22,11 +22,14 @@ use crate::ids::EntryId;
 #[async_trait]
 pub trait EntryFileSetRepositoryPort: Send + Sync {
     /// 保存某条 entry 的完整清单,整体替换该 entry 之前保存的任何清单。
+    ///
+    /// 返回被换掉的清单行上的 blob。调用方在保存成功后再决定是否回收；
+    /// 新清单若仍引用同一个 blob，回收会留下该行。
     async fn save(
         &self,
         entry_id: &EntryId,
         file_set: &EntryFileSet,
-    ) -> Result<(), EntryFileSetError>;
+    ) -> Result<Vec<BlobId>, EntryFileSetError>;
 
     /// 取回某条 entry 的清单;不存在则返回 `Ok(None)`。
     async fn load(&self, entry_id: &EntryId) -> Result<Option<EntryFileSet>, EntryFileSetError>;

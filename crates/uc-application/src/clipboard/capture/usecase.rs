@@ -19,7 +19,8 @@
 //! The old path keeps a deprecated re-export shim until Slice 5 deletes
 //! `uc-app`.
 
-use std::sync::Arc;
+use std::mem;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -41,8 +42,9 @@ use uc_core::clipboard::{
     PersistedClipboardRepresentation, IMAGE_FROM_FILE_FORMAT,
 };
 
+use crate::clipboard::history::blob_reclaim::BlobReclaimPort;
 use crate::clipboard::outbound::{parse_uri_list_line, UriListLineKind};
-use uc_core::ids::{EntryId, EventId};
+use uc_core::ids::{BlobId, EntryId, EventId};
 use uc_core::ports::clipboard::{
     EntryFileSetRepositoryPort, FindEntryIdBySnapshotHashPort, ReplaceEntryContentPort,
     RepresentationCachePort, SaveClipboardEntryPort, SpoolQueuePort, SpoolRequest,
@@ -184,6 +186,9 @@ pub struct CaptureClipboardUseCase {
     /// 仅在 `ClipboardChangeOrigin::{LocalCapture, LocalRestore}` 路径 emit；
     /// `RemotePush` 严禁 emit（红线：与入站同步双计会污染 DAU 信号）。
     analytics: Arc<dyn AnalyticsPort>,
+    /// 替换成功后回收旧 blob，并在引用落库后释放本次写入租约。
+    /// 生产装配必须调用 [`Self::with_blob_reclaim`]。
+    blob_reclaim: Option<Arc<dyn BlobReclaimPort>>,
 }
 
 impl CaptureClipboardUseCase {
@@ -221,7 +226,14 @@ impl CaptureClipboardUseCase {
             inbound_receive_commit: None,
             coordinator: None,
             analytics,
+            blob_reclaim: None,
         }
+    }
+
+    /// 生产路径必须注入。与 BlobWriter 共享同一 profile 的进程内租约。
+    pub fn with_blob_reclaim(mut self, blob_reclaim: Arc<dyn BlobReclaimPort>) -> Self {
+        self.blob_reclaim = Some(blob_reclaim);
+        self
     }
 
     pub fn with_inbound_receive_commit(
@@ -346,6 +358,8 @@ impl CaptureClipboardUseCase {
             }
             uc_info!("Starting clipboard capture with provided snapshot");
 
+            // 去重命中的租约在任何提前返回时都要释放。新插入的 id 已由 Writer 释放。
+            let write_leases = WriteLeaseRelease::new(self.blob_reclaim.clone());
             let event_id = EventId::new();
             let captured_at_ms = snapshot.ts_ms;
             // `RemotePush { from_device: Some(_) }` 路径走的是 apply_inbound:
@@ -401,6 +415,7 @@ impl CaptureClipboardUseCase {
                 if let Some(built) =
                     build_entry_file_set(&snapshot, self.blob_ingest.as_ref(), caps).await
                 {
+                    write_leases.track_all(&referenced_blob_ids(&[], Some(&built)));
                     if let Some(component) = built.file_set_v1_component() {
                         snapshot.file_set_v1_component = Some(component);
                     } else {
@@ -497,6 +512,7 @@ impl CaptureClipboardUseCase {
                                 // No path in the message: a clipboard file
                                 // path is user content.
                                 .context("LocalFile rep ingest into blob store failed")?;
+                            write_leases.track(&blob_id);
                             uc_info!(
                                 rep_id = log_id(&observed.id),
                                 blob_id = log_id(&blob_id),
@@ -515,6 +531,9 @@ impl CaptureClipboardUseCase {
                         ClipboardPayloadSource::Inline(_) => {
                             let persisted =
                                 self.representation_normalizer.normalize(observed).await?;
+                            if let Some(blob_id) = &persisted.blob_id {
+                                write_leases.track(blob_id);
+                            }
                             out.push(persisted);
                         }
                     }
@@ -647,7 +666,7 @@ impl CaptureClipboardUseCase {
             // directory receive commits the entry, manifest and publication
             // state together; every other capture keeps the established path.
             let used_atomic_receive_commit = commit_context.is_some();
-            async {
+            let mut replaced_blob_ids = async {
                 let total_size = snapshot.total_size_bytes();
                 let content_category = ClipboardEntryContentCategory::from_snapshot(&snapshot);
                 let now_ms = SystemTime::now()
@@ -730,7 +749,9 @@ impl CaptureClipboardUseCase {
                             commit_port
                                 .commit_inbound_receive(&settlement)
                                 .await
-                                .map_err(anyhow::Error::from)
+                                .map_err(anyhow::Error::from)?;
+                            // 旧 blob 由入站提交仓储在事务成功后回收。
+                            Ok(Vec::new())
                         }
                     };
                 }
@@ -747,7 +768,8 @@ impl CaptureClipboardUseCase {
                         self.save_entry
                             .save_entry_and_selection(&new_entry, &new_selection)
                             .await
-                            .map_err(anyhow::Error::from)
+                            .map_err(anyhow::Error::from)?;
+                        Ok(Vec::new())
                     }
                     CommitMode::Replace => self
                         .replace_entry
@@ -778,15 +800,21 @@ impl CaptureClipboardUseCase {
             // transaction, or give the reader a way to tell the two apart.
             if !used_atomic_receive_commit {
                 if let Some(file_set) = &file_set {
-                    if let Err(err) = self.entry_file_set_repo.save(&entry_id, file_set).await {
-                        uc_warn!(
-                            entry_id = log_id(&entry_id),
-                            error_kind = "file_set_manifest_save",
-                            io_error_kind = io_error_kind(&err),
-                            "capture: failed to persist entry file-set manifest"
-                        );
+                    match self.entry_file_set_repo.save(&entry_id, file_set).await {
+                        Ok(previous) => replaced_blob_ids.extend(previous),
+                        Err(err) => {
+                            uc_warn!(
+                                entry_id = log_id(&entry_id),
+                                error_kind = "file_set_manifest_save",
+                                io_error_kind = io_error_kind(&err),
+                                "capture: failed to persist entry file-set manifest"
+                            );
+                        }
                     }
                 }
+            }
+            if let Some(reclaim) = &self.blob_reclaim {
+                reclaim_replaced_blobs(reclaim.as_ref(), &replaced_blob_ids).await;
             }
 
             uc_info!(
@@ -888,6 +916,100 @@ impl CaptureClipboardUseCase {
 ///     id would dangle if returned as `deduplicated: true`.
 ///
 /// All failure paths are non-fatal: a dedup miss must never drop the capture.
+/// 捕获结束（含 `?` 提前返回）时释放已经登记的写入租约。
+struct WriteLeaseRelease {
+    reclaim: Option<Arc<dyn BlobReclaimPort>>,
+    blob_ids: Mutex<Vec<BlobId>>,
+}
+
+impl WriteLeaseRelease {
+    fn new(reclaim: Option<Arc<dyn BlobReclaimPort>>) -> Self {
+        Self {
+            reclaim,
+            blob_ids: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn track(&self, blob_id: &BlobId) {
+        self.blob_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(blob_id.clone());
+    }
+
+    fn track_all(&self, blob_ids: &[BlobId]) {
+        for blob_id in blob_ids {
+            self.track(blob_id);
+        }
+    }
+}
+
+impl Drop for WriteLeaseRelease {
+    fn drop(&mut self) {
+        let Some(reclaim) = self.reclaim.as_ref() else {
+            return;
+        };
+        let blob_ids = mem::take(
+            self.blob_ids
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        if blob_ids.is_empty() {
+            return;
+        }
+        reclaim.release_write_leases(&blob_ids);
+    }
+}
+
+fn referenced_blob_ids(
+    representations: &[PersistedClipboardRepresentation],
+    file_set: Option<&EntryFileSet>,
+) -> Vec<BlobId> {
+    let mut blob_ids = Vec::new();
+    for representation in representations {
+        if let Some(blob_id) = &representation.blob_id {
+            blob_ids.push(blob_id.clone());
+        }
+    }
+    if let Some(file_set) = file_set {
+        for line in &file_set.lines {
+            if let EntryFileSetLineKind::File {
+                blob_id: Some(blob_id),
+                ..
+            } = &line.kind
+            {
+                blob_ids.push(blob_id.clone());
+            }
+        }
+    }
+    blob_ids
+}
+
+async fn reclaim_replaced_blobs(reclaim: &dyn BlobReclaimPort, blob_ids: &[BlobId]) {
+    if blob_ids.is_empty() {
+        return;
+    }
+    match reclaim.reclaim_unreferenced(blob_ids).await {
+        Ok(report) if report.failures == 0 => {}
+        Ok(report) => {
+            uc_warn!(
+                error_kind = "blob_reclaim",
+                errors = report.failures,
+                deleted = report.rows_deleted,
+                bytes_reclaimed = report.bytes_freed,
+                "unreferenced blob reclaim left failures after entry replacement"
+            );
+        }
+        Err(error) => {
+            uc_warn!(
+                error_kind = "blob_reclaim",
+                io_error_kind = io_error_kind(&error),
+                "unreferenced blob reclaim failed after entry replacement"
+            );
+        }
+    }
+}
+
 async fn resurface_existing_entry(
     find_entry_by_snapshot_hash: &dyn FindEntryIdBySnapshotHashPort,
     touch_entry: &dyn TouchClipboardEntryPort,
@@ -2567,5 +2689,324 @@ mod tests {
             resurface_existing_entry(&repo, &repo, "blake3v1:abc", 123).await,
             None
         );
+    }
+
+    struct LeaseLog {
+        reclaimed: Mutex<Vec<String>>,
+        released: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlobReclaimPort for LeaseLog {
+        async fn reclaim_unreferenced(
+            &self,
+            blob_ids: &[BlobId],
+        ) -> Result<
+            crate::clipboard::history::blob_reclaim::BlobReclaimReport,
+            crate::clipboard::history::blob_reclaim::BlobReclaimError,
+        > {
+            self.reclaimed
+                .lock()
+                .unwrap()
+                .extend(blob_ids.iter().map(|id| id.to_string()));
+            Ok(crate::clipboard::history::blob_reclaim::BlobReclaimReport::default())
+        }
+
+        fn release_write_leases(&self, blob_ids: &[BlobId]) {
+            self.released
+                .lock()
+                .unwrap()
+                .extend(blob_ids.iter().map(|id| id.to_string()));
+        }
+    }
+
+    struct CapturePorts {
+        log: Arc<LeaseLog>,
+        fail_insert: bool,
+        ingest_blob: BlobId,
+        replace_blobs: Vec<BlobId>,
+        previous_file_blobs: Vec<BlobId>,
+    }
+
+    #[async_trait::async_trait]
+    impl SaveClipboardEntryPort for CapturePorts {
+        async fn save_entry_and_selection(
+            &self,
+            _: &uc_core::ClipboardEntry,
+            _: &ClipboardSelectionDecision,
+        ) -> Result<(), uc_core::clipboard::ClipboardRepositoryError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TouchClipboardEntryPort for CapturePorts {
+        async fn touch_entry(
+            &self,
+            _: &EntryId,
+            _: i64,
+        ) -> Result<bool, uc_core::clipboard::ClipboardRepositoryError> {
+            Ok(false)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FindEntryIdBySnapshotHashPort for CapturePorts {
+        async fn find_entry_id_by_snapshot_hash(
+            &self,
+            _: &str,
+        ) -> Result<Option<EntryId>, uc_core::clipboard::ClipboardRepositoryError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClipboardEventWriterPort for CapturePorts {
+        async fn insert_event(
+            &self,
+            _: &ClipboardEvent,
+            _: &Vec<PersistedClipboardRepresentation>,
+        ) -> Result<()> {
+            if self.fail_insert {
+                anyhow::bail!("insert failed");
+            }
+            Ok(())
+        }
+
+        async fn delete_event_and_representations(&self, _: &EventId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SelectRepresentationPolicyPort for CapturePorts {
+        fn select(
+            &self,
+            snapshot: &SystemClipboardSnapshot,
+        ) -> Result<uc_core::clipboard::ClipboardSelection, uc_core::clipboard::PolicyError>
+        {
+            let rep_id = snapshot.representations[0].id.clone();
+            Ok(uc_core::clipboard::ClipboardSelection {
+                primary_rep_id: rep_id.clone(),
+                secondary_rep_ids: Vec::new(),
+                preview_rep_id: rep_id.clone(),
+                paste_rep_id: rep_id,
+                policy_version: uc_core::clipboard::SelectionPolicyVersion::V1,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClipboardRepresentationNormalizerPort for CapturePorts {
+        async fn normalize(
+            &self,
+            observed: &ObservedClipboardRepresentation,
+        ) -> Result<PersistedClipboardRepresentation> {
+            Ok(PersistedClipboardRepresentation::new(
+                observed.id.clone(),
+                observed.format_id.clone(),
+                observed.mime.clone(),
+                observed.size_bytes(),
+                observed.inline_bytes().map(|bytes| bytes.to_vec()),
+                None,
+            ))
+        }
+    }
+
+    impl DeviceIdentityPort for CapturePorts {
+        fn current_device_id(&self) -> uc_core::DeviceId {
+            uc_core::DeviceId::new("local")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RepresentationCachePort for CapturePorts {
+        async fn put(&self, _: &uc_core::ids::RepresentationId, _: Vec<u8>) {}
+        async fn get(&self, _: &uc_core::ids::RepresentationId) -> Option<Vec<u8>> {
+            None
+        }
+        async fn mark_completed(&self, _: &uc_core::ids::RepresentationId) {}
+        async fn mark_spooling(&self, _: &uc_core::ids::RepresentationId) {}
+        async fn remove(&self, _: &uc_core::ids::RepresentationId) {}
+    }
+
+    #[async_trait::async_trait]
+    impl SpoolQueuePort for CapturePorts {
+        async fn enqueue(&self, _: SpoolRequest) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::blob::ports::BlobContentIngestPort for CapturePorts {
+        async fn ingest_path(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<uc_core::blob::ports::IngestedBlob> {
+            Ok(uc_core::blob::ports::IngestedBlob {
+                blob_id: self.ingest_blob.clone(),
+                content_hash: uc_core::ContentHash::from(&[7u8; 32]),
+                size_bytes: 4,
+            })
+        }
+
+        async fn hash_path(&self, _: &std::path::Path) -> Result<uc_core::ContentHash> {
+            Ok(uc_core::ContentHash::from(&[7u8; 32]))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EntryFileSetRepositoryPort for CapturePorts {
+        async fn save(
+            &self,
+            _: &EntryId,
+            _: &EntryFileSet,
+        ) -> Result<Vec<BlobId>, uc_core::clipboard::EntryFileSetError> {
+            Ok(self.previous_file_blobs.clone())
+        }
+
+        async fn load(
+            &self,
+            _: &EntryId,
+        ) -> Result<Option<EntryFileSet>, uc_core::clipboard::EntryFileSetError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SettingsPort for CapturePorts {
+        async fn load(&self) -> Result<uc_core::settings::model::Settings> {
+            Ok(uc_core::settings::model::Settings::default())
+        }
+
+        async fn save(&self, _: &uc_core::settings::model::Settings) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ReplaceEntryContentPort for CapturePorts {
+        async fn replace_entry_content(
+            &self,
+            _: &EntryId,
+            _: &ClipboardEvent,
+            _: &[PersistedClipboardRepresentation],
+            _: &ClipboardSelectionDecision,
+            _: i64,
+            _: ClipboardEntryContentCategory,
+        ) -> Result<Vec<BlobId>, uc_core::clipboard::ClipboardRepositoryError> {
+            Ok(self.replace_blobs.clone())
+        }
+    }
+
+    impl AnalyticsPort for CapturePorts {
+        fn capture(&self, _: Event) {}
+    }
+
+    fn capture_usecase(ports: Arc<CapturePorts>) -> CaptureClipboardUseCase {
+        CaptureClipboardUseCase::new(
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+            ports.clone(),
+        )
+        .with_blob_reclaim(ports.log.clone())
+    }
+
+    #[tokio::test]
+    async fn replace_and_file_set_reclaim_previous_blobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, b"note").unwrap();
+        let uri = format!("file://{}", file.display());
+        let log = Arc::new(LeaseLog {
+            reclaimed: Mutex::new(Vec::new()),
+            released: Mutex::new(Vec::new()),
+        });
+        let ports = Arc::new(CapturePorts {
+            log: Arc::clone(&log),
+            fail_insert: false,
+            ingest_blob: BlobId::from("unused"),
+            replace_blobs: vec![BlobId::from("blob-replaced")],
+            previous_file_blobs: vec![BlobId::from("blob-file-set")],
+        });
+        let outcome = capture_usecase(ports)
+            .execute_with_origin(
+                snapshot_with(vec![rep(
+                    "public.file-url",
+                    Some("text/uri-list"),
+                    uri.as_bytes(),
+                )]),
+                ClipboardChangeOrigin::RemotePush {
+                    from_device: Some(uc_core::DeviceId::new("peer")),
+                },
+                Some(EntryId::from("entry-replace")),
+                None,
+                CommitMode::Replace,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!outcome.deduplicated);
+        assert_eq!(
+            log.reclaimed.lock().unwrap().as_slice(),
+            ["blob-replaced".to_string(), "blob-file-set".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_lease_is_released_when_insert_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pic.bin");
+        std::fs::write(&file, b"pic").unwrap();
+        let log = Arc::new(LeaseLog {
+            reclaimed: Mutex::new(Vec::new()),
+            released: Mutex::new(Vec::new()),
+        });
+        let ports = Arc::new(CapturePorts {
+            log: Arc::clone(&log),
+            fail_insert: true,
+            ingest_blob: BlobId::from("blob-ingested"),
+            replace_blobs: Vec::new(),
+            previous_file_blobs: Vec::new(),
+        });
+        let error = capture_usecase(ports)
+            .execute_with_origin(
+                SystemClipboardSnapshot {
+                    ts_ms: 1_700_000_000_000,
+                    representations: vec![ObservedClipboardRepresentation::new_local_file(
+                        uc_core::ids::RepresentationId::new(),
+                        uc_core::ids::FormatId::from("public.file-url"),
+                        Some(uc_core::clipboard::MimeType("text/uri-list".into())),
+                        file,
+                        3,
+                    )],
+                    file_content_digests: Vec::new(),
+                    file_set_v1_component: None,
+                },
+                ClipboardChangeOrigin::RemotePush {
+                    from_device: Some(uc_core::DeviceId::new("peer")),
+                },
+                Some(EntryId::from("entry-fail")),
+                None,
+                CommitMode::Create,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("insert failed"));
+        assert_eq!(
+            log.released.lock().unwrap().as_slice(),
+            ["blob-ingested".to_string()]
+        );
+        assert!(log.reclaimed.lock().unwrap().is_empty());
     }
 }

@@ -14,7 +14,7 @@ use uc_core::clipboard::{
     ClipboardEntryContentCategory, ClipboardEvent, ClipboardRepositoryError,
     ClipboardSelectionDecision, PersistedClipboardRepresentation,
 };
-use uc_core::ids::EntryId;
+use uc_core::ids::{BlobId, EntryId};
 use uc_core::ports::clipboard::ReplaceEntryContentPort;
 
 use crate::db::mappers::clipboard_event_mapper::ClipboardEventRowMapper;
@@ -85,7 +85,7 @@ pub(super) fn replace_entry_content_rows(
     conn: &mut SqliteConnection,
     prepared: &PreparedEntryReplacement,
     preserve_directory_attempts: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let old_event_id = clipboard_entry::table
         .filter(clipboard_entry::entry_id.eq(&prepared.entry_id))
         .select(clipboard_entry::event_id)
@@ -101,6 +101,21 @@ pub(super) fn replace_entry_content_rows(
         .filter(clipboard_snapshot_representation::event_id.eq(&old_event_id))
         .select(clipboard_snapshot_representation::id)
         .load::<String>(conn)?;
+    let mut replaced_blob_ids = clipboard_snapshot_representation::table
+        .filter(clipboard_snapshot_representation::event_id.eq(&old_event_id))
+        .select(clipboard_snapshot_representation::blob_id)
+        .load::<Option<String>>(conn)?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if !old_rep_ids.is_empty() {
+        replaced_blob_ids.extend(
+            clipboard_representation_thumbnail::table
+                .filter(clipboard_representation_thumbnail::representation_id.eq_any(&old_rep_ids))
+                .select(clipboard_representation_thumbnail::thumbnail_blob_id)
+                .load::<String>(conn)?,
+        );
+    }
     let mut transfers = file_transfer::table
         .filter(file_transfer::entry_id.eq(&prepared.entry_id))
         .into_boxed();
@@ -166,7 +181,7 @@ pub(super) fn replace_entry_content_rows(
     .execute(conn)?;
     diesel::delete(clipboard_event::table.filter(clipboard_event::event_id.eq(old_event_id)))
         .execute(conn)?;
-    Ok(())
+    Ok(replaced_blob_ids)
 }
 
 #[async_trait::async_trait]
@@ -187,7 +202,7 @@ where
         new_selection: &ClipboardSelectionDecision,
         new_total_size: i64,
         new_content_category: ClipboardEntryContentCategory,
-    ) -> Result<(), ClipboardRepositoryError> {
+    ) -> Result<Vec<BlobId>, ClipboardRepositoryError> {
         let prepared = prepare_entry_replacement(
             entry_id,
             new_event,
@@ -202,6 +217,7 @@ where
                 conn.transaction(|conn| replace_entry_content_rows(conn, &prepared, false))
             })
             .map_err(to_repo_err)
+            .map(|blob_ids| blob_ids.into_iter().map(BlobId::from).collect())
     }
 }
 

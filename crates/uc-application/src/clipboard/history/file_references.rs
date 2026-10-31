@@ -2,6 +2,7 @@
 use async_trait::async_trait;
 use uc_core::ids::{EntryId, RepresentationId};
 
+#[derive(Clone)]
 pub struct HistoryFileReference {
     pub entry_id: EntryId,
     pub representation_id: RepresentationId,

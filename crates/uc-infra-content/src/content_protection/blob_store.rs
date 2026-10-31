@@ -9,7 +9,7 @@ use uc_core::crypto::aad;
 use uc_core::crypto::domain::{Aad, Ciphertext, Plaintext};
 use uc_core::{BlobId, ContentHash};
 
-use uc_infra_local::blob::{BlobStorePort, StoredPathBlob};
+use uc_infra_local::blob::{BlobFileRemoval, BlobStorePort, StoredPathBlob};
 use uc_infra_security::ContentProtection;
 use uc_observability_contract::uc_debug;
 
@@ -91,6 +91,10 @@ impl BlobStorePort for V3EncryptedBlobStore {
 
     async fn delete(&self, blob_id: &BlobId) -> Result<()> {
         self.inner.delete(blob_id).await
+    }
+
+    async fn remove_stored_file(&self, blob_id: &BlobId) -> Result<BlobFileRemoval> {
+        self.inner.remove_stored_file(blob_id).await
     }
 }
 

@@ -740,17 +740,20 @@ pub async fn wire_dependencies_from_inputs(
             platform.current_profile.clone(),
         ),
     });
-    let inbound_commit_impl = Arc::new(match &v3_content_protection {
-        Some(protection) => DieselInboundReceiveCommitRepository::new_v3(
-            infra.db_executor.clone(),
-            Arc::clone(protection),
-        ),
-        None => DieselInboundReceiveCommitRepository::new(
-            infra.db_executor.clone(),
-            space_access_ports.derive_subkey.clone(),
-            platform.current_profile.clone(),
-        ),
-    });
+    let inbound_commit_impl = Arc::new(
+        match &v3_content_protection {
+            Some(protection) => DieselInboundReceiveCommitRepository::new_v3(
+                infra.db_executor.clone(),
+                Arc::clone(protection),
+            ),
+            None => DieselInboundReceiveCommitRepository::new(
+                infra.db_executor.clone(),
+                space_access_ports.derive_subkey.clone(),
+                platform.current_profile.clone(),
+            ),
+        }
+        .with_blob_reclaim(Arc::clone(&platform.blob_reclaim)),
+    );
     let mut directory_receive = DirectoryReceivePorts {
         get_attempt: directory_attempt_impl.clone(),
         list_attempts: directory_attempt_impl.clone(),
@@ -946,6 +949,7 @@ pub async fn wire_dependencies_from_inputs(
             Arc::clone(&decrypting_rep_repo),
             worker_tx.clone(),
             Arc::clone(&platform.blob_writer),
+            Arc::clone(&platform.blob_reclaim),
             Arc::clone(&infra.hash),
             Arc::clone(&infra.clock),
         ),
@@ -1023,6 +1027,7 @@ pub async fn wire_dependencies_from_inputs(
             blob_store: platform.blob_store,
             blob_writer: platform.blob_writer,
             blob_content_ingest: platform.blob_content_ingest,
+            blob_reclaim: Arc::clone(&platform.blob_reclaim),
             entry_file_set_repo,
             history_tag_store: history_tag_repo.clone(),
             history_entry_tags: history_tag_repo,

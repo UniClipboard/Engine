@@ -67,6 +67,7 @@ diesel::table! {
         encryption_algo -> Nullable<Text>,
         created_at_ms -> BigInt,
         compressed_size -> Nullable<BigInt>,
+        last_claimed_at_ms -> BigInt,
     }
 }
 

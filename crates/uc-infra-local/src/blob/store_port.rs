@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uc_core::{BlobId, ContentHash};
 
+/// 按 blob_id 删除落盘文件的结果。缺失不是错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobFileRemoval {
+    Deleted,
+    Missing,
+}
+
 /// Outcome of persisting a path-backed file into blob storage.
 ///
 /// The `content_hash` and `size_bytes` are derived from the exact bytes the
@@ -64,6 +71,9 @@ pub trait BlobStorePort: Send + Sync {
     /// to drop a freshly written blob when content-hash deduplication finds an
     /// existing record for the same bytes.
     async fn delete(&self, blob_id: &BlobId) -> Result<()>;
+
+    /// 删除该 blob_id 对应的文件。已经不存在时返回 [`BlobFileRemoval::Missing`]。
+    async fn remove_stored_file(&self, blob_id: &BlobId) -> Result<BlobFileRemoval>;
 }
 
 #[async_trait]
@@ -82,5 +92,9 @@ impl<T: BlobStorePort + ?Sized> BlobStorePort for Arc<T> {
 
     async fn delete(&self, blob_id: &BlobId) -> Result<()> {
         (**self).delete(blob_id).await
+    }
+
+    async fn remove_stored_file(&self, blob_id: &BlobId) -> Result<BlobFileRemoval> {
+        (**self).remove_stored_file(blob_id).await
     }
 }

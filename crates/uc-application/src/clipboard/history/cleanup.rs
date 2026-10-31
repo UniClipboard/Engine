@@ -21,17 +21,14 @@
 //! fine. If cleanup frequency ever grows (e.g. per-hour sweep), revisit
 //! this trade-off.
 //!
-//! `execute` runs two passes:
-//!   1. the file-cache TTL sweep described above (copied files only), and
-//!   2. a total-size quota over disk-backed entries — the only pass that
-//!      bounds the content-addressed image-blob store, which the TTL sweep
-//!      never sees (issue #957).
+//! `execute` 跑两轮：
+//!   1. 上面的文件缓存 TTL，只处理复制出来的文件；
+//!   2. 按总容量选择要删除的磁盘条目。TTL 扫不到图片 blob。
 //!
-//! The quota pass is **quota-only** (no age rule for image blobs) and
-//! **grandfathers** everything that predates the persisted quota baseline, so
-//! it never retroactively reclaims a user's pre-upgrade history — the failure
-//! mode that got the earlier age-retention variant reverted (#957). See
-//! `CleanupExpiredFilesUseCase::run_quota`.
+//! 用户删除、清空、保留策略和本用例在删除条目成功后，都会回收已经没有引用、
+//! 且认领时间已过宽限的 vault blob。仍在宽限内的 blob 留给 PR2（WF-engine-39
+//! GC sweep）。配额本身没有年龄规则，并豁免配额基线之前的数据，因此不会回头
+//! 清掉升级前的历史。见 `CleanupExpiredFilesUseCase::run_quota`。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -266,9 +263,8 @@ impl CleanupExpiredFilesUseCase {
         Ok(())
     }
 
-    /// Pass 2: enforce a total-size quota over disk-backed entries (blob-backed
-    /// images and file-cache files alike), evicting oldest-first. This is the
-    /// only pass that reclaims clipboard image blobs.
+    /// 第二轮：按总容量、从最旧开始选出要删除的落盘条目（含 blob 图片和文件缓存）。
+    /// 条目删除成功后会回收无引用的 vault blob；这一轮只负责选出超额条目。
     ///
     /// Two safety rules distinguish this from the reverted age-retention
     /// variant (#957) that deleted users' history on first upgrade:
@@ -410,7 +406,7 @@ impl CleanupExpiredFilesUseCase {
             quota_mb = quota_bytes / (1024 * 1024),
             grandfathered = grandfathered,
             baseline_ms = baseline_ms,
-            "Cache quota enforcement complete (oldest-first; pre-baseline data grandfathered; disk reclaimed by iroh-blobs GC on its next sweep)"
+            "Cache quota enforcement complete (oldest-first; pre-baseline data grandfathered; unreferenced vault blobs reclaimed with each deleted entry)"
         );
     }
 
@@ -1115,6 +1111,226 @@ mod tests {
         assert!(
             fs.exists(&root.join("full")).await,
             "non-empty subdir must be kept"
+        );
+    }
+
+    struct CleanupWorld {
+        entry: uc_core::ClipboardEntry,
+        uri: Vec<u8>,
+    }
+
+    struct CleanupReclaim {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::clipboard::history::blob_reclaim::BlobReclaimPort for CleanupReclaim {
+        async fn reclaim_unreferenced(
+            &self,
+            blob_ids: &[uc_core::BlobId],
+        ) -> Result<
+            crate::clipboard::history::blob_reclaim::BlobReclaimReport,
+            crate::clipboard::history::blob_reclaim::BlobReclaimError,
+        > {
+            self.seen
+                .lock()
+                .unwrap()
+                .extend(blob_ids.iter().map(|id| id.to_string()));
+            Ok(Default::default())
+        }
+        fn release_write_leases(&self, _: &[uc_core::BlobId]) {}
+    }
+
+    struct CleanupStore {
+        world: CleanupWorld,
+    }
+
+    #[async_trait::async_trait]
+    impl SettingsPort for CleanupStore {
+        async fn load(&self) -> Result<uc_core::settings::model::Settings> {
+            let mut settings = uc_core::settings::model::Settings::default();
+            settings.file_sync.file_auto_cleanup = true;
+            settings.file_sync.file_retention_hours = 1;
+            settings.file_sync.file_cache_quota_per_device = 0;
+            Ok(settings)
+        }
+        async fn save(&self, _: &uc_core::settings::model::Settings) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ListClipboardEntriesPort for CleanupStore {
+        async fn list_entries(
+            &self,
+            _: usize,
+            offset: usize,
+        ) -> Result<Vec<uc_core::ClipboardEntry>, uc_core::clipboard::ClipboardRepositoryError>
+        {
+            if offset == 0 {
+                Ok(vec![self.world.entry.clone()])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::ports::clipboard::GetClipboardEntryPort for CleanupStore {
+        async fn get_entry(
+            &self,
+            _: &EntryId,
+        ) -> Result<Option<uc_core::ClipboardEntry>, uc_core::clipboard::ClipboardRepositoryError>
+        {
+            Ok(Some(self.world.entry.clone()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ListRepresentationsForEventPort for CleanupStore {
+        async fn get_representations_for_event(
+            &self,
+            _: &uc_core::ids::EventId,
+        ) -> Result<
+            Vec<uc_core::clipboard::PersistedClipboardRepresentation>,
+            uc_core::clipboard::ClipboardRepositoryError,
+        > {
+            Ok(vec![
+                uc_core::clipboard::PersistedClipboardRepresentation::new(
+                    uc_core::ids::RepresentationId::from("rep-cache"),
+                    uc_core::ids::FormatId::from("public.file-url"),
+                    Some(uc_core::MimeType("text/uri-list".into())),
+                    self.world.uri.len() as i64,
+                    Some(self.world.uri.clone()),
+                    None,
+                ),
+            ])
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl uc_core::ports::clipboard::DeleteClipboardEntryWithReceiveStatePort for CleanupStore {
+        async fn delete_entry_with_receive_state(
+            &self,
+            _: &EntryId,
+        ) -> Result<
+            uc_core::ports::clipboard::ClipboardEntryRemoval,
+            uc_core::clipboard::ClipboardRepositoryError,
+        > {
+            Ok(uc_core::ports::clipboard::ClipboardEntryRemoval {
+                removed: true,
+                candidate_blob_ids: vec![uc_core::BlobId::from("blob-cleanup")],
+            })
+        }
+    }
+
+    struct ListingCacheFs {
+        cache_dir: PathBuf,
+        file: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl CacheFsPort for ListingCacheFs {
+        async fn exists(&self, path: &Path) -> bool {
+            path == self.cache_dir || path == self.file
+        }
+        async fn read_dir(&self, path: &Path) -> Result<Vec<uc_core::ports::cache_fs::DirEntry>> {
+            if path == self.cache_dir {
+                Ok(vec![uc_core::ports::cache_fs::DirEntry {
+                    path: self.file.clone(),
+                    is_dir: false,
+                }])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+        async fn remove_dir_all(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_file(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        async fn dir_size(&self, _: &Path) -> Result<u64> {
+            Ok(0)
+        }
+        async fn read_file(&self, _: &Path) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn write_file(&self, _: &Path, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        async fn metadata(
+            &self,
+            path: &Path,
+        ) -> Result<Option<uc_core::ports::cache_fs::FileMetadata>> {
+            if path == self.file {
+                Ok(Some(uc_core::ports::cache_fs::FileMetadata {
+                    size_bytes: 4,
+                    is_dir: false,
+                    modified_unix_ms: Some(0),
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        async fn remove_dir(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ZeroClock;
+    impl crate::connectivity::ElapsedClockPort for ZeroClock {
+        fn elapsed(&self) -> Result<std::time::Duration, crate::connectivity::ElapsedClockError> {
+            Ok(std::time::Duration::ZERO)
+        }
+    }
+
+    #[tokio::test]
+    async fn ttl_cleanup_reclaims_the_blob_of_the_deleted_entry() {
+        use crate::clipboard::history::delete_entry::DeleteClipboardEntryUseCase;
+        use crate::transfer::progress::ProgressProjectionRegistry;
+        use crate::transfer::receive::work::ReceiveWorkRegistry;
+
+        let root = tempfile::tempdir().unwrap();
+        let cache_dir = root.path().join("file-cache");
+        let file = cache_dir.join("old.bin");
+        let uri = format!("file://{}\n", file.display()).into_bytes();
+        let entry = uc_core::ClipboardEntry::new(
+            EntryId::from("cached"),
+            uc_core::ids::EventId::from("ev-cached"),
+            0,
+            4,
+        );
+        let store = Arc::new(CleanupStore {
+            world: CleanupWorld { entry, uri },
+        });
+        let reclaim = Arc::new(CleanupReclaim {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let work = Arc::new(ReceiveWorkRegistry::default());
+        let (progress, _worker) = ProgressProjectionRegistry::new(Arc::new(ZeroClock));
+        let delete_uc = Arc::new(DeleteClipboardEntryUseCase::from_ports(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            work,
+            progress,
+            reclaim.clone(),
+        ));
+        let usecase = CleanupExpiredFilesUseCase::new(
+            store.clone(),
+            cache_dir.clone(),
+            store.clone(),
+            delete_uc,
+            store,
+            Arc::new(ListingCacheFs { cache_dir, file }),
+        );
+        let result = usecase.execute().await.unwrap();
+        assert_eq!(result.entries_deleted, 1);
+        assert_eq!(result.errors, 0);
+        assert_eq!(
+            reclaim.seen.lock().unwrap().as_slice(),
+            ["blob-cleanup".to_string()]
         );
     }
 }

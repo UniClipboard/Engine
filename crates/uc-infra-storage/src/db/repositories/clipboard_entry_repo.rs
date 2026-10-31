@@ -5,8 +5,9 @@ use crate::db::models::NewClipboardSelectionRow;
 use crate::db::ports::DbExecutor;
 use crate::db::ports::{InsertMapper, RowMapper};
 use crate::db::schema::{
-    clipboard_entry, clipboard_event, clipboard_selection, clipboard_snapshot_representation,
-    directory_publish_log, entry_receive_attempt, receive_artifact_log,
+    clipboard_entry, clipboard_event, clipboard_representation_thumbnail, clipboard_selection,
+    clipboard_snapshot_representation, directory_publish_log, entry_file_set,
+    entry_receive_attempt, receive_artifact_log,
 };
 use anyhow::Result;
 use diesel::query_dsl::methods::FilterDsl;
@@ -25,9 +26,9 @@ use uc_application::facade::clipboard_history::HistoryDeletionTargetsPort;
 use uc_core::clipboard::{
     check_receive_deletion, ClipboardEntry, ClipboardRepositoryError, ClipboardSelectionDecision,
 };
-use uc_core::ids::EntryId;
+use uc_core::ids::{BlobId, EntryId};
 use uc_core::ports::clipboard::{
-    DeleteClipboardEntryPort, DeleteClipboardEntryWithReceiveStatePort,
+    ClipboardEntryRemoval, DeleteClipboardEntryPort, DeleteClipboardEntryWithReceiveStatePort,
     FindEntryIdBySnapshotHashPort, GetClipboardEntryPort, GetEntrySnapshotHashPort,
     ListClipboardEntriesPort, SaveClipboardEntryPort, SetClipboardEntryFavoritePort,
     TouchClipboardEntryPort,
@@ -490,7 +491,7 @@ where
     async fn delete_entry_with_receive_state(
         &self,
         entry_id: &EntryId,
-    ) -> Result<bool, ClipboardRepositoryError> {
+    ) -> Result<ClipboardEntryRemoval, ClipboardRepositoryError> {
         let entry_id = entry_id.to_string();
         self.executor
             .run(move |conn| {
@@ -549,6 +550,13 @@ where
                         .first::<String>(conn)
                         .optional()?;
                     let had_entry = event_id.is_some();
+                    // 缩略图没有级联。先收集三类候选并删掉缩略图行，再删条目
+                    // （文件清单随条目 CASCADE）和表示。回收发生在事务提交之后。
+                    let candidate_blob_ids = event_id
+                        .as_deref()
+                        .map(|event_id| collect_entry_blob_ids(conn, &entry_id, event_id))
+                        .transpose()?
+                        .unwrap_or_default();
                     if let Some(event_id) = event_id {
                         diesel::delete(
                             clipboard_selection::table
@@ -570,7 +578,10 @@ where
                         .execute(conn)?;
                     }
                     let had_receive = delete_receive_state(conn, &entry_id)?;
-                    Ok(had_entry || had_receive)
+                    Ok(ClipboardEntryRemoval {
+                        removed: had_entry || had_receive,
+                        candidate_blob_ids,
+                    })
                 })
             })
             .map_err(|error| {
@@ -579,6 +590,46 @@ where
                 )
             })
     }
+}
+
+/// 收集并拆掉本条目上的 blob 引用。缩略图行在这里删除；文件清单行留给
+/// 随后的条目 CASCADE。表示行由调用方在同一事务里删除。
+fn collect_entry_blob_ids(
+    conn: &mut SqliteConnection,
+    entry_id: &str,
+    event_id: &str,
+) -> anyhow::Result<Vec<BlobId>> {
+    let representation_ids = clipboard_snapshot_representation::table
+        .filter(clipboard_snapshot_representation::event_id.eq(event_id))
+        .select(clipboard_snapshot_representation::id)
+        .load::<String>(conn)?;
+    let mut blob_ids = clipboard_snapshot_representation::table
+        .filter(clipboard_snapshot_representation::event_id.eq(event_id))
+        .select(clipboard_snapshot_representation::blob_id)
+        .load::<Option<String>>(conn)?
+        .into_iter()
+        .flatten()
+        .map(BlobId::from)
+        .collect::<Vec<_>>();
+    if !representation_ids.is_empty() {
+        let thumbnail_blob_ids = clipboard_representation_thumbnail::table
+            .filter(
+                clipboard_representation_thumbnail::representation_id.eq_any(&representation_ids),
+            )
+            .select(clipboard_representation_thumbnail::thumbnail_blob_id)
+            .load::<String>(conn)?;
+        diesel::delete(clipboard_representation_thumbnail::table.filter(
+            clipboard_representation_thumbnail::representation_id.eq_any(&representation_ids),
+        ))
+        .execute(conn)?;
+        blob_ids.extend(thumbnail_blob_ids.into_iter().map(BlobId::from));
+    }
+    let file_blob_ids = entry_file_set::table
+        .filter(entry_file_set::entry_id.eq(entry_id))
+        .select(entry_file_set::blob_id)
+        .load::<Option<String>>(conn)?;
+    blob_ids.extend(file_blob_ids.into_iter().flatten().map(BlobId::from));
+    Ok(blob_ids)
 }
 
 #[async_trait::async_trait]
@@ -967,7 +1018,12 @@ mod tests {
             EntryId::from("directory-only"),
         ] {
             assert!(targets.contains(&id));
-            assert!(repo.delete_entry_with_receive_state(&id).await.unwrap());
+            assert!(
+                repo.delete_entry_with_receive_state(&id)
+                    .await
+                    .unwrap()
+                    .removed
+            );
         }
         assert!(repo.history_deletion_targets().await.unwrap().is_empty());
     }
@@ -1045,11 +1101,14 @@ mod tests {
             }).unwrap();
             let result = repo.delete_entry_with_receive_state(&entry_id).await;
             if matches!(refusal, None | Some("orphan" | "rolled_back_publication")) {
-                assert!(result.unwrap());
-                assert!(!repo
-                    .delete_entry_with_receive_state(&entry_id)
-                    .await
-                    .unwrap());
+                assert!(result.unwrap().removed);
+                assert!(
+                    !repo
+                        .delete_entry_with_receive_state(&entry_id)
+                        .await
+                        .unwrap()
+                        .removed
+                );
             } else {
                 let error = result.unwrap_err();
                 assert!(std::error::Error::source(&error).is_some());
