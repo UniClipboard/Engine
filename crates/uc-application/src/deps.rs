@@ -3,6 +3,9 @@
 //! 定义 Application 对象图所需的依赖分组。这些类型只负责打包必需参数，
 //! 不提供分步构建、默认值或隐式装配逻辑，因此不是 Builder。
 
+pub use crate::clipboard::history::blob_reclaim::{
+    BlobReclaimError, BlobReclaimPort, BlobReclaimReport,
+};
 use crate::clipboard::history::clear_history::HistoryDeletionTargetsPort;
 pub use crate::clipboard::history::resource_snapshot::{
     EntryResourceReadError, EntryResourceSnapshot, ReadEntryResourceSnapshotPort,
@@ -431,6 +434,10 @@ pub struct StoragePorts {
     ///
     /// 捕获流程使用内容哈希从设备无关的文件内容派生文件条目快照身份。
     pub blob_content_ingest: Arc<dyn BlobContentIngestPort>,
+    /// 删除或替换条目后，回收已经没有任何引用的 vault blob。
+    ///
+    /// 与写入方共享同一 profile 的进程内租约。生产装配必须传入真实实现。
+    pub blob_reclaim: Arc<dyn BlobReclaimPort>,
     /// 持久化由捕获流程构建的文件类条目逐项清单。
     pub entry_file_set_repo: Arc<dyn EntryFileSetRepositoryPort>,
     /// 本机历史标签定义与关联的权威存储。

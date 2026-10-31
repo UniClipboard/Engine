@@ -8,12 +8,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info_span, Instrument};
 use uc_core::clipboard::ClipboardRepositoryError;
-use uc_core::ids::EntryId;
+use uc_core::ids::{BlobId, EntryId};
 use uc_core::ports::blob::{BlobTransferPort, TagReason};
 use uc_core::ports::clipboard::{
     DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
     ListRepresentationsForEventPort,
 };
+
+use super::blob_reclaim::BlobReclaimPort;
 use uc_core::ports::SearchIndexPort;
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_info, uc_warn,
@@ -29,6 +31,7 @@ pub(crate) struct DeleteClipboardEntryUseCase {
     file_cache_dir: Option<PathBuf>,
     search_index: Option<Arc<dyn SearchIndexPort>>,
     blob_transfer: Option<Arc<dyn BlobTransferPort>>,
+    blob_reclaim: Arc<dyn BlobReclaimPort>,
 }
 
 impl DeleteClipboardEntryUseCase {
@@ -38,6 +41,7 @@ impl DeleteClipboardEntryUseCase {
         representation_repo: Arc<dyn ListRepresentationsForEventPort>,
         receive_work: Arc<ReceiveWorkRegistry>,
         progress: ProgressProjectionRegistry,
+        blob_reclaim: Arc<dyn BlobReclaimPort>,
     ) -> Self {
         Self {
             receive_work,
@@ -48,6 +52,7 @@ impl DeleteClipboardEntryUseCase {
             file_cache_dir: None,
             search_index: None,
             blob_transfer: None,
+            blob_reclaim,
         }
     }
 
@@ -99,14 +104,16 @@ impl DeleteClipboardEntryUseCase {
             None => None,
         };
         // 仓储在同一原子边界解析实际条目与NoEntry状态，缺失不能伪报删除成功。
-        if !self
+        let removal = self
             .delete
             .delete_entry_with_receive_state(entry_id)
             .await
-            .context("delete entry and settled receive state")?
-        {
+            .context("delete entry and settled receive state")?;
+        if !removal.removed {
             return Err(ClipboardRepositoryError::NotFound("clipboard entry".into()).into());
         }
+        // 回收失败不改变删除结果。文件删不掉时行已经提交，留给后续扫描。
+        reclaim_after_delete(self.blob_reclaim.as_ref(), &removal.candidate_blob_ids).await;
 
         if let Some(blob_transfer) = self.blob_transfer.as_ref() {
             async {
@@ -170,6 +177,31 @@ impl DeleteClipboardEntryUseCase {
             "Deleted clipboard entry successfully"
         );
         Ok(())
+    }
+}
+
+async fn reclaim_after_delete(reclaim: &dyn BlobReclaimPort, blob_ids: &[BlobId]) {
+    if blob_ids.is_empty() {
+        return;
+    }
+    match reclaim.reclaim_unreferenced(blob_ids).await {
+        Ok(report) if report.failures == 0 => {}
+        Ok(report) => {
+            uc_warn!(
+                error_kind = "blob_reclaim",
+                errors = report.failures,
+                deleted = report.rows_deleted,
+                bytes_reclaimed = report.bytes_freed,
+                "unreferenced blob reclaim left failures after entry deletion"
+            );
+        }
+        Err(error) => {
+            uc_warn!(
+                error_kind = "blob_reclaim",
+                io_error_kind = io_error_kind(&error),
+                "unreferenced blob reclaim failed after entry deletion"
+            );
+        }
     }
 }
 

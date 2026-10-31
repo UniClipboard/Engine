@@ -10,7 +10,7 @@ Generated thumbnails use a 4 MiB weighted process cache. They are not persisted.
 
 `ReadThumbnail`, `ThumbnailResourceInput`, the representation-addressed resource resolver, background thumbnail generation, and the dedicated thumbnail metadata repository, mapper, domain model, and wiring are removed. The RGBA-only generator method is also removed. History summaries no longer contain `thumbnail_url`, `image_width`, or `image_height`. Image preview text uses a byte-size placeholder; it does not decode inline image bytes as text.
 
-Historical thumbnail schema, migrations, and encrypted data remain intact. The operation does not read historical thumbnail metadata or blobs. An unreadable legacy derivative cannot block generation from an available original. Existing entry deletion still removes associated historical rows. Code cleanup does not introduce a destructive data migration.
+Historical thumbnail schema, migrations, and encrypted data remain intact. The operation does not read historical thumbnail metadata or blobs. An unreadable legacy derivative cannot block generation from an available original. 删除条目时仍会移除关联的历史 thumbnail 行；对应 blob 在没有其他引用后立即回收。Code cleanup does not introduce a destructive data migration.
 
 Products must replace the old route and generated SDK references. Do not retain a compatibility route that depends on the removed operation. Original-resource operations remain necessary for explicit original-image actions.
 

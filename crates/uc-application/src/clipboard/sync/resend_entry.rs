@@ -669,7 +669,7 @@ mod tests {
             &self,
             _entry_id: &EntryId,
             _file_set: &uc_core::clipboard::EntryFileSet,
-        ) -> Result<(), uc_core::clipboard::EntryFileSetError> {
+        ) -> Result<Vec<BlobId>, uc_core::clipboard::EntryFileSetError> {
             unreachable!("StubFileSetRepo: save() must not be called in resend tests")
         }
         async fn load(

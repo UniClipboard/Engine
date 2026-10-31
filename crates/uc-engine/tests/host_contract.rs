@@ -326,3 +326,6 @@ mod resource_release;
 
 #[path = "host_contract/entry_thumbnails.rs"]
 mod entry_thumbnails;
+
+#[path = "host_contract/blob_reclaim.rs"]
+mod blob_reclaim;

@@ -11,7 +11,17 @@ use crate::clipboard::{
     ClipboardEntry, ClipboardEvent, ClipboardRepositoryError, ClipboardSelectionDecision,
     PersistedClipboardRepresentation,
 };
-use crate::ids::EntryId;
+use crate::ids::{BlobId, EntryId};
+
+/// 删除条目及其已结算接收状态后的结果。
+///
+/// `candidate_blob_ids` 是本次事务里被拆掉的表示、历史缩略图和文件清单
+/// 曾经指向的 blob。调用方不得直接删行；是否回收由数据库按当前引用判断。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardEntryRemoval {
+    pub removed: bool,
+    pub candidate_blob_ids: Vec<BlobId>,
+}
 
 /// Fetch a single clipboard entry by id.
 #[async_trait]
@@ -84,11 +94,12 @@ pub trait DeleteClipboardEntryPort: Send + Sync {
 pub trait DeleteClipboardEntryWithReceiveStatePort: Send + Sync {
     /// 原子移除条目及其已结算的接收状态；未保存条目时也移除同一条目的接收状态。
     /// 非终态接收或未结算产物必须拒绝，失败不得部分删除。
-    /// 返回是否实际移除了条目或接收状态；真实缺失返回false。
+    /// 返回是否实际移除了条目或接收状态，以及本次拆掉的 blob 候选。
+    /// 真实缺失时 `removed` 为 false，候选为空。
     async fn delete_entry_with_receive_state(
         &self,
         entry_id: &EntryId,
-    ) -> Result<bool, ClipboardRepositoryError>;
+    ) -> Result<ClipboardEntryRemoval, ClipboardRepositoryError>;
 }
 
 /// Resolve an entry id from a previously observed content snapshot hash.
@@ -148,6 +159,9 @@ pub trait ReplaceEntryContentPort: Send + Sync {
     ///
     /// Returns an error if no entry with `entry_id` exists — replace never
     /// implicitly creates.
+    ///
+    /// 成功时返回被换掉的表示和历史缩略图 blob。文件清单的旧 blob 由清单
+    /// 替换自己返回。新内容若仍引用同一个 blob，回收时会留下该行。
     async fn replace_entry_content(
         &self,
         entry_id: &EntryId,
@@ -156,7 +170,7 @@ pub trait ReplaceEntryContentPort: Send + Sync {
         new_selection: &ClipboardSelectionDecision,
         new_total_size: i64,
         new_content_category: crate::clipboard::ClipboardEntryContentCategory,
-    ) -> Result<(), ClipboardRepositoryError>;
+    ) -> Result<Vec<BlobId>, ClipboardRepositoryError>;
 }
 
 /// Resolve the persisted snapshot hash recorded for a given entry.

@@ -10,7 +10,7 @@ use uc_core::BlobId;
 use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id, uc_debug};
 
 use crate::blob::hashing::{copy_and_hash, stream_hash_file};
-use crate::blob::{BlobStorePort, StoredPathBlob};
+use crate::blob::{BlobFileRemoval, BlobStorePort, StoredPathBlob};
 
 /// Filesystem-based blob storage.
 pub struct FilesystemBlobStore {
@@ -66,6 +66,10 @@ impl BlobStorePort for SwitchableFilesystemBlobStore {
 
     async fn delete(&self, blob_id: &BlobId) -> Result<()> {
         self.current_store().delete(blob_id).await
+    }
+
+    async fn remove_stored_file(&self, blob_id: &BlobId) -> Result<BlobFileRemoval> {
+        self.current_store().remove_stored_file(blob_id).await
     }
 }
 
@@ -182,6 +186,11 @@ impl BlobStorePort for FilesystemBlobStore {
     }
 
     async fn delete(&self, blob_id: &BlobId) -> Result<()> {
+        self.remove_stored_file(blob_id).await?;
+        Ok(())
+    }
+
+    async fn remove_stored_file(&self, blob_id: &BlobId) -> Result<BlobFileRemoval> {
         let path = self.blob_path(blob_id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {
@@ -189,10 +198,10 @@ impl BlobStorePort for FilesystemBlobStore {
                     blob_id = log_id(&blob_id),
                     "Deleted blob from filesystem store"
                 );
-                Ok(())
+                Ok(BlobFileRemoval::Deleted)
             }
-            // Idempotent: an already-absent blob is a no-op, not an error.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            // 文件已经不在：对 delete 是成功，对回收报告则计入 missing_files。
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BlobFileRemoval::Missing),
             Err(err) => Err(err).context("failed to delete blob"),
         }
     }

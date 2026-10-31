@@ -41,8 +41,9 @@ use uc_core::clipboard::{
     PersistedClipboardRepresentation, IMAGE_FROM_FILE_FORMAT,
 };
 
+use crate::clipboard::history::blob_reclaim::BlobReclaimPort;
 use crate::clipboard::outbound::{parse_uri_list_line, UriListLineKind};
-use uc_core::ids::{EntryId, EventId};
+use uc_core::ids::{BlobId, EntryId, EventId};
 use uc_core::ports::clipboard::{
     EntryFileSetRepositoryPort, FindEntryIdBySnapshotHashPort, ReplaceEntryContentPort,
     RepresentationCachePort, SaveClipboardEntryPort, SpoolQueuePort, SpoolRequest,
@@ -184,6 +185,9 @@ pub struct CaptureClipboardUseCase {
     /// 仅在 `ClipboardChangeOrigin::{LocalCapture, LocalRestore}` 路径 emit；
     /// `RemotePush` 严禁 emit（红线：与入站同步双计会污染 DAU 信号）。
     analytics: Arc<dyn AnalyticsPort>,
+    /// 替换成功后回收旧 blob，并在引用落库后释放本次写入租约。
+    /// 生产装配必须调用 [`Self::with_blob_reclaim`]。
+    blob_reclaim: Option<Arc<dyn BlobReclaimPort>>,
 }
 
 impl CaptureClipboardUseCase {
@@ -221,7 +225,14 @@ impl CaptureClipboardUseCase {
             inbound_receive_commit: None,
             coordinator: None,
             analytics,
+            blob_reclaim: None,
         }
+    }
+
+    /// 生产路径必须注入。与 BlobWriter 共享同一 profile 的进程内租约。
+    pub fn with_blob_reclaim(mut self, blob_reclaim: Arc<dyn BlobReclaimPort>) -> Self {
+        self.blob_reclaim = Some(blob_reclaim);
+        self
     }
 
     pub fn with_inbound_receive_commit(
@@ -458,6 +469,9 @@ impl CaptureClipboardUseCase {
                         entry_id = log_id(&existing),
                         "Local capture matched existing content; resurfaced instead of duplicating"
                     );
+                    if let Some(reclaim) = &self.blob_reclaim {
+                        reclaim.release_write_leases(&referenced_blob_ids(&[], file_set.as_ref()));
+                    }
                     return Ok(Some(CaptureOutcome {
                         entry_id: existing,
                         deduplicated: true,
@@ -647,7 +661,8 @@ impl CaptureClipboardUseCase {
             // directory receive commits the entry, manifest and publication
             // state together; every other capture keeps the established path.
             let used_atomic_receive_commit = commit_context.is_some();
-            async {
+            let written_blob_ids = referenced_blob_ids(&normalized_reps, file_set.as_ref());
+            let mut replaced_blob_ids = async {
                 let total_size = snapshot.total_size_bytes();
                 let content_category = ClipboardEntryContentCategory::from_snapshot(&snapshot);
                 let now_ms = SystemTime::now()
@@ -730,7 +745,9 @@ impl CaptureClipboardUseCase {
                             commit_port
                                 .commit_inbound_receive(&settlement)
                                 .await
-                                .map_err(anyhow::Error::from)
+                                .map_err(anyhow::Error::from)?;
+                            // 旧 blob 由入站提交仓储在事务成功后回收。
+                            Ok(Vec::new())
                         }
                     };
                 }
@@ -747,7 +764,8 @@ impl CaptureClipboardUseCase {
                         self.save_entry
                             .save_entry_and_selection(&new_entry, &new_selection)
                             .await
-                            .map_err(anyhow::Error::from)
+                            .map_err(anyhow::Error::from)?;
+                        Ok(Vec::new())
                     }
                     CommitMode::Replace => self
                         .replace_entry
@@ -778,15 +796,22 @@ impl CaptureClipboardUseCase {
             // transaction, or give the reader a way to tell the two apart.
             if !used_atomic_receive_commit {
                 if let Some(file_set) = &file_set {
-                    if let Err(err) = self.entry_file_set_repo.save(&entry_id, file_set).await {
-                        uc_warn!(
-                            entry_id = log_id(&entry_id),
-                            error_kind = "file_set_manifest_save",
-                            io_error_kind = io_error_kind(&err),
-                            "capture: failed to persist entry file-set manifest"
-                        );
+                    match self.entry_file_set_repo.save(&entry_id, file_set).await {
+                        Ok(previous) => replaced_blob_ids.extend(previous),
+                        Err(err) => {
+                            uc_warn!(
+                                entry_id = log_id(&entry_id),
+                                error_kind = "file_set_manifest_save",
+                                io_error_kind = io_error_kind(&err),
+                                "capture: failed to persist entry file-set manifest"
+                            );
+                        }
                     }
                 }
+            }
+            if let Some(reclaim) = &self.blob_reclaim {
+                reclaim_replaced_blobs(reclaim.as_ref(), &replaced_blob_ids).await;
+                reclaim.release_write_leases(&written_blob_ids);
             }
 
             uc_info!(
@@ -888,6 +913,55 @@ impl CaptureClipboardUseCase {
 ///     id would dangle if returned as `deduplicated: true`.
 ///
 /// All failure paths are non-fatal: a dedup miss must never drop the capture.
+fn referenced_blob_ids(
+    representations: &[PersistedClipboardRepresentation],
+    file_set: Option<&EntryFileSet>,
+) -> Vec<BlobId> {
+    let mut blob_ids = Vec::new();
+    for representation in representations {
+        if let Some(blob_id) = &representation.blob_id {
+            blob_ids.push(blob_id.clone());
+        }
+    }
+    if let Some(file_set) = file_set {
+        for line in &file_set.lines {
+            if let EntryFileSetLineKind::File {
+                blob_id: Some(blob_id),
+                ..
+            } = &line.kind
+            {
+                blob_ids.push(blob_id.clone());
+            }
+        }
+    }
+    blob_ids
+}
+
+async fn reclaim_replaced_blobs(reclaim: &dyn BlobReclaimPort, blob_ids: &[BlobId]) {
+    if blob_ids.is_empty() {
+        return;
+    }
+    match reclaim.reclaim_unreferenced(blob_ids).await {
+        Ok(report) if report.failures == 0 => {}
+        Ok(report) => {
+            uc_warn!(
+                error_kind = "blob_reclaim",
+                errors = report.failures,
+                deleted = report.rows_deleted,
+                bytes_reclaimed = report.bytes_freed,
+                "unreferenced blob reclaim left failures after entry replacement"
+            );
+        }
+        Err(error) => {
+            uc_warn!(
+                error_kind = "blob_reclaim",
+                io_error_kind = io_error_kind(&error),
+                "unreferenced blob reclaim failed after entry replacement"
+            );
+        }
+    }
+}
+
 async fn resurface_existing_entry(
     find_entry_by_snapshot_hash: &dyn FindEntryIdBySnapshotHashPort,
     touch_entry: &dyn TouchClipboardEntryPort,

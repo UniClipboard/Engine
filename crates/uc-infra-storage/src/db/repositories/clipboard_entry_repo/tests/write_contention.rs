@@ -47,6 +47,6 @@ async fn combined_delete_waits_for_a_short_writer_before_reading_receive_state()
         waited,
         "短写锁释放前组合删除应等待，不能提前返回失败：{failure:?}"
     );
-    assert!(result.unwrap());
+    assert!(result.unwrap().removed);
     assert_receive_delete_fixture_counts(&executor, 0);
 }

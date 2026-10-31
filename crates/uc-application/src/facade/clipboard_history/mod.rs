@@ -1,5 +1,5 @@
 pub use crate::clipboard::history::clear_history::HistoryDeletionTargetsPort;
-use crate::deps::ReadEntryResourceSnapshotPort;
+use crate::deps::{BlobReclaimPort, ReadEntryResourceSnapshotPort};
 use crate::transfer::progress::ProgressProjectionRegistry;
 use crate::transfer::receive::work::ReceiveWorkRegistry;
 use std::path::PathBuf;
@@ -95,6 +95,9 @@ pub struct ClipboardHistoryFacadeDeps {
     pub cache_fs: Arc<dyn CacheFsPort>,
     /// 本机历史标签定义与关联的权威存储。
     pub history_tag_store: Arc<dyn HistoryTagStorePort>,
+    /// 删除成功后回收已经没有引用的 vault blob。清空、保留和 cleanup 共用
+    /// 同一个删除用例，因此也走这里。
+    pub blob_reclaim: Arc<dyn BlobReclaimPort>,
 }
 
 pub struct ClipboardHistoryFacade {
@@ -138,6 +141,7 @@ impl ClipboardHistoryFacade {
             clock,
             cache_fs,
             history_tag_store,
+            blob_reclaim,
         } = deps;
         let ClipboardEntryPorts {
             get: entry_get,
@@ -202,6 +206,7 @@ impl ClipboardHistoryFacade {
             rep_list_for_event.clone(),
             receive_work.clone(),
             progress,
+            blob_reclaim,
         );
         if let Some(dir) = file_cache_dir.clone() {
             delete_uc = delete_uc.with_file_cache_dir(dir);
