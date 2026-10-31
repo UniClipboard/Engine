@@ -1,5 +1,5 @@
 //! 真实SQLite限定发送归属、内容类别与读取额度；读取不写任何新历史。
-use super::tests::{make_repo, sample_file_set, seed_entry};
+use super::tests::{make_repo, sample_file_set, seed_blob, seed_entry};
 use crate::db::repositories::DieselEntryDeliveryRepository;
 use crate::db::{
     ports::DbExecutor,
@@ -19,6 +19,7 @@ async fn history_requires_local_unremoved_file_ownership_and_preserves_authentic
     let peer = DeviceId::new("peer");
     let entry = EntryId::from("entry");
     seed_entry(&executor, "entry");
+    seed_blob(&executor, "blob-a");
     let manifest = sample_file_set();
     repo.save(&entry, &manifest).await.unwrap();
     assert!(repo

@@ -112,7 +112,8 @@ impl DeleteClipboardEntryUseCase {
         if !removal.removed {
             return Err(ClipboardRepositoryError::NotFound("clipboard entry".into()).into());
         }
-        // 回收失败不改变删除结果。文件删不掉时行已经提交，留给后续扫描。
+        // 回收失败不改变删除结果。文件删不掉或仍在认领宽限内时，行已经提交，
+        // 留给 PR2（WF-engine-39 GC sweep）。
         reclaim_after_delete(self.blob_reclaim.as_ref(), &removal.candidate_blob_ids).await;
 
         if let Some(blob_transfer) = self.blob_transfer.as_ref() {

@@ -7,11 +7,14 @@
 //! CASCADE)。本文件把 wire 中性的 kind/排除原因枚举与 SQL 字符串做双向
 //! 映射,保持表结构稳定。
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use anyhow::Context;
 use diesel::query_dsl::methods::{FilterDsl, OrderDsl, SelectDsl};
-use diesel::Connection;
+use diesel::sql_types::{BigInt, Text};
 use diesel::ExpressionMethods;
+use diesel::QueryableByName;
 use diesel::RunQueryDsl;
 use diesel::SqliteConnection;
 
@@ -514,6 +517,7 @@ pub(super) fn replace_entry_file_set_rows(
     diesel::delete(entry_file_set::table)
         .filter(entry_file_set::entry_id.eq(entry_id))
         .execute(conn)?;
+    ensure_file_set_blobs_exist(conn, new_rows)?;
     for chunk in new_rows.chunks(ENTRY_FILE_SET_INSERT_CHUNK) {
         diesel::insert_into(entry_file_set::table)
             .values(chunk)
@@ -554,7 +558,9 @@ where
         let entry_id_for_err = entry_id_str.clone();
         self.executor
             .run(move |conn| {
-                conn.transaction(|conn| replace_entry_file_set_rows(conn, &entry_id_str, &new_rows))
+                conn.immediate_transaction(|conn| {
+                    replace_entry_file_set_rows(conn, &entry_id_str, &new_rows)
+                })
             })
             .map_err(|err| translate_storage_error(err, &entry_id_for_err))
             .map(|blob_ids| blob_ids.into_iter().map(BlobId::from).collect())
@@ -591,8 +597,41 @@ where
     }
 }
 
-/// 把底层错误翻译为领域错误。FK violation 反映"引用了不存在的 entry",
-/// 其它一律按 Storage 归类。
+#[derive(Debug, thiserror::Error)]
+#[error("entry file set references a blob row that is not present")]
+struct MissingFileSetBlob;
+
+fn ensure_file_set_blobs_exist(
+    conn: &mut SqliteConnection,
+    rows: &[NewEntryFileSetRow],
+) -> anyhow::Result<()> {
+    let mut blob_ids = BTreeSet::new();
+    for row in rows {
+        if let Some(blob_id) = row.blob_id.as_deref() {
+            blob_ids.insert(blob_id.to_owned());
+        }
+    }
+    for blob_id in blob_ids {
+        let present = diesel::sql_query("SELECT COUNT(*) AS n FROM blob WHERE blob_id = ?")
+            .bind::<Text, _>(&blob_id)
+            .get_result::<BlobPresence>(conn)
+            .context("check entry file set blob")?;
+        if present.n == 0 {
+            return Err(MissingFileSetBlob.into());
+        }
+    }
+    Ok(())
+}
+
+#[derive(QueryableByName)]
+struct BlobPresence {
+    #[diesel(sql_type = BigInt)]
+    n: i64,
+}
+
+/// 把底层错误翻译为领域错误。FK violation 反映"引用了不存在的 entry"。
+/// 清单指向不存在的 blob 行时返回 [`EntryFileSetError::MissingBlob`]，并保留 source。
+/// 查询本身失败仍按 Storage 归类。
 ///
 /// The executor threads the original `diesel::result::Error` through the
 /// `anyhow` chain, so classify on the typed error kind rather than the
@@ -604,6 +643,15 @@ fn translate_storage_error(err: anyhow::Error, entry_id: &str) -> EntryFileSetEr
     )) = err.downcast_ref::<diesel::result::Error>()
     {
         return EntryFileSetError::EntryNotFound(entry_id.to_string());
+    }
+    if err
+        .chain()
+        .any(|source| source.downcast_ref::<MissingFileSetBlob>().is_some())
+    {
+        return EntryFileSetError::MissingBlob(
+            err.context("entry file set references a missing blob")
+                .into(),
+        );
     }
     EntryFileSetError::Storage(err.context("access entry file set store").into())
 }
@@ -710,6 +758,25 @@ mod tests {
             .unwrap();
     }
 
+    pub(super) fn seed_blob(executor: &DieselSqliteExecutor, blob_id: &str) {
+        let blob_id = blob_id.to_owned();
+        let hash = format!("hash-{blob_id}");
+        executor
+            .run(move |conn| {
+                diesel::sql_query(
+                    "INSERT INTO blob (blob_id, storage_path, storage_backend, size_bytes, \
+                     content_hash, created_at_ms, last_claimed_at_ms) \
+                     VALUES (?, '/vault/' || ?, 'local_fs', 1, ?, 1, 1)",
+                )
+                .bind::<diesel::sql_types::Text, _>(&blob_id)
+                .bind::<diesel::sql_types::Text, _>(&blob_id)
+                .bind::<diesel::sql_types::Text, _>(&hash)
+                .execute(conn)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
     pub(super) fn sample_file_set() -> EntryFileSet {
         EntryFileSet {
             lines: vec![
@@ -795,6 +862,7 @@ mod tests {
     async fn save_then_load_round_trips() {
         let (repo, seed_exec, _tempdir) = make_repo();
         seed_entry(&seed_exec, "entry-1");
+        seed_blob(&seed_exec, "blob-a");
 
         let entry_id = EntryId::from("entry-1");
         repo.save(&entry_id, &sample_file_set()).await.unwrap();
@@ -814,6 +882,8 @@ mod tests {
     async fn save_replaces_rather_than_appends() {
         let (repo, seed_exec, _tempdir) = make_repo();
         seed_entry(&seed_exec, "entry-1");
+        seed_blob(&seed_exec, "blob-a");
+        seed_blob(&seed_exec, "blob-only");
         let entry_id = EntryId::from("entry-1");
 
         repo.save(&entry_id, &sample_file_set()).await.unwrap();
@@ -841,7 +911,8 @@ mod tests {
 
     #[tokio::test]
     async fn save_on_missing_entry_returns_entry_not_found() {
-        let (repo, _seed_exec, _tempdir) = make_repo();
+        let (repo, seed_exec, _tempdir) = make_repo();
+        seed_blob(&seed_exec, "blob-a");
         let result = repo
             .save(&EntryId::from("ghost-entry"), &sample_file_set())
             .await;
@@ -888,6 +959,7 @@ mod tests {
     async fn sealed_path_column_is_not_plaintext_on_disk() {
         let (repo, seed_exec, _tempdir) = make_repo();
         seed_entry(&seed_exec, "entry-1");
+        seed_blob(&seed_exec, "blob-a");
         let entry_id = EntryId::from("entry-1");
         repo.save(&entry_id, &sample_file_set()).await.unwrap();
 
@@ -979,6 +1051,7 @@ mod tests {
         // session — the load must error rather than return garbage.
         let (repo, seed_exec, tempdir) = make_repo();
         seed_entry(&seed_exec, "entry-1");
+        seed_blob(&seed_exec, "blob-a");
         let entry_id = EntryId::from("entry-1");
         repo.save(&entry_id, &sample_file_set()).await.unwrap();
 
@@ -999,6 +1072,7 @@ mod tests {
     async fn fk_cascade_deletes_file_set_rows() {
         let (repo, seed_exec, _tempdir) = make_repo();
         seed_entry(&seed_exec, "entry-1");
+        seed_blob(&seed_exec, "blob-a");
         let entry_id = EntryId::from("entry-1");
         repo.save(&entry_id, &sample_file_set()).await.unwrap();
 
@@ -1013,6 +1087,30 @@ mod tests {
 
         let loaded = repo.load(&entry_id).await.unwrap();
         assert!(loaded.is_none(), "FK CASCADE 应清理 file-set 行");
+    }
+
+    #[tokio::test]
+    async fn save_fails_when_file_set_blob_row_is_missing() {
+        let (repo, seed_exec, _tempdir) = make_repo();
+        seed_entry(&seed_exec, "entry-1");
+        let result = repo
+            .save(&EntryId::from("entry-1"), &sample_file_set())
+            .await;
+        let Err(EntryFileSetError::MissingBlob(source)) = result else {
+            panic!("missing blob row must fail the file-set write");
+        };
+        let rendered = source.to_string();
+        assert!(!rendered.contains("blob-a"));
+        let mut current = Some(source.as_ref() as &dyn std::error::Error);
+        let mut found = false;
+        while let Some(err) = current {
+            if err.downcast_ref::<MissingFileSetBlob>().is_some() {
+                found = true;
+                break;
+            }
+            current = err.source();
+        }
+        assert!(found, "missing blob error must keep its source");
     }
 }
 

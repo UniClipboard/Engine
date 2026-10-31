@@ -256,8 +256,9 @@ pub fn create_platform_layer(
     // read-side (BlobReaderPort). Both views point at the same concrete
     // EncryptedBlobStore instance.
     let encrypted_blob_store_for_writer = payload_adapters.blob_store();
-    // 同一 profile、同一进程共享一份租约。15 分钟只挡住尚未释放的在途写入，
-    // 捕获或后台物化把引用落库后会释放。该时长需实测确认。
+    // 同一 profile、同一进程共享一份租约。15 分钟只挡住尚未释放的在途写入。
+    // 跨进程窗口是 60 分钟认领宽限，需实测确认。宽限内的无引用 blob 留给
+    // PR2（WF-engine-39 GC sweep）。
     let leases = BlobLeaseRegistry::for_profile(profile_id.inner());
     let blob_repository_for_reclaim = Arc::clone(&blob_repository);
     // One concrete BlobWriter, surfaced as both the write-side port and the
@@ -266,13 +267,14 @@ pub fn create_platform_layer(
     let blob_writer_concrete = Arc::new(BlobWriter::new(
         Arc::clone(&encrypted_blob_store_for_writer),
         blob_repository,
-        clock,
+        Arc::clone(&clock),
         Arc::clone(&leases),
     ));
     let blob_reclaim: Arc<dyn BlobReclaimPort> = Arc::new(BlobReclaimer::new(
         encrypted_blob_store_for_writer,
         blob_repository_for_reclaim,
         leases,
+        clock,
     ));
     let blob_writer: Arc<dyn BlobWriterPort> = blob_writer_concrete.clone();
     let blob_content_ingest: Arc<dyn BlobContentIngestPort> = blob_writer_concrete;

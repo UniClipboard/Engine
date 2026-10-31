@@ -24,6 +24,7 @@ async fn deleting_the_only_image_reference_removes_the_blob_file_and_row() {
     let before = dir_size(&store_dir);
     assert!(blob_file.is_file());
     assert!(before > 0);
+    age_claim(root.path(), &blob_id);
     delete_entry(&engine, &entry_id).await;
     assert_eq!(blob_count(root.path(), &blob_id), 0);
     assert!(!blob_file.is_file());
@@ -39,6 +40,7 @@ async fn shared_blob_is_reclaimed_only_when_the_last_referencer_is_deleted() {
     delete_entry(&engine, &entry_id).await;
     assert_eq!(blob_count(root.path(), &blob_id), 1);
     assert!(Path::new(&storage_path).is_file());
+    age_claim(root.path(), &blob_id);
     delete_entry(&engine, "entry-share").await;
     assert_eq!(blob_count(root.path(), &blob_id), 0);
     assert!(!Path::new(&storage_path).is_file());
@@ -57,14 +59,26 @@ async fn thumbnail_blob_is_reclaimed_only_after_its_last_reference_is_gone() {
         .join(&thumb_id);
     std::fs::write(&thumb_path, b"thumb").unwrap();
     insert_thumbnail_blob(root.path(), &thumb_path, &representation_id, &thumb_id);
+    age_claim(root.path(), &image_blob);
     delete_entry(&engine, &entry_id).await;
     assert_eq!(blob_count(root.path(), &image_blob), 0);
     assert!(!Path::new(&image_path).is_file());
     assert_eq!(blob_count(root.path(), &thumb_id), 1);
     assert!(thumb_path.is_file());
+    age_claim(root.path(), &thumb_id);
     delete_entry(&engine, "entry-thumb-share").await;
     assert_eq!(blob_count(root.path(), &thumb_id), 0);
     assert!(!thumb_path.is_file());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_a_recently_claimed_blob_keeps_the_row_and_file() {
+    let (root, engine) = start_engine().await;
+    let entry_id = send_png(&engine).await;
+    let (blob_id, storage_path) = wait_ready_blob(root.path(), &entry_id).await;
+    delete_entry(&engine, &entry_id).await;
+    assert_eq!(blob_count(root.path(), &blob_id), 1);
+    assert!(Path::new(&storage_path).is_file());
 }
 
 async fn start_engine() -> (tempfile::TempDir, Engine) {
@@ -197,6 +211,14 @@ fn ready_blob(root: &Path, entry_id: &str) -> Option<(String, String)> {
     .get_result::<BlobPath>(&mut connection)
     .ok()
     .map(|row| (row.blob_id, row.storage_path))
+}
+
+fn age_claim(root: &Path, blob_id: &str) {
+    let mut connection = open_db(root);
+    diesel::sql_query("UPDATE blob SET last_claimed_at_ms = 0 WHERE blob_id = ?")
+        .bind::<Text, _>(blob_id)
+        .execute(&mut connection)
+        .unwrap();
 }
 
 fn blob_count(root: &Path, blob_id: &str) -> i64 {

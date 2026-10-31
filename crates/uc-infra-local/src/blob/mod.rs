@@ -10,7 +10,7 @@ mod store_port;
 pub use blob_writer::BlobWriter;
 pub use domain::{Blob, BlobStorageLocator};
 pub use filesystem_store::{FilesystemBlobStore, SwitchableFilesystemBlobStore};
-pub use lease::BlobLeaseRegistry;
+pub use lease::{BlobLeaseRegistry, BLOB_RECLAIM_CLAIM_GRACE};
 pub use reclaimer::BlobReclaimer;
 pub use repository_port::{BlobRepositoryPort, UnreferencedBlobDeletion};
 pub use store_port::{BlobFileRemoval, BlobStorePort, StoredPathBlob};

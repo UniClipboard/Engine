@@ -13,10 +13,9 @@ use uc_observability_contract::{
     uc_debug, uc_warn,
 };
 
+use super::lease::{BlobLeaseGuard, BlobLeaseRegistry};
 use crate::blob::hashing::stream_hash_file;
-use crate::blob::{
-    Blob, BlobLeaseRegistry, BlobRepositoryPort, BlobStorageLocator, BlobStorePort, StoredPathBlob,
-};
+use crate::blob::{Blob, BlobRepositoryPort, BlobStorageLocator, BlobStorePort, StoredPathBlob};
 
 pub struct BlobWriter<B, BR, C>
 where
@@ -69,8 +68,8 @@ where
             // 1. 落盘:store 在写入的同一遍里算出权威 content_hash + size,二者与实际
             //    持有的字节同源(hardlink 时哈希 dest,copy/加密时哈希落盘字节流)。
             let blob_id = BlobId::new();
-            // put 前登记。租约只覆盖本进程尚未把引用写入条目的窗口。
-            self.leases.acquire(&blob_id);
+            // put 前登记。守卫在失败或新 id 返回时释放；去重命中的已有 id 才 persist。
+            let fresh_lease = self.leases.acquire_guard(&blob_id);
             let StoredPathBlob {
                 storage_path,
                 content_hash,
@@ -82,8 +81,8 @@ where
                     // A partial write (mid-copy read error, post-link hash
                     // failure, …) may have left a file under this blob_id. Clean
                     // it up so a failed ingest never leaks an orphan blob.
-                    self.leases.release(&blob_id);
                     self.discard_blob(&blob_id, "put_from_path failed").await;
+                    drop(fresh_lease);
                     return Err(err);
                 }
             };
@@ -98,22 +97,21 @@ where
             let looked_up = match self.blob_repo.find_by_hash(&content_hash).await {
                 Ok(found) => found,
                 Err(err) => {
-                    self.leases.release(&blob_id);
                     self.discard_blob(&blob_id, "dedup lookup failed").await;
+                    drop(fresh_lease);
                     return Err(err);
                 }
             };
-            if let Some(ref existing) = looked_up {
-                self.leases.acquire(&existing.blob_id);
-            }
+            let looked_up_lease = looked_up
+                .as_ref()
+                .map(|existing| self.leases.acquire_guard(&existing.blob_id));
             match self
                 .blob_repo
                 .claim_existing(&content_hash, created_at_ms)
                 .await
             {
                 Ok(Some(existing)) => {
-                    self.leases.acquire(&existing.blob_id);
-                    self.leases.release(&blob_id);
+                    persist_claimed_lease(looked_up_lease, &self.leases, &existing.blob_id);
                     uc_debug!(
                         blob_id = log_id(&existing.blob_id),
                         "Path ingest: dedup hit, dropping freshly written blob and reusing existing"
@@ -121,6 +119,7 @@ where
                     // 新文件即使是硬链接，也只 unlink 这个新 blob_id 的名字。
                     // 源文件和其他链接还在时，inode 不会被删掉。
                     self.discard_blob(&blob_id, "dedup hit").await;
+                    drop(fresh_lease);
                     return Ok(IngestedBlob {
                         blob_id: existing.blob_id,
                         content_hash,
@@ -129,13 +128,12 @@ where
                 }
                 Ok(None) => {
                     // 查找命中后行已被删。释放那个旧 id 的租约，下面插入本次新文件。
-                    if let Some(existing) = &looked_up {
-                        self.leases.release(&existing.blob_id);
-                    }
+                    drop(looked_up_lease);
                 }
                 Err(err) => {
-                    self.leases.release(&blob_id);
+                    drop(looked_up_lease);
                     self.discard_blob(&blob_id, "dedup lookup failed").await;
+                    drop(fresh_lease);
                     return Err(err);
                 }
             }
@@ -160,14 +158,14 @@ where
                     .await
                 {
                     Ok(Some(existing)) => {
-                        self.leases.acquire(&existing.blob_id);
-                        self.leases.release(&blob_id);
+                        self.leases.acquire_guard(&existing.blob_id).persist();
                         uc_debug!(
                             error_kind = "insert_race",
                             io_error_kind = io_error_kind(insert_err.as_ref()),
                             "Path ingest insert raced with existing blob; dropping freshly written blob and returning existing record",
                         );
                         self.discard_blob(&blob_id, "insert race").await;
+                        drop(fresh_lease);
                         return Ok(IngestedBlob {
                             blob_id: existing.blob_id,
                             content_hash,
@@ -176,23 +174,21 @@ where
                     }
                     Ok(None) => {}
                     Err(err) => {
-                        self.leases.release(&blob_id);
                         self.discard_blob(&blob_id, "insert failed").await;
+                        drop(fresh_lease);
                         return Err(err);
                     }
                 }
                 // 竞态赢家也已经不在。不能复用已删除的 id；刚写入的文件属于本次新 id，再插一次。
                 if let Err(retry_err) = self.blob_repo.insert_blob(&record).await {
-                    self.leases.release(&blob_id);
                     self.discard_blob(&blob_id, "insert failed").await;
+                    drop(fresh_lease);
                     return Err(retry_err);
                 }
             }
-            self.leases.acquire(&blob_id);
-            // 新 id 还没有任何条目引用，删除路径看不到它。返回前释放，
-            // 避免后台物化把引用写上之后，租约仍挡住立刻删除。
-            // 去重命中的已有 id 不在这里释放。该窗口需实测确认。
-            self.leases.release(&blob_id);
+            // 新 id 还没有任何条目引用。返回前释放守卫，引用落库后的删除
+            // 只受认领宽限约束，不由进程内租约挡住。该宽限需实测确认。
+            drop(fresh_lease);
             Ok(IngestedBlob {
                 blob_id,
                 content_hash,
@@ -240,29 +236,41 @@ where
         async {
             let claimed_at_ms = self.clock.now_ms();
             if let Some(existing) = self.blob_repo.find_by_hash(content_id).await? {
-                self.leases.acquire(&existing.blob_id);
-                if let Some(claimed) = self
+                let looked_up_lease = self.leases.acquire_guard(&existing.blob_id);
+                match self
                     .blob_repo
                     .claim_existing(content_id, claimed_at_ms)
-                    .await?
+                    .await
                 {
-                    self.leases.acquire(&claimed.blob_id);
-                    return Ok(claimed.blob_id);
+                    Ok(Some(claimed)) => {
+                        persist_claimed_lease(
+                            Some(looked_up_lease),
+                            &self.leases,
+                            &claimed.blob_id,
+                        );
+                        return Ok(claimed.blob_id);
+                    }
+                    Ok(None) => {
+                        // 行在命中后被删除。不能复用旧 blob_id，改为重新写文件。
+                        drop(looked_up_lease);
+                    }
+                    Err(err) => {
+                        drop(looked_up_lease);
+                        return Err(err);
+                    }
                 }
-                // 行在命中后被删除。不能复用旧 blob_id，改为重新写文件。
-                self.leases.release(&existing.blob_id);
             }
 
             let blob_id = BlobId::new();
-            self.leases.acquire(&blob_id);
+            let fresh_lease = self.leases.acquire_guard(&blob_id);
 
             // Encryption is handled by the injected BlobStorePort decorator (if any).
             let (storage_path, compressed_size) =
                 match self.blob_store.put(&blob_id, plaintext_bytes).await {
                     Ok(stored) => stored,
                     Err(err) => {
-                        self.leases.release(&blob_id);
                         self.discard_blob(&blob_id, "put failed").await;
+                        drop(fresh_lease);
                         return Err(err);
                     }
                 };
@@ -278,31 +286,38 @@ where
             );
 
             if let Err(err) = self.blob_repo.insert_blob(&record).await {
-                if let Some(existing) = self
+                match self
                     .blob_repo
                     .claim_existing(content_id, claimed_at_ms)
-                    .await?
+                    .await
                 {
-                    self.leases.acquire(&existing.blob_id);
-                    self.leases.release(&blob_id);
-                    uc_debug!(
-                        error_kind = "insert_race",
-                        io_error_kind = io_error_kind(err.as_ref()),
-                        "Insert raced with existing blob; returning existing record",
-                    );
-                    // put 按新 blob_id 新建文件，不覆盖已有 blob 的路径。
-                    // 硬链接场景下 unlink 新名字也不会删除仍被其他链接持有的 inode。
-                    self.discard_blob(&blob_id, "insert race").await;
-                    return Ok(existing.blob_id);
+                    Ok(Some(existing)) => {
+                        self.leases.acquire_guard(&existing.blob_id).persist();
+                        uc_debug!(
+                            error_kind = "insert_race",
+                            io_error_kind = io_error_kind(err.as_ref()),
+                            "Insert raced with existing blob; returning existing record",
+                        );
+                        // put 按新 blob_id 新建文件，不覆盖已有 blob 的路径。
+                        // 硬链接场景下 unlink 新名字也不会删除仍被其他链接持有的 inode。
+                        self.discard_blob(&blob_id, "insert race").await;
+                        drop(fresh_lease);
+                        return Ok(existing.blob_id);
+                    }
+                    Ok(None) => {}
+                    Err(claim_err) => {
+                        self.discard_blob(&blob_id, "insert failed").await;
+                        drop(fresh_lease);
+                        return Err(claim_err);
+                    }
                 }
-                self.leases.release(&blob_id);
                 self.discard_blob(&blob_id, "insert failed").await;
+                drop(fresh_lease);
                 return Err(err);
             }
-            self.leases.acquire(&blob_id);
-            // 新 id 尚未被表示引用。返回前释放，引用落库后的删除才能立刻回收。
-            // 去重命中的已有 id 由调用方在引用提交后释放。该窗口需实测确认。
-            self.leases.release(&blob_id);
+            // 新 id 尚未被表示引用。返回前释放守卫。去重命中的已有 id
+            // 由调用方在引用提交后释放。认领宽限需实测确认。
+            drop(fresh_lease);
             Ok(blob_id)
         }
         .instrument(span)
@@ -311,6 +326,21 @@ where
 
     async fn write_path_if_absent(&self, source_path: &Path) -> Result<BlobId> {
         Ok(self.ingest_path_inner(source_path).await?.blob_id)
+    }
+}
+
+/// 认领到的 id 与查找时登记的 id 相同时只保留那一次计数；不一致则先丢掉查找租约。
+fn persist_claimed_lease(
+    looked_up: Option<BlobLeaseGuard>,
+    leases: &Arc<BlobLeaseRegistry>,
+    claimed_id: &BlobId,
+) {
+    match looked_up {
+        Some(guard) if guard.blob_id() == claimed_id => guard.persist(),
+        looked_up => {
+            drop(looked_up);
+            leases.acquire_guard(claimed_id).persist();
+        }
     }
 }
 
@@ -403,6 +433,7 @@ mod tests {
         async fn delete_if_unreferenced(
             &self,
             _blob_id: &BlobId,
+            _claimed_before_ms: i64,
         ) -> Result<UnreferencedBlobDeletion> {
             Ok(UnreferencedBlobDeletion::Retained)
         }
@@ -440,8 +471,11 @@ mod tests {
         async fn delete_if_unreferenced(
             &self,
             blob_id: &BlobId,
+            claimed_before_ms: i64,
         ) -> Result<UnreferencedBlobDeletion> {
-            self.inner.delete_if_unreferenced(blob_id).await
+            self.inner
+                .delete_if_unreferenced(blob_id, claimed_before_ms)
+                .await
         }
     }
 
@@ -651,8 +685,202 @@ mod tests {
         async fn delete_if_unreferenced(
             &self,
             _blob_id: &BlobId,
+            _claimed_before_ms: i64,
         ) -> Result<UnreferencedBlobDeletion> {
             Ok(UnreferencedBlobDeletion::Retained)
         }
+    }
+
+    struct ClaimFailsRepo {
+        existing: Blob,
+        fail_on_claim: bool,
+    }
+
+    #[async_trait]
+    impl BlobRepositoryPort for ClaimFailsRepo {
+        async fn insert_blob(&self, blob: &Blob) -> Result<()> {
+            if self.fail_on_claim {
+                anyhow::bail!("insert failed");
+            }
+            let _ = blob;
+            Ok(())
+        }
+        async fn find_by_hash(&self, content_hash: &ContentHash) -> Result<Option<Blob>> {
+            if self.fail_on_claim && &self.existing.content_hash == content_hash {
+                return Ok(Some(self.existing.clone()));
+            }
+            Ok(None)
+        }
+        async fn claim_existing(&self, _: &ContentHash, _: i64) -> Result<Option<Blob>> {
+            anyhow::bail!("claim failed");
+        }
+        async fn delete_if_unreferenced(
+            &self,
+            _: &BlobId,
+            _: i64,
+        ) -> Result<UnreferencedBlobDeletion> {
+            Ok(UnreferencedBlobDeletion::Retained)
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_error_before_put_releases_the_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_dir = tmp.path().join("blobs");
+        let store = Arc::new(FilesystemBlobStore::new(blob_dir.clone()));
+        let bytes = b"claim fails before a new file".to_vec();
+        let hash = hash_of(&bytes);
+        let existing = BlobId::from("existing-blob");
+        let leases = Arc::new(BlobLeaseRegistry::isolated());
+        let writer = BlobWriter::new(
+            store,
+            Arc::new(ClaimFailsRepo {
+                existing: Blob::new(
+                    existing.clone(),
+                    crate::blob::BlobStorageLocator::new_local_fs(blob_dir.join("existing-blob")),
+                    bytes.len() as i64,
+                    hash.clone(),
+                    1,
+                    1,
+                    None,
+                ),
+                fail_on_claim: true,
+            }),
+            FixedClock(4),
+            Arc::clone(&leases),
+        );
+        let error = writer.write_if_absent(&hash, &bytes).await.unwrap_err();
+        assert!(error.to_string().contains("claim failed"));
+        assert!(!leases.holds(&existing));
+        assert_eq!(leases.holder_count(), 0);
+        assert_eq!(count_blob_files(&blob_dir), 0);
+    }
+
+    struct ClaimAfterInsertFails {
+        winner_hash: ContentHash,
+    }
+
+    #[async_trait]
+    impl BlobRepositoryPort for ClaimAfterInsertFails {
+        async fn insert_blob(&self, _: &Blob) -> Result<()> {
+            anyhow::bail!("insert failed");
+        }
+        async fn find_by_hash(&self, _: &ContentHash) -> Result<Option<Blob>> {
+            Ok(None)
+        }
+        async fn claim_existing(&self, content_hash: &ContentHash, _: i64) -> Result<Option<Blob>> {
+            assert_eq!(content_hash, &self.winner_hash);
+            anyhow::bail!("claim after insert failed");
+        }
+        async fn delete_if_unreferenced(
+            &self,
+            _: &BlobId,
+            _: i64,
+        ) -> Result<UnreferencedBlobDeletion> {
+            Ok(UnreferencedBlobDeletion::Retained)
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_error_after_put_discards_the_file_and_releases_the_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_dir = tmp.path().join("blobs");
+        let store = Arc::new(FilesystemBlobStore::new(blob_dir.clone()));
+        let bytes = b"claim fails after the file exists".to_vec();
+        let hash = hash_of(&bytes);
+        let leases = Arc::new(BlobLeaseRegistry::isolated());
+        let writer = BlobWriter::new(
+            store,
+            Arc::new(ClaimAfterInsertFails {
+                winner_hash: hash.clone(),
+            }),
+            FixedClock(5),
+            Arc::clone(&leases),
+        );
+        let error = writer.write_if_absent(&hash, &bytes).await.unwrap_err();
+        assert!(error.to_string().contains("claim after insert failed"));
+        assert_eq!(leases.holder_count(), 0);
+        assert_eq!(count_blob_files(&blob_dir), 0);
+    }
+
+    struct MismatchClaimRepo {
+        looked_up: Blob,
+        claimed: Blob,
+    }
+
+    #[async_trait]
+    impl BlobRepositoryPort for MismatchClaimRepo {
+        async fn insert_blob(&self, _: &Blob) -> Result<()> {
+            anyhow::bail!("unused");
+        }
+        async fn find_by_hash(&self, content_hash: &ContentHash) -> Result<Option<Blob>> {
+            if &self.looked_up.content_hash == content_hash {
+                Ok(Some(self.looked_up.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        async fn claim_existing(
+            &self,
+            content_hash: &ContentHash,
+            claimed_at_ms: i64,
+        ) -> Result<Option<Blob>> {
+            if &self.claimed.content_hash != content_hash {
+                return Ok(None);
+            }
+            let mut claimed = self.claimed.clone();
+            claimed.last_claimed_at_ms = claimed_at_ms;
+            Ok(Some(claimed))
+        }
+        async fn delete_if_unreferenced(
+            &self,
+            _: &BlobId,
+            _: i64,
+        ) -> Result<UnreferencedBlobDeletion> {
+            Ok(UnreferencedBlobDeletion::Retained)
+        }
+    }
+
+    #[tokio::test]
+    async fn looked_up_lease_is_released_when_claim_returns_a_different_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(FilesystemBlobStore::new(tmp.path().join("blobs")));
+        let bytes = b"lookup id and claim id differ".to_vec();
+        let hash = hash_of(&bytes);
+        let looked_up = BlobId::from("looked-up");
+        let claimed = BlobId::from("claimed");
+        let leases = Arc::new(BlobLeaseRegistry::isolated());
+        let locator = crate::blob::BlobStorageLocator::new_local_fs(tmp.path().join("row"));
+        let writer = BlobWriter::new(
+            store,
+            Arc::new(MismatchClaimRepo {
+                looked_up: Blob::new(
+                    looked_up.clone(),
+                    locator.clone(),
+                    bytes.len() as i64,
+                    hash.clone(),
+                    1,
+                    1,
+                    None,
+                ),
+                claimed: Blob::new(
+                    claimed.clone(),
+                    locator,
+                    bytes.len() as i64,
+                    hash.clone(),
+                    1,
+                    1,
+                    None,
+                ),
+            }),
+            FixedClock(6),
+            Arc::clone(&leases),
+        );
+        let written = writer.write_if_absent(&hash, &bytes).await.unwrap();
+        assert_eq!(written, claimed);
+        assert!(!leases.holds(&looked_up));
+        assert!(leases.holds(&claimed));
+        leases.release(&claimed);
+        assert_eq!(leases.holder_count(), 0);
     }
 }
