@@ -21,7 +21,6 @@ use crate::{
     ResourceReleaseOutcome,
 };
 
-const SHUTDOWN_COMPLETION_MARGIN: Duration = Duration::from_millis(100);
 #[cfg(feature = "dev-tools")]
 pub(super) static PROBE_ORPHAN_RETRY_EXECUTOR_FAILURE: AtomicBool = AtomicBool::new(false);
 
@@ -273,7 +272,7 @@ impl Engine {
     }
 
     pub async fn shutdown_until_released(&self) -> ResourceReleaseOutcome {
-        match self.start_shutdown(None, None).await {
+        match self.start_shutdown(None).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.wait_shutdown_obligations().await;
@@ -294,7 +293,7 @@ impl Engine {
                 error: EngineError::new(1003, EngineErrorCategory::InvalidInput, false),
             };
         };
-        match self.start_shutdown(Some(deadline), None).await {
+        match self.start_shutdown(Some(deadline)).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.wait_shutdown_obligations().await;
@@ -336,7 +335,8 @@ impl Engine {
                 error: EngineError::new(1003, EngineErrorCategory::InvalidInput, false),
             };
         };
-        let attempt = self.start_shutdown(Some(deadline_at), Some(deadline_at));
+        // 调用方期限只限制等待和操作排空；关闭负责人必须完整执行资源清理。
+        let attempt = self.start_shutdown(Some(deadline_at));
         match timeout_at(deadline_at, async {
             match attempt.await {
                 Ok(outcome) => outcome,
@@ -358,7 +358,6 @@ impl Engine {
     pub(super) fn start_shutdown(
         &self,
         deadline_at: Option<Instant>,
-        cleanup_deadline: Option<Instant>,
     ) -> JoinHandle<ResourceReleaseOutcome> {
         self.lifecycle_requests
             .accept_shutdown(&self.stop_requested);
@@ -425,18 +424,7 @@ impl Engine {
                 }
             }
             operations.wait_empty().await;
-            let runtime_deadline = cleanup_deadline
-                .map(|end| end.checked_sub(SHUTDOWN_COMPLETION_MARGIN).unwrap_or(end));
-            let runtime_result = match runtime.shutdown(runtime_deadline).await {
-                Err(error)
-                    if cleanup_deadline.is_some()
-                        && error.category() == EngineErrorCategory::DeadlineExceeded =>
-                {
-                    // 等待期限只结束等待；原负责人继续无期限完成已接收的清理。
-                    runtime.shutdown(None).await
-                }
-                result => result,
-            };
+            let runtime_result = runtime.shutdown(None).await;
             let result = match runtime_result {
                 Ok(()) => log_activity.end().await,
                 Err(error) => Err(error),

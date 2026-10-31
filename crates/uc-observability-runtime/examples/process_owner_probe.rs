@@ -1,4 +1,5 @@
 //! 使用真实进程运行时验证私有释放负责人，不代表移动设备验收。
+#![cfg(not(test))]
 #![allow(dead_code)]
 
 mod build_source {

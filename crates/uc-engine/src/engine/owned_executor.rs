@@ -120,9 +120,13 @@ impl OwnedExecutor {
             Condvar::new(),
         ));
         let worker_state = Arc::clone(&state);
+        let subscriber = tracing::dispatcher::get_default(Clone::clone);
         let worker = std::thread::Builder::new()
             .name("uc-engine-owned-executor".to_owned())
             .spawn(move || {
+                // 未安装订阅者时保留全局回退，允许宿主稍后初始化观测。
+                let _subscriber = (!subscriber.is::<tracing::subscriber::NoSubscriber>())
+                    .then(|| tracing::dispatcher::set_default(&subscriber));
                 let mut completion = CompletionGuard {
                     state: worker_state,
                     result: ExecutorStop::Failed,

@@ -32,6 +32,7 @@ Port 归需要能力的层与业务模块所有，不按最终实现位置归类
 
 ## 构造与测试依赖
 
+- Do not add parameters, fields, or configuration to production code solely for tests. A feature toggle can gate test-only controls. Keep test-only controls out of builds that do not enable the feature.
 - 一个业务对象只保留一个完整构造入口；所有必需能力都必须由调用方明确提供。
 - 不得为了减少测试改动而增加仅测试可见的便捷构造、隐式默认值或空实现。这些做法会让测试绕过生产对象图，并掩盖新增能力是否已经正确装配。
 - 测试使用明确命名的 fake 或 recorder 提供必需能力；即使当前用例不关心该能力，也要在构造位置显式传入，使依赖变化成为可见的编译影响。
