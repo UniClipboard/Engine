@@ -15,6 +15,7 @@
 - [可靠性](RELIABILITY.md)：恢复、后台任务与验证层次。
 - [质量记分卡](QUALITY_SCORE.md)：评审维度与证据入口。
 - [本地构建](design-docs/local-builds.md)：多 worktree 输出隔离、资源边界与可重复基准。
+- [暂存字节与采集提交顺序](design-docs/clipboard-staged-commit.md)：耐久写入、原子提交和后台通知的顺序约束。
 - [测试使用指南](design-docs/testing-guide.md)：选择测试层级、运行分组、使用 testkit 和复现失败。
 
 ## 记录分类

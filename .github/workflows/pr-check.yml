@@ -348,6 +348,19 @@ jobs:
         with:
           tool: cargo-nextest@0.9.145
 
+      - name: Verify staged mobile image commit through the public Engine
+        env:
+          UC_STAGED_IMAGE_E2E_RECEIPT: ${{ runner.temp }}/staged-image-commit.json
+        run: cargo test --locked -p uc-engine --features lan-compat --test host_contract staged_capture_commit -- --nocapture
+
+      - name: Retain staged image commit evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: staged-image-commit
+          path: ${{ runner.temp }}/staged-image-commit.json
+          if-no-files-found: warn
+
       - name: Build workspace tests
         run: cargo nextest run --profile ci --locked --workspace --all-targets --no-run
 

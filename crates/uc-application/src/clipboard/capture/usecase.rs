@@ -42,7 +42,7 @@ use uc_core::clipboard::{
 };
 
 use crate::clipboard::outbound::{parse_uri_list_line, UriListLineKind};
-use uc_core::ids::{EntryId, EventId};
+use uc_core::ids::{EntryId, EventId, RepresentationId};
 use uc_core::ports::clipboard::{
     EntryFileSetRepositoryPort, FindEntryIdBySnapshotHashPort, ReplaceEntryContentPort,
     RepresentationCachePort, SaveClipboardEntryPort, SpoolQueuePort, SpoolRequest,
@@ -564,7 +564,7 @@ impl CaptureClipboardUseCase {
 
             // Cache representations for immediate access by the background blob worker.
             // This must happen before persist_entry so the worker gets a cache hit
-            // when it is notified (via try_send in spool_blobs below).
+            // when it is notified after the capture commits.
             async {
                 for rep in &normalized_reps {
                     if rep.payload_state() == PayloadAvailability::Staged {
@@ -596,7 +596,7 @@ impl CaptureClipboardUseCase {
             //
             // Durability invariant: when `entry_repo.save_entry_and_selection`
             // succeeds, the spool file for every Staged rep is already on disk
-            // (`DurableSpoolQueue::enqueue` fsyncs before returning). The
+            // (`DurableSpoolQueue::persist` fsyncs before returning). The
             // in-memory cache is just an accelerator; spool is the source of
             // truth for representations that haven't been promoted to a blob yet.
             //
@@ -626,11 +626,16 @@ impl CaptureClipboardUseCase {
                 })
                 .collect();
 
+            let staged_rep_ids: Vec<RepresentationId> = spool_reps
+                .iter()
+                .map(|request| request.rep_id.clone())
+                .collect();
+
             if !spool_reps.is_empty() {
                 async {
                     for req in spool_reps {
                         let rep_id = req.rep_id.clone();
-                        self.spool_queue.enqueue(req).await.map_err(|err| {
+                        self.spool_queue.persist(req).await.map_err(|err| {
                             anyhow::anyhow!(
                                 "Failed to durably spool representation {} during capture: {}",
                                 rep_id,
@@ -764,6 +769,12 @@ impl CaptureClipboardUseCase {
                 }
             }
             .await?;
+
+            // Atomic inbound/replace commits create their representations here. Publishing
+            // earlier lets the worker finish a not-yet-persisted representation as missing.
+            for rep_id in staged_rep_ids {
+                self.spool_queue.notify_committed(&rep_id);
+            }
 
             // Persist the file-set manifest built above, now that `entry_id`
             // is durable. Best-effort: a failure here does not roll back the

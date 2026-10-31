@@ -326,3 +326,7 @@ mod resource_release;
 
 #[path = "host_contract/entry_thumbnails.rs"]
 mod entry_thumbnails;
+
+#[cfg(feature = "lan-compat")]
+#[path = "host_contract/staged_capture_commit.rs"]
+mod staged_capture_commit;

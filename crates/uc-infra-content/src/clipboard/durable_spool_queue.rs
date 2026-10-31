@@ -1,31 +1,13 @@
-//! Durable spool queue that writes bytes to disk before returning.
+//! Durable staging and post-commit notification for clipboard payloads.
 //!
-//! `enqueue()` writes synchronously to the spool directory before notifying
-//! the background blob worker, so bytes survive a process exit between
-//! capture and blob materialisation.
+//! `persist()` writes and syncs bytes through `SpoolManager` without waking
+//! the worker. Capture owns the database commit and calls `notify_committed()`
+//! only after the representation and its owner are visible together.
 //!
-//! ## Durability guarantee
-//!
-//! `enqueue()` writes the bytes to the spool directory (via `SpoolManager`)
-//! before returning. Only then does it notify the background blob worker.
-//! If the process exits after `enqueue()` returns, `SpoolScanner` will find
-//! the spool file on next startup and re-queue it to the worker.
-//!
-//! ## Failure semantics
-//!
-//! If the spool write fails (e.g., disk full), `enqueue()` returns `Err`.
-//! The caller (`CaptureClipboardUseCase`) propagates the error, which means
-//! the clipboard entry is still persisted in DB with `Staged` state but will
-//! not be viewable until the spool write succeeds on a subsequent capture.
-//! This preserves the previous error behaviour for disk-full scenarios.
-//!
-//! ## Worker notification
-//!
-//! After writing the spool file, `enqueue()` attempts a `try_send` to the
-//! worker channel so the background blob worker can immediately begin
-//! materialising the blob without waiting for the next startup scan.
-//! A failed `try_send` (channel full) is logged but not treated as an error;
-//! the spool scanner will recover the entry on next startup.
+//! Spool write failure stops capture before its entry commit. A committed
+//! record keeps its durable bytes even if the bounded notification channel
+//! is full or the process exits: the existing startup scanner recovers it.
+//! Uncommitted files keep the existing orphan-recovery policy.
 
 use anyhow::Context;
 use std::sync::Arc;
@@ -38,7 +20,7 @@ use uc_observability_contract::{error_source::io_error_kind, log_fields::log_id,
 
 use crate::clipboard::SpoolManager;
 
-/// Durable spool queue: writes to disk synchronously, then notifies the worker.
+/// Durable payload staging with an explicit committed-work notification.
 pub struct DurableSpoolQueue {
     spool_manager: Arc<SpoolManager>,
     worker_tx: mpsc::Sender<RepresentationId>,
@@ -58,7 +40,7 @@ impl DurableSpoolQueue {
 
 #[async_trait::async_trait]
 impl SpoolQueuePort for DurableSpoolQueue {
-    async fn enqueue(&self, request: SpoolRequest) -> anyhow::Result<()> {
+    async fn persist(&self, request: SpoolRequest) -> anyhow::Result<()> {
         // Write bytes to disk first — this is the durability guarantee.
         // If this fails, we return Err so the caller knows bytes are not safe.
         self.spool_manager
@@ -66,18 +48,20 @@ impl SpoolQueuePort for DurableSpoolQueue {
             .await
             .context("failed to write spool file")?;
 
-        // Notify the background worker to immediately process this entry.
+        Ok(())
+    }
+
+    fn notify_committed(&self, rep_id: &RepresentationId) {
+        // Notify only after the representation and its owner have committed.
         // A failure here is non-fatal: the spool file is on disk and will be
         // recovered by SpoolScanner on the next application startup.
-        if let Err(err) = self.worker_tx.try_send(request.rep_id.clone()) {
+        if let Err(err) = self.worker_tx.try_send(rep_id.clone()) {
             uc_warn!(
-                representation_id = log_id(&request.rep_id),
+                representation_id = log_id(rep_id),
                 error_kind = "worker_notify",
                 io_error_kind = io_error_kind(&err),
-                "Failed to notify worker after spool write; will be recovered on next startup"
+                "Failed to notify worker after capture commit; will be recovered on next startup"
             );
         }
-
-        Ok(())
     }
 }
