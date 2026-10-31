@@ -10,7 +10,8 @@ use std::time::Duration;
 use uc_engine::{
     Engine, EngineConfig, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardChange, HostClipboardChangeStream, HostClipboardSnapshot,
-    HostDirectories, HostSecureStorage, StartupLifecycle, StartupProgress, StartupState,
+    HostDirectories, HostSecureStorage, StartupLifecycle, StartupProgress, StartupReleaseOutcome,
+    StartupState,
 };
 
 use async_trait::async_trait;
@@ -519,7 +520,7 @@ impl HostSecureStorage for ObservedStorage {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_service_start_releases_every_host_owner_before_returning() {
+async fn failed_service_start_releases_every_host_owner_before_release_receipt() {
     let root = tempfile::tempdir().unwrap();
     let storage = MemorySecureStorage::default();
     let dropped = Arc::new(AtomicBool::new(false));
@@ -548,10 +549,15 @@ async fn failed_service_start_releases_every_host_owner_before_returning() {
     )
     .await;
     assert!(result.is_err(), "occupied network port must reject startup");
+    let startup_error = result.err().unwrap();
     assert_eq!(
         pause.await.unwrap_err().category(),
-        result.err().unwrap().category()
+        startup_error.category()
     );
+    assert!(matches!(
+        control.wait_release(Duration::from_secs(20)),
+        StartupReleaseOutcome::Released(Some(error), _) if error == startup_error
+    ));
     assert!(
         dropped.load(Ordering::SeqCst),
         "failed startup retained a host owner"

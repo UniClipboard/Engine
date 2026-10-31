@@ -366,6 +366,8 @@ impl StartupCleanupOwner {
         progress: StartupProgressInput,
         startup_error: EngineError,
     ) {
+        // 启动错误返回前先发布失败；清理未确认时不开放重试。
+        progress.finish_cleanup_failed(&startup_error);
         let mut progress = Some(StartupFailureProgress {
             input: progress,
             startup_error,
