@@ -22,6 +22,7 @@ use crate::filter::{remote_span_enabled, sdk_log_enabled};
 use crate::local_file::LocalFileRuntime;
 use crate::local_log_processor::LocalLogProcessor;
 use crate::local_recording::LocalRecordingState;
+use crate::offline::OfflineSpanProcessor;
 use crate::remote_health::{
     RemoteHealthCounters, RemoteHealthSnapshot, RemoteSubmissionControl, TracingSpans,
     TrackedLogProcessor, TrackedSpanProcessor,
@@ -323,6 +324,7 @@ impl TelemetryRuntime {
     }
 
     pub(crate) fn shutdown(&self, deadline: Duration) -> TelemetrySignalSummary {
+        self.recording.offline.stop();
         let (traces, trace_error) = signal_with_error(self.traces.shutdown_with_timeout(deadline));
         let (logs, log_error) = signal_with_error(self.logs.shutdown_with_timeout(deadline));
         TelemetrySignalSummary {
@@ -366,6 +368,10 @@ impl TelemetryRuntime {
     ) -> Self {
         Self {
             traces: SdkTracerProvider::builder()
+                .with_span_processor(OfflineSpanProcessor::new(
+                    recording.offline.clone(),
+                    &resource,
+                ))
                 .with_resource(resource.clone())
                 .build(),
             logs: local_logger_provider(resource, local_file, recording.clone()).build(),
@@ -418,6 +424,10 @@ impl TelemetryRuntime {
         let submission = RemoteSubmissionControl::new(health.clone());
         Ok(Self {
             traces: SdkTracerProvider::builder()
+                .with_span_processor(OfflineSpanProcessor::new(
+                    recording.offline.clone(),
+                    &resource,
+                ))
                 .with_sampler(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)))
                 .with_span_processor(TrackedSpanProcessor::new(
                     span_exporter,

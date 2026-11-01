@@ -52,6 +52,7 @@ impl LogProcessor for LocalLogProcessor {
         if !self.recording.include(&mut record) {
             return;
         }
+        self.recording.offline.log(&record);
         let source = source_for(&record);
         let Ok(mut record) = serde_json::to_vec(&record) else {
             self.recording.rejected();
