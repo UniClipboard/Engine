@@ -6,7 +6,9 @@
 Desktop daemon 启动采样，并在用户导出时冻结记录。
 Engine 组装层连接现有资料加密适配器。调用方不接触密钥。
 采样覆盖 daemon 和通过当前资料本地认证登记的 GUI、Quick Panel。
-登记绑定内核启动时间与内存中的可执行文件路径。
+登记绑定内核创建标识与内存中的可执行文件路径。
+macOS 使用微秒启动时间，Linux 使用内核启动时钟 tick，Windows 使用创建 FILETIME。
+这些标识只在内存中使用，不依赖 sysinfo 的秒级启动时间。
 Wails 公开 API 未提供 WebView PID，无法确认归属时保留 unknown。
 不能将这些进程的数据称为全应用独占资源占用。
 

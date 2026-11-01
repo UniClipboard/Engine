@@ -42,6 +42,8 @@ mod network_log;
 mod offline;
 #[path = "../src/process_census.rs"]
 mod process_census;
+#[path = "../src/process_identity.rs"]
+mod process_identity;
 #[path = "../src/process_release.rs"]
 mod process_release;
 #[path = "../src/remote_health.rs"]
