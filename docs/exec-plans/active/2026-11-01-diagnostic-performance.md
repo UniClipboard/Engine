@@ -5,7 +5,10 @@
 `uc-observability-runtime` 拥有采样、有界历史与 OTLP 记录。
 Desktop daemon 启动采样，并在用户导出时冻结记录。
 Engine 组装层连接现有资料加密适配器。调用方不接触密钥。
-本阶段只覆盖 daemon。不能将该数据称为全应用资源占用。
+采样覆盖 daemon 和通过当前资料本地认证登记的 GUI、Quick Panel。
+登记绑定内核启动时间与内存中的可执行文件路径。
+Wails 公开 API 未提供 WebView PID，无法确认归属时保留 unknown。
+不能将这些进程的数据称为全应用独占资源占用。
 
 ## 数据与存储
 
@@ -30,4 +33,5 @@ CPU 累计值为总 CPU 秒数。使用率为单逻辑核心比例。
 已执行 `cargo check -p uc-engine --all-targets --locked`。
 该检查只证明编译，不证明产品导出或后端导入。
 Desktop 的验收记录负责真实 ZIP、Collector、后端查询与跨平台状态。
-GUI、Quick Panel 与 WebView 覆盖仍需单独实现和验收。
+GUI、Quick Panel 的新增登记仍需在 Desktop 原生验收中核对。
+WebView 只接受宿主明确拥有的 PID，不通过名称或父子关系扫描推断。
