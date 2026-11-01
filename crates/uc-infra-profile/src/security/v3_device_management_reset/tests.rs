@@ -7,7 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use diesel::connection::SimpleConnection as _;
-use diesel::{Connection as _, SqliteConnection};
+use diesel::sql_types::{BigInt, Integer};
+use diesel::{sql_query, Connection as _, QueryableByName, RunQueryDsl as _, SqliteConnection};
 use tempfile::{tempdir, TempDir};
 use uc_application::deps::{AdmissionSpaceTransitionError, DeviceManagementResetDataPort};
 use uc_core::ids::SpaceId;
@@ -52,6 +53,38 @@ impl SecureStoragePort for MemorySecureStorage {
     }
 }
 
+#[derive(QueryableByName)]
+struct AdmissionCounts {
+    #[diesel(sql_type = BigInt)]
+    state_count: i64,
+    #[diesel(sql_type = BigInt)]
+    record_count: i64,
+    #[diesel(sql_type = BigInt)]
+    summary_count: i64,
+}
+
+#[derive(QueryableByName)]
+struct ProfileVersion {
+    #[diesel(sql_type = Integer)]
+    user_version: i32,
+}
+
+fn admission_counts(pool: &DbPool) -> (i64, i64, i64) {
+    let mut connection = pool.get().unwrap();
+    let counts = sql_query(
+        "SELECT (SELECT COUNT(*) FROM admission_repository_state) AS state_count, \
+         (SELECT COUNT(*) FROM admission_repository_record) AS record_count, \
+         (SELECT COUNT(*) FROM admission_recovery_summary) AS summary_count",
+    )
+    .get_result::<AdmissionCounts>(&mut connection)
+    .unwrap();
+    (
+        counts.state_count,
+        counts.record_count,
+        counts.summary_count,
+    )
+}
+
 #[tokio::test]
 async fn v3_device_reset_replaces_only_the_control_generation() {
     let directory = tempdir().unwrap();
@@ -90,7 +123,20 @@ async fn v3_device_reset_replaces_only_the_control_generation() {
 
     let source_layout = ProfileRuntimeLayout::v3(&root, &source);
     std::fs::create_dir_all(source_layout.profile_database().parent().unwrap()).unwrap();
-    std::fs::write(source_layout.profile_database(), b"reset-retained-profile").unwrap();
+    let profile_pool = init_db_pool(source_layout.profile_database().to_str().unwrap()).unwrap();
+    profile_pool
+        .get()
+        .unwrap()
+        .batch_execute(
+            "PRAGMA user_version = 71; \
+             INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, X'01'); \
+             INSERT INTO admission_repository_record (lookup_token, content_token, encrypted_payload) \
+             VALUES (zeroblob(32), zeroblob(32), X'01'); \
+             INSERT INTO admission_recovery_summary (lookup_token, content_token, encrypted_payload) \
+             VALUES (zeroblob(32), zeroblob(32), X'01');",
+        )
+        .unwrap();
+    assert_eq!(admission_counts(&profile_pool), (1, 1, 1));
     std::fs::create_dir_all(source_layout.blob_root()).unwrap();
     std::fs::write(
         source_layout.blob_root().join("history.ucbl"),
@@ -145,6 +191,7 @@ async fn v3_device_reset_replaces_only_the_control_generation() {
     ));
     let reset = V3DeviceManagementReset::new(
         root.clone(),
+        profile_pool.clone(),
         control_pool,
         Arc::clone(&manifests),
         generations,
@@ -176,6 +223,7 @@ async fn v3_device_reset_replaces_only_the_control_generation() {
         .promote_device_management_reset(&target_space)
         .await
         .unwrap();
+    assert_eq!(admission_counts(&profile_pool), (1, 1, 1));
     reset
         .finalize_device_management_reset(&target_space)
         .await
@@ -190,10 +238,12 @@ async fn v3_device_reset_replaces_only_the_control_generation() {
     assert_ne!(active.layout().space_control_generation(), &[0x83; 16]);
     assert_eq!(session.current_space_id().unwrap(), target_space);
     assert_eq!(session.get_master_key().unwrap(), master_key);
-    assert_eq!(
-        std::fs::read(source_layout.profile_database()).unwrap(),
-        b"reset-retained-profile"
-    );
+    assert_eq!(admission_counts(&profile_pool), (0, 0, 0));
+    let mut profile_connection = profile_pool.get().unwrap();
+    let version = sql_query("PRAGMA user_version")
+        .get_result::<ProfileVersion>(&mut profile_connection)
+        .unwrap();
+    assert_eq!(version.user_version, 71);
     assert_eq!(
         std::fs::read(source_layout.blob_root().join("history.ucbl")).unwrap(),
         b"reset-retained-blob"
@@ -274,7 +324,7 @@ impl ResetProfile {
             .unwrap();
         let layout = ProfileRuntimeLayout::v3(&root, &source);
         fs::create_dir_all(layout.profile_database().parent().unwrap()).unwrap();
-        fs::write(layout.profile_database(), b"reset-retained-profile").unwrap();
+        init_db_pool(layout.profile_database().to_str().unwrap()).unwrap();
         fs::create_dir_all(layout.control_database().parent().unwrap()).unwrap();
         let pool = init_db_pool(layout.control_database().to_str().unwrap()).unwrap();
         let session = InMemorySession::new();
@@ -357,6 +407,13 @@ impl ResetProfile {
         ));
         let reset = V3DeviceManagementReset::new(
             self.root.clone(),
+            init_db_pool(
+                ProfileRuntimeLayout::v3(&self.root, &active)
+                    .profile_database()
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap(),
             control_pool.clone(),
             Arc::clone(&manifests),
             Arc::clone(&generations),
@@ -555,6 +612,19 @@ async fn an_activated_target_is_finished_instead_of_discarded() {
     let logs = uc_testkit::log_capture::CapturedLogs::default();
     let _guard = logs.install();
     let profile = ResetProfile::create().await;
+    let profile_layout = ProfileRuntimeLayout::v3(&profile.root, &profile.source);
+    let profile_pool = init_db_pool(profile_layout.profile_database().to_str().unwrap()).unwrap();
+    profile_pool
+        .get()
+        .unwrap()
+        .batch_execute(
+            "INSERT INTO admission_repository_state (singleton_id, encrypted_payload) VALUES (1, X'01'); \
+             INSERT INTO admission_repository_record (lookup_token, content_token, encrypted_payload) \
+             VALUES (zeroblob(32), zeroblob(32), X'01'); \
+             INSERT INTO admission_recovery_summary (lookup_token, content_token, encrypted_payload) \
+             VALUES (zeroblob(32), zeroblob(32), X'01');",
+        )
+        .unwrap();
     {
         let first = profile.open().await;
         first.prepare_and_stage(&profile).await;
@@ -580,6 +650,7 @@ async fn an_activated_target_is_finished_instead_of_discarded() {
     assert!(second.has_material(&profile.target_space).await);
     drop(second);
     assert_eq!(active_space(&profile).await, profile.target_space);
+    assert_eq!(admission_counts(&profile_pool), (0, 0, 0));
     assert_eq!(profile.control_generations().len(), 1);
     assert_eq!(logs.count("finds the target already active"), 1);
     assert!(logs.output().contains("reason=\"already_target\""));
