@@ -20,6 +20,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 semver = "1"
 serde_json = "1"
 sha2 = "0.10"
+tempfile = "3"
+sysinfo = { version = "=0.38.4", default-features = false, features = ["system"] }
+opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs", "metrics", "with-serde"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
