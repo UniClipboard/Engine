@@ -37,3 +37,13 @@ CPU 累计值为总 CPU 秒数。使用率为单逻辑核心比例。
 Desktop 的验收记录负责真实 ZIP、Collector、后端查询与跨平台状态。
 GUI、Quick Panel 的新增登记仍需在 Desktop 原生验收中核对。
 WebView 只接受宿主明确拥有的 PID，不通过名称或父子关系扫描推断。
+
+## 审查回归：关联白名单与历史恢复
+
+修改前的失败场景：同一真实诊断 ZIP 的 OTLP 日志缺少原始顶层关联值；破坏 history.enc 后，重新启动仍无法持久化。
+
+验收先写入 Desktop 的既有 diagnostics_acceptance_run.py：逐条匹配原日志和 OTLP，保留真实 trace/span 与 LocalRecordingState.run_id；用隔离合成资料验证损坏、历史密钥缺失、锁定、超限、权限错误和重启重载。不得新增实现后单元测试。
+
+顶层关联属性只取明确白名单。密文打开错误在拥有 BlobCipherError/ContentProtectionError 类型信息的 assembly 边界分类并保留 source。缺失 V3 或旧版历史密钥不能解释为文件损坏。
+
+确定不可读的历史在新历史加密成功后，保存到单个有界密文证据槽，再原子更新。锁定和可重试错误不修改文件。恢复原因、证据原大小与裁剪状态写入新的加密历史。单个证据槽最多 8 MiB，不新增明文文件或文件密钥。
