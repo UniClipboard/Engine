@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use diesel::{Connection as _, RunQueryDsl as _};
 use rand::RngCore as _;
 use uc_application::deps::{AdmissionSpaceTransitionError, DeviceManagementResetDataPort};
 use uc_core::ids::SpaceId;
@@ -22,9 +23,10 @@ use uc_infra_storage::db::pool::DbPool;
 ///
 /// Application 仍只执行既有四步动作；本模块独占 target 分配、control snapshot、
 /// mutable staging、promotion proof、manifest 前向恢复和 source cleanup。profile
-/// database/blob 与 payload cipher 不进入依赖图。
+/// payload 在提交前保持不变；提交后清理旧 Space 的准入状态。
 pub struct V3DeviceManagementReset {
     profile_root: PathBuf,
+    profile_pool: DbPool,
     control_pool: DbPool,
     manifests: Arc<ActiveSpaceGenerationManifestStore>,
     control_generations: Arc<SpaceControlGeneration>,
@@ -35,6 +37,7 @@ pub struct V3DeviceManagementReset {
 impl V3DeviceManagementReset {
     pub fn new(
         profile_root: PathBuf,
+        profile_pool: DbPool,
         control_pool: DbPool,
         manifests: Arc<ActiveSpaceGenerationManifestStore>,
         control_generations: Arc<SpaceControlGeneration>,
@@ -42,6 +45,7 @@ impl V3DeviceManagementReset {
     ) -> Self {
         Self {
             profile_root,
+            profile_pool,
             control_pool,
             manifests,
             control_generations,
@@ -93,6 +97,22 @@ impl V3DeviceManagementReset {
                 return generation;
             }
         }
+    }
+
+    async fn retire_previous_space_admissions(&self) -> Result<(), AdmissionSpaceTransitionError> {
+        let pool = self.profile_pool.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let mut connection = pool.get()?;
+            connection.transaction::<_, anyhow::Error, _>(|connection| {
+                diesel::sql_query("DELETE FROM admission_recovery_summary").execute(connection)?;
+                diesel::sql_query("DELETE FROM admission_repository_record").execute(connection)?;
+                diesel::sql_query("DELETE FROM admission_repository_state").execute(connection)?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(AdmissionSpaceTransitionError::storage)?
+        .map_err(AdmissionSpaceTransitionError::storage)
     }
 
     fn journal_matches(
@@ -429,6 +449,7 @@ impl DeviceManagementResetDataPort for V3DeviceManagementReset {
                 "device reset journal is not cleanup pending",
             ));
         }
+        self.retire_previous_space_admissions().await?;
         self.activation
             .cleanup_source_control_generation(&source, &target)
             .await
