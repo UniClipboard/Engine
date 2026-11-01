@@ -26,6 +26,7 @@ mod module_log;
 mod module_log_fields;
 mod network_log;
 mod process_census;
+mod process_identity;
 mod process_release;
 pub use local_capture::{
     CaptureEndReason, DetailedCaptureRequest, LocalCaptureMode, LocalCaptureStatus,

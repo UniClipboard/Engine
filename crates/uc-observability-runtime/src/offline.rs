@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::local_recording::LocalRecordingState;
+use crate::process_identity::birth_identity;
 use opentelemetry::Context;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -164,6 +165,7 @@ impl OfflineHistory {
                 "invalid diagnostic process registration",
             ));
         }
+        let identity = birth_identity(pid)?;
         let mut system = System::new();
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
@@ -187,9 +189,16 @@ impl OfflineHistory {
                 )
             })?
             .to_path_buf();
+        if birth_identity(pid)? != identity {
+            return Err(std::io::Error::other(
+                "diagnostic process changed during registration",
+            ));
+        }
         let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
         if hosts.get(&pid).is_some_and(|known| {
-            known.start == process.start_time()
+            known.state == "active"
+                && known.identity == identity
+                && known.start == process.start_time()
                 && known.executable == executable
                 && known.role == role
         }) {
@@ -223,6 +232,7 @@ impl OfflineHistory {
         hosts.insert(
             pid,
             HostProcess {
+                identity,
                 start: process.start_time(),
                 executable,
                 role: role.to_owned(),
@@ -571,6 +581,19 @@ fn sample_process(
                     host.previous = None;
                     continue;
                 };
+                match birth_identity(*pid) {
+                    Ok(identity) if identity == host.identity => {}
+                    Ok(_) => {
+                        host.state = "identity_changed";
+                        host.previous = None;
+                        continue;
+                    }
+                    Err(_) => {
+                        host.state = "identity_unavailable";
+                        host.previous = None;
+                        continue;
+                    }
+                }
                 if process.start_time() != host.start
                     || process.exe() != Some(host.executable.as_path())
                 {
@@ -682,6 +705,7 @@ fn unix_ms() -> u64 {
 }
 
 struct HostProcess {
+    identity: u128,
     start: u64,
     executable: PathBuf,
     role: String,
