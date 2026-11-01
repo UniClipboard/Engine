@@ -15,6 +15,9 @@ mod snapshot_cas;
 mod stream_isolation;
 #[cfg(target_os = "linux")]
 use super::blob_resources::ReceiveResourceBaseline;
+// stream_isolation 只在 Linux 测试中编译，并通过 super 使用该助手。
+#[cfg(all(test, target_os = "linux"))]
+use super::empty_engine_host;
 use super::{
     mount_engine_rendezvous, next_engine_event_matching, persistent_engine_host,
     MemoryHostSecureStorage, ENGINE_TEST_LOCK,
