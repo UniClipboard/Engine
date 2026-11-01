@@ -581,3 +581,81 @@ async fn concurrent_settings_updates_are_all_covered_by_notifications() {
     // 整个真实 fixture 仍受 Nextest 外层期限约束。
     engine.shutdown_until_complete().await.unwrap();
 }
+
+/// 宿主契约：按设备标识设置、替换、删除用户配置的设备地址；未列出的设备保持不变，
+/// 主机名等非 IP 值整体拒绝且不改写已保存的值。
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_addresses_are_patched_per_device_through_the_host_contract() {
+    use std::collections::BTreeMap;
+    use uc_engine::{NetworkSettingsPatch, PeerAddressSetting, SettingsUpdateOutcome};
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (engine, _events) = start(root.path(), &storage).await;
+    let address = |ip: &str, port| PeerAddressSetting {
+        ip: ip.to_string(),
+        port,
+    };
+    let update = |changes: BTreeMap<String, Option<PeerAddressSetting>>| {
+        let engine = &engine;
+        async move {
+            match engine
+                .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
+                    network: Some(NetworkSettingsPatch {
+                        peer_addresses: Some(changes),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })))
+                .await
+                .expect("settings update completes")
+            {
+                OperationResult::SettingsUpdated(outcome) => outcome,
+                other => panic!("unexpected result {other:?}"),
+            }
+        }
+    };
+    let saved = || {
+        let engine = &engine;
+        async move {
+            let OperationResult::Settings(settings) =
+                engine.execute(Operation::QuerySettings).await.unwrap()
+            else {
+                panic!("expected settings")
+            };
+            settings.network.peer_addresses
+        }
+    };
+
+    assert!(saved().await.is_empty());
+    assert!(matches!(
+        update(BTreeMap::from([
+            ("device-a".to_string(), Some(address("10.8.0.2", 51821))),
+            ("device-b".to_string(), Some(address("10.8.0.3", 51821))),
+        ]))
+        .await,
+        SettingsUpdateOutcome::Updated(_)
+    ));
+    assert!(matches!(
+        update(BTreeMap::from([
+            ("device-a".to_string(), Some(address("[fd00::2]", 40000))),
+            ("device-b".to_string(), None),
+        ]))
+        .await,
+        SettingsUpdateOutcome::Updated(_)
+    ));
+    let expected = BTreeMap::from([("device-a".to_string(), address("fd00::2", 40000))]);
+    assert_eq!(saved().await, expected);
+
+    let rejected = update(BTreeMap::from([(
+        "device-c".to_string(),
+        Some(address("laptop.wg", 51821)),
+    )]))
+    .await;
+    let SettingsUpdateOutcome::Rejected { reason } = rejected else {
+        panic!("a hostname must be rejected");
+    };
+    assert!(!reason.contains("laptop.wg"));
+    assert_eq!(saved().await, expected);
+    engine.shutdown_until_complete().await.unwrap();
+}

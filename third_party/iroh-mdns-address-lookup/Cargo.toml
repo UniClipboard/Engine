@@ -95,6 +95,13 @@ features = ["sync"]
 [dependencies.tracing]
 version = "0.1.44"
 
+# 恢复独立运行现有单元测试所需的依赖，不影响 Engine workspace 的依赖锁。
+[dev-dependencies]
+iroh = { path = "../iroh/iroh", default-features = false, features = ["tls-ring"] }
+rand = "0.10"
+rand_chacha = "0.10"
+tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "time"] }
+
 [lints.clippy]
 unused-async = "warn"
 

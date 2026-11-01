@@ -41,7 +41,7 @@ impl ClipboardDispatchAdapter {
         let mut stream = connection
             .open_bi(deadline)
             .await
-            .map_err(|error| ClipboardDispatchError::Io(Box::new(error)))?;
+            .map_err(map_connectivity_err)?;
         let mut wire_header = header.clone();
         if connection.protocol() != ConnectionProtocol::AttributedClipboard {
             // 实际协商的旧能力只发送冻结旧头；不追加尾随数据或在错误后重试旧格式。
@@ -55,16 +55,17 @@ impl ClipboardDispatchAdapter {
         )
         .await
         .map_err(map_encode_err)?;
+        // 帧已交给传输层后，流失败只说明确认未到达；对端可能已保存，重试靠接收端去重。
         stream
             .send
             .finish()
-            .map_err(|error| ClipboardDispatchError::Io(Box::new(error)))?;
+            .map_err(|error| ClipboardDispatchError::Transient(Box::new(error)))?;
         let mut ack = [0u8; 1];
         stream
             .receive
             .read_exact(&mut ack)
             .await
-            .map_err(|error| ClipboardDispatchError::Io(Box::new(error)))?;
+            .map_err(|error| ClipboardDispatchError::Transient(Box::new(error)))?;
         match AckCode::try_from(ack[0]) {
             Ok(AckCode::Accepted) => Ok(DispatchAck::Accepted),
             Ok(AckCode::DuplicateIgnored) => Ok(DispatchAck::DuplicateIgnored),
@@ -105,15 +106,9 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
         {
             Ok(connection) => connection,
             Err(error) => {
-                // 既有稳定端口的离线分类是最后的业务边界；manager 内保留完整来源。
-                let outcome = if error.is_unavailable() {
-                    ClipboardDispatchError::Offline
-                } else {
-                    ClipboardDispatchError::Io(Box::new(error))
-                };
                 return DispatchReport {
                     transport: ConnectionChannel::Unknown,
-                    outcome: Err(outcome),
+                    outcome: Err(map_acquisition_err(error)),
                 };
             }
         };
@@ -124,20 +119,11 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
         .await
         {
             Ok(result) => result,
-            Err(error) => Err(ClipboardDispatchError::Io(Box::new(error))),
+            Err(error) => Err(ClipboardDispatchError::Transient(Box::new(error))),
         };
+        // presence 已确认对端离线时，暂时性网络失败归为离线；本机授权与资源失败保持原分类。
         let outcome = match outcome {
-            Err(ClipboardDispatchError::Io(ref source))
-                if connection.is_unreachable()
-                    && source
-                        .downcast_ref::<ConnectivityError>()
-                        .is_none_or(|error| {
-                            matches!(
-                                error,
-                                ConnectivityError::Stream(_) | ConnectivityError::TimedOut(_)
-                            )
-                        }) =>
-            {
+            Err(ClipboardDispatchError::Transient(_)) if connection.is_unreachable() => {
                 Err(ClipboardDispatchError::Offline)
             }
             outcome => outcome,
@@ -149,6 +135,32 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
     }
 }
 
+/// 取得连接失败的分类。准入授权拒绝（成员权威拒绝或身份不符，含经共享拨号结果返回的
+/// 拒绝）是终态失败，必须先于既有的宽泛不可用判断处理，否则会被记为可恢复的离线并被反复
+/// 重试。请求失效（例如锁定准备暂停连接使撤销快照过期，成员关系未变）不是拒绝：旧请求已被
+/// 围栏拒绝且未发送帧，归为离线后由恢复负责人在对端重新在线时以新请求重新核对当前成员权威。
+/// 其余真正的不可达（无地址、无可用连接、底层拨号失败）同样归为离线。终态分类保留原始来源。
+fn map_acquisition_err(error: ConnectivityError) -> ClipboardDispatchError {
+    if error.is_denied() {
+        ClipboardDispatchError::Io(Box::new(error))
+    } else if error.is_unavailable() {
+        // 既有稳定端口的离线分类是最后的业务边界；manager 内保留完整来源。
+        ClipboardDispatchError::Offline
+    } else {
+        map_connectivity_err(error)
+    }
+}
+
+/// 暂时性连接或容量失败可重试；其余连接失败（准入拒绝、本机负责人停止、地址资料读取失败、
+/// 准入结算失败等）保持不可重试。
+fn map_connectivity_err(error: ConnectivityError) -> ClipboardDispatchError {
+    if error.is_transient() {
+        ClipboardDispatchError::Transient(Box::new(error))
+    } else {
+        ClipboardDispatchError::Io(Box::new(error))
+    }
+}
+
 fn map_encode_err(err: WireEncodeError) -> ClipboardDispatchError {
     match err {
         WireEncodeError::SourceIdentity(source) => ClipboardDispatchError::Internal(
@@ -156,9 +168,9 @@ fn map_encode_err(err: WireEncodeError) -> ClipboardDispatchError {
                 .context("source entry encode")
                 .into(),
         ),
-        WireEncodeError::Io(ioerr) => {
-            ClipboardDispatchError::Io(anyhow::Error::new(ioerr).context("frame write").into())
-        }
+        WireEncodeError::Io(ioerr) => ClipboardDispatchError::Transient(
+            anyhow::Error::new(ioerr).context("frame write").into(),
+        ),
         WireEncodeError::PayloadTooLarge { size, max } => {
             // wire codec also enforces MAX_PAYLOAD_SIZE; if we somehow get
             // here (the upstream early-reject in `dispatch` should have

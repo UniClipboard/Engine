@@ -55,7 +55,8 @@
 //! [`RelayUrl`]: iroh_base::RelayUrl
 use std::{
     collections::{BTreeSet, HashMap},
-    net::{IpAddr, SocketAddr},
+    fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -160,12 +161,64 @@ impl Subscribers {
     }
 }
 
+/// 返回当前应参与 mDNS 组播的本机 IPv4 接口地址。
+///
+/// 启动时调用一次；之后每当本机发布的地址发生变化时再调用。结果是期望集合，
+/// 由 swarm-discovery 负责增删接口并重试安装失败的接口。
+#[derive(Clone)]
+pub struct MulticastInterfacesV4(Arc<dyn Fn() -> Vec<Ipv4Addr> + Send + Sync>);
+
+impl MulticastInterfacesV4 {
+    /// 用接口快照函数创建来源。
+    pub fn new(snapshot: impl Fn() -> Vec<Ipv4Addr> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(snapshot))
+    }
+
+    fn snapshot(&self) -> BTreeSet<Ipv4Addr> {
+        (self.0)().into_iter().collect()
+    }
+}
+
+impl fmt::Debug for MulticastInterfacesV4 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MulticastInterfacesV4")
+    }
+}
+
+/// 返回当前应参与 mDNS 组播的本机 IPv6 接口：每项为（操作系统接口索引，该接口上的一个
+/// 本机地址）。
+///
+/// 读取时机与 [`MulticastInterfacesV4`] 相同。IPv6 组播按接口索引生效，地址只用于绑定该
+/// 接口的发送套接字；结果是期望集合，由 swarm-discovery 的 `set_interfaces_v6` 负责增删接口
+/// 并重试安装失败的接口。
+#[derive(Clone)]
+pub struct MulticastInterfacesV6(Arc<dyn Fn() -> Vec<(u32, Ipv6Addr)> + Send + Sync>);
+
+impl MulticastInterfacesV6 {
+    /// 用接口快照函数创建来源。
+    pub fn new(snapshot: impl Fn() -> Vec<(u32, Ipv6Addr)> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(snapshot))
+    }
+
+    fn snapshot(&self) -> Vec<(u32, Ipv6Addr)> {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for MulticastInterfacesV6 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MulticastInterfacesV6")
+    }
+}
+
 /// Builder for [`MdnsAddressLookup`].
 #[derive(Debug)]
 pub struct MdnsAddressLookupBuilder {
     advertise: bool,
     service_name: String,
     filter: AddrFilter,
+    multicast_interfaces_v4: Option<MulticastInterfacesV4>,
+    multicast_interfaces_v6: Option<MulticastInterfacesV6>,
 }
 
 impl MdnsAddressLookupBuilder {
@@ -175,7 +228,29 @@ impl MdnsAddressLookupBuilder {
             advertise: true,
             service_name: N0_SERVICE_NAME.to_string(),
             filter: AddrFilter::default(),
+            multicast_interfaces_v4: None,
+            multicast_interfaces_v6: None,
         }
+    }
+
+    /// 在全部给定的 IPv4 接口上收发 mDNS，而不只是默认路由所在的接口。
+    ///
+    /// 未设置时保持上游行为：只使用默认路由接口。来源返回空列表时同样退回默认接口。
+    /// 单个接口无法建立组播套接字时只跳过该接口，不影响服务启动；该接口仍在期望集合中时
+    /// 按 1 秒起、最长 60 秒的有界退避重试。
+    pub fn multicast_interfaces_v4(mut self, interfaces: MulticastInterfacesV4) -> Self {
+        self.multicast_interfaces_v4 = Some(interfaces);
+        self
+    }
+
+    /// 在全部给定的 IPv6 接口上收发 mDNS，而不只是默认接口。
+    ///
+    /// 未设置时保持上游行为：IPv6 只使用默认接口。启动后以及本机发布地址每次变化时读取
+    /// 来源，把结果作为期望集合交给 swarm-discovery；单个接口无法安装时只跳过该接口，按与
+    /// IPv4 相同的有界退避重试。
+    pub fn multicast_interfaces_v6(mut self, interfaces: MulticastInterfacesV6) -> Self {
+        self.multicast_interfaces_v6 = Some(interfaces);
+        self
     }
 
     /// Sets whether this endpoint should advertise its presence.
@@ -216,7 +291,14 @@ impl MdnsAddressLookupBuilder {
         self,
         endpoint_id: EndpointId,
     ) -> Result<MdnsAddressLookup, AddressLookupBuilderError> {
-        MdnsAddressLookup::new(endpoint_id, self.advertise, self.service_name, self.filter)
+        MdnsAddressLookup::new(
+            endpoint_id,
+            self.advertise,
+            self.service_name,
+            self.filter,
+            self.multicast_interfaces_v4,
+            self.multicast_interfaces_v6,
+        )
     }
 }
 
@@ -275,19 +357,32 @@ impl MdnsAddressLookup {
         advertise: bool,
         service_name: String,
         filter: AddrFilter,
+        multicast_interfaces_v4: Option<MulticastInterfacesV4>,
+        multicast_interfaces_v6: Option<MulticastInterfacesV6>,
     ) -> Result<Self, AddressLookupBuilderError> {
         debug!("Creating new Mdns service");
         let (send, mut recv) = mpsc::channel(64);
         let task_sender = send.clone();
         let rt = tokio::runtime::Handle::current();
+        let initial_interfaces_v4 = multicast_interfaces_v4
+            .as_ref()
+            .map(MulticastInterfacesV4::snapshot);
         let address_lookup = MdnsAddressLookup::spawn_discoverer(
             endpoint_id,
             advertise,
             task_sender.clone(),
             BTreeSet::new(),
+            initial_interfaces_v4.iter().flatten().copied().collect(),
             service_name,
             &rt,
         )?;
+        // 接口集合只表达期望；是否安装成功由 swarm-discovery 判断，初始失败的接口由其重试。
+        if let Some(initial) = initial_interfaces_v4 {
+            address_lookup.set_interfaces_v4(initial);
+        }
+        if let Some(interfaces) = &multicast_interfaces_v6 {
+            address_lookup.set_interfaces_v6(interfaces.snapshot());
+        }
 
         let local_addrs: Watchable<Option<EndpointData>> = Watchable::default();
         let mut addrs_change = local_addrs.watch();
@@ -308,6 +403,14 @@ impl MdnsAddressLookup {
                     }
                     Ok(Some(data)) = addrs_change.updated() => {
                         tracing::trace!(?data, "Mdns address changed");
+                        // 本机发布地址变化通常意味着网卡变化：把最新快照作为期望集合交给
+                        // swarm-discovery，由它增删接口；集合未变时也会立即重试未安装的接口。
+                        if let Some(interfaces) = &multicast_interfaces_v4 {
+                            address_lookup.set_interfaces_v4(interfaces.snapshot());
+                        }
+                        if let Some(interfaces) = &multicast_interfaces_v6 {
+                            address_lookup.set_interfaces_v6(interfaces.snapshot());
+                        }
                         address_lookup.remove_all();
 
                         // apply user-supplied filter
@@ -505,6 +608,7 @@ impl MdnsAddressLookup {
         advertise: bool,
         sender: mpsc::Sender<Message>,
         socketaddrs: BTreeSet<SocketAddr>,
+        multicast_interfaces_v4: Vec<Ipv4Addr>,
         service_name: String,
         rt: &tokio::runtime::Handle,
     ) -> Result<DropGuard, AddressLookupBuilderError> {
@@ -527,7 +631,8 @@ impl MdnsAddressLookup {
             .to_ascii_lowercase();
         let mut discoverer = Discoverer::new_interactive(service_name, endpoint_id_str)
             .with_callback(callback)
-            .with_ip_class(IpClass::Auto);
+            .with_ip_class(IpClass::Auto)
+            .with_multicast_interfaces_v4(multicast_interfaces_v4);
         if advertise {
             let addrs = MdnsAddressLookup::socketaddrs_to_addrs(socketaddrs.iter());
             for addr in addrs {
@@ -539,11 +644,18 @@ impl MdnsAddressLookup {
             .map_err(|e| AddressLookupBuilderError::from_err("mdns", e))
     }
 
+    /// 按端口分组待通告的地址。
+    ///
+    /// UniClipboard 补丁：不通告 IPv6 link-local 地址。AAAA 记录无法携带 scope id，对端
+    /// 收到的 fe80::/10 地址不知道经哪个接口到达，不能拨号。
     fn socketaddrs_to_addrs<'a>(
         socketaddrs: impl Iterator<Item = &'a SocketAddr>,
     ) -> HashMap<u16, Vec<IpAddr>> {
         let mut addrs: HashMap<u16, Vec<IpAddr>> = HashMap::default();
-        for socketaddr in socketaddrs {
+        for socketaddr in socketaddrs.filter(|addr| match addr.ip() {
+            IpAddr::V6(ip) => !ip.is_unicast_link_local(),
+            IpAddr::V4(_) => true,
+        }) {
             addrs
                 .entry(socketaddr.port())
                 .and_modify(|a| a.push(socketaddr.ip()))
@@ -639,13 +751,11 @@ mod tests {
         use iroh_base::{SecretKey, TransportAddr};
         use n0_error::{AnyError as Error, Result, StdResultExt, bail_any};
         use n0_future::StreamExt;
-        use n0_tracing_test::traced_test;
         use rand::{CryptoRng, RngExt, SeedableRng};
 
         use super::super::*;
 
         #[tokio::test]
-        #[traced_test]
         async fn mdns_publish_resolve() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
@@ -710,7 +820,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn mdns_publish_expire() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
             let (_, address_lookup_a) = make_address_lookup(&mut rng, false)?;
@@ -767,7 +876,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn mdns_subscribe() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
@@ -816,7 +924,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn non_advertising_endpoint_not_discovered() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
@@ -850,7 +957,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn test_service_names() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 
@@ -910,7 +1016,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[traced_test]
         async fn mdns_publish_relay_url() -> Result {
             let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
 

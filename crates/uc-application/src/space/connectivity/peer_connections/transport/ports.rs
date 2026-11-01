@@ -6,6 +6,7 @@ use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
 
 use crate::connectivity::{ConnectivityError, PeerReceiveStream, PeerSendStream};
+use crate::space::membership::RefreshVerifiedPeerAddressPort;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerReachabilityWireError {
@@ -83,6 +84,8 @@ pub trait PeerReachabilityEnvironmentPort: Send + Sync {
 pub struct PeerReachabilityTransportPorts {
     pub wire: Arc<dyn PeerReachabilityWirePort>,
     pub environment: Arc<dyn PeerReachabilityEnvironmentPort>,
+    /// 已认证且当前获准的对端经 presence 联系本机后，按本次连接正在使用的路径刷新其已保存地址。
+    pub address_refresh: Arc<dyn RefreshVerifiedPeerAddressPort>,
 }
 
 impl ErrorClass for PeerReachabilityWireError {

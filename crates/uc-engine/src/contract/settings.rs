@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -198,6 +199,31 @@ pub struct NetworkSettingsSummary {
     pub allow_overlay_network_addrs: bool,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionControllerSummary,
+    /// 已保存的固定 P2P UDP 端口；`None` 表示每次启动随机端口。修改后需重启网络生效。
+    #[serde(default)]
+    pub bind_port: Option<u16>,
+    /// 用户为已配对设备配置的地址，键为该设备的 `DeviceId` 字符串（与成员列表中的设备标识相同，
+    /// 不是设备名）。连接需要该设备的地址时才读取，结果只是拨号线索，连接后仍验证身份；
+    /// LAN-only 下只拨本地网络范围内的地址。修改即时生效，无需重启网络。
+    #[serde(default)]
+    pub peer_addresses: BTreeMap<String, PeerAddressSetting>,
+}
+
+/// 一个已配对设备的用户配置地址：`ip` 为单播 IPv4 或 IPv6 字面量（IPv6 可带方括号，保存时去掉；
+/// 不接受主机名，因此不会产生 DNS 查询），`port` 为对端的 P2P UDP 端口（通常是对端的
+/// `bind_port`），不得为 0。
+///
+/// 这是明文配置，但属于地址材料：宿主不得把它写入日志或诊断，`Debug` 不输出其内容。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerAddressSetting {
+    pub ip: String,
+    pub port: u16,
+}
+
+impl fmt::Debug for PeerAddressSetting {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PeerAddressSetting([REDACTED])")
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +232,14 @@ pub struct NetworkSettingsPatch {
     pub allow_overlay_network_addrs: Option<bool>,
     pub custom_relay_urls: Option<Vec<String>>,
     pub congestion_controller: Option<CongestionControllerSummary>,
+    /// `None` = 不修改；`Some(0)` = 恢复随机端口；其他值 = 固定该端口。
+    #[serde(default)]
+    pub bind_port: Option<u16>,
+    /// `None` = 不修改；`Some(map)` 只修改其中列出的设备：值为 `Some(address)` 时设置或替换
+    /// 该设备的地址，值为 `None`（JSON `null`）时删除；未列出的设备保持不变。IP 或端口不合法、
+    /// 设备标识超长时整个更新以 `SettingsUpdateOutcome::Rejected` 拒绝，原因不回显地址。
+    #[serde(default)]
+    pub peer_addresses: Option<BTreeMap<String, Option<PeerAddressSetting>>>,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +261,7 @@ impl fmt::Debug for SettingsSummary {
             .field("schema_version", &self.schema_version)
             .field("retention_rule_count", &self.retention_policy.rules.len())
             .field("custom_relay_count", &self.network.custom_relay_urls.len())
+            .field("peer_address_count", &self.network.peer_addresses.len())
             .field("has_auto_save_dir", &self.file_sync.auto_save_dir.is_some())
             .finish()
     }

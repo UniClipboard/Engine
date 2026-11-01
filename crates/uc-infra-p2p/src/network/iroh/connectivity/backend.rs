@@ -1,5 +1,7 @@
 use super::super::blobs::BLOBS_ALPN;
-use super::super::connect::{connect_with_staggered_retry_classified, strip_relay_if_lan_only};
+use super::super::connect::{
+    connect_with_staggered_retry_classified, restrict_dial_addr_if_lan_only,
+};
 use super::super::peer_address_resolver::PeerAddressResolver;
 use super::IrohPeerConnection;
 use async_trait::async_trait;
@@ -89,7 +91,7 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                     }
                     hinted.addrs.extend(stored.addrs);
                 }
-                strip_relay_if_lan_only(hinted)
+                hinted
             }
             Some(_) => return Err(ConnectivityError::Denied),
             None => stored.ok_or(if matches!(self.profile, ConnectivityProfile::Presence) {
@@ -98,6 +100,8 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                 ConnectivityError::Offline
             })?,
         };
+        // 每个 profile 的原生拨号都从这里取地址：LAN-only 边界只在此处统一收敛一次。
+        let address = restrict_dial_addr_if_lan_only(address);
         if cancel.is_cancelled() {
             return Err(ConnectivityError::Stopped);
         }
@@ -169,7 +173,7 @@ impl ConnectivityBackend for IrohConnectivityBackend {
             // 方向名额覆盖唯一原生拨号；兼容ALPN在同一次握手提供，不交错创建影子连接。
             let dial = async {
                 let connecting = within_network_scope(self.endpoint.connect_with_opts(
-                    strip_relay_if_lan_only(address),
+                    address,
                     preferred,
                     ConnectOptions::new().with_additional_alpns(additional),
                 ))

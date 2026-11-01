@@ -70,6 +70,8 @@ pub async fn start(
     .await
     .unwrap();
     let mut builder = network.prepare_session();
+    let address_refresh =
+        builder.build_verified_peer_address_refresh(addresses.clone(), clock.clone());
     let (deps, environment) =
         builder.presence_connectivity_deps(addresses, identities, authority.clone(), fingerprint);
     let manager = ConnectivityManager::new(
@@ -88,6 +90,7 @@ pub async fn start(
         PeerReachabilityTransportPorts {
             wire: Arc::new(PeerReachabilityWire),
             environment,
+            address_refresh,
         },
         clock,
         contacts,

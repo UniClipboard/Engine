@@ -469,7 +469,9 @@ fn error_type(error: &ClipboardDispatchError) -> DiagnosticErrorType {
         ClipboardDispatchError::LocalPolicyExceeded(_) => DiagnosticErrorType::LocalPolicyExceeded,
         ClipboardDispatchError::PeerRejected(_) => DiagnosticErrorType::PeerRejected,
         ClipboardDispatchError::PeerIncompatible => DiagnosticErrorType::PeerIncompatible,
-        ClipboardDispatchError::Io(_) => DiagnosticErrorType::StreamFailed,
+        ClipboardDispatchError::Transient(_) | ClipboardDispatchError::Io(_) => {
+            DiagnosticErrorType::StreamFailed
+        }
         ClipboardDispatchError::Internal(_) => DiagnosticErrorType::Internal,
     }
 }

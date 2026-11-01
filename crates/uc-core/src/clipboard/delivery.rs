@@ -18,9 +18,10 @@ use thiserror::Error;
 /// 一条 entry 对单个对端的最新投递结果。
 ///
 /// `Delivered` / `Duplicate` 对用户视角都属于"对端已经持有这条内容",
-/// 但保留区分以便排障 / 后续策略需要。`Unreachable` 表示对端不可达
-/// (离线或拨号失败)——这不是故障,只是时机不对,后续上线时可自然
-/// 恢复;`Failed` 携带细分原因,代表需要关注或干预的真正失败。
+/// 但保留区分以便排障 / 后续策略需要。`Unreachable` 表示对端暂时不可达
+/// (离线、拨号失败，或传输在确认前中断)。这不是故障,只是时机不对,
+/// 由离线投递恢复在对端上线或仍在线时按退避重试;`Failed` 携带细分原因,
+/// 代表需要关注或干预的真正失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryDeliveryStatus {
     /// 发送负责人已经持久接受该目标，但尚未得到最终结果。进程中断后可据此恢复。
@@ -29,8 +30,9 @@ pub enum EntryDeliveryStatus {
     Delivered,
     /// 对端节点报告"已存在",通常因为对端从另一路径已收到同一内容。
     Duplicate,
-    /// 对端节点不可达(没有可用地址或拨号失败)。不属于故障——对端
-    /// 当前离线,下次上线时可重试送达。与 `Failed` 的区别:
+    /// 对端节点暂时不可达(没有可用地址、拨号失败，或连接/流在确认前中断)。
+    /// 不属于故障：上线时或仍在线时按退避重试送达；确认丢失时对端可能已
+    /// 保存，重试会得到重复确认。与 `Failed` 的区别:
     /// `Unreachable` 是预期的临时状态,`Failed` 是需要关注的异常。
     Unreachable,
     /// A newer local clipboard entry replaced this unreachable delivery for

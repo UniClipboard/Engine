@@ -541,7 +541,7 @@ async fn dropped_dial_leader_does_not_block_later_dispatches() {
     ));
 }
 
-/// 对端收下帧却永不回执时，发送必须在回执上限内以 I/O 失败返回。
+/// 对端收下帧却永不回执时，发送必须在回执上限内以可恢复的暂时失败返回。
 #[tokio::test]
 async fn dispatch_returns_when_the_peer_never_acks() {
     #[derive(Debug, Clone)]
@@ -589,7 +589,66 @@ async fn dispatch_returns_when_the_peer_never_acks() {
     )
     .await
     .expect("dispatch must give up when no ack arrives");
-    assert!(matches!(report.outcome, Err(ClipboardDispatchError::Io(_))));
+    assert!(matches!(
+        report.outcome,
+        Err(ClipboardDispatchError::Transient(_))
+    ));
+    peer_router.shutdown().await.expect("router shutdown");
+}
+
+/// 对端读完帧后在回执前重置流：确认丢失只是暂时失败，必须可恢复而不是终态 I/O。
+#[tokio::test]
+async fn stream_reset_before_ack_is_a_transient_dispatch_failure() {
+    #[derive(Debug, Clone)]
+    struct ResettingHandler;
+    impl ProtocolHandler for ResettingHandler {
+        async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+            let (mut send, mut recv) = connection
+                .accept_bi()
+                .await
+                .map_err(|err| AcceptError::from_err(err))?;
+            let _ = clipboard_wire::read_frame(&mut recv).await;
+            let _ = send.reset(0u32.into());
+            let _ = connection.closed().await;
+            Ok(())
+        }
+    }
+
+    let peer_endpoint = bind_endpoint().await;
+    wait_for_direct_addrs(&peer_endpoint).await;
+    let peer_router = Router::builder((*peer_endpoint).clone())
+        .accept(CLIPBOARD_ALPN, ResettingHandler)
+        .spawn();
+    let sender_endpoint = bind_endpoint().await;
+    wait_for_direct_addrs(&sender_endpoint).await;
+    let repo = Arc::new(MemRepo::default());
+    let target = DeviceId::new("resetting-target");
+    seed_addr(&repo, &target, &peer_endpoint.addr()).await;
+    let adapter = dispatch_fixture(
+        sender_endpoint,
+        repo,
+        peer_reachability_mock(),
+        Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+        ConnectivityPolicy::default(),
+    );
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(8),
+        adapter.dispatch(
+            &target,
+            &sample_header(),
+            SyncPayload {
+                ciphertext: Bytes::from_static(b"reset before ack"),
+            },
+        ),
+    )
+    .await
+    .expect("dispatch must settle when the stream is reset");
+    assert!(
+        matches!(report.outcome, Err(ClipboardDispatchError::Transient(_))),
+        "unexpected outcome: {:?}",
+        report.outcome
+    );
     peer_router.shutdown().await.expect("router shutdown");
 }
 
@@ -879,6 +938,282 @@ async fn acquisition_capability_failures_keep_their_source_in_dispatch_reports()
         assert!(
             found,
             "dispatch mapping must retain the original capability failure"
+        );
+    }
+}
+
+/// 取得连接时的准入拒绝（经共享拨号结果返回）是终态授权失败：不能被宽泛的不可用判断
+/// 记为可恢复的离线，并保留原始拒绝来源；请求失效与真正的底层拨号失败仍是可恢复的离线。
+#[tokio::test]
+async fn acquisition_denial_is_a_terminal_failure_while_unreachable_stays_offline() {
+    use std::error::Error;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use uc_application::deps::{ConnectivityBackend, ConnectivityError, PeerConnection};
+    #[derive(Clone, Copy, PartialEq)]
+    enum Failure {
+        Denied,
+        Invalidated,
+        Unreachable,
+    }
+    struct FailingBackend {
+        failure: Failure,
+        connects: AtomicUsize,
+    }
+    #[async_trait]
+    impl ConnectivityBackend for FailingBackend {
+        async fn connect(
+            &self,
+            _: DeviceId,
+            _address_hint: Option<Vec<u8>>,
+            _cancel: CancellationToken,
+        ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+            self.connects.fetch_add(1, Ordering::SeqCst);
+            Err(match self.failure {
+                Failure::Denied => ConnectivityError::Denied,
+                Failure::Invalidated => ConnectivityError::Invalidated(None),
+                Failure::Unreachable => ConnectivityError::Backend(Box::new(std::io::Error::from(
+                    std::io::ErrorKind::HostUnreachable,
+                ))),
+            })
+        }
+    }
+    for failure in [Failure::Denied, Failure::Invalidated, Failure::Unreachable] {
+        let backend = Arc::new(FailingBackend {
+            failure,
+            connects: AtomicUsize::new(0),
+        });
+        let adapter = super::test_support::dispatch_with_backend(
+            Arc::clone(&backend) as Arc<dyn ConnectivityBackend>,
+            Arc::new(EpochOnlyAdmission(AdmittedConnections::default())),
+            ConnectivityPolicy::default(),
+        );
+        let error = adapter
+            .dispatch(
+                &DeviceId::new("peer"),
+                &sample_header(),
+                SyncPayload {
+                    ciphertext: Bytes::from_static(b"unused"),
+                },
+            )
+            .await
+            .outcome
+            .unwrap_err();
+        assert_eq!(backend.connects.load(Ordering::SeqCst), 1);
+        if failure != Failure::Denied {
+            assert!(matches!(error, ClipboardDispatchError::Offline), "{error}");
+            continue;
+        }
+        assert!(matches!(error, ClipboardDispatchError::Io(_)), "{error}");
+        let source = error
+            .source()
+            .and_then(|source| source.downcast_ref::<ConnectivityError>());
+        assert!(
+            source.is_some_and(ConnectivityError::is_denied),
+            "dispatch mapping must retain the typed denial"
+        );
+    }
+}
+
+/// 经真实连接准入：拨号进行中撤销快照失效（锁定准备暂停全部连接）而成员关系不变时，取得
+/// 连接得到可恢复的离线结果；旧请求仍被围栏拒绝，迟到的连接被关闭且从未打开流或发送帧。
+/// 成员权威真实拒绝与身份不符仍是保留类型拒绝来源的终态失败。
+#[tokio::test]
+async fn acquisition_invalidated_during_dial_is_recoverable_while_real_refusal_is_terminal() {
+    use crate::network::iroh::connectivity::{ConnectivityProfile, IrohConnectionAdmission};
+    use std::error::Error;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::sync::{watch, Notify};
+    use uc_application::deps::{
+        ConnectionMode, ConnectionProtocol, ConnectivityBackend, ConnectivityError,
+        KnownPeerIdentity, MembershipLedgerError, PeerConnection, PeerIdentityDirectoryPort,
+        StreamPair,
+    };
+    use uc_core::membership::{PeerAdmissionError, PeerAdmissionPort};
+    use uc_core::ports::security::IdentityFingerprintFactoryPort;
+    use uc_core::ports::ConnectionChannel;
+    use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
+
+    const PEER_KEY: [u8; 32] = [0x11; 32];
+    const OTHER_KEY: [u8; 32] = [0x22; 32];
+    struct Members {
+        identities: Vec<KnownPeerIdentity>,
+        admitted: AtomicBool,
+    }
+    #[async_trait]
+    impl PeerIdentityDirectoryPort for Members {
+        async fn known_peer_identities(
+            &self,
+        ) -> Result<Vec<KnownPeerIdentity>, MembershipLedgerError> {
+            Ok(self.identities.clone())
+        }
+    }
+    #[async_trait]
+    impl PeerAdmissionPort for Members {
+        async fn is_admitted(&self, peer: &DeviceId) -> Result<bool, PeerAdmissionError> {
+            Ok(self.admitted.load(Ordering::SeqCst)
+                && self.identities.iter().any(|row| row.device_id == *peer))
+        }
+    }
+    struct LateConnection {
+        key: [u8; 32],
+        opened: AtomicUsize,
+        closed: watch::Sender<bool>,
+    }
+    #[async_trait]
+    impl PeerConnection for LateConnection {
+        fn id(&self) -> usize {
+            1
+        }
+        fn authenticated_key(&self) -> [u8; 32] {
+            self.key
+        }
+        fn mode(&self) -> ConnectionMode {
+            ConnectionMode::Multiplexed
+        }
+        fn protocol(&self) -> ConnectionProtocol {
+            ConnectionProtocol::MultiplexedClipboard
+        }
+        fn channel(&self) -> ConnectionChannel {
+            ConnectionChannel::Unknown
+        }
+        fn is_closed(&self) -> bool {
+            *self.closed.borrow()
+        }
+        fn close(&self) {
+            self.closed.send_replace(true);
+        }
+        async fn closed(&self) {
+            let mut closed = self.closed.subscribe();
+            let _ = closed.wait_for(|closed| *closed).await;
+        }
+        async fn open_bi(&self) -> Result<StreamPair, ConnectivityError> {
+            self.opened.fetch_add(1, Ordering::SeqCst);
+            Err(ConnectivityError::Offline)
+        }
+        async fn accept_bi(&self) -> Result<StreamPair, ConnectivityError> {
+            Err(ConnectivityError::Stopped)
+        }
+    }
+    /// 拨号停在门口，直到测试完成失效或放行。
+    struct GatedBackend {
+        connection: Arc<LateConnection>,
+        dialing: Notify,
+        release: Notify,
+    }
+    #[async_trait]
+    impl ConnectivityBackend for GatedBackend {
+        async fn connect(
+            &self,
+            _: DeviceId,
+            _address_hint: Option<Vec<u8>>,
+            _cancel: CancellationToken,
+        ) -> Result<Arc<dyn PeerConnection>, ConnectivityError> {
+            self.dialing.notify_one();
+            self.release.notified().await;
+            Ok(self.connection.clone())
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Case {
+        PausedWhileAdmitted,
+        MembershipRefused,
+        IdentityMismatch,
+    }
+    let fingerprint = Sha256IdentityFingerprintFactory;
+    let peer = DeviceId::new("peer");
+    for case in [
+        Case::PausedWhileAdmitted,
+        Case::MembershipRefused,
+        Case::IdentityMismatch,
+    ] {
+        let members = Arc::new(Members {
+            identities: vec![
+                KnownPeerIdentity {
+                    device_id: peer,
+                    identity_fingerprint: fingerprint.from_public_key(&PEER_KEY).unwrap(),
+                },
+                KnownPeerIdentity {
+                    device_id: DeviceId::new("other"),
+                    identity_fingerprint: fingerprint.from_public_key(&OTHER_KEY).unwrap(),
+                },
+            ],
+            admitted: AtomicBool::new(case != Case::MembershipRefused),
+        });
+        let registry = AdmittedConnections::default();
+        let backend = Arc::new(GatedBackend {
+            connection: Arc::new(LateConnection {
+                key: if case == Case::IdentityMismatch {
+                    OTHER_KEY
+                } else {
+                    PEER_KEY
+                },
+                opened: AtomicUsize::new(0),
+                closed: watch::channel(false).0,
+            }),
+            dialing: Notify::new(),
+            release: Notify::new(),
+        });
+        let adapter = super::test_support::dispatch_with_backend(
+            Arc::clone(&backend) as Arc<dyn ConnectivityBackend>,
+            Arc::new(IrohConnectionAdmission::new(
+                members.clone(),
+                members,
+                Arc::new(Sha256IdentityFingerprintFactory),
+                registry.clone(),
+                ConnectivityProfile::Clipboard,
+            )),
+            ConnectivityPolicy::default(),
+        );
+        let dispatch = tokio::spawn(async move {
+            adapter
+                .dispatch(
+                    &peer,
+                    &sample_header(),
+                    SyncPayload {
+                        ciphertext: Bytes::from_static(b"payload"),
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), backend.dialing.notified())
+            .await
+            .expect("dial reaches the gate");
+        if case == Case::PausedWhileAdmitted {
+            // 与锁定准备暂停连接相同：推进撤销快照，成员关系保持准入。
+            registry.close_all(b"test pause");
+        }
+        backend.release.notify_one();
+        let report = tokio::time::timeout(Duration::from_secs(5), dispatch)
+            .await
+            .expect("dispatch settles")
+            .expect("dispatch task");
+        let error = report.outcome.unwrap_err();
+        assert_eq!(
+            backend.connection.opened.load(Ordering::SeqCst),
+            0,
+            "{case:?}: a rejected acquisition must not open a stream"
+        );
+        assert!(
+            backend.connection.is_closed(),
+            "{case:?}: the late connection must be closed"
+        );
+        if case == Case::PausedWhileAdmitted {
+            assert!(
+                matches!(error, ClipboardDispatchError::Offline),
+                "{case:?}: {error}"
+            );
+            continue;
+        }
+        assert!(
+            matches!(error, ClipboardDispatchError::Io(_)),
+            "{case:?}: {error}"
+        );
+        let source = error
+            .source()
+            .and_then(|source| source.downcast_ref::<ConnectivityError>());
+        assert!(
+            source.is_some_and(ConnectivityError::is_denied),
+            "{case:?}: dispatch mapping must retain the typed denial"
         );
     }
 }
