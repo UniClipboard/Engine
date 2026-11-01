@@ -695,6 +695,9 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
                 _ => None,
             });
             items.push(ReceiveItemProgress {
+                content: None,
+                transfer: None,
+                history_file_index: None,
                 item_id: row
                     .receive_item_id
                     .clone()
@@ -750,6 +753,7 @@ impl<E: DbExecutor> GetEntryReceiveProgressPort for DieselFileTransferRepository
 
         let items = group_receive_items(state, directory, items, &delivered);
         Ok(Some(EntryReceiveProgress {
+            snapshot_version: None,
             entry_id: attempt.entry_id,
             attempt_id: attempt.current_attempt_id,
             state,

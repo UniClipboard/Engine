@@ -31,6 +31,8 @@ mod startup_outcome;
 pub(crate) mod startup_owner;
 
 use crate::runtime::{RecoverableRuntime, ReusableHost};
+#[cfg(test)]
+use crate::EngineEvent;
 #[cfg(feature = "dev-tools")]
 use crate::{DevOperation, DevOperationResult};
 use crate::{
@@ -291,6 +293,11 @@ impl Engine {
         };
         let _ = engine.bind_lifecycle(false);
         (engine, stream)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_emit_host_event(&self, event: EngineEvent) {
+        self.events.send(event);
     }
 
     #[cfg(feature = "dev-tools")]

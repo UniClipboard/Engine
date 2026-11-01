@@ -304,8 +304,39 @@ impl fmt::Display for ReceiveItemFailureReason {
         formatter.write_str(self.wire())
     }
 }
+/// 原始内容位置；文件与表示使用独立命名空间。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReceiveContentLocator {
+    File { index: u32 },
+    Representation { index: u32 },
+    DirectoryUnit,
+}
+
+/// 同一运行期原接收目录提供的完整快照版本。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiveSnapshotVersion {
+    pub producer_id: String,
+    pub attempt_revision: u64,
+    pub snapshot_revision: u64,
+}
+
+/// 当前获取轮次的字节事实；总量未知与零字节文件不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiveItemTransfer {
+    pub received_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub round: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiveItemSummary {
+    #[serde(default)]
+    pub content: Option<ReceiveContentLocator>,
+    #[serde(default)]
+    pub transfer: Option<ReceiveItemTransfer>,
+    #[serde(default)]
+    pub history_file_index: Option<u32>,
     pub item_id: String,
     pub kind: ReceiveItemKind,
     pub state: String,
@@ -315,6 +346,8 @@ pub struct ReceiveItemSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiveProgressSummary {
+    #[serde(default)]
+    pub snapshot_version: Option<ReceiveSnapshotVersion>,
     pub entry_id: String,
     pub attempt_id: String,
     pub state: String,

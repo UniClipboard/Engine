@@ -41,6 +41,7 @@ fn source() -> ReceiveSource {
 }
 fn progress(state: AttemptState) -> EntryReceiveProgress {
     EntryReceiveProgress {
+        snapshot_version: None,
         entry_id: "receiver".into(),
         attempt_id: "attempt".into(),
         state,

@@ -2,6 +2,7 @@
 mod backpressure;
 mod batch_outcomes;
 mod database;
+mod item_progress;
 mod lifecycle;
 mod observation;
 mod outbound_progress;
@@ -49,7 +50,7 @@ use url::Url;
 use wiremock::MockServer;
 
 const NAME: &str = "engine-retry-filename-probe.bin";
-const CONTENTS: [&[u8]; 3] = [b"one-data", b"two-data", b"tri-data"];
+const CONTENTS: [&[u8]; 3] = [b"one-data", b"two-data-distinct", b"tri-data-distinct-size"];
 
 struct Files;
 fn unavailable() -> HostCapabilityError {

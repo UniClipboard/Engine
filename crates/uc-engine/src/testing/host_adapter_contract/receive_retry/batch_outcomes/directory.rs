@@ -147,6 +147,15 @@ async fn assert_directory(fail: bool, empty: bool) {
     } else {
         received
     };
+    let query = serde_json::to_value(&received).unwrap();
+    assert_eq!(
+        query["items"][0]["content"],
+        serde_json::json!({"kind": "directory_unit"}),
+        "directory query: {query}"
+    );
+    assert!(query["snapshot_version"].is_object());
+    super::super::item_progress::record_evidence("directory", &query);
+
     let settled = reconciled_for_input(
         &case,
         &received,

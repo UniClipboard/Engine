@@ -145,6 +145,7 @@ async fn failed_file_commit_cleans_only_its_output_and_next_file_can_commit() {
         HashSet::from([0, 2])
     );
     let mut result = EntryReceiveProgress {
+        snapshot_version: None,
         entry_id: "receiver".into(),
         attempt_id,
         state: AttemptState::Failed,

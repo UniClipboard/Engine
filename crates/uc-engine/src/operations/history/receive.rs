@@ -13,12 +13,14 @@ use uc_application::facade::{
 use crate::{
     CancelEntryReceiveInput, CancelInboundTransferInput, EngineError, EngineErrorCategory,
     EntryReceiveCancellationOutcome, EntryReceiveProgressInput, EntryReceiveRetryOutcome,
-    InboundTransferCancellationOutcome, OperationResult, ReceiveItemFailureReason, ReceiveItemKind,
-    ReceiveItemSummary, ReceiveProgressSummary, ReceiveRetryUnavailableReason,
+    InboundTransferCancellationOutcome, OperationResult, ReceiveContentLocator,
+    ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemSummary, ReceiveItemTransfer,
+    ReceiveProgressSummary, ReceiveRetryUnavailableReason, ReceiveSnapshotVersion,
     RetryEntryReceiveInput, TransferCancellationReason,
 };
 use uc_core::ids::EntryId;
 use uc_core::ports::{
+    ReceiveContentLocator as CoreReceiveContentLocator,
     ReceiveItemFailureReason as CoreReceiveItemFailureReason,
     ReceiveItemKind as CoreReceiveItemKind,
 };
@@ -159,6 +161,13 @@ pub async fn execute_cancel_inbound_transfer(
 
 fn receive_progress(progress: uc_core::ports::EntryReceiveProgress) -> ReceiveProgressSummary {
     ReceiveProgressSummary {
+        snapshot_version: progress
+            .snapshot_version
+            .map(|version| ReceiveSnapshotVersion {
+                producer_id: version.producer_id,
+                attempt_revision: version.attempt_revision,
+                snapshot_revision: version.snapshot_revision,
+            }),
         entry_id: progress.entry_id,
         attempt_id: progress.attempt_id,
         state: progress.state.to_string(),
@@ -170,6 +179,23 @@ fn receive_progress(progress: uc_core::ports::EntryReceiveProgress) -> ReceivePr
             .items
             .into_iter()
             .map(|item| ReceiveItemSummary {
+                content: item.content.map(|content| match content {
+                    CoreReceiveContentLocator::File { index } => {
+                        ReceiveContentLocator::File { index }
+                    }
+                    CoreReceiveContentLocator::Representation { index } => {
+                        ReceiveContentLocator::Representation { index }
+                    }
+                    CoreReceiveContentLocator::DirectoryUnit => {
+                        ReceiveContentLocator::DirectoryUnit
+                    }
+                }),
+                transfer: item.transfer.map(|transfer| ReceiveItemTransfer {
+                    received_bytes: transfer.received_bytes,
+                    total_bytes: transfer.total_bytes,
+                    round: transfer.round,
+                }),
+                history_file_index: item.history_file_index,
                 item_id: item.item_id,
                 kind: match item.kind {
                     CoreReceiveItemKind::Unknown => ReceiveItemKind::Unknown,

@@ -25,10 +25,10 @@ use uc_engine::{
     HostClipboardSnapshot, HostClipboardWriteReceipt, HostDirectories, HostFileAccess,
     HostFileHandle, HostFileMetadata, HostSecureStorage, JoinSpaceInput,
     ObserveClipboardChangeInput, Operation, OperationResult, OutboundProgressInput,
-    OutboundProgressSummary, ReceiveProgressSummary, ReconcileOutboundProgressInput,
-    RecoverSessionInput, RemoveMemberInput, ResendEntryInput, RestoreClipboardInput,
-    RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput, SendTextInput,
-    StartupProgress, TransferCancellationReason,
+    OutboundProgressSummary, ReceiveContentLocator as EngineReceiveContentLocator,
+    ReceiveProgressSummary, ReconcileOutboundProgressInput, RecoverSessionInput, RemoveMemberInput,
+    ResendEntryInput, RestoreClipboardInput, RetryEntryReceiveInput, SecretString, SendFilesInput,
+    SendImageInput, SendTextInput, StartupProgress, TransferCancellationReason,
 };
 #[cfg(feature = "test-binding-worker-panic")]
 use uc_engine::{HostConfigurationFile, HostConfigurationFileReset};
@@ -216,8 +216,30 @@ pub enum ReceiveRetryOutcome {
     Unavailable { reason: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ReceiveContentLocator {
+    File { index: u32 },
+    Representation { index: u32 },
+    DirectoryUnit,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReceiveItemTransfer {
+    pub received_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub round: u32,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReceiveSnapshotVersion {
+    pub producer_id: String,
+    pub attempt_revision: u64,
+    pub snapshot_revision: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ReceiveItem {
+    pub content: Option<ReceiveContentLocator>,
+    pub transfer: Option<ReceiveItemTransfer>,
+    pub history_file_index: Option<u32>,
     pub item_id: String,
     pub kind: String,
     pub state: String,
@@ -225,6 +247,7 @@ pub struct ReceiveItem {
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ReceiveProgress {
+    pub snapshot_version: Option<ReceiveSnapshotVersion>,
     pub entry_id: String,
     pub attempt_id: String,
     pub state: String,
@@ -2639,6 +2662,7 @@ fn map_engine_event(event: uc_engine::EngineEvent) -> BindingEvent {
             total_bytes: event.total_bytes,
         },
         uc_engine::EngineEvent::OutboundProgressChanged => BindingEvent::OutboundProgressChanged,
+        uc_engine::EngineEvent::ReceiveProgressChanged => BindingEvent::ReceiveProgressChanged,
         uc_engine::EngineEvent::TransferStatusChanged(event) => {
             BindingEvent::TransferStatusChanged {
                 transfer_id: event.transfer_id,
@@ -3237,6 +3261,13 @@ fn map_clipboard_restored(
 
 fn receive_progress(progress: ReceiveProgressSummary) -> ReceiveProgress {
     ReceiveProgress {
+        snapshot_version: progress
+            .snapshot_version
+            .map(|version| ReceiveSnapshotVersion {
+                producer_id: version.producer_id,
+                attempt_revision: version.attempt_revision,
+                snapshot_revision: version.snapshot_revision,
+            }),
         entry_id: progress.entry_id,
         attempt_id: progress.attempt_id,
         state: progress.state,
@@ -3248,6 +3279,23 @@ fn receive_progress(progress: ReceiveProgressSummary) -> ReceiveProgress {
             .items
             .into_iter()
             .map(|item| ReceiveItem {
+                content: item.content.map(|content| match content {
+                    EngineReceiveContentLocator::File { index } => {
+                        ReceiveContentLocator::File { index }
+                    }
+                    EngineReceiveContentLocator::Representation { index } => {
+                        ReceiveContentLocator::Representation { index }
+                    }
+                    EngineReceiveContentLocator::DirectoryUnit => {
+                        ReceiveContentLocator::DirectoryUnit
+                    }
+                }),
+                transfer: item.transfer.map(|transfer| ReceiveItemTransfer {
+                    received_bytes: transfer.received_bytes,
+                    total_bytes: transfer.total_bytes,
+                    round: transfer.round,
+                }),
+                history_file_index: item.history_file_index,
                 item_id: item.item_id,
                 kind: item.kind.to_string(),
                 state: item.state,
@@ -4200,6 +4248,8 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod receive_evidence_e2e;
 #[cfg(test)]
 mod receive_tests;
 

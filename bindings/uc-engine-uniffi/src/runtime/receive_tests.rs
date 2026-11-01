@@ -10,6 +10,7 @@ use uc_engine::{
 #[test]
 fn receive_mapping_keeps_exact_counts_and_engine_vocabulary() {
     let summary = ReceiveProgressSummary {
+        snapshot_version: None,
         entry_id: "entry".into(),
         attempt_id: "attempt".into(),
         state: "failed".into(),
@@ -18,6 +19,9 @@ fn receive_mapping_keeps_exact_counts_and_engine_vocabulary() {
         items_total: 2,
         items_completed: 1,
         items: vec![ReceiveItemSummary {
+            content: None,
+            transfer: None,
+            history_file_index: None,
             item_id: "stable-item".into(),
             kind: ReceiveItemKind::Representation,
             state: "failed".into(),

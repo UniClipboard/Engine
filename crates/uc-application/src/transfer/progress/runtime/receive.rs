@@ -1,5 +1,6 @@
 //! 通知消费原接收负责人的canonical快照；实际保存与重试不等待本观察者。
 use super::super::{ProgressExchangeService, ProgressReceiveError, ProgressSubmission};
+use crate::facade::host_event::{HostEvent, HostEventBus, TransferHostEvent};
 use crate::transfer::receive::work::{ReceiveProgressChange, ReceiveWorkRegistry};
 use std::error::Error;
 use std::sync::Arc;
@@ -11,9 +12,13 @@ use uc_observability_contract::uc_debug;
 pub(super) async fn observe_receive(
     registry: Arc<ReceiveWorkRegistry>,
     exchanges: ProgressExchangeService,
+    host: Arc<HostEventBus>,
     cancel: CancellationToken,
 ) {
     while let Some(changed) = registry.next_progress_changes(&cancel).await {
+        host.emit_or_warn(HostEvent::Transfer(
+            TransferHostEvent::ReceiveProgressChanged,
+        ));
         for changed in changed {
             submit_change(&exchanges, changed);
         }

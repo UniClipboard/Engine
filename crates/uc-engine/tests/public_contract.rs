@@ -997,6 +997,7 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
     }
 
     let progress = uc_engine::ReceiveProgressSummary {
+        snapshot_version: None,
         entry_id: "entry-1".into(),
         attempt_id: "attempt-1".into(),
         state: "transferring".into(),
@@ -1005,6 +1006,9 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
         items_total: 2,
         items_completed: 1,
         items: vec![uc_engine::ReceiveItemSummary {
+            content: None,
+            transfer: None,
+            history_file_index: None,
             item_id: "stable-item".into(),
             kind: uc_engine::ReceiveItemKind::File,
             state: "failed".into(),
@@ -1028,6 +1032,7 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
         uc_engine::OperationResult::EntryReceiveProgressList(vec![progress]),
         uc_engine::OperationResult::EntryReceiveProgressList(vec![
             uc_engine::ReceiveProgressSummary {
+                snapshot_version: None,
                 entry_id: "entry-1".into(),
                 attempt_id: "attempt-1".into(),
                 state: "transferring".into(),
@@ -1036,6 +1041,9 @@ fn receive_progress_and_cancellation_have_stable_operations_and_results() {
                 items_total: 2,
                 items_completed: 1,
                 items: vec![uc_engine::ReceiveItemSummary {
+                    content: None,
+                    transfer: None,
+                    history_file_index: None,
                     item_id: "stable-item".into(),
                     kind: uc_engine::ReceiveItemKind::File,
                     state: "failed".into(),

@@ -80,6 +80,7 @@ impl GetEntryReceiveProgressPort for Progress {
         entry: &str,
     ) -> Result<Option<EntryReceiveProgress>, FileTransferProjectionError> {
         Ok(Some(EntryReceiveProgress {
+            snapshot_version: None,
             entry_id: entry.into(),
             attempt_id: self.0.attempt_id.lock().unwrap().clone(),
             state: *self.0.state.lock().unwrap(),

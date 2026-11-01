@@ -6,6 +6,7 @@ use uc_engine::{
 #[test]
 fn receive_mapping_preserves_integers_beyond_javascript_precision() {
     let summary = ReceiveProgressSummary {
+        snapshot_version: None,
         entry_id: "entry".into(),
         attempt_id: "attempt".into(),
         state: "failed".into(),
@@ -14,6 +15,9 @@ fn receive_mapping_preserves_integers_beyond_javascript_precision() {
         items_total: 1,
         items_completed: 0,
         items: vec![ReceiveItemSummary {
+            content: None,
+            transfer: None,
+            history_file_index: None,
             item_id: "directory_unit".into(),
             kind: ReceiveItemKind::DirectoryUnit,
             state: "failed".into(),

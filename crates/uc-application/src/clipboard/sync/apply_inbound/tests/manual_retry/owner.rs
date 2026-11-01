@@ -126,6 +126,7 @@ impl GetEntryReceiveProgressPort for Stored {
             )));
         }
         Ok(Some(EntryReceiveProgress {
+            snapshot_version: None,
             entry_id: entry.into(),
             attempt_id: self.attempts.attempt_id.lock().unwrap().clone(),
             state: *self.attempts.state.lock().unwrap(),

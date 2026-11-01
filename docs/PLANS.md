@@ -20,6 +20,8 @@
 
 ## 当前专项计划
 
+- [File-addressable receive snapshots (#368)](exec-plans/completed/2026-11-01-receive-item-progress.md): implementation and host verification complete; 61 receive E2E scenarios and both binding projections passed. Native devices, remote CI, and release publication were skipped.
+
 - [Process observability and failed-start release specification](exec-plans/active/2026-10-27-process-startup-release-spec.md): proposed; complete owners, source-matched bindings, native artifacts, and end-to-end acceptance remain incomplete.
 
 - [Issue #34 后续缺口处理](exec-plans/completed/2026-10-30-issue-34-followups.md)：实现与本地验收完成并归档；目录复用、D15独立发现证明与成员证据数据库代号隔离落地，最终工作区5004项及成员56项通过。原间歇异常和旧格式演进继续由技术债跟踪，远端CI及设备范围由总清单跟踪。

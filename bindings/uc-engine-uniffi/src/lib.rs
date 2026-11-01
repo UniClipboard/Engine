@@ -20,10 +20,11 @@ pub use runtime::{
     CustomRelayMutationRejection, CustomRelayMutationResult, Device, EntryNotResendableReason,
     InvitationAvailability, InvitationIssued, JoinSpaceRejectionReason, JoinSpaceStatus,
     JoinSpaceTerminationReason, JoinedSpace, LocalDevice, MobileEngine, MobileStartupLifecycle,
-    OutboundProgress, OutboundProgressItem, PeerConnectionRefresh, ReceiveItem, ReceiveProgress,
-    ReceiveRetryOutcome, RejectedConfigImport, RelayEntrySource, RelayOverview, RelayOverviewEntry,
-    RelayRoutingMode, RelaySaveResult, ResendEntryOutcome, ResendTargetProgress, SendReport,
-    SessionRecovery, SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
+    OutboundProgress, OutboundProgressItem, PeerConnectionRefresh, ReceiveContentLocator,
+    ReceiveItem, ReceiveItemTransfer, ReceiveProgress, ReceiveRetryOutcome, ReceiveSnapshotVersion,
+    RejectedConfigImport, RelayEntrySource, RelayOverview, RelayOverviewEntry, RelayRoutingMode,
+    RelaySaveResult, ResendEntryOutcome, ResendTargetProgress, SendReport, SessionRecovery,
+    SpaceCreated, SpaceInvitation, SpaceState, WorkspaceConvergence,
     WorkspaceConvergenceFailureCategory, WorkspaceConvergencePhase,
 };
 
@@ -534,6 +535,7 @@ pub enum BindingEvent {
         total_bytes: Option<u64>,
     },
     OutboundProgressChanged,
+    ReceiveProgressChanged,
     TransferStatusChanged {
         transfer_id: String,
         entry_id: Option<String>,

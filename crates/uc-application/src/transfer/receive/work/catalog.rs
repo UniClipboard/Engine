@@ -1,6 +1,7 @@
 //! 同进程重试的原始资料与实际保存事实；不写入持久存储，也不输出敏感字段。
-use super::ReceiveProgressSignal;
-use super::{ReceiveAction, ReceiveBatch, ReceiveWorkRegistry};
+use super::{
+    ReceiveAction, ReceiveBatch, ReceiveProgressSignal, ReceiveWorkRegistry, RegistryState,
+};
 use crate::clipboard::sync::payload_codec::V3BlobRef;
 use crate::transfer::receive::batch::ReceiveFacts;
 use crate::transfer::receive::identity::receive_item_ids;
@@ -17,6 +18,7 @@ use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::{EntryReceiveProgress, ReceiveItemKind, TrackedFileTransferStatus};
 use uc_core::MimeType;
 
+mod host_snapshot;
 mod progress_snapshot;
 mod projection;
 
@@ -340,7 +342,15 @@ impl ReceiveWorkRegistry {
         &self,
         progress: &mut EntryReceiveProgress,
     ) -> Result<(), SourceError> {
-        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::merge_results(&state, progress)?;
+        state.project_host_snapshot(progress)
+    }
+
+    fn merge_results(
+        state: &RegistryState,
+        progress: &mut EntryReceiveProgress,
+    ) -> Result<(), SourceError> {
         let Some(receipt) = state
             .receipts
             .get(&EntryId::from(progress.entry_id.clone()))

@@ -95,13 +95,21 @@ async fn real_engine_restart_refuses_retry_without_original_material_and_preserv
         );
     }
     assert_eq!(recovered.attempt_id, original.attempt_id);
-    assert_eq!(recovered.items, original.items);
+    let mut durable_items = original.items.clone();
+    for item in &mut durable_items {
+        item.content = None;
+        item.transfer = None;
+        item.history_file_index = None;
+    }
+    assert!(recovered.snapshot_version.is_none());
+    assert_eq!(recovered.items, durable_items);
     let OperationResult::EntryReceiveProgress(Some(after)) = after else {
         panic!("重试不可用不能移除原部分结果")
     };
     assert_eq!(after.attempt_id, original.attempt_id);
     assert_eq!(after.state, "failed");
-    assert_eq!(after.items, original.items);
+    assert!(after.snapshot_version.is_none());
+    assert_eq!(after.items, durable_items);
     assert_eq!(files, original_files);
     assert_eq!(exports, 3, "没有原始来源时不得重新导出或伪造新尝试");
 }

@@ -13,10 +13,10 @@ use uc_engine::{
     EngineState, EntryNotResendableReason, EntryReceiveProgressInput, EntryReceiveRetryOutcome,
     EventStream, ExportEntryInput, HostFileHandle, InvitationAvailability, JoinSpaceInput,
     Operation, OperationResult, OperationTerminal, OutboundProgressInput, OutboundProgressSummary,
-    ReceiveProgressSummary, ReconcileOutboundProgressInput, RecoverSessionInput, RefreshReason,
-    RemoveMemberInput, ResendEntryInput, ResendEntryOutcome, RestoreClipboardInput,
-    RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput, SendReportSummary,
-    SendTextInput, StartupLifecycle, StartupLifecycleInput, StartupProgress,
+    ReceiveContentLocator, ReceiveProgressSummary, ReconcileOutboundProgressInput,
+    RecoverSessionInput, RefreshReason, RemoveMemberInput, ResendEntryInput, ResendEntryOutcome,
+    RestoreClipboardInput, RetryEntryReceiveInput, SecretString, SendFilesInput, SendImageInput,
+    SendReportSummary, SendTextInput, StartupLifecycle, StartupLifecycleInput, StartupProgress,
     TransferCancellationReason,
 };
 use zeroize::Zeroizing;
@@ -24,9 +24,10 @@ use zeroize::Zeroizing;
 use crate::{
     host, OhActiveClipboard, OhEngineConfig, OhEngineEvent, OhHost, OhInvitationIssued,
     OhJoinSpaceStatus, OhJoinedSpace, OhLocalDevice, OhNetworkRecoveryStatus, OhOutboundProgress,
-    OhOutboundProgressItem, OhReceiveItem, OhReceiveProgress, OhReceiveRetryOutcome,
-    OhRelayOverview, OhRelayOverviewEntry, OhResendOutcome, OhResendTargetProgress, OhSendReport,
-    OhSessionRecovery, OhSpaceCreated, OhWorkspaceConvergence,
+    OhOutboundProgressItem, OhReceiveContentLocator, OhReceiveItem, OhReceiveItemTransfer,
+    OhReceiveProgress, OhReceiveRetryOutcome, OhReceiveSnapshotVersion, OhRelayOverview,
+    OhRelayOverviewEntry, OhResendOutcome, OhResendTargetProgress, OhSendReport, OhSessionRecovery,
+    OhSpaceCreated, OhWorkspaceConvergence,
 };
 
 #[napi]
@@ -1493,6 +1494,13 @@ fn receive_retry(outcome: EntryReceiveRetryOutcome) -> OhReceiveRetryOutcome {
 
 fn receive_progress(progress: ReceiveProgressSummary) -> OhReceiveProgress {
     OhReceiveProgress {
+        snapshot_version: progress
+            .snapshot_version
+            .map(|version| OhReceiveSnapshotVersion {
+                producer_id: version.producer_id,
+                attempt_revision: version.attempt_revision.to_string(),
+                snapshot_revision: version.snapshot_revision.to_string(),
+            }),
         entry_id: progress.entry_id,
         attempt_id: progress.attempt_id,
         state: progress.state,
@@ -1504,6 +1512,25 @@ fn receive_progress(progress: ReceiveProgressSummary) -> OhReceiveProgress {
             .items
             .into_iter()
             .map(|item| OhReceiveItem {
+                content: item.content.map(|content| {
+                    let (kind, index) = match content {
+                        ReceiveContentLocator::File { index } => ("file", Some(index)),
+                        ReceiveContentLocator::Representation { index } => {
+                            ("representation", Some(index))
+                        }
+                        ReceiveContentLocator::DirectoryUnit => ("directory_unit", None),
+                    };
+                    OhReceiveContentLocator {
+                        kind: kind.into(),
+                        index,
+                    }
+                }),
+                transfer: item.transfer.map(|transfer| OhReceiveItemTransfer {
+                    received_bytes: transfer.received_bytes.to_string(),
+                    total_bytes: transfer.total_bytes.map(|total| total.to_string()),
+                    round: transfer.round,
+                }),
+                history_file_index: item.history_file_index,
                 item_id: item.item_id,
                 kind: item.kind.to_string(),
                 state: item.state,
@@ -1513,6 +1540,8 @@ fn receive_progress(progress: ReceiveProgressSummary) -> OhReceiveProgress {
     }
 }
 
+#[cfg(test)]
+mod receive_evidence_e2e;
 #[cfg(test)]
 mod receive_tests;
 
