@@ -1,7 +1,7 @@
 //! Bounded local OTLP exchange records. No plaintext history is written to disk.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread;
@@ -66,6 +66,7 @@ pub(crate) struct OfflineHistory {
     sample_request: Mutex<Option<SyncSender<SyncSender<()>>>>,
     storage: Mutex<Option<OfflineHistoryStorage>>,
     persistence: Mutex<&'static str>,
+    persistence_trimmed: AtomicU64,
 }
 
 impl OfflineHistory {
@@ -114,6 +115,7 @@ impl OfflineHistory {
             sample_request: Mutex::new(None),
             storage: Mutex::new(None),
             persistence: Mutex::new("key_unavailable"),
+            persistence_trimmed: AtomicU64::new(0),
         })
     }
 
@@ -207,17 +209,20 @@ impl OfflineHistory {
         }
         let mut entries = Vec::new();
         let mut bytes = 0;
+        let mut trimmed = 0;
         {
             let history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
             for entry in history.entries.iter().rev() {
                 // JSON escaping and the existing AEAD envelope need additional space.
                 if entry.at.elapsed() > RETENTION || bytes + entry.line.len() > 512 * 1024 {
+                    trimmed += 1;
                     continue;
                 }
                 bytes += entry.line.len();
                 entries.push((entry.wall_ms, entry.signal, entry.line.clone()));
             }
         }
+        self.persistence_trimmed.store(trimmed, Ordering::Release);
         entries.reverse();
         let clear = serde_json::to_vec(&StoredHistory {
             version: 1,
@@ -242,6 +247,9 @@ impl OfflineHistory {
     }
 
     fn push(&self, signal: usize, record: &impl Serialize) {
+        if !self.started.load(Ordering::Acquire) || self.stopped.load(Ordering::Acquire) {
+            return;
+        }
         let mut history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
         let Ok(mut line) = serde_json::to_string(record) else {
             history.rejected += 1;
@@ -299,7 +307,13 @@ impl OfflineHistory {
         for entry in &history.entries {
             signals[entry.signal].push_str(&entry.line);
         }
-        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "daemon" } else { "not_started" }, "unobservedRoles": ["gui", "quick-panel", "webview"], "runId": self.run_id, "persistence": *self.persistence.lock().unwrap_or_else(PoisonError::into_inner), "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
+        let last_metric_age = history
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.signal == 0)
+            .map(|entry| entry.at.elapsed());
+        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "daemon" } else { "not_started" }, "unobservedRoles": ["gui", "quick-panel", "webview"], "runId": self.run_id, "persistence": *self.persistence.lock().unwrap_or_else(PoisonError::into_inner), "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "persistenceTrimmedRecords": self.persistence_trimmed.load(Ordering::Acquire), "lastMetricAgeMs": last_metric_age.map(|age| age.as_millis()), "metricsStale": last_metric_age.is_none_or(|age| age > Duration::from_secs(15)), "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
         let [metrics, logs, traces] = signals;
         OfflineDiagnosticSnapshot {
             metrics,
