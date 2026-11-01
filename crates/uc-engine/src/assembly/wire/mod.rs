@@ -14,6 +14,7 @@
 //!
 //! > **Zero tauri imports in this file.**
 
+mod diagnostic_history;
 mod infra;
 
 use std::path::PathBuf;
@@ -489,7 +490,10 @@ pub async fn wire_dependencies_from_inputs(
                 paths.logs_dir.join("otel-history"),
                 Box::new(move |bytes| {
                     let encrypt_cipher = encrypt_cipher.upgrade().ok_or_else(|| {
-                        std::io::Error::other("diagnostic profile cipher released")
+                        std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "diagnostic profile cipher released",
+                        )
                     })?;
                     runtime
                         .block_on(encrypt_cipher.encrypt(
@@ -499,11 +503,14 @@ pub async fn wire_dependencies_from_inputs(
                             ),
                         ))
                         .map(|value| value.as_bytes().to_vec())
-                        .map_err(std::io::Error::other)
+                        .map_err(diagnostic_history::cipher_error)
                 }),
                 Box::new(move |bytes| {
                     let decrypt_cipher = decrypt_cipher.upgrade().ok_or_else(|| {
-                        std::io::Error::other("diagnostic profile cipher released")
+                        std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "diagnostic profile cipher released",
+                        )
                     })?;
                     decrypt_runtime
                         .block_on(decrypt_cipher.decrypt(
@@ -513,7 +520,7 @@ pub async fn wire_dependencies_from_inputs(
                             ),
                         ))
                         .map(|value| value.as_bytes().to_vec())
-                        .map_err(std::io::Error::other)
+                        .map_err(diagnostic_history::cipher_error)
                 }),
             ),
         );

@@ -24,10 +24,14 @@ use opentelemetry_proto::transform::trace::tonic::group_spans_by_resource_and_sc
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{Span, SpanData, SpanProcessor};
 use opentelemetry_sdk::Resource;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
-use std::io::{Read, Write};
 use std::path::PathBuf;
+
+#[path = "offline/storage.rs"]
+mod storage;
+pub use storage::OfflineHistoryStorage;
+use storage::RecoveryRecord;
 use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System};
 use uuid::Uuid;
 
@@ -68,6 +72,7 @@ pub(crate) struct OfflineHistory {
     storage: Mutex<Option<OfflineHistoryStorage>>,
     persistence: Mutex<&'static str>,
     persistence_trimmed: AtomicU64,
+    recovery: Mutex<Option<RecoveryRecord>>,
     host_registration_failures: AtomicU64,
     hosts: Mutex<HashMap<u32, HostProcess>>,
 }
@@ -119,6 +124,7 @@ impl OfflineHistory {
             storage: Mutex::new(None),
             persistence: Mutex::new("key_unavailable"),
             persistence_trimmed: AtomicU64::new(0),
+            recovery: Mutex::new(None),
             host_registration_failures: AtomicU64::new(0),
             hosts: Mutex::new(HashMap::new()),
         })
@@ -248,113 +254,6 @@ impl OfflineHistory {
         *self.storage.lock().unwrap_or_else(PoisonError::into_inner) = Some(storage);
     }
 
-    fn persist(&self) {
-        let mut slot = self.storage.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(storage) = slot.as_mut() else {
-            return;
-        };
-        let result = self.persist_with(storage);
-        *self
-            .persistence
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = match result {
-            Ok(()) => "encrypted",
-            Err(_) => "locked_or_io_failure",
-        };
-    }
-
-    fn persist_with(&self, storage: &mut OfflineHistoryStorage) -> std::io::Result<()> {
-        let file = storage.directory.join("history.enc");
-        if !storage.loaded {
-            match std::fs::File::open(&file) {
-                Ok(input) => {
-                    let mut encrypted = Vec::new();
-                    input
-                        .take(8 * 1024 * 1024 + 1)
-                        .read_to_end(&mut encrypted)?;
-                    if encrypted.len() > 8 * 1024 * 1024 {
-                        return Err(std::io::Error::other(
-                            "encrypted diagnostic history exceeds quota",
-                        ));
-                    }
-                    let clear = (storage.open)(&encrypted)?;
-                    let saved: StoredHistory = serde_json::from_slice(&clear)?;
-                    if saved.version != 1 {
-                        return Err(std::io::Error::other("unsupported diagnostic history"));
-                    }
-                    let mut history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
-                    history.evicted = history
-                        .evicted
-                        .saturating_add(saved.evicted)
-                        .saturating_add(saved.persistence_trimmed);
-                    history.rejected = history.rejected.saturating_add(saved.rejected);
-                    let now = unix_ms();
-                    // Old runs retain their resource identity and original OTLP timestamps.
-                    for (wall_ms, signal, line) in saved.entries.into_iter().rev() {
-                        let age = Duration::from_millis(now.saturating_sub(wall_ms));
-                        if age > RETENTION
-                            || signal > 2
-                            || line.len() > MAX_RECORD_BYTES
-                            || history.bytes + line.len() > MAX_BYTES
-                        {
-                            history.evicted += 1;
-                            continue;
-                        }
-                        history.bytes += line.len();
-                        history.entries.push_front(Entry {
-                            at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
-                            wall_ms,
-                            signal,
-                            line,
-                        });
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-            storage.loaded = true;
-        }
-        let mut entries = Vec::new();
-        let mut bytes = 0;
-        let mut trimmed = 0;
-        let (evicted, rejected);
-        {
-            let history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
-            evicted = history.evicted;
-            rejected = history.rejected;
-            for entry in history.entries.iter().rev() {
-                // JSON escaping and the existing AEAD envelope need additional space.
-                if entry.at.elapsed() > RETENTION || bytes + entry.line.len() > 512 * 1024 {
-                    trimmed += 1;
-                    continue;
-                }
-                bytes += entry.line.len();
-                entries.push((entry.wall_ms, entry.signal, entry.line.clone()));
-            }
-        }
-        self.persistence_trimmed.store(trimmed, Ordering::Release);
-        entries.reverse();
-        let clear = serde_json::to_vec(&StoredHistory {
-            version: 1,
-            entries,
-            evicted,
-            rejected,
-            persistence_trimmed: trimmed,
-        })?;
-        let encrypted = (storage.seal)(&clear)?;
-        if encrypted.len() > 8 * 1024 * 1024 {
-            return Err(std::io::Error::other(
-                "encrypted diagnostic history exceeds quota",
-            ));
-        }
-        std::fs::create_dir_all(&storage.directory)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(&storage.directory)?;
-        temporary.write_all(&encrypted)?;
-        temporary.as_file().sync_all()?;
-        temporary.persist(file).map_err(|error| error.error)?;
-        Ok(())
-    }
-
     pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
     }
@@ -427,7 +326,7 @@ impl OfflineHistory {
             .rev()
             .find(|entry| entry.signal == 0)
             .map(|entry| entry.at.elapsed());
-        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "registered_processes" } else { "not_started" }, "metricScope": "per_process_no_application_total", "processMemorySemanticConventionVersion": "1.37.0", "processMemorySemanticConventionStability": "development", "hostCoverage": host_coverage, "hostRegistrationFailures": self.host_registration_failures.load(Ordering::Relaxed), "webviewAttribution": "unknown_unless_explicitly_registered_by_owner", "runId": self.run_id, "persistence": *self.persistence.lock().unwrap_or_else(PoisonError::into_inner), "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "persistenceTrimmedRecords": self.persistence_trimmed.load(Ordering::Acquire), "lastMetricAgeMs": last_metric_age.map(|age| age.as_millis()), "metricsStale": last_metric_age.is_none_or(|age| age > Duration::from_secs(15)), "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
+        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "registered_processes" } else { "not_started" }, "metricScope": "per_process_no_application_total", "processMemorySemanticConventionVersion": "1.37.0", "processMemorySemanticConventionStability": "development", "hostCoverage": host_coverage, "hostRegistrationFailures": self.host_registration_failures.load(Ordering::Relaxed), "webviewAttribution": "unknown_unless_explicitly_registered_by_owner", "runId": self.run_id, "persistence": *self.persistence.lock().unwrap_or_else(PoisonError::into_inner), "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "persistenceTrimmedRecords": self.persistence_trimmed.load(Ordering::Acquire), "historyRecovery": self.recovery.lock().unwrap_or_else(PoisonError::into_inner).clone(), "lastMetricAgeMs": last_metric_age.map(|age| age.as_millis()), "metricsStale": last_metric_age.is_none_or(|age| age > Duration::from_secs(15)), "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
         let [metrics, logs, traces] = signals;
         OfflineDiagnosticSnapshot {
             metrics,
@@ -448,20 +347,18 @@ impl OfflineHistory {
         };
         let mut attributes = Vec::new();
         if let Some(fields) = record["fields"].as_object() {
-            for (key, value) in fields {
-                let value = match value {
-                    Value::String(s) => any_value::Value::StringValue(s.clone()),
-                    Value::Bool(b) => any_value::Value::BoolValue(*b),
-                    Value::Number(n) if n.is_i64() => {
-                        any_value::Value::IntValue(n.as_i64().unwrap_or_default())
-                    }
-                    _ => continue,
-                };
-                attributes.push(KeyValue {
-                    key_strindex: 0,
-                    key: key.clone(),
-                    value: Some(AnyValue { value: Some(value) }),
-                });
+            attributes.extend(
+                fields
+                    .iter()
+                    .filter_map(|(key, value)| log_attribute(key, value)),
+            );
+        }
+        // These owner-generated aliases are scoped by the original LocalRecordingState run_id.
+        // Never copy arbitrary top-level input or replace this scope with the SDK resource ID.
+        for key in LOCAL_CORRELATION_ATTRIBUTES {
+            if let Some(value) = record.get(*key) {
+                attributes.retain(|attribute| attribute.key != *key);
+                attributes.extend(log_attribute(key, value));
             }
         }
         let log = LogRecord {
@@ -487,6 +384,49 @@ impl OfflineHistory {
             },
         );
     }
+}
+
+// Approved metadata from LocalRecordingState::annotate/module_metadata and CapturePolicy::include.
+const LOCAL_CORRELATION_ATTRIBUTES: &[&str] = &[
+    "local_schema_version",
+    "run_id",
+    "monotonic_offset_ms",
+    "engine_version",
+    "host_version",
+    "platform",
+    "environment",
+    "app_channel",
+    "source_commit",
+    "source_state",
+    "peer_ref",
+    "candidate_set_ref",
+    "candidate_generation",
+    "candidate_values_changed",
+    "connection_id",
+    "path_ref",
+    "device_ref",
+    "address_record_ref",
+    "correlation_status",
+    "connection_correlation_status",
+    "record_correlation_status",
+    "capture_mode",
+    "capture_id",
+    "capture_tail_completion",
+];
+
+fn log_attribute(key: &str, value: &Value) -> Option<KeyValue> {
+    let value = match value {
+        Value::String(value) => Some(any_value::Value::StringValue(value.clone())),
+        Value::Bool(value) => Some(any_value::Value::BoolValue(*value)),
+        Value::Number(value) => Some(any_value::Value::IntValue(value.as_i64()?)),
+        Value::Null => None,
+        _ => return None,
+    };
+    Some(KeyValue {
+        key_strindex: 0,
+        key: key.into(),
+        value: Some(AnyValue { value }),
+    })
 }
 
 fn decode_hex(value: &str, bytes: usize) -> Vec<u8> {
@@ -668,35 +608,6 @@ impl SpanProcessor for OfflineSpanProcessor {
     }
 }
 
-/// Protection callbacks use the active profile cipher. They must fail while locked.
-pub struct OfflineHistoryStorage {
-    pub directory: PathBuf,
-    pub seal: Box<dyn Fn(&[u8]) -> std::io::Result<Vec<u8>> + Send + Sync>,
-    pub open: Box<dyn Fn(&[u8]) -> std::io::Result<Vec<u8>> + Send + Sync>,
-    loaded: bool,
-}
-impl OfflineHistoryStorage {
-    pub fn new(
-        directory: PathBuf,
-        seal: Box<dyn Fn(&[u8]) -> std::io::Result<Vec<u8>> + Send + Sync>,
-        open: Box<dyn Fn(&[u8]) -> std::io::Result<Vec<u8>> + Send + Sync>,
-    ) -> Self {
-        Self {
-            directory,
-            seal,
-            open,
-            loaded: false,
-        }
-    }
-}
-#[derive(Serialize, Deserialize)]
-struct StoredHistory {
-    version: u32,
-    entries: Vec<(u64, usize, String)>,
-    evicted: u64,
-    rejected: u64,
-    persistence_trimmed: u64,
-}
 fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
