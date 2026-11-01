@@ -113,6 +113,7 @@ impl Drop for ActiveVault {
 
 #[derive(Default)]
 struct RecoveryState {
+    startup_kek: Option<Kek>,
     active: Option<ActiveVault>,
     cleanup_pending: bool,
 }
@@ -127,6 +128,14 @@ pub struct ProfileKeyRecoveryStore {
     file: PathBuf,
     paths: AppPaths,
     state: Mutex<RecoveryState>,
+}
+
+struct StartupUnlockScope<'a>(&'a ProfileKeyRecoveryStore);
+
+impl Drop for StartupUnlockScope<'_> {
+    fn drop(&mut self) {
+        self.0.lock_state().startup_kek = None;
+    }
 }
 
 impl ProfilePassphraseRecoveryPort for ProfileKeyRecoveryStore {
@@ -173,15 +182,23 @@ impl ProfileKeyRecoveryStore {
         &self.file
     }
 
+    /// 限定启动材料的交付范围；成功、失败或取消后都释放未交付的 KEK。
+    pub fn startup_unlock_scope(&self) -> impl Drop + '_ {
+        StartupUnlockScope(self)
+    }
+
     pub fn forget_after_factory_reset(&self) {
         let mut state = self.lock_state();
+        state.startup_kek = None;
         state.active = None;
         state.cleanup_pending = false;
     }
 
     /// Removes decrypted profile secrets from memory after the runtime suspends.
     pub fn suspend(&self) {
-        self.lock_state().active = None;
+        let mut state = self.lock_state();
+        state.startup_kek = None;
+        state.active = None;
     }
 
     pub fn cleanup_pending(&self) -> bool {
@@ -191,6 +208,7 @@ impl ProfileKeyRecoveryStore {
     pub async fn prepare_startup(
         &self,
     ) -> Result<ProfileRecoveryPreparation, ProfileKeyRecoveryError> {
+        self.lock_state().startup_kek = None;
         // 导入事务可能处于 KEK 与 vault 分步替换之间；先由离线采用负责人续做。
         if adoption_journal_present(&self.paths.app_data_root_dir)?
             || matches!(
@@ -222,6 +240,8 @@ impl ProfileKeyRecoveryStore {
                     return Ok(ProfileRecoveryPreparation::AwaitingPassphrase { losses });
                 }
                 self.activate_or_migrate(&kek)?;
+                // 只交付一次已验证材料；显式认证的后续读取仍访问安全存储。
+                self.lock_state().startup_kek = Some(kek);
                 Ok(ProfileRecoveryPreparation::Ready)
             }
             Err(
@@ -880,6 +900,11 @@ impl ProfileKeyRecoveryStore {
 
 impl SecureStoragePort for ProfileKeyRecoveryStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
+        if key == self.kek_name {
+            if let Some(kek) = self.lock_state().startup_kek.take() {
+                return Ok(Some(kek.as_bytes().to_vec()));
+            }
+        }
         if is_managed_key(key) {
             self.activate_from_backing_if_available()?;
             if let Some(active) = &self.lock_state().active {
@@ -890,6 +915,9 @@ impl SecureStoragePort for ProfileKeyRecoveryStore {
     }
 
     fn set(&self, key: &str, value: &[u8]) -> Result<(), SecureStorageError> {
+        if key == self.kek_name {
+            self.lock_state().startup_kek = None;
+        }
         if is_managed_key(key) {
             self.activate_from_backing_if_available()?;
             let mut state = self.lock_state();
@@ -917,6 +945,9 @@ impl SecureStoragePort for ProfileKeyRecoveryStore {
     }
 
     fn delete(&self, key: &str) -> Result<(), SecureStorageError> {
+        if key == self.kek_name {
+            self.lock_state().startup_kek = None;
+        }
         if is_managed_key(key) {
             self.activate_from_backing_if_available()?;
             let mut state = self.lock_state();

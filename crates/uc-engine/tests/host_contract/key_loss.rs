@@ -75,6 +75,35 @@ async fn assert_history(engine: &Engine, entry_id: String, expected: &str) {
     assert_eq!(entry.content, expected);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reads_kek_once_and_resume_rechecks_secure_storage() {
+    use std::sync::atomic::Ordering;
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (original, _kek_name) = create_profile(root.path(), &storage).await;
+    storage.kek_reads.store(0, Ordering::SeqCst);
+
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root.path(), Box::new(storage.clone())),
+    )
+    .await
+    .unwrap();
+    assert_history(&engine, original.clone(), "history before key loss").await;
+    let startup_reads = storage.kek_reads.load(Ordering::SeqCst);
+    assert_eq!(startup_reads, 1, "startup must share its validated KEK");
+
+    engine.suspend().await.unwrap();
+    storage.fail_reads.store(true, Ordering::SeqCst);
+    assert!(engine.resume().await.is_err());
+    assert!(storage.kek_reads.load(Ordering::SeqCst) > startup_reads);
+    storage.fail_reads.store(false, Ordering::SeqCst);
+    engine.resume().await.unwrap();
+    assert_history(&engine, original, "history before key loss").await;
+    engine.shutdown(Duration::from_secs(15)).await.unwrap();
+}
+
 async fn restart_after_loss(all: bool) {
     let root = tempfile::tempdir().unwrap();
     let storage = MemorySecureStorage::default();
