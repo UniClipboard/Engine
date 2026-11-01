@@ -1,6 +1,6 @@
 //! Bounded local OTLP exchange records. No plaintext history is written to disk.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System};
 use uuid::Uuid;
 
 const MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -67,6 +67,7 @@ pub(crate) struct OfflineHistory {
     storage: Mutex<Option<OfflineHistoryStorage>>,
     persistence: Mutex<&'static str>,
     persistence_trimmed: AtomicU64,
+    hosts: Mutex<HashMap<u32, HostProcess>>,
 }
 
 impl OfflineHistory {
@@ -76,7 +77,7 @@ impl OfflineHistory {
         let mut attributes = vec![
             attribute("service.name", "uniclipboard"),
             attribute("service.instance.id", &run_id),
-            attribute("process.role", "daemon"),
+            attribute("uc.process.role", "daemon"),
         ];
         for key in ["service.version", "os.type", "host.arch"] {
             if let Some((_, value)) = resource.iter().find(|(k, _)| k.as_str() == key) {
@@ -116,6 +117,7 @@ impl OfflineHistory {
             storage: Mutex::new(None),
             persistence: Mutex::new("key_unavailable"),
             persistence_trimmed: AtomicU64::new(0),
+            hosts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -139,6 +141,83 @@ impl OfflineHistory {
             self.started.store(false, Ordering::Release);
             return Err(error);
         }
+        Ok(())
+    }
+
+    pub(crate) fn register_host(&self, pid: u32, role: &str) -> std::io::Result<()> {
+        if !matches!(role, "gui" | "quick-panel" | "webview") || pid == std::process::id() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid diagnostic process registration",
+            ));
+        }
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_exe(sysinfo::UpdateKind::Always),
+        );
+        let process = system.process(Pid::from_u32(pid)).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "registered diagnostic process is unavailable",
+            )
+        })?;
+        let executable = process
+            .exe()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "registered diagnostic process identity is unavailable",
+                )
+            })?
+            .to_path_buf();
+        let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
+        if hosts.get(&pid).is_some_and(|known| {
+            known.start == process.start_time()
+                && known.executable == executable
+                && known.role == role
+        }) {
+            return Ok(());
+        }
+        hosts.retain(|_, host| host.state == "active");
+        if hosts.len() >= 32 {
+            return Err(std::io::Error::other(
+                "diagnostic process registration quota exceeded",
+            ));
+        }
+        let mut resource = self.resource.clone();
+        resource.attributes.retain(|a| {
+            !matches!(
+                a.key.as_str(),
+                "service.instance.id" | "uc.process.role" | "process.pid" | "process.creation.time"
+            )
+        });
+        resource.attributes.extend([
+            attribute("service.instance.id", &Uuid::new_v4().to_string()),
+            attribute("uc.process.role", role),
+            attribute("process.creation.time", &process.start_time().to_string()),
+            KeyValue {
+                key_strindex: 0,
+                key: "process.pid".into(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::IntValue(i64::from(pid))),
+                }),
+            },
+        ]);
+        hosts.insert(
+            pid,
+            HostProcess {
+                start: process.start_time(),
+                executable,
+                role: role.to_owned(),
+                resource,
+                state: "active",
+                previous: None,
+            },
+        );
         Ok(())
     }
 
@@ -292,6 +371,7 @@ impl OfflineHistory {
             .as_ref()
             .is_some_and(|tx| tx.try_send(done).is_ok())
             && completed.recv_timeout(Duration::from_secs(1)).is_ok();
+        let host_coverage: Vec<Value> = self.hosts.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|(pid, host)| json!({"pid": pid, "role": host.role, "state": host.state, "processCreationTime": host.start})).collect();
         let mut history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
         while history
             .entries
@@ -313,7 +393,7 @@ impl OfflineHistory {
             .rev()
             .find(|entry| entry.signal == 0)
             .map(|entry| entry.at.elapsed());
-        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "daemon" } else { "not_started" }, "unobservedRoles": ["gui", "quick-panel", "webview"], "runId": self.run_id, "persistence": *self.persistence.lock().unwrap_or_else(PoisonError::into_inner), "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "persistenceTrimmedRecords": self.persistence_trimmed.load(Ordering::Acquire), "lastMetricAgeMs": last_metric_age.map(|age| age.as_millis()), "metricsStale": last_metric_age.is_none_or(|age| age > Duration::from_secs(15)), "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
+        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "registered_processes" } else { "not_started" }, "metricScope": "per_process_no_application_total", "hostCoverage": host_coverage, "webviewAttribution": "unknown_unless_explicitly_registered_by_owner", "runId": self.run_id, "persistence": *self.persistence.lock().unwrap_or_else(PoisonError::into_inner), "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "persistenceTrimmedRecords": self.persistence_trimmed.load(Ordering::Acquire), "lastMetricAgeMs": last_metric_age.map(|age| age.as_millis()), "metricsStale": last_metric_age.is_none_or(|age| age > Duration::from_secs(15)), "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
         let [metrics, logs, traces] = signals;
         OfflineDiagnosticSnapshot {
             metrics,
@@ -433,62 +513,56 @@ fn sample_process(
         let wall = SystemTime::now();
         system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh);
         if let Some(process) = system.process(pid) {
-            let cpu = process.accumulated_cpu_time();
-            let start = process.start_time();
-            let at = wall
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
-                .unwrap_or_default();
-            let mut state = "warming_up";
-            let mut utilization = None;
-            if let Some((last, last_wall, last_cpu, last_start)) = previous {
-                let elapsed = now.duration_since(last);
-                let wall_gap = wall.duration_since(last_wall).ok();
-                if start != last_start || cpu < last_cpu {
-                    state = "process_restarted";
-                } else if elapsed > Duration::from_secs(15)
-                    || wall_gap.is_none_or(|d| d > Duration::from_secs(15))
-                {
-                    state = "gap";
-                } else if elapsed >= Duration::from_secs(1) {
-                    state = "valid";
-                    utilization = Some((cpu - last_cpu) as f64 / 1000.0 / elapsed.as_secs_f64());
-                }
-            }
-            let mut metrics = vec![
-                gauge(
-                    "process.memory.usage",
-                    "By",
-                    process.memory() as f64,
-                    at,
-                    state,
-                ),
-                gauge("uc.process.cpu.time", "s", cpu as f64 / 1000.0, at, state),
-            ];
-            if let Some(value) = utilization {
-                metrics.push(gauge("uc.process.cpu.utilization", "1", value, at, state));
-            }
-            let resource = history.resource.clone();
-            history.push(
-                0,
-                &ExportMetricsServiceRequest {
-                    resource_metrics: vec![ResourceMetrics {
-                        resource: Some(resource),
-                        scope_metrics: vec![ScopeMetrics {
-                            metrics,
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    }],
-                },
+            record_process(
+                &history,
+                process,
+                &history.resource,
+                now,
+                wall,
+                &mut previous,
             );
-            if previous
-                .is_none_or(|(last, _, _, _)| now.duration_since(last) >= Duration::from_secs(1))
-            {
-                previous = Some((now, wall, cpu, start));
-            }
         } else {
             previous = None;
+        }
+        {
+            let mut hosts = history.hosts.lock().unwrap_or_else(PoisonError::into_inner);
+            let pids: Vec<Pid> = hosts
+                .iter()
+                .filter(|(_, host)| host.state == "active")
+                .map(|(pid, _)| Pid::from_u32(*pid))
+                .collect();
+            if !pids.is_empty() {
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&pids),
+                    true,
+                    refresh.with_exe(sysinfo::UpdateKind::Always),
+                );
+            }
+            for (pid, host) in hosts.iter_mut() {
+                if host.state != "active" {
+                    continue;
+                }
+                let Some(process) = system.process(Pid::from_u32(*pid)) else {
+                    host.state = "exited";
+                    host.previous = None;
+                    continue;
+                };
+                if process.start_time() != host.start
+                    || process.exe() != Some(host.executable.as_path())
+                {
+                    host.state = "identity_changed";
+                    host.previous = None;
+                    continue;
+                }
+                record_process(
+                    &history,
+                    process,
+                    &host.resource,
+                    now,
+                    wall,
+                    &mut host.previous,
+                );
+            }
         }
         history.persist();
         drop(history);
@@ -578,4 +652,76 @@ fn unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or_default()
+}
+
+struct HostProcess {
+    start: u64,
+    executable: PathBuf,
+    role: String,
+    resource: ProtoResource,
+    state: &'static str,
+    previous: Option<(Instant, SystemTime, u64, u64)>,
+}
+
+fn record_process(
+    history: &OfflineHistory,
+    process: &Process,
+    resource: &ProtoResource,
+    now: Instant,
+    wall: SystemTime,
+    previous: &mut Option<(Instant, SystemTime, u64, u64)>,
+) {
+    let cpu = process.accumulated_cpu_time();
+    let start = process.start_time();
+    let at = wall
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or_default();
+    let mut state = "warming_up";
+    let mut utilization = None;
+    if let Some((last, last_wall, last_cpu, last_start)) = *previous {
+        let elapsed = now.duration_since(last);
+        if start != last_start || cpu < last_cpu {
+            state = "process_restarted";
+        } else if elapsed > Duration::from_secs(15)
+            || wall
+                .duration_since(last_wall)
+                .ok()
+                .is_none_or(|gap| gap > Duration::from_secs(15))
+        {
+            state = "gap";
+        } else if elapsed >= Duration::from_secs(1) {
+            state = "valid";
+            utilization = Some((cpu - last_cpu) as f64 / 1000.0 / elapsed.as_secs_f64());
+        }
+    }
+    let mut metrics = vec![
+        gauge(
+            "process.memory.usage",
+            "By",
+            process.memory() as f64,
+            at,
+            state,
+        ),
+        gauge("uc.process.cpu.time", "s", cpu as f64 / 1000.0, at, state),
+    ];
+    if let Some(value) = utilization {
+        metrics.push(gauge("uc.process.cpu.utilization", "1", value, at, state));
+    }
+    history.push(
+        0,
+        &ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(resource.clone()),
+                scope_metrics: vec![ScopeMetrics {
+                    metrics,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        },
+    );
+    if previous.is_none_or(|(last, _, _, _)| now.duration_since(last) >= Duration::from_secs(1)) {
+        *previous = Some((now, wall, cpu, start));
+    }
 }

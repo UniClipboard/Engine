@@ -1205,6 +1205,16 @@ impl ProcessObservabilityHandle {
         )
     }
 
+    /// Register a host authenticated by this profile's local daemon channel.
+    /// The caller must own the process; discovery by process name is not supported.
+    pub fn register_host_performance(&self, pid: u32, role: &str) -> std::io::Result<()> {
+        self.state
+            .telemetry
+            .recording
+            .offline
+            .register_host(pid, role)
+    }
+
     /// Attach the profile-owned cipher without exposing key material to the runtime.
     pub fn protect_offline_diagnostic_history(&self, storage: OfflineHistoryStorage) {
         self.state.telemetry.recording.offline.protect(storage);
