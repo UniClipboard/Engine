@@ -50,6 +50,7 @@ use crate::{
     LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability, SourceCollection,
     StopCaptureResult,
 };
+use crate::{OfflineDiagnosticSnapshot, OfflineHistoryStorage};
 
 static INSTALL_GUARD: Mutex<()> = Mutex::new(());
 static INSTALLED: OnceLock<Arc<RuntimeState>> = OnceLock::new();
@@ -102,6 +103,12 @@ impl ProcessResumeObservation {
     pub fn wait(&self, deadline: Duration) -> ProcessResumeResult {
         self.observation.wait(deadline)
     }
+}
+
+pub fn installed_process_observability() -> Option<ProcessObservabilityHandle> {
+    INSTALLED.get().map(|state| ProcessObservabilityHandle {
+        state: Arc::clone(state),
+    })
 }
 
 /// 已安装运行期的网络日志；未安装或未配置时为空。
@@ -1196,6 +1203,25 @@ impl ProcessObservabilityHandle {
             self.state.health.local_file,
             self.state.shutdown.is_started(),
         )
+    }
+
+    /// Attach the profile-owned cipher without exposing key material to the runtime.
+    pub fn protect_offline_diagnostic_history(&self, storage: OfflineHistoryStorage) {
+        self.state.telemetry.recording.offline.protect(storage);
+    }
+
+    /// Start daemon-only performance collection independently of remote telemetry.
+    pub fn start_process_performance(&self) -> std::io::Result<()> {
+        self.state
+            .telemetry
+            .recording
+            .offline
+            .start(Arc::downgrade(&self.state.telemetry.recording))
+    }
+
+    /// Freeze bounded in-memory OTLP records without writing plaintext history.
+    pub fn offline_diagnostic_snapshot(&self) -> OfflineDiagnosticSnapshot {
+        self.state.telemetry.recording.offline.snapshot()
     }
 
     pub fn prepare_local_diagnostic_export(
