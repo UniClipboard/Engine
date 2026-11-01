@@ -15,7 +15,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use opentelemetry_proto::tonic::metrics::v1::{
-    metric, number_data_point, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+    metric, number_data_point, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum,
 };
 use opentelemetry_proto::tonic::resource::v1::Resource as ProtoResource;
 use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
@@ -67,6 +67,7 @@ pub(crate) struct OfflineHistory {
     storage: Mutex<Option<OfflineHistoryStorage>>,
     persistence: Mutex<&'static str>,
     persistence_trimmed: AtomicU64,
+    host_registration_failures: AtomicU64,
     hosts: Mutex<HashMap<u32, HostProcess>>,
 }
 
@@ -117,6 +118,7 @@ impl OfflineHistory {
             storage: Mutex::new(None),
             persistence: Mutex::new("key_unavailable"),
             persistence_trimmed: AtomicU64::new(0),
+            host_registration_failures: AtomicU64::new(0),
             hosts: Mutex::new(HashMap::new()),
         })
     }
@@ -145,6 +147,17 @@ impl OfflineHistory {
     }
 
     pub(crate) fn register_host(&self, pid: u32, role: &str) -> std::io::Result<()> {
+        match self.register_host_identity(pid, role) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.host_registration_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(error)
+            }
+        }
+    }
+
+    fn register_host_identity(&self, pid: u32, role: &str) -> std::io::Result<()> {
         if !matches!(role, "gui" | "quick-panel" | "webview") || pid == std::process::id() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -260,6 +273,11 @@ impl OfflineHistory {
                         return Err(std::io::Error::other("unsupported diagnostic history"));
                     }
                     let mut history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
+                    history.evicted = history
+                        .evicted
+                        .saturating_add(saved.evicted)
+                        .saturating_add(saved.persistence_trimmed);
+                    history.rejected = history.rejected.saturating_add(saved.rejected);
                     let now = unix_ms();
                     // Old runs retain their resource identity and original OTLP timestamps.
                     for (wall_ms, signal, line) in saved.entries.into_iter().rev() {
@@ -289,8 +307,11 @@ impl OfflineHistory {
         let mut entries = Vec::new();
         let mut bytes = 0;
         let mut trimmed = 0;
+        let (evicted, rejected);
         {
             let history = self.history.lock().unwrap_or_else(PoisonError::into_inner);
+            evicted = history.evicted;
+            rejected = history.rejected;
             for entry in history.entries.iter().rev() {
                 // JSON escaping and the existing AEAD envelope need additional space.
                 if entry.at.elapsed() > RETENTION || bytes + entry.line.len() > 512 * 1024 {
@@ -306,6 +327,9 @@ impl OfflineHistory {
         let clear = serde_json::to_vec(&StoredHistory {
             version: 1,
             entries,
+            evicted,
+            rejected,
+            persistence_trimmed: trimmed,
         })?;
         let encrypted = (storage.seal)(&clear)?;
         if encrypted.len() > 8 * 1024 * 1024 {
@@ -393,7 +417,7 @@ impl OfflineHistory {
             .rev()
             .find(|entry| entry.signal == 0)
             .map(|entry| entry.at.elapsed());
-        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "registered_processes" } else { "not_started" }, "metricScope": "per_process_no_application_total", "hostCoverage": host_coverage, "webviewAttribution": "unknown_unless_explicitly_registered_by_owner", "runId": self.run_id, "persistence": *self.persistence.lock().unwrap_or_else(PoisonError::into_inner), "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "persistenceTrimmedRecords": self.persistence_trimmed.load(Ordering::Acquire), "lastMetricAgeMs": last_metric_age.map(|age| age.as_millis()), "metricsStale": last_metric_age.is_none_or(|age| age > Duration::from_secs(15)), "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
+        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "registered_processes" } else { "not_started" }, "metricScope": "per_process_no_application_total", "processMemorySemanticConventionVersion": "1.37.0", "processMemorySemanticConventionStability": "development", "hostCoverage": host_coverage, "hostRegistrationFailures": self.host_registration_failures.load(Ordering::Relaxed), "webviewAttribution": "unknown_unless_explicitly_registered_by_owner", "runId": self.run_id, "persistence": *self.persistence.lock().unwrap_or_else(PoisonError::into_inner), "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "persistenceTrimmedRecords": self.persistence_trimmed.load(Ordering::Acquire), "lastMetricAgeMs": last_metric_age.map(|age| age.as_millis()), "metricsStale": last_metric_age.is_none_or(|age| age > Duration::from_secs(15)), "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
         let [metrics, logs, traces] = signals;
         OfflineDiagnosticSnapshot {
             metrics,
@@ -646,6 +670,9 @@ impl OfflineHistoryStorage {
 struct StoredHistory {
     version: u32,
     entries: Vec<(u64, usize, String)>,
+    evicted: u64,
+    rejected: u64,
+    persistence_trimmed: u64,
 }
 fn unix_ms() -> u64 {
     SystemTime::now()
@@ -695,14 +722,25 @@ fn record_process(
             utilization = Some((cpu - last_cpu) as f64 / 1000.0 / elapsed.as_secs_f64());
         }
     }
+    let mut memory = gauge(
+        "process.memory.usage",
+        "By",
+        process.memory() as f64,
+        at,
+        state,
+    );
+    if let Some(metric::Data::Gauge(mut value)) = memory.data.take() {
+        for point in &mut value.data_points {
+            point.start_time_unix_nano = start.saturating_mul(1_000_000_000);
+        }
+        memory.data = Some(metric::Data::Sum(Sum {
+            data_points: value.data_points,
+            aggregation_temporality: 2,
+            is_monotonic: false,
+        }));
+    }
     let mut metrics = vec![
-        gauge(
-            "process.memory.usage",
-            "By",
-            process.memory() as f64,
-            at,
-            state,
-        ),
+        memory,
         gauge("uc.process.cpu.time", "s", cpu as f64 / 1000.0, at, state),
     ];
     if let Some(value) = utilization {
