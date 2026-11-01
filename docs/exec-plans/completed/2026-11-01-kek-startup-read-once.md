@@ -1,6 +1,6 @@
 # 启动期 KEK 单次读取
 
-状态：实现与本地验证完成。后续来源：UniClipboard/UniClipboard#2160。
+状态：实现与单次读取验证完成；密码输入次数的产品验收未通过。后续来源：UniClipboard/UniClipboard#2160。
 
 ## 范围与责任
 
@@ -51,4 +51,33 @@
 just cargo test -p uc-engine --test host_contract startup_reads_kek_once_and_resume_rechecks_secure_storage --locked
 ```
 
-宿主安全存储为内存实现。真实 macOS 钥匙串弹窗、发布签名和设备验收均跳过。
+首轮自动验证使用内存宿主安全存储。后续真实 macOS 验证见下节；发布签名和其他设备验收仍跳过。
+
+
+## 真实 macOS 验证
+
+环境：macOS 27.0（26A5416b），Apple Silicon。Desktop 源码为
+`897c9d5e5a18ca741c086b2ccc4da9b3ab6abf74`。分别构建引用上述基线和候选
+`aa2eae6103e5d48e47340338829a23f2008fa607` 的独立 `uniclipd` 调试测试版本。
+此次验证运行真实 daemon 和登录钥匙串，没有运行打包后的 GUI。
+
+使用唯一 `gui-go-kek-native-*` 资料，设置 `UC_DEV_USE_PLATFORM_STORAGE=1` 并禁用系统剪贴板。
+测试资料的文件密钥库条目数为零，资料 vault 使用原有密文格式。
+只观察该测试服务的 `SecKeychainFindGenericPassword` 调用，保持原参数和返回值，记录次数与
+`OSStatus`，不记录账户名、密码或密钥字节。测试口令只在初始化进程内生成和持有。
+
+结果：
+
+- 基线打开已有测试资料：2 次原生 KEK 读取，两次 `OSStatus=0`；会话与设备身份保持正常。
+- 候选打开自己创建的测试资料：1 次原生 KEK 读取，`OSStatus=0`；会话与设备身份保持正常。
+- 候选打开不同测试签名创建的同一资料：1 次原生 KEK 读取，`OSStatus=0`；会话与设备身份保持正常。
+- 用户报告：前一阶段输入过 4 次密码；候选跨签名阶段仍输入了 2 次密码。
+  前一阶段包含基线与另一份资料的初始化，不能把 4 次输入逐一归因于基线读取。
+- 候选跨签名日志只有一次成功的 KEK 读取。其他同测试服务的查询均返回条目不存在。
+  读取次数不能作为系统授权窗口数量的证明；两次输入的具体窗口内容仍待确认。
+- 只读检查测试条目的访问控制：存在应用信任的解密 ACL（1 个受信任应用）和分区 ACL。
+  此事实不足以证明两次输入分别由哪一个 ACL 触发；未修改 ACL、分区权限或用户钥匙串设置。
+- 全部测试 daemon 均已退出；Desktop 源码与 Engine 依赖文件已恢复，未修改既有 UniClipboard 资料。
+
+限制：测试二进制采用独立的临时 ad-hoc 签名，不代表 Developer ID 发布签名或 App/CLI 共享信任验收。
+当前只证明真实启动 KEK 读取从两次降为一次。不得将本 PR 描述为已消除重复密码输入或钥匙串弹窗。
