@@ -38,6 +38,8 @@ mod module_log;
 mod module_log_fields;
 #[path = "../src/network_log/mod.rs"]
 mod network_log;
+#[path = "../src/offline.rs"]
+mod offline;
 #[path = "../src/process_census.rs"]
 mod process_census;
 #[path = "../src/process_release.rs"]
@@ -52,6 +54,7 @@ mod status;
 mod subscriber;
 #[path = "../src/subscriber_gate.rs"]
 mod subscriber_gate;
+pub use offline::{OfflineDiagnosticSnapshot, OfflineHistoryStorage};
 #[path = "../src/telemetry.rs"]
 mod telemetry;
 

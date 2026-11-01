@@ -481,13 +481,16 @@ pub async fn wire_dependencies_from_inputs(
         uc_observability_runtime::installed_process_observability(),
         tokio::runtime::Handle::try_current(),
     ) {
-        let encrypt_cipher = Arc::clone(&platform.blob_cipher);
-        let decrypt_cipher = Arc::clone(&platform.blob_cipher);
+        let encrypt_cipher = Arc::downgrade(&platform.blob_cipher);
+        let decrypt_cipher = Arc::downgrade(&platform.blob_cipher);
         let decrypt_runtime = runtime.clone();
         observability.protect_offline_diagnostic_history(
             uc_observability_runtime::OfflineHistoryStorage::new(
                 paths.logs_dir.join("otel-history"),
                 Box::new(move |bytes| {
+                    let encrypt_cipher = encrypt_cipher.upgrade().ok_or_else(|| {
+                        std::io::Error::other("diagnostic profile cipher released")
+                    })?;
                     runtime
                         .block_on(encrypt_cipher.encrypt(
                             &uc_core::crypto::domain::Plaintext::new(bytes.to_vec()),
@@ -499,6 +502,9 @@ pub async fn wire_dependencies_from_inputs(
                         .map_err(std::io::Error::other)
                 }),
                 Box::new(move |bytes| {
+                    let decrypt_cipher = decrypt_cipher.upgrade().ok_or_else(|| {
+                        std::io::Error::other("diagnostic profile cipher released")
+                    })?;
                     decrypt_runtime
                         .block_on(decrypt_cipher.decrypt(
                             &uc_core::crypto::domain::Ciphertext::new(bytes.to_vec()),
