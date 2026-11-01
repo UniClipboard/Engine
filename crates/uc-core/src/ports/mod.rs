@@ -91,9 +91,10 @@ pub use file_transfer::{
     FindEntryIdForTransferPort, GetEntryReceiveProgressPort, GetEntryTransferSummaryPort,
     ListExpiredInflightTransfersPort, ListProvisionalReceivesPort, PendingInboundTransfer,
     ProvisionalInboundTransfer, ProvisionalReceiveAction, ProvisionalReceiveError,
-    ProvisionalReceiveRecovery, ReceiveItemFailureReason, ReceiveItemKind, ReceiveItemProgress,
-    ReceiveItemRole, RecordReceiverTransferPort, SeedProvisionalReceivePort,
-    TrackedFileTransferStatus, UpdateProvisionalReceivePathPort,
+    ProvisionalReceiveRecovery, ReceiveContentLocator, ReceiveItemFailureReason, ReceiveItemKind,
+    ReceiveItemProgress, ReceiveItemRole, ReceiveItemTransfer, ReceiveSnapshotVersion,
+    RecordReceiverTransferPort, SeedProvisionalReceivePort, TrackedFileTransferStatus,
+    UpdateProvisionalReceivePathPort,
 };
 pub use hidden_path::MarkHiddenPort;
 pub use host_event::{

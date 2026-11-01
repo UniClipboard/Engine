@@ -47,6 +47,7 @@ pub enum ClipboardHostEvent {
 pub enum TransferHostEvent {
     /// 发送侧完整投影已变化；事件只使宿主缓存失效，丢失后仍可重读完整列表。
     OutboundProgressChanged,
+    ReceiveProgressChanged,
     StatusChanged {
         transfer_id: String,
         // 临时接收尚未认领或因内容重复被丢弃时，没有历史记录归属。

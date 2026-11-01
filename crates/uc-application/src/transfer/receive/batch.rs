@@ -555,6 +555,9 @@ fn project_items(
         let members = items
             .iter()
             .map(|(id, item)| ReceiveItemProgress {
+                content: None,
+                transfer: None,
+                history_file_index: None,
                 item_id: id.clone(),
                 kind: ReceiveItemKind::Unknown,
                 status: tracked_status(&item.status),
@@ -601,6 +604,9 @@ fn project_items(
                 reason = Some(ReceiveItemFailureReason::Unknown);
             }
             ReceiveItemProgress {
+                content: None,
+                transfer: None,
+                history_file_index: None,
                 item_id: planned.id.clone(),
                 kind: planned.kind,
                 status,

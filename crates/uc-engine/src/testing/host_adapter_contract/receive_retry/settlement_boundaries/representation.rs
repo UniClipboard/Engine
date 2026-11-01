@@ -51,6 +51,16 @@ async fn assert_decryption_boundary(corrupt: bool) {
         .await
         .unwrap();
     let receiving = progress(&case.receiver, &pending.entry_id, "receiving").await;
+    let query = serde_json::to_value(&receiving).unwrap();
+    assert_eq!(
+        query["items"][0]["content"],
+        serde_json::json!({"kind": "representation", "index": 0})
+    );
+    assert_eq!(
+        query["items"][0]["transfer"]["received_bytes"],
+        query["items"][0]["transfer"]["total_bytes"]
+    );
+    assert_eq!(receiving.items[0].state, "transferring");
     let before = assert_processing(&case, &receiving, 0).await;
     assert_eq!(before.entry_id, report.entry_id);
     assert_eq!(before.items_total, 1);

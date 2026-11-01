@@ -58,7 +58,7 @@ impl ProgressRuntime {
             jobs.spawn(projection.run(stopping.clone()));
             jobs.spawn(exchange.run(stopping.clone()));
             jobs.spawn(observe_reachability(reachability, exchanges.clone(), stopping.clone()));
-            jobs.spawn(observe_receive(receipts, exchanges, stopping.clone()));
+            jobs.spawn(observe_receive(receipts, exchanges, host_events.clone(), stopping.clone()));
             jobs.spawn(observe_events(events, host_events, stopping.clone()));
             let mut failure = None;
             tokio::select! {

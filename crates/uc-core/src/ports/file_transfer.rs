@@ -219,9 +219,36 @@ pub enum ReceiveItemFailureReason {
     Unknown,
 }
 
+/// 原始内容位置；文件与表示使用独立命名空间。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiveContentLocator {
+    File { index: u32 },
+    Representation { index: u32 },
+    DirectoryUnit,
+}
+
+/// 同一运行期原接收目录提供的完整快照版本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiveSnapshotVersion {
+    pub producer_id: String,
+    pub attempt_revision: u64,
+    pub snapshot_revision: u64,
+}
+
+/// 当前获取轮次的字节事实；总量未知与零字节文件不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiveItemTransfer {
+    pub received_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub round: u32,
+}
+
 /// 可供宿主选择的接收项；身份绑定本次查询的 attempt。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiveItemProgress {
+    pub content: Option<ReceiveContentLocator>,
+    pub transfer: Option<ReceiveItemTransfer>,
+    pub history_file_index: Option<u32>,
     pub item_id: String,
     pub kind: ReceiveItemKind,
     pub status: TrackedFileTransferStatus,
@@ -291,6 +318,9 @@ pub fn group_receive_items(
         _ => None,
     };
     vec![ReceiveItemProgress {
+        content: None,
+        transfer: None,
+        history_file_index: None,
         item_id: "directory_unit".to_owned(),
         kind: ReceiveItemKind::DirectoryUnit,
         status,
@@ -301,6 +331,7 @@ pub fn group_receive_items(
 /// 当前接收尝试的成员聚合；目录成员计数与可选择的整个目录单元分开。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryReceiveProgress {
+    pub snapshot_version: Option<ReceiveSnapshotVersion>,
     pub entry_id: String,
     pub attempt_id: String,
     pub state: crate::ports::entry_receive_attempt::AttemptState,
@@ -470,6 +501,9 @@ mod receive_item_tests {
 
     fn completed(id: &str) -> ReceiveItemProgress {
         ReceiveItemProgress {
+            content: None,
+            transfer: None,
+            history_file_index: None,
             item_id: id.into(),
             kind: ReceiveItemKind::File,
             status: TrackedFileTransferStatus::Completed,
@@ -511,6 +545,9 @@ mod receive_item_tests {
                 state,
                 true,
                 vec![ReceiveItemProgress {
+                    content: None,
+                    transfer: None,
+                    history_file_index: None,
                     item_id: "member".into(),
                     kind: ReceiveItemKind::File,
                     status: TrackedFileTransferStatus::Failed,
@@ -535,6 +572,9 @@ mod receive_item_tests {
                 vec![
                     completed("saved"),
                     ReceiveItemProgress {
+                        content: None,
+                        transfer: None,
+                        history_file_index: None,
                         item_id: "unstarted".into(),
                         kind: ReceiveItemKind::File,
                         status: TrackedFileTransferStatus::Pending,

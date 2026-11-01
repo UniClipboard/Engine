@@ -235,7 +235,28 @@ export interface OhSpaceCreated {
   identityFingerprint: string
 }
 
+export interface OhReceiveContentLocator {
+  kind: 'file' | 'representation' | 'directory_unit'
+  index?: number
+}
+
+export interface OhReceiveItemTransfer {
+  /** Decimal integers preserve the full 64-bit range. */
+  receivedBytes: string
+  totalBytes?: string
+  round: number
+}
+
+export interface OhReceiveSnapshotVersion {
+  producerId: string
+  attemptRevision: string
+  snapshotRevision: string
+}
+
 export interface OhReceiveItem {
+  content?: OhReceiveContentLocator
+  transfer?: OhReceiveItemTransfer
+  historyFileIndex?: number
   itemId: string
   kind: string
   state: string
@@ -249,6 +270,7 @@ export interface OhReceiveRetryOutcome {
 }
 
 export interface OhReceiveProgress {
+  snapshotVersion?: OhReceiveSnapshotVersion
   entryId: string
   attemptId: string
   state: string

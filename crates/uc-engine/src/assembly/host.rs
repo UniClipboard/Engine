@@ -381,6 +381,9 @@ impl EngineHostEventEmitter {
 impl HostEventEmitterPort for EngineHostEventEmitter {
     fn emit(&self, event: HostEvent) -> Result<(), EmitError> {
         let event = match event {
+            HostEvent::Transfer(TransferHostEvent::ReceiveProgressChanged) => {
+                EngineEvent::ReceiveProgressChanged
+            }
             HostEvent::Transfer(TransferHostEvent::OutboundProgressChanged) => {
                 EngineEvent::OutboundProgressChanged
             }

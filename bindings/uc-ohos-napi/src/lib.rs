@@ -189,7 +189,28 @@ pub struct OhReceiveRetryOutcome {
 }
 
 #[napi(object)]
+pub struct OhReceiveContentLocator {
+    pub kind: String,
+    pub index: Option<u32>,
+}
+#[napi(object)]
+pub struct OhReceiveItemTransfer {
+    pub received_bytes: String,
+    pub total_bytes: Option<String>,
+    pub round: u32,
+}
+#[napi(object)]
+pub struct OhReceiveSnapshotVersion {
+    pub producer_id: String,
+    pub attempt_revision: String,
+    pub snapshot_revision: String,
+}
+
+#[napi(object)]
 pub struct OhReceiveItem {
+    pub content: Option<OhReceiveContentLocator>,
+    pub transfer: Option<OhReceiveItemTransfer>,
+    pub history_file_index: Option<u32>,
     pub item_id: String,
     pub kind: String,
     pub state: String,
@@ -197,6 +218,7 @@ pub struct OhReceiveItem {
 }
 #[napi(object)]
 pub struct OhReceiveProgress {
+    pub snapshot_version: Option<OhReceiveSnapshotVersion>,
     pub entry_id: String,
     pub attempt_id: String,
     pub state: String,

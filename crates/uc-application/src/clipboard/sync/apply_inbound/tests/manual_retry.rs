@@ -143,6 +143,7 @@ async fn discarded_partial_redelivery_preserves_original_saved_recipe_for_manual
         );
         assert_eq!(landed.keys().copied().collect::<Vec<_>>(), vec![0]);
         let mut progress = EntryReceiveProgress {
+            snapshot_version: None,
             entry_id: "receiver".into(),
             attempt_id: attempt.clone(),
             state: AttemptState::Failed,
@@ -621,6 +622,9 @@ impl Fixture {
                     unselected: HashMap::from([(
                         2,
                         ReceiveItemProgress {
+                            content: None,
+                            transfer: None,
+                            history_file_index: None,
                             item_id: "receiver:attempt:old:member:2".into(),
                             kind: ReceiveItemKind::File,
                             status: TrackedFileTransferStatus::Cancelled,
@@ -667,6 +671,7 @@ async fn manual_retry_saves_new_partial_success_without_fetching_or_deleting_pre
     );
     assert_eq!(std::fs::read(&fixture.saved).unwrap(), b"success");
     let mut progress = EntryReceiveProgress {
+        snapshot_version: None,
         entry_id: "receiver".into(),
         attempt_id,
         state: AttemptState::Cancelled,
@@ -763,6 +768,7 @@ async fn manual_retry_caller_drop_keeps_full_capture_supervised_until_actual_com
         panic!("retry not accepted")
     };
     let mut pending = EntryReceiveProgress {
+        snapshot_version: None,
         entry_id: "receiver".into(),
         attempt_id: attempt_id.clone(),
         state: AttemptState::Receiving,
@@ -847,6 +853,7 @@ async fn manual_retry_full_completion_keeps_inherited_item_results_and_releases_
         .retry_material(&EntryId::from("receiver"), &attempt_id)
         .is_none());
     let mut current = EntryReceiveProgress {
+        snapshot_version: None,
         entry_id: "receiver".into(),
         attempt_id,
         state: AttemptState::Completed,

@@ -91,7 +91,9 @@ async fn real_engine_written_output_stays_processing_until_original_export_retur
     let _lock = ENGINE_TEST_LOCK.lock().await;
     let case = receive_case(true).await;
     let _release = ReleaseOnDrop(case.exports.clone());
-    let path = case.exports.paths.lock().unwrap()[0].clone();
+    let path = case.exports.paths.lock().unwrap()[0]
+        .canonicalize()
+        .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), CONTENTS[0]);
     let before = assert_processing(&case, &case.first, 0).await;
     assert_eq!(before.items_completed, 0);
@@ -140,7 +142,9 @@ async fn real_engine_offline_retry_commits_output_while_progress_notification_re
     })
     .await
     .expect("actual export and permanently blocked notification both started");
-    let path = case.exports.paths.lock().unwrap()[3].clone();
+    let path = case.exports.paths.lock().unwrap()[3]
+        .canonicalize()
+        .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), CONTENTS[1]);
     case.exports.release.add_permits(1);
     let completed = progress(&case.receiver, &case.first.entry_id, "completed").await;

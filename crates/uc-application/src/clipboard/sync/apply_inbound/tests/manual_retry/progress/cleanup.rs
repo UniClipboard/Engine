@@ -140,6 +140,7 @@ async fn failed_or_cancelled_fetch_cleanup_retains_resources_without_completed_f
             AttemptState::Receiving
         );
         let mut pending = EntryReceiveProgress {
+            snapshot_version: None,
             entry_id: "receiver".into(),
             attempt_id,
             state: AttemptState::Receiving,

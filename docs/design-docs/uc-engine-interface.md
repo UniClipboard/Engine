@@ -375,7 +375,11 @@ HarmonyOS 绑定必须公开相同字段、结果、错误和提醒。
 
 `QueryEntryDelivery` 由核心合并记录来源、当前可信设备集合和已发生的投递事实。来源明确区分本机、远端和无法追溯的历史记录；每个目标明确区分待处理、已送达、重复、不可达和失败。待处理既可以来自尚未接受发送的当前设备差集，也可以来自发送开始前已经持久保存、等待最终结果的恢复依据；两者对宿主保持同一状态。正常结果可以携带设备显示名和失败补充说明供界面展示，但这些内容不得进入调试输出或日志。记录不存在返回 `NotFound`，存储失败只返回脱敏错误。
 
-接收进度只包含记录编号、尝试编号、稳定状态、字节数和项目数，不包含文件名、路径或内容。`QueryEntryReceiveProgress` 在没有活动任务时返回空结果；`ListEntryReceiveProgress` 只返回尚未进入终态的任务。
+`QueryEntryReceiveProgress` returns the current receive attempt, including terminal results.
+`ListEntryReceiveProgress` returns nonterminal attempts only. Per-item content locators,
+current-round counters, saved-result boundaries, snapshot ordering, binding semantics,
+and unavailable runtime facts follow the [host receive snapshot contract](receive-item-progress.md).
+`ReceiveProgressChanged` invalidates these queries. Progress events contain no file names or paths.
 
 `CancelEntryReceive` 使用记录编号和尝试编号防止过期请求误取消新任务，并明确区分已请求取消、已取消、未在接收、已经太晚、已经结束和已被新尝试取代。`CancelInboundTransfer` 是幂等操作：真实撤销返回 `Cancelled`，没有活动传输或重复取消返回 `NotInflight`。取消原因使用核心稳定枚举，宿主不得传入底层网络或文件系统错误。
 
