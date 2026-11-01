@@ -136,6 +136,9 @@ pub enum EntryFileSetError {
     /// 引用的 entry_id 在系统中不存在(违反 FK)。
     #[error("entry not found: {0}")]
     EntryNotFound(String),
+    /// 清单行指向的 blob 行不存在。错误文本不包含 blob 标识。
+    #[error("entry file set references a missing blob")]
+    MissingBlob(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// 持久化层操作失败。
     #[error("storage failure")]
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),

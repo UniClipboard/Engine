@@ -13,9 +13,14 @@ use uc_core::clipboard::{
 };
 use uc_core::ids::{EntryId, EventId};
 use uc_core::ports::clipboard::{
-    DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
+    ClipboardEntryRemoval, DeleteClipboardEntryWithReceiveStatePort, GetClipboardEntryPort,
     ListRepresentationsForEventPort,
 };
+
+use crate::clipboard::history::blob_reclaim::{
+    BlobReclaimError, BlobReclaimPort, BlobReclaimReport,
+};
+use uc_core::BlobId;
 
 struct Targets {
     second_succeeds: bool,
@@ -49,14 +54,40 @@ impl DeleteClipboardEntryWithReceiveStatePort for Targets {
     async fn delete_entry_with_receive_state(
         &self,
         entry: &EntryId,
-    ) -> Result<bool, ClipboardRepositoryError> {
+    ) -> Result<ClipboardEntryRemoval, ClipboardRepositoryError> {
         if entry.as_ref() == "second" && self.second_succeeds {
-            return Ok(true);
+            return Ok(ClipboardEntryRemoval {
+                removed: true,
+                candidate_blob_ids: vec![BlobId::from("blob-cleared")],
+            });
         }
         Err(ClipboardRepositoryError::Storage(
             io::Error::new(io::ErrorKind::PermissionDenied, "PRIVATE_CLEAR_ERROR_BODY").into(),
         ))
     }
+}
+
+struct RecordingReclaim {
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl BlobReclaimPort for RecordingReclaim {
+    async fn reclaim_unreferenced(
+        &self,
+        blob_ids: &[BlobId],
+    ) -> Result<BlobReclaimReport, BlobReclaimError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .extend(blob_ids.iter().map(|blob_id| blob_id.to_string()));
+        Ok(BlobReclaimReport {
+            checked: blob_ids.len() as u64,
+            ..BlobReclaimReport::default()
+        })
+    }
+
+    fn release_write_leases(&self, _: &[BlobId]) {}
 }
 
 #[tokio::test]
@@ -66,12 +97,16 @@ async fn clear_keeps_each_deletion_source_and_leaves_failed_admission_closed() {
         let work = Arc::new(ReceiveWorkRegistry::default());
         let (progress, _worker) =
             ProgressProjectionRegistry::new(Arc::new(RejectUnexpectedElapsed));
+        let reclaim = Arc::new(RecordingReclaim {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
         let deletion = Arc::new(DeleteClipboardEntryUseCase::from_ports(
             targets.clone(),
             targets.clone(),
             targets.clone(),
             work.clone(),
             progress,
+            reclaim.clone(),
         ));
         let clear = ClearClipboardHistoryUseCase::new(targets, deletion, work.clone());
         let result = clear.execute().await;
@@ -83,6 +118,10 @@ async fn clear_keeps_each_deletion_source_and_leaves_failed_admission_closed() {
                 .1
                 .chain()
                 .any(|source| source.downcast_ref::<io::Error>().is_some()));
+            assert_eq!(
+                reclaim.seen.lock().unwrap().as_slice(),
+                ["blob-cleared".to_string()]
+            );
         } else {
             let error = result.unwrap_err();
             assert!(!error.to_string().contains("PRIVATE_CLEAR_ERROR_BODY"));
@@ -98,6 +137,7 @@ async fn clear_keeps_each_deletion_source_and_leaves_failed_admission_closed() {
                     io::ErrorKind::PermissionDenied
                 );
             }
+            assert!(reclaim.seen.lock().unwrap().is_empty());
         }
         assert!(!work.is_open());
     }

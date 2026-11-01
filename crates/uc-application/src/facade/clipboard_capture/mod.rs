@@ -274,6 +274,7 @@ mod tests {
         ContentHash, EntryFileSet, EntryFileSetError, EntryFileSetLine, EntryFileSetLineKind,
         FileSetMemberKind, FileSetMemberLocation, HashAlgorithm,
     };
+    use uc_core::ids::BlobId;
     use uc_core::ports::clipboard::EntryFileSetRepositoryPort;
     use uc_core::SystemClipboardSnapshot;
 
@@ -368,7 +369,7 @@ mod tests {
             &self,
             _entry_id: &EntryId,
             _file_set: &EntryFileSet,
-        ) -> Result<(), EntryFileSetError> {
+        ) -> Result<Vec<BlobId>, EntryFileSetError> {
             panic!("diagnostic capture must not save through its readback dependency")
         }
 

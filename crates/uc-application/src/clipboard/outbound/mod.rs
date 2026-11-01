@@ -1117,7 +1117,7 @@ mod tests {
         ContentHash, EntryFileSet, EntryFileSetError, EntryFileSetLine, FileSetMemberKind,
         FileSetMemberLocation, HashAlgorithm, MimeType, ObservedClipboardRepresentation,
     };
-    use uc_core::ids::{EntryId, FormatId, RepresentationId};
+    use uc_core::ids::{BlobId, EntryId, FormatId, RepresentationId};
 
     struct FakeOutbound;
 
@@ -1352,7 +1352,7 @@ mod tests {
             &self,
             _entry_id: &EntryId,
             _file_set: &EntryFileSet,
-        ) -> Result<(), EntryFileSetError> {
+        ) -> Result<Vec<BlobId>, EntryFileSetError> {
             unreachable!("outbound must never save a file-set manifest")
         }
         async fn load(

@@ -209,7 +209,8 @@ impl ClipboardAssembly {
             .with_inbound_receive_commit(Arc::clone(
                 &application.storage.directory_receive.commit_inbound,
             ))
-            .with_entry_identity_coordinator(Arc::clone(&entry_identity)),
+            .with_entry_identity_coordinator(Arc::clone(&entry_identity))
+            .with_blob_reclaim(Arc::clone(&application.storage.blob_reclaim)),
         );
         let capture = Arc::new(
             ClipboardCaptureFacade::new(
@@ -496,6 +497,7 @@ impl ClipboardAssembly {
             clock: Arc::clone(&self.deps.system.clock),
             cache_fs: Arc::clone(&self.deps.system.cache_fs),
             history_tag_store: Arc::clone(&self.deps.storage.history_tag_store),
+            blob_reclaim: Arc::clone(&self.deps.storage.blob_reclaim),
         }))
     }
 

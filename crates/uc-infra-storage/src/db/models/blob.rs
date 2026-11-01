@@ -12,6 +12,7 @@ pub struct BlobRow {
     pub encryption_algo: Option<String>,
     pub created_at_ms: i64,
     pub compressed_size: Option<i64>,
+    pub last_claimed_at_ms: i64,
 }
 
 #[derive(Insertable)]
@@ -25,4 +26,5 @@ pub struct NewBlobRow {
     pub content_hash: String,
     pub created_at_ms: i64,
     pub compressed_size: Option<i64>,
+    pub last_claimed_at_ms: i64,
 }

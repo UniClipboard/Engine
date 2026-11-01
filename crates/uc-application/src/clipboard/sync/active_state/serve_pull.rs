@@ -300,7 +300,7 @@ mod tests {
             &self,
             _entry_id: &EntryId,
             _file_set: &EntryFileSet,
-        ) -> Result<(), EntryFileSetError> {
+        ) -> Result<Vec<BlobId>, EntryFileSetError> {
             unreachable!("serve never writes the manifest")
         }
         async fn load(
