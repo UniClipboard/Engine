@@ -635,6 +635,9 @@ async fn unpolled_startup_retains_host_closer() {
     assert!(!retry, "unconfirmed cleanup must prevent retry");
 }
 
+// 共享 CI 上启动与独立清理线程可能延迟调度，保留有界但充足的等待时间。
+const OWNED_CLEANUP_WAIT: Duration = Duration::from_secs(30);
+
 struct GatedUnpolledCloser {
     lease: Option<File>,
     entered: mpsc::Sender<()>,
@@ -657,15 +660,15 @@ impl HostClipboardChangeStream for GatedUnpolledCloser {
     }
 }
 
-/// 未轮询启动的清理独立于原执行器，并在宿主确认前继续持有锁。
+/// 启动 future 在首次轮询前被丢弃时，清理守卫接管宿主并持锁到关闭确认。
 #[test]
-fn unpolled_startup_runs_owned_cleanup() {
+fn startup_future_dropped_before_first_poll_runs_owned_cleanup() {
     const CHILD: &str = "UC_TEST_UNPOLLED_STARTUP_CLEANUP_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "startup::failure::unpolled_startup_runs_owned_cleanup",
+                "startup::failure::startup_future_dropped_before_first_poll_runs_owned_cleanup",
                 "--nocapture",
             ])
             .env(CHILD, "1")
@@ -707,22 +710,38 @@ fn unpolled_startup_runs_owned_cleanup() {
         input,
         lifecycle,
     ));
-    let started = waiting.recv_timeout(Duration::from_secs(2)).is_ok();
+    let started = waiting.recv_timeout(OWNED_CLEANUP_WAIT).is_ok();
     let probe = || {
         Command::new("python3").args(["-c", "import fcntl,sys\nf=open(sys.argv[1], 'r+')\ntry:\n fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n sys.exit(1)"]).arg(&path).status().unwrap().success()
     };
     let held_while_pending = !probe();
     let retry_while_pending = progress.snapshot().allowed_actions.retry;
     release.notify_one();
-    let finished = done.recv_timeout(Duration::from_secs(2)).is_ok();
+    let finished = done.recv_timeout(OWNED_CLEANUP_WAIT).is_ok();
     let released = probe();
     if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(std::path::Path::new(&directory).join("unpolled-startup-cleanup.json"), serde_json::to_vec_pretty(&serde_json::json!({"scope":"unpolled real Engine future, controlled blocked host closer and independent lock probe", "cleanup_started":started, "host_lock_retained_while_pending":held_while_pending, "retry_allowed_while_pending":retry_while_pending, "cleanup_finished":finished, "host_lock_released":released, "startup_release_receipt":"not established", "device_acceptance":"not established"})).unwrap()).unwrap();
     }
     assert!(
-        started && held_while_pending && !retry_while_pending && finished && released,
-        "unpolled cleanup must be owned through close confirmation"
+        started,
+        "cleanup closer did not start within {OWNED_CLEANUP_WAIT:?}"
+    );
+    assert!(
+        held_while_pending,
+        "host lease was not held while cleanup was pending"
+    );
+    assert!(
+        !retry_while_pending,
+        "retry was allowed before cleanup confirmation"
+    );
+    assert!(
+        finished,
+        "cleanup closer did not finish within {OWNED_CLEANUP_WAIT:?} after release"
+    );
+    assert!(
+        released,
+        "host lease was not released after cleanup finished"
     );
 }
 
@@ -802,15 +821,15 @@ fn startup_without_executor_returns_error_and_runs_cleanup() {
     );
 }
 
-/// 已接收但从未轮询的启动任务仍须接管宿主清理。
+/// 调用方停止 runtime 不会停止独立执行器；丢弃启动结果后仍须完成宿主清理。
 #[test]
-fn unpolled_startup_task_runs_owned_cleanup_after_executor_stops() {
+fn startup_cleanup_completes_after_caller_runtime_stops() {
     const CHILD: &str = "UC_TEST_UNPOLLED_STARTUP_TASK_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "startup::failure::unpolled_startup_task_runs_owned_cleanup_after_executor_stops",
+                "startup::failure::startup_cleanup_completes_after_caller_runtime_stops",
                 "--nocapture",
             ])
             .env(CHILD, "1")
@@ -863,22 +882,36 @@ fn unpolled_startup_task_runs_owned_cleanup_after_executor_stops() {
     };
     drop(future);
     runtime.shutdown_timeout(Duration::from_millis(100));
-    let started = waiting.recv_timeout(Duration::from_secs(2)).is_ok();
+    let started = waiting.recv_timeout(OWNED_CLEANUP_WAIT).is_ok();
     let probe = || {
         Command::new("python3").args(["-c", "import fcntl,sys\nf=open(sys.argv[1], 'r+')\ntry:\n fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n sys.exit(1)"]).arg(&path).status().unwrap().success()
     };
     let held = !probe();
     let retry = progress.snapshot().allowed_actions.retry;
     release.notify_one();
-    let finished = done.recv_timeout(Duration::from_secs(2)).is_ok();
+    let finished = done.recv_timeout(OWNED_CLEANUP_WAIT).is_ok();
     let released = probe();
     if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(std::path::Path::new(&directory).join("unpolled-startup-task.json"), serde_json::to_vec_pretty(&serde_json::json!({"scope":"real Engine task accepted by a controlled executor that stops before polling, controlled host closer and independent lock probe", "task_accepted":accepted, "cleanup_started":started, "host_lock_retained_while_pending":held, "retry_allowed_while_pending":retry, "cleanup_finished":finished, "host_lock_released":released, "startup_release_receipt":"not established", "device_acceptance":"not established"})).unwrap()).unwrap();
+        std::fs::write(std::path::Path::new(&directory).join("unpolled-startup-task.json"), serde_json::to_vec_pretty(&serde_json::json!({"scope":"real Engine startup future polled once then dropped and caller runtime stopped, independent owned executor, controlled host closer and lock probe", "task_accepted":accepted, "cleanup_started":started, "host_lock_retained_while_pending":held, "retry_allowed_while_pending":retry, "cleanup_finished":finished, "host_lock_released":released, "startup_release_receipt":"not established", "device_acceptance":"not established"})).unwrap()).unwrap();
     }
     assert!(
-        accepted && started && held && !retry && finished && released,
-        "unpolled accepted task must run owned host cleanup"
+        accepted,
+        "startup future was not pending after its first poll"
+    );
+    assert!(
+        started,
+        "cleanup closer did not start within {OWNED_CLEANUP_WAIT:?}"
+    );
+    assert!(held, "host lease was not held while cleanup was pending");
+    assert!(!retry, "retry was allowed before cleanup confirmation");
+    assert!(
+        finished,
+        "cleanup closer did not finish within {OWNED_CLEANUP_WAIT:?} after release"
+    );
+    assert!(
+        released,
+        "host lease was not released after cleanup finished"
     );
 }
 

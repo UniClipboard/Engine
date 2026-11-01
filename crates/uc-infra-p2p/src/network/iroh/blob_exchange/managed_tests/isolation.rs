@@ -8,6 +8,7 @@ use crate::network::iroh::blobs::{IrohBlobTransferAdapter, BLOBS_ALPN};
 use crate::network::iroh::connectivity::{
     ConnectivityProfile, IrohConnectionAdmission, IrohPeerConnection,
 };
+use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::task::AtomicWaker;
 use futures_util::StreamExt;
@@ -15,6 +16,7 @@ use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::{protocol::Router, Endpoint, RelayMode};
 use iroh_blobs::store::fs::FsStore;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -47,6 +49,18 @@ use uc_core::ContentHash;
 use uc_infra_crypto::identity_fingerprint::Sha256IdentityFingerprintFactory;
 
 const WAIT: Duration = Duration::from_secs(10);
+
+async fn staged<T>(
+    round: usize,
+    stage: &'static str,
+    duration: Duration,
+    future: impl Future<Output = T>,
+) -> anyhow::Result<T> {
+    timeout(duration, future)
+        .await
+        .with_context(|| format!("round {round}: stage `{stage}` timed out after {duration:?}"))
+}
+
 #[derive(Default)]
 struct Gate {
     entered: Notify,
@@ -419,7 +433,13 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
                     .await
             })
         };
-        timeout(WAIT, gates[0].entered.notified()).await?;
+        staged(
+            round,
+            "A partial-read gate",
+            WAIT,
+            gates[0].entered.notified(),
+        )
+        .await?;
         assert!(gates[0].validated.load(Ordering::SeqCst) > 0);
         let b = {
             let facade = facade.clone();
@@ -436,7 +456,7 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
                     .await
             })
         };
-        timeout(WAIT, async {
+        staged(round, "both operations entered", WAIT, async {
             while receiving.receives.lock().unwrap().len() < offset + 2
                 || provider.provides.load(Ordering::SeqCst) < offset + 2
             {
@@ -445,7 +465,13 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
         })
         .await?;
         if !same_content {
-            timeout(WAIT, gates[1].entered.notified()).await?;
+            staged(
+                round,
+                "B partial-read gate",
+                WAIT,
+                gates[1].entered.notified(),
+            )
+            .await?;
             let validated = gates[1].validated.load(Ordering::SeqCst);
             assert!(
                 validated > 0 && validated < size as u64,
@@ -461,7 +487,7 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
         );
         assert!(native_lifetime.upgrade().is_some());
         a_cancel.cancel();
-        let cancelled = timeout(WAIT, a).await??;
+        let cancelled = staged(round, "A cancellation settled", WAIT, a).await??;
         assert!(
             matches!(cancelled, Err(BlobTransferError::Cancelled)),
             "A must actually settle cancellation"
@@ -472,7 +498,13 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
             "A cancellation must not close the shared native connection"
         );
         if same_content {
-            timeout(WAIT, gates[1].entered.notified()).await?;
+            staged(
+                round,
+                "B partial-read gate",
+                WAIT,
+                gates[1].entered.notified(),
+            )
+            .await?;
         }
         gates[1].release();
         let completion_wait = if size >= 1024 * 1024 * 1024 {
@@ -480,7 +512,7 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
         } else {
             WAIT
         };
-        let completed = timeout(completion_wait, b).await???;
+        let completed = staged(round, "B completion", completion_wait, b).await???;
         assert_eq!(completed.bytes_written, size as u64);
         tokio::task::spawn_blocking(move || verify_fixture(&b_path, b_byte, size)).await??;
         assert!(!a_path.exists(), "cancelled A must not export output");
@@ -523,26 +555,40 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
             "all requests must use unique streams on the same connection"
         );
         // 先确认上一轮提供端SDK导出实际结束，再复用同一连接，避免把合法过载误记为取消隔离失败。
-        timeout(WAIT, async {
+        staged(round, "provider exchanges finished", WAIT, async {
             while provider.provided.load(Ordering::SeqCst) < offset + 2 {
                 tokio::task::yield_now().await;
             }
         })
         .await?;
         // SDK保护释放经原actor交接；反复读取实际列表，不用包装层调用数冒充tag计数。
-        let (source_tags_settled, destination_tags_settled) = timeout(WAIT, async {
-            loop {
-                let source_count = source.tags().list_temp_tags().await?.count().await;
-                let destination_count = destination.tags().list_temp_tags().await?.count().await;
-                if source_count == source_tags_before
-                    && destination_count == destination_tags_before
-                {
-                    break Ok::<_, anyhow::Error>((source_count, destination_count));
+        let mut source_tags_observed = None;
+        let mut destination_tags_observed = None;
+        let (source_tags_settled, destination_tags_settled) = staged(
+            round,
+            "source/destination SDK temp-tag counts back to baseline",
+            WAIT,
+            async {
+                loop {
+                    let source_count = source.tags().list_temp_tags().await?.count().await;
+                    source_tags_observed = Some(source_count);
+                    let destination_count = destination.tags().list_temp_tags().await?.count().await;
+                    destination_tags_observed = Some(destination_count);
+                    if source_count == source_tags_before
+                        && destination_count == destination_tags_before
+                    {
+                        break Ok::<_, anyhow::Error>((source_count, destination_count));
+                    }
+                    sleep(Duration::from_millis(10)).await;
                 }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await??;
+            },
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "round {round}: SDK temp tags: source last={source_tags_observed:?}, baseline={source_tags_before}; destination last={destination_tags_observed:?}, baseline={destination_tags_before}"
+            )
+        })??;
         resource_rounds.push(serde_json::json!({
             "source_temp_tags_active": source_tags_active,
             "destination_temp_tags_active": destination_tags_active,
@@ -554,8 +600,22 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
             "provide_calls": provider.provides.load(Ordering::SeqCst),
         }));
     }
-    timeout(WAIT, downloading.shutdown(BlobShutdownWait::Complete)).await??;
-    timeout(WAIT, serving.shutdown(BlobShutdownWait::Complete)).await??;
+    // 最终关闭阶段沿用最后一轮编号，便于关联该轮的资源收敛记录。
+    let round = rounds.saturating_sub(1);
+    staged(
+        round,
+        "downloading shutdown",
+        WAIT,
+        downloading.shutdown(BlobShutdownWait::Complete),
+    )
+    .await??;
+    staged(
+        round,
+        "serving shutdown",
+        WAIT,
+        serving.shutdown(BlobShutdownWait::Complete),
+    )
+    .await??;
     assert!(
         native.close_reason().is_some(),
         "完整关闭必须实际关闭原生连接"
@@ -572,11 +632,16 @@ async fn prove(same_content: bool, size: usize, rounds: usize) -> anyhow::Result
         client,
         server,
     ));
-    timeout(WAIT, async {
-        while native_lifetime.upgrade().is_some() {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
+    staged(
+        round,
+        "native connection weak handle release",
+        WAIT,
+        async {
+            while native_lifetime.upgrade().is_some() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        },
+    )
     .await?;
     if let Some(root) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
         let directory = PathBuf::from(root).join("blob-resources");
