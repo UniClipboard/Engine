@@ -739,13 +739,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_reserves_completion_time_outside_the_runtime_budget() {
+    async fn shutdown_runs_runtime_cleanup_without_caller_deadline() {
         let runtime = Arc::new(FakeRuntime::default());
         let (engine, _events) = Engine::from_runtime(runtime.clone(), 8);
 
         engine.shutdown(Duration::from_secs(1)).await.unwrap();
 
-        let runtime_deadline = runtime.shutdown_deadline.lock().unwrap().unwrap();
-        assert!(runtime_deadline <= Duration::from_millis(900));
+        assert_eq!(runtime.shutdown_calls.load(Ordering::SeqCst), 1);
+        assert!(runtime.shutdown_deadline.lock().unwrap().is_none());
     }
 }
