@@ -826,6 +826,7 @@ async fn start_profile_mode(
     cleanup: Option<&Arc<StartupCleanupOwner>>,
 ) -> Result<RuntimeMode, EngineError> {
     let paths = derive_app_paths(host.directories());
+    let _startup_unlock_scope = recovery.startup_unlock_scope();
     match recovery.prepare_startup().await? {
         ProfileRecoveryPreparation::Ready => {
             let mut capabilities = host.capabilities();
