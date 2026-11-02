@@ -106,7 +106,10 @@ impl DiagnosticStream {
     ) -> std::io::Result<()> {
         let mut sampler = self.sampler.lock().unwrap_or_else(PoisonError::into_inner);
         if self.stopped.load(Ordering::Acquire) {
-            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "diagnostic sampling is stopped"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "diagnostic sampling is stopped",
+            ));
         }
         if self.started.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -121,7 +124,7 @@ impl DiagnosticStream {
             .name("uc-process-metrics".into())
             .spawn(move || sample_process(weak, rx, recording))
         {
-            Ok(worker) => *sampler = Some(worker)
+            Ok(worker) => *sampler = Some(worker),
             Err(error) => {
                 self.started.store(false, Ordering::Release);
                 self.sample_request
