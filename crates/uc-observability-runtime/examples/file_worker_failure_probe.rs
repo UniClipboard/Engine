@@ -1,10 +1,16 @@
 //! 隔离验证文件线程终止后的已接受停车请求。真实锁不代表完整进程资源范围。
 #![allow(dead_code)]
 
+#[path = "../src/build_source.rs"]
+mod build_source;
+#[path = "../src/diagnostic_store.rs"]
+mod diagnostic_store;
 #[path = "../src/file_statistics.rs"]
 mod file_statistics;
 #[path = "../src/local_file.rs"]
 mod local_file;
+#[path = "../src/run_storage.rs"]
+mod run_storage;
 
 mod remote_health {
     pub(crate) fn record_local_file_failed(_: &'static str) {}
@@ -18,7 +24,7 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use local_file::{FileQueue, HealthHooks, RecordCounters, RecordStore};
-use uc_observability_runtime::{SignalResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS};
+use uc_observability_runtime::SignalResult;
 
 struct ControlledStore {
     _lease: File,
@@ -44,6 +50,7 @@ impl RecordStore for ControlledStore {
 
 struct Counters;
 impl RecordCounters for Counters {
+    fn submission_dropped(&self, _: usize) {}
     fn accepted(&self, _: usize) {}
     fn queue_dropped(&self, _: usize) {}
     fn write_failed(&self, _: usize) {}

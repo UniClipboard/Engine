@@ -1,6 +1,7 @@
 //! 进程运行时的本地关联元数据；对端映射有界且只驻留内存。
 use crate::build_source::build_source;
 use crate::config::ObservabilityResource;
+use crate::diagnostic_stream::DiagnosticStream;
 use crate::local_capture::CapturePolicy;
 use crate::local_file::LocalFileRuntime;
 use crate::{
@@ -8,6 +9,8 @@ use crate::{
     LocalDiagnosticStatus, OperatingSystem, SetupStatus, SourceCapability, SourceCollection,
     SourceCoverage, StopCaptureResult,
 };
+use opentelemetry::KeyValue;
+use opentelemetry_sdk::Resource;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -119,6 +122,7 @@ impl PeerRecording {
 
 pub(crate) struct LocalRecordingState {
     pub(crate) capture: Mutex<CapturePolicy>,
+    pub(crate) diagnostics: Arc<DiagnosticStream>,
     run_id: Uuid,
     started: Instant,
     resource: ObservabilityResource,
@@ -133,9 +137,22 @@ impl LocalRecordingState {
         resource: &ObservabilityResource,
         file: Option<&Arc<LocalFileRuntime>>,
     ) -> Self {
+        let run_id = file
+            .and_then(|file| file.run_id())
+            .unwrap_or_else(Uuid::new_v4);
         Self {
+            diagnostics: DiagnosticStream::new(
+                &Resource::builder_empty()
+                    .with_attributes([
+                        KeyValue::new("service.version", resource.service_version.clone()),
+                        KeyValue::new("os.type", resource.os.as_str()),
+                    ])
+                    .build(),
+                file,
+                run_id,
+            ),
             capture: Mutex::new(CapturePolicy::new()),
-            run_id: Uuid::new_v4(),
+            run_id,
             started: Instant::now(),
             resource: resource.clone(),
             peers: Mutex::new(HashMap::new()),
@@ -295,14 +312,7 @@ impl LocalRecordingState {
         let mut record = json!({ "timestamp": chrono::Utc::now().to_rfc3339(), "level": "INFO", "target": "uc.diagnostics", "fields": fields });
         let _context = opentelemetry::Context::new().attach();
         self.annotate(&mut record);
-        match serde_json::to_vec(&record) {
-            Ok(mut bytes) if bytes.len() <= 4096 => {
-                bytes.push(b'\n');
-                file.writer()
-                    .write_record(&bytes, LocalDiagnosticSource::Runtime);
-            }
-            _ => file.record_rejection(),
-        }
+        file.record(LocalDiagnosticSource::Runtime as usize, &record);
     }
 
     pub(crate) fn platform(&self) -> OperatingSystem {
@@ -344,16 +354,7 @@ impl LocalRecordingState {
         let Some(file) = self.file.as_ref().and_then(Weak::upgrade) else {
             return;
         };
-        match serde_json::to_vec(record) {
-            Ok(mut bytes) if bytes.len() <= 4096 => {
-                bytes.push(b'\n');
-                file.writer().write_record(&bytes, source);
-            }
-            _ => {
-                self.rejected();
-                file.record_rejection();
-            }
-        }
+        file.record(source as usize, record);
     }
 
     pub(crate) fn rejected(&self) {

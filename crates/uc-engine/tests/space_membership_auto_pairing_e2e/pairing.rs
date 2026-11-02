@@ -109,16 +109,18 @@ async fn uninterrupted_admission_uses_one_trace() {
         trace_evidence.admission_trace_counts,
     );
     let _ = observation.force_flush(Duration::from_secs(10));
-    let local_records: Vec<serde_json::Value> = std::fs::read_dir(local_logs.path())
-        .expect("files")
-        .flat_map(|entry| {
-            std::fs::read_to_string(entry.expect("entry").path())
-                .expect("file")
-                .lines()
-                .map(|line| serde_json::from_str(line).expect("record"))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let local_records: Vec<serde_json::Value> =
+        uc_observability_runtime::managed_log_files(local_logs.path())
+            .expect("files")
+            .into_iter()
+            .flat_map(|entry| {
+                std::fs::read_to_string(entry)
+                    .expect("file")
+                    .lines()
+                    .map(|line| serde_json::from_str(line).expect("record"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
     let lifecycle = local_records
         .iter()
         .find(|r| {

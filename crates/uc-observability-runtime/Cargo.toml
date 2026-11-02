@@ -20,6 +20,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 semver = "1"
 serde_json = "1"
 sha2 = "0.10"
+tempfile = "3"
+sysinfo = { version = "=0.38.4", default-features = false, features = ["system"] }
+opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs", "metrics", "with-serde"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
@@ -36,6 +39,9 @@ zeroize = "1.8"
 jni22 = { package = "jni", version = "0.22", default-features = false }
 rustls-platform-verifier = "0.7"
 tracing-android = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

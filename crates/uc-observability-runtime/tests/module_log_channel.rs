@@ -211,9 +211,10 @@ fn module_log_channel_records_renders_limits_and_exports_with_visible_counts() {
             .contains("module_log_channel.rs"),
         "{typed_row}"
     );
-    let all_text = std::fs::read_dir(directory.path())
+    let all_text = uc_observability_runtime::managed_log_files(directory.path())
         .expect("dir")
-        .map(|entry| std::fs::read_to_string(entry.expect("entry").path()).expect("file"))
+        .into_iter()
+        .map(|entry| std::fs::read_to_string(entry).expect("file"))
         .collect::<String>();
     for leaked in [
         "MyPhone123",

@@ -26,6 +26,7 @@ mod module_log;
 mod module_log_fields;
 mod network_log;
 mod process_census;
+mod process_identity;
 mod process_release;
 pub use local_capture::{
     CaptureEndReason, DetailedCaptureRequest, LocalCaptureMode, LocalCaptureStatus,
@@ -41,7 +42,10 @@ pub use network_log::{
 pub use process_release::{
     ProcessFailureKind, ProcessReleaseReport, ProcessReleaseResult, ProcessResumeResult,
 };
+mod diagnostic_store;
+mod diagnostic_stream;
 mod remote_health;
+mod run_storage;
 mod runtime;
 mod status;
 mod subscriber;

@@ -73,9 +73,10 @@ async fn maintenance_connections_use_exact_anonymous_references_without_raw_keys
         ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(5)),
         SignalResult::Completed
     );
-    let output = std::fs::read_dir(logs.path())
+    let output = uc_observability_runtime::managed_log_files(logs.path())
         .expect("files")
-        .map(|entry| std::fs::read_to_string(entry.expect("entry").path()).expect("file"))
+        .into_iter()
+        .map(|entry| std::fs::read_to_string(entry).expect("file"))
         .collect::<String>();
     assert!(!output.contains("987654") && !output.contains("987655"));
     assert!(!output.contains(&"91".repeat(32)) && !output.contains(&"92".repeat(32)));
@@ -196,10 +197,11 @@ async fn local_work_records_duration_failure_cancellation_and_queue_in_standard_
         ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(5)),
         SignalResult::Completed
     );
-    let records: Vec<Value> = std::fs::read_dir(logs.path())
+    let records: Vec<Value> = uc_observability_runtime::managed_log_files(logs.path())
         .expect("files")
+        .into_iter()
         .flat_map(|entry| {
-            std::fs::read_to_string(entry.expect("entry").path())
+            std::fs::read_to_string(entry)
                 .expect("file")
                 .lines()
                 .map(|line| serde_json::from_str(line).expect("record"))

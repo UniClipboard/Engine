@@ -58,10 +58,11 @@ fn local_records_and_status_report_the_linked_build_source() {
         SignalResult::Completed
     );
     let status = runtime.handle().query_local_diagnostic_status();
-    let records: Vec<Value> = std::fs::read_dir(logs.path())
+    let records: Vec<Value> = uc_observability_runtime::managed_log_files(logs.path())
         .expect("files")
+        .into_iter()
         .flat_map(|entry| {
-            std::fs::read_to_string(entry.expect("entry").path())
+            std::fs::read_to_string(entry)
                 .expect("file")
                 .lines()
                 .map(|line| serde_json::from_str(line).expect("record"))

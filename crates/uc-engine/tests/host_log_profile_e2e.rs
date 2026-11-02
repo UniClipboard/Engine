@@ -319,11 +319,14 @@ async fn save_settings(engine: &Engine) {
 
 fn read_logs(directory: &Path) -> String {
     let mut text = String::new();
-    for entry in std::fs::read_dir(directory).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file() {
-            text.push_str(&String::from_utf8_lossy(&std::fs::read(path).unwrap()));
-        }
+    let mut paths: std::collections::BTreeSet<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file())
+        .collect();
+    paths.extend(uc_engine::observability::managed_log_files(directory).unwrap());
+    for path in paths {
+        text.push_str(&String::from_utf8_lossy(&std::fs::read(path).unwrap()));
     }
     text
 }

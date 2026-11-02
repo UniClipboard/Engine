@@ -93,6 +93,9 @@ impl NetworkCounters {
 }
 
 impl RecordCounters for NetworkCounters {
+    fn submission_dropped(&self, _source: usize) {
+        increment(&self.queue_dropped);
+    }
     fn accepted(&self, _source: usize) {
         increment(&self.accepted);
     }

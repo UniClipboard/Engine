@@ -28,7 +28,7 @@ function jsonlFromDirectory(root) {
     for (const entry of readdirSync(directory)) {
       const path = join(directory, entry)
       if (statSync(path).isDirectory()) walk(path)
-      else if (/engine.*\.jsonl$/.test(entry)) found.push(readFileSync(path, 'utf8'))
+      else if (/^(?:engine\..*|logs\.[0-9]{8}\.[0-9]{10,20})\.jsonl$/.test(entry)) found.push(readFileSync(path, 'utf8'))
     }
   }
   walk(root)
@@ -38,7 +38,7 @@ function jsonlFromDirectory(root) {
 function jsonlFromZip(path) {
   const listing = execFileSync('unzip', ['-Z1', path], { encoding: 'utf8' }).split('\n')
   return listing
-    .filter((name) => /(^|\/)engine[^/]*\.jsonl$/.test(name))
+    .filter((name) => /(^|\/)(?:engine[^/]*|logs\.[0-9]{8}\.[0-9]{10,20})\.jsonl$/.test(name))
     .map((name) => execFileSync('unzip', ['-p', path, name], { encoding: 'utf8', maxBuffer: 1 << 28 }))
 }
 

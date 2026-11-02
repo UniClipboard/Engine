@@ -89,9 +89,10 @@ async fn one_authentication_completion_has_local_detail_but_only_the_v1_remote_s
         0,
         "local routing is not a privacy rejection"
     );
-    let output = std::fs::read_dir(directory.path())
+    let output = uc_observability_runtime::managed_log_files(directory.path())
         .expect("files")
-        .map(|e| std::fs::read_to_string(e.expect("file").path()).expect("content"))
+        .into_iter()
+        .map(|e| std::fs::read_to_string(e).expect("content"))
         .collect::<String>();
     let local: Vec<serde_json::Value> = output
         .lines()

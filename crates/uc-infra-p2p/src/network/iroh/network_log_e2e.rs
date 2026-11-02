@@ -712,16 +712,7 @@ fn network_records(run: &Path) -> Vec<Value> {
 
 fn business_records(out: &Path, role: &str) -> Vec<Value> {
     let logs = out.join(role).join("logs");
-    let mut files: Vec<_> = std::fs::read_dir(&logs)
-        .expect("logs dir")
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("engine.") && name.ends_with(".jsonl"))
-        })
-        .collect();
+    let mut files = uc_observability_runtime::managed_log_files(&logs).expect("managed logs");
     files.sort();
     files.iter().flat_map(|path| jsonl(path)).collect()
 }

@@ -118,6 +118,7 @@ pub struct LocalDiagnosticStatus {
 
 #[derive(Debug, Clone)]
 pub struct LocalDiagnosticExportReport {
+    pub performance: Value,
     pub flush: SignalResult,
     pub status: LocalDiagnosticStatus,
     pub requested_at_utc: String,

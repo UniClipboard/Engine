@@ -45,9 +45,10 @@ fn authentication_completion_has_one_local_detail_and_does_not_leak_to_the_next_
         ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(5)),
         SignalResult::Completed
     );
-    let output = std::fs::read_dir(directory.path())
+    let output = uc_observability_runtime::managed_log_files(directory.path())
         .expect("files")
-        .map(|e| std::fs::read_to_string(e.expect("file").path()).expect("content"))
+        .into_iter()
+        .map(|e| std::fs::read_to_string(e).expect("content"))
         .collect::<String>();
     let rows: Vec<serde_json::Value> = output
         .lines()

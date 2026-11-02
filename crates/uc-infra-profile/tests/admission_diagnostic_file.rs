@@ -84,10 +84,11 @@ fn read_logs(directory: &std::path::Path) -> Vec<serde_json::Value> {
         ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(5)),
         SignalResult::Completed
     );
-    std::fs::read_dir(directory)
+    uc_observability_runtime::managed_log_files(directory)
         .expect("files")
+        .into_iter()
         .flat_map(|entry| {
-            let content = std::fs::read_to_string(entry.expect("file").path()).expect("content");
+            let content = std::fs::read_to_string(entry).expect("content");
             content
                 .lines()
                 .map(|line| serde_json::from_str(line).expect("JSON"))

@@ -86,9 +86,10 @@ fn local_file_keeps_valid_correlation_without_remote_export_and_respects_detachm
         ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(5)),
         SignalResult::Completed
     );
-    let output = std::fs::read_dir(directory.path())
+    let output = uc_observability_runtime::managed_log_files(directory.path())
         .expect("files")
-        .map(|e| std::fs::read_to_string(e.expect("file").path()).expect("content"))
+        .into_iter()
+        .map(|e| std::fs::read_to_string(e).expect("content"))
         .collect::<String>();
     let rows: Vec<serde_json::Value> = output
         .lines()

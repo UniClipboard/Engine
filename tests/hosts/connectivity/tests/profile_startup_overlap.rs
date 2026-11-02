@@ -214,12 +214,12 @@ fn startup_result(ready: &Value) -> Value {
 
 /// 读取共享日志目录中的升级失败诊断，只保留固定分类字段。
 fn upgrade_failures(root: &Path) -> Vec<Value> {
-    let Ok(entries) = std::fs::read_dir(root.join("logs")) else {
+    let Ok(entries) = uc_engine::observability::managed_log_files(&root.join("logs")) else {
         return Vec::new();
     };
     let mut failures = Vec::new();
-    for entry in entries.filter_map(Result::ok) {
-        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+    for entry in entries {
+        let text = std::fs::read_to_string(entry).unwrap_or_default();
         for row in text
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())

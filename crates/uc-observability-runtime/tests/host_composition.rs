@@ -79,9 +79,10 @@ fn one_process_can_keep_host_logs_and_route_engine_records_only_to_the_common_ru
     assert!(!host_output.contains("uc.telemetry"));
     assert!(!host_output.contains("PRIVATE_ENGINE_PAYLOAD"));
     assert!(!host_output.contains("PRIVATE_NETWORK_PAYLOAD"));
-    let engine_output = std::fs::read_dir(directory.path())
+    let engine_output = uc_observability_runtime::managed_log_files(directory.path())
         .expect("files")
-        .map(|e| std::fs::read_to_string(e.expect("file").path()).expect("content"))
+        .into_iter()
+        .map(|e| std::fs::read_to_string(e).expect("content"))
         .collect::<String>();
     assert_eq!(
         engine_output

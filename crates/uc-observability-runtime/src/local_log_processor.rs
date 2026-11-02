@@ -53,18 +53,7 @@ impl LogProcessor for LocalLogProcessor {
             return;
         }
         let source = source_for(&record);
-        let Ok(mut record) = serde_json::to_vec(&record) else {
-            self.recording.rejected();
-            self.file.record_rejection();
-            return;
-        };
-        if record.len() > 4096 {
-            self.recording.rejected();
-            self.file.record_rejection();
-            return;
-        }
-        record.push(b'\n');
-        self.file.writer().write_record(&record, source);
+        self.file.record(source as usize, &record);
     }
 
     // 文件队列由进程运行时在 SDK 刷新之后统一刷新，处理器自身没有缓存。
@@ -154,10 +143,14 @@ fn decode_record(
     }
     let timestamp: DateTime<Utc> = data.timestamp().or(data.observed_timestamp())?.into();
     let mut record = json!({
-        "timestamp": timestamp.to_rfc3339_opts(SecondsFormat::Micros, true),
+        "timestamp": timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true),
         "level": level, "target": target, "fields": fields,
         "local_schema_version": 1,
     });
+    if let Some(observed) = data.observed_timestamp() {
+        let observed: DateTime<Utc> = observed.into();
+        record["observed_timestamp"] = json!(observed.to_rfc3339_opts(SecondsFormat::Nanos, true));
+    }
     if let Some(context) = data.trace_context() {
         if context.trace_id != opentelemetry::trace::TraceId::INVALID
             && context.span_id != opentelemetry::trace::SpanId::INVALID

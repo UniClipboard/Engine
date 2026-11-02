@@ -16,16 +16,17 @@ use process::{join_host, mount_rendezvous, HostProcess};
 
 fn recovery_paths(host: &mut HostProcess) -> HashMap<String, HashSet<String>> {
     host.request(json!({"command": "flush"}));
-    let records: Vec<Value> = std::fs::read_dir(host.root.path().join("logs"))
-        .expect("diagnostic directory")
-        .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .flat_map(|text| {
-            text.lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let records: Vec<Value> =
+        uc_engine::observability::managed_log_files(&host.root.path().join("logs"))
+            .expect("diagnostic directory")
+            .into_iter()
+            .filter_map(|entry| std::fs::read_to_string(entry).ok())
+            .flat_map(|text| {
+                text.lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
     let mut paths = HashMap::new();
     for row in &records {
         if row["fields"]["event.name"] == "connection.protocol.negotiated"
@@ -62,16 +63,17 @@ fn recovery_paths(host: &mut HostProcess) -> HashMap<String, HashSet<String>> {
 
 fn has_correlated_recovery_round(host: &mut HostProcess) -> bool {
     host.request(json!({"command": "flush"}));
-    let records: Vec<Value> = std::fs::read_dir(host.root.path().join("logs"))
-        .expect("diagnostic directory")
-        .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .flat_map(|text| {
-            text.lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let records: Vec<Value> =
+        uc_engine::observability::managed_log_files(&host.root.path().join("logs"))
+            .expect("diagnostic directory")
+            .into_iter()
+            .filter_map(|entry| std::fs::read_to_string(entry).ok())
+            .flat_map(|text| {
+                text.lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
     let negotiated: HashSet<_> = records
         .iter()
         .filter(|row| {

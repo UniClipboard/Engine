@@ -439,11 +439,11 @@ impl Drop for ProfileHost {
 
 /// 只采样既有脱敏诊断，确认自定义 relay 已被实际 Endpoint 使用。
 pub(crate) fn relay_connected(root: &Path) -> bool {
-    std::fs::read_dir(root.join("logs"))
+    uc_engine::observability::managed_log_files(&root.join("logs"))
         .expect("host diagnostic directory")
-        .filter_map(Result::ok)
+        .into_iter()
         .any(|entry| {
-            std::fs::read_to_string(entry.path())
+            std::fs::read_to_string(entry)
                 .unwrap_or_default()
                 .lines()
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
