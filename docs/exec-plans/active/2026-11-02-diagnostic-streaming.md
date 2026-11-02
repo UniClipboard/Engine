@@ -70,3 +70,16 @@ Engine 导出入口复用现有 `tempfile` 依赖保存临时 ZIP，完成后再
 
 补充验收结果：运行时与 P2P 118 项通过，资料与准入状态 38 项通过，两个原 CI 分支恢复失败场景在读取器迁移后通过，连接复用与宿主日志档位场景通过。Linux 网络命名空间矩阵不能在 macOS 本机执行，保持未运行。
 显式忽略的 `uninterrupted_admission_uses_one_trace` 仍在原有 `session_stop_network` 断言失败。基线与当前生产代码均没有 `SessionStopNetwork` 写入点；本任务保留该断言，不修改会话生命周期。该结果单独报告，不计为通过。
+
+### 移动上传 CI 竞态修复
+
+真实图片验收复现了 `BeginMobileFileUpload` 的 `1448`。临时固定分类记录确认底层为 SQLite `busy`。
+同一入口还可在上传完成时返回 `1444`：启动恢复在新上传登记后执行，将其临时传输当作遗留记录清除。
+原因是移动上传未经过已有接收恢复门控。`MobileFileUploadCoordinator` 现在先调用
+`ensure_receive_ready()`，待隐私维护与遗留接收恢复完成后再登记上传；恢复失败保留来源并返回既有上传错误。
+不添加等待时长、自动重试或新的恢复负责人。临时分类记录已删除。
+
+复现与验收入口：`just cargo test --locked -p uc-engine --features lan-compat --test host_contract staged_capture_commit -- --nocapture`。
+修复后连续运行该真实 Engine、SQLite、暂存文件、blob 与缩略图链路 30 次，全部通过。
+`UC_STAGED_IMAGE_E2E_RECEIPT` 指定每次 JSON 回执。4 项既有移动上传宿主回归场景通过，覆盖内容收发、暂停、进度、失败清理和关闭清理。
+远端 CI 仍须以修复提交的实际结果结算。
