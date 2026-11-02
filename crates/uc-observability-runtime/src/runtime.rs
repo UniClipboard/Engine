@@ -44,7 +44,6 @@ use crate::status::{
 };
 use crate::subscriber::{local_health_layer, system_layer, HealthRecording};
 use crate::telemetry::TelemetryRuntime;
-use crate::DiagnosticSnapshot;
 use crate::{
     DetailedCaptureRequest, HostDiagnosticEvent, HostDiagnosticReceipt, HostDiagnosticRecordStatus,
     HostDiagnosticSource, HostLogLayer, LocalCaptureStatus, LocalDiagnosticError,
@@ -1218,11 +1217,6 @@ impl ProcessObservabilityHandle {
             .start(Arc::downgrade(&self.state.telemetry.recording))
     }
 
-    /// Freeze the current process's bounded in-memory OTLP records.
-    pub fn diagnostic_snapshot(&self) -> DiagnosticSnapshot {
-        self.state.telemetry.recording.diagnostics.snapshot()
-    }
-
     pub fn prepare_local_diagnostic_export(
         &self,
         deadline: Duration,
@@ -1231,6 +1225,8 @@ impl ProcessObservabilityHandle {
             return Err(LocalDiagnosticError::InvalidDeadline);
         }
         let requested_at_utc = chrono::Utc::now().to_rfc3339();
+        let started = Instant::now();
+        let mut performance = self.state.telemetry.recording.diagnostics.prepare(deadline);
         let before_flush = self.query_local_diagnostic_status();
         if !self.state.shutdown.is_started() {
             self.state.telemetry.recording.checkpoint("diagnostics.export.snapshot", serde_json::json!({
@@ -1245,15 +1241,17 @@ impl ProcessObservabilityHandle {
                 );
             }
         }
-        let flush = if self.state.shutdown.is_started() {
-            SignalResult::AlreadyShutdown
-        } else {
-            match &self.state.local_file {
-                Some(file) => file.flush_result(deadline),
-                _ => SignalResult::Failed,
-            }
-        };
+        let sdk_flush = self.force_flush(deadline.saturating_sub(started.elapsed()));
+        let flush = sdk_flush.logs;
+        performance["sdkTraceFlush"] = serde_json::json!(sdk_flush.traces);
+        performance["sdkLogFlush"] = serde_json::json!(sdk_flush.logs);
+        performance["stream"] = self
+            .state
+            .local_file
+            .as_ref()
+            .map_or(serde_json::Value::Null, |file| file.stream_summary());
         Ok(LocalDiagnosticExportReport {
+            performance,
             flush,
             status: self.query_local_diagnostic_status(),
             requested_at_utc,

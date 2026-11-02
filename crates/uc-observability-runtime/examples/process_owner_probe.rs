@@ -16,8 +16,10 @@ mod build_source {
 }
 #[path = "../src/config.rs"]
 mod config;
-#[path = "../src/diagnostic_history.rs"]
-mod diagnostic_history;
+#[path = "../src/diagnostic_store.rs"]
+mod diagnostic_store;
+#[path = "../src/diagnostic_stream.rs"]
+mod diagnostic_stream;
 #[path = "../src/engine_activity.rs"]
 mod engine_activity;
 #[path = "../src/file_statistics.rs"]
@@ -48,6 +50,8 @@ mod process_identity;
 mod process_release;
 #[path = "../src/remote_health.rs"]
 mod remote_health;
+#[path = "../src/run_storage.rs"]
+mod run_storage;
 #[path = "../src/runtime.rs"]
 mod runtime;
 #[path = "../src/status.rs"]
@@ -56,7 +60,6 @@ mod status;
 mod subscriber;
 #[path = "../src/subscriber_gate.rs"]
 mod subscriber_gate;
-pub use diagnostic_history::DiagnosticSnapshot;
 #[path = "../src/telemetry.rs"]
 mod telemetry;
 

@@ -7,14 +7,23 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use chrono::{Days, NaiveDate, Utc};
+use chrono::NaiveDate;
+#[cfg(test)]
+use chrono::{Days, Utc};
 use tracing_subscriber::fmt::MakeWriter;
-use uc_observability_contract::diagnostics::{managed_log_file_date, managed_log_file_name};
+use uc_observability_contract::diagnostics::managed_log_file_date;
+#[cfg(test)]
+use uc_observability_contract::diagnostics::managed_log_file_name;
 
+use crate::diagnostic_store::DiagnosticWriter;
 use crate::file_statistics::{increment, FileSourceCounts, FileStatistics, LocalDiagnosticSource};
 use crate::remote_health::{record_local_file_failed, record_local_file_recovered};
-use crate::{SignalResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS};
+use crate::SignalResult;
+use serde::Serialize;
+use serde_json::Value;
+use uuid::Uuid;
 
+#[cfg(test)]
 const ASYNC_QUEUE_CAPACITY: usize = 4_096;
 #[cfg(feature = "test-process-release")]
 pub(crate) static PROBE_DAILY_PARK_FAILURE: AtomicBool = AtomicBool::new(false);
@@ -45,6 +54,7 @@ impl Drop for ProbeDailyExitGate {
 }
 
 #[derive(Clone)]
+#[cfg(test)]
 pub(crate) struct BoundedDailyMakeWriter {
     state: Arc<Mutex<Option<WriterState>>>,
     directory: PathBuf,
@@ -56,6 +66,7 @@ pub(crate) struct BoundedDailyMakeWriter {
     unavailable: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
 impl BoundedDailyMakeWriter {
     fn new_with_limits(
         directory: &Path,
@@ -82,6 +93,7 @@ impl BoundedDailyMakeWriter {
     }
 }
 
+#[cfg(test)]
 impl<'writer> MakeWriter<'writer> for BoundedDailyMakeWriter {
     type Writer = BoundedDailyWriter;
 
@@ -92,6 +104,7 @@ impl<'writer> MakeWriter<'writer> for BoundedDailyMakeWriter {
     }
 }
 
+#[cfg(test)]
 impl Write for BoundedDailyMakeWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         BoundedDailyWriter {
@@ -108,6 +121,7 @@ impl Write for BoundedDailyMakeWriter {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct BoundedDailyWriter {
     owner: BoundedDailyMakeWriter,
 }
@@ -138,6 +152,11 @@ pub(crate) trait RecordStore: Send + 'static {
 
 /// 队列侧的按来源计数；写入策略自己的落盘计数不经过这里。
 pub(crate) trait RecordCounters: Send + Sync + 'static {
+    fn queued(&self, _bytes: usize) -> bool {
+        true
+    }
+    fn dequeued(&self, _bytes: usize) {}
+    fn worker_failed(&self) {}
     fn accepted(&self, source: usize);
     fn queue_dropped(&self, source: usize);
     /// 队列已封口后到达的记录；没有单独统计的计数器把它并入队列丢弃。
@@ -175,6 +194,7 @@ impl RecordCounters for FileStatistics {
     }
 }
 
+#[cfg(test)]
 impl RecordStore for BoundedDailyMakeWriter {
     fn store_record(&mut self, bytes: &[u8], source: usize) -> io::Result<()> {
         BoundedDailyMakeWriter::write_record(
@@ -246,6 +266,7 @@ pub(crate) struct AsyncFileWriter {
 }
 
 /// 一个独立的有界文件队列：写入句柄、工作线程与可用性状态。
+#[derive(Clone)]
 pub(crate) struct FileQueue {
     writer: AsyncFileWriter,
     worker: Arc<LocalFileWorker>,
@@ -256,6 +277,7 @@ pub(crate) struct FileQueue {
 pub(crate) struct LocalFileRuntime {
     pub(crate) queue: FileQueue,
     statistics: Arc<FileStatistics>,
+    stream: Option<DiagnosticWriter>,
 }
 
 struct LocalFileWorker {
@@ -333,7 +355,12 @@ impl LocalFileRuntime {
         self.queue.park_error()
     }
     pub(crate) fn new(directory: &Path) -> io::Result<Self> {
-        Self::new_internal(directory, LOCAL_LOG_RETENTION_DAYS, LOCAL_LOG_MAX_BYTES)
+        let stream = DiagnosticWriter::new(directory)?;
+        Ok(Self {
+            queue: stream.queue.clone(),
+            statistics: stream.counters.files.clone(),
+            stream: Some(stream),
+        })
     }
 
     #[cfg(test)]
@@ -341,6 +368,7 @@ impl LocalFileRuntime {
         Self::new_internal(directory, retention_days, max_bytes)
     }
 
+    #[cfg(test)]
     fn new_internal(directory: &Path, retention_days: u64, max_bytes: u64) -> io::Result<Self> {
         let (writer, dropped_records) =
             BoundedDailyMakeWriter::new_with_limits(directory, retention_days, max_bytes)?;
@@ -355,7 +383,27 @@ impl LocalFileRuntime {
                 unavailable,
             },
             statistics,
+            stream: None,
         })
+    }
+
+    pub(crate) fn encoding_slot(&self) -> Option<MutexGuard<'_, ()>> {
+        self.stream
+            .as_ref()
+            .and_then(DiagnosticWriter::encoding_slot)
+    }
+    pub(crate) fn run_id(&self) -> Option<Uuid> {
+        self.stream.as_ref().map(|stream| stream.run_id)
+    }
+    pub(crate) fn stream_summary(&self) -> Value {
+        self.stream
+            .as_ref()
+            .map_or(Value::Null, DiagnosticWriter::summary)
+    }
+    pub(crate) fn record(&self, source: usize, value: &impl Serialize) {
+        if let Some(stream) = &self.stream {
+            stream.record(source, value);
+        }
     }
 
     pub(crate) fn record_rejection(&self) {
@@ -501,6 +549,7 @@ impl FileQueue {
     }
 }
 
+#[cfg(test)]
 fn non_blocking_file_writer(
     writer: BoundedDailyMakeWriter,
     dropped_records: Arc<AtomicU64>,
@@ -543,16 +592,27 @@ fn spawn_file_queue<S: RecordStore>(
         .spawn(move || {
             #[cfg(feature = "test-process-release")]
             let _exit_gate = daily_worker.then(|| ProbeDailyExitGate);
-            run_file_worker(
-                store,
-                receiver,
-                worker_dropped_records,
-                worker_counters,
-                unavailable,
-                hooks,
-                worker_closed,
-                worker_park_error,
-            )
+            let panic_counters = worker_counters.clone();
+            let panic_closed = worker_closed.clone();
+            let panic_unavailable = unavailable.clone();
+            if catch_unwind(AssertUnwindSafe(|| {
+                run_file_worker(
+                    store,
+                    receiver,
+                    worker_dropped_records,
+                    worker_counters,
+                    unavailable,
+                    hooks,
+                    worker_closed,
+                    worker_park_error,
+                )
+            }))
+            .is_err()
+            {
+                panic_closed.store(true, Ordering::Release);
+                panic_unavailable.store(true, Ordering::Release);
+                panic_counters.worker_failed();
+            }
         })?;
     Ok((
         AsyncFileWriter {
@@ -578,33 +638,36 @@ fn spawn_file_queue<S: RecordStore>(
 }
 
 impl AsyncFileWriter {
-    pub(crate) fn write_record(&self, buffer: &[u8], source: LocalDiagnosticSource) {
-        self.write_indexed(buffer, source as usize);
-    }
-
-    pub(crate) fn write_indexed(&self, buffer: &[u8], source: usize) {
-        // 门只保护封口与入队的先后顺序，持有者只做不阻塞的 `try_send`，所以这里等待锁不会等待磁盘或网络；
-        // 争用本身不得丢记录，只有队列已满或已封口才计入丢弃。
+    pub(crate) fn write_owned(&self, bytes: Vec<u8>, source: usize) {
         let _submission = lock(&self.submission);
         if self.closed.load(Ordering::Acquire) || self.parked.load(Ordering::Acquire) {
             increment(&self.dropped_records);
             self.counters.closed_dropped(source);
-        } else if self
-            .sender
-            .try_send(FileMessage::Line(buffer.to_vec(), source))
-            .is_err()
-        {
+            return;
+        }
+        let length = bytes.len();
+        if !self.counters.queued(length) {
             increment(&self.dropped_records);
             self.counters.queue_dropped(source);
-        } else {
-            self.counters.accepted(source);
+            return;
+        }
+        match self.sender.try_send(FileMessage::Line(bytes, source)) {
+            Ok(()) => self.counters.accepted(source),
+            Err(error) => {
+                self.counters.dequeued(length);
+                increment(&self.dropped_records);
+                match error {
+                    mpsc::TrySendError::Full(_) => self.counters.queue_dropped(source),
+                    mpsc::TrySendError::Disconnected(_) => self.counters.closed_dropped(source),
+                }
+            }
         }
     }
 }
 
 impl Write for AsyncFileWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.write_record(buffer, LocalDiagnosticSource::Runtime);
+        self.write_owned(buffer.to_vec(), LocalDiagnosticSource::Runtime as usize);
         Ok(buffer.len())
     }
 
@@ -938,10 +1001,28 @@ fn run_file_worker<S: RecordStore>(
     while let Ok(message) = receiver.recv() {
         match message {
             FileMessage::Line(bytes, source) => {
+                counters.dequeued(bytes.len());
                 if health.in_backoff() {
                     increment(&dropped_records);
                     counters.write_failed(source);
-                } else if writer.store_record(&bytes, source).is_err() {
+                } else if match catch_unwind(AssertUnwindSafe(|| {
+                    writer.store_record(&bytes, source)
+                })) {
+                    Ok(result) => result.is_err(),
+                    Err(_) => {
+                        closed.store(true, Ordering::Release);
+                        health.unavailable.store(true, Ordering::Release);
+                        counters.worker_failed();
+                        counters.write_failed(source);
+                        for pending in receiver.try_iter() {
+                            if let FileMessage::Line(bytes, source) = pending {
+                                counters.dequeued(bytes.len());
+                                counters.write_failed(source);
+                            }
+                        }
+                        return;
+                    }
+                } {
                     increment(&dropped_records);
                     counters.write_failed(source);
                     health.failed("write_failed");
@@ -1003,6 +1084,7 @@ fn settle_flush<S: RecordStore>(writer: &mut S, health: &mut WorkerHealth) -> bo
     !health.is_failed()
 }
 
+#[cfg(test)]
 impl BoundedDailyMakeWriter {
     fn write_record(&self, buffer: &[u8], source: LocalDiagnosticSource) -> io::Result<()> {
         let mut state = lock(&self.state);
@@ -1031,6 +1113,7 @@ impl BoundedDailyMakeWriter {
     }
 }
 
+#[cfg(test)]
 impl Write for BoundedDailyWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         self.owner
@@ -1048,6 +1131,7 @@ impl Write for BoundedDailyWriter {
     }
 }
 
+#[cfg(test)]
 struct WriterState {
     directory: PathBuf,
     date: NaiveDate,
@@ -1059,6 +1143,7 @@ struct WriterState {
     max_bytes: u64,
 }
 
+#[cfg(test)]
 impl WriterState {
     fn open(
         directory: PathBuf,
@@ -1181,7 +1266,7 @@ pub(crate) fn open_managed_file(path: &Path) -> io::Result<File> {
 fn prevent_symlink_follow(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
-    options.custom_flags(libc::O_NOFOLLOW);
+    options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
 }
 
 #[cfg(windows)]
@@ -1223,6 +1308,7 @@ fn managed_files(directory: &Path) -> io::Result<Vec<ManagedFile>> {
     Ok(files)
 }
 
+#[cfg(test)]
 fn cleanup(
     directory: &Path,
     today: NaiveDate,
@@ -1302,6 +1388,7 @@ pub fn managed_log_files(directory: &Path) -> io::Result<Vec<PathBuf>> {
     managed_files(directory).map(|files| files.into_iter().map(|entry| entry.path).collect())
 }
 
+#[cfg(test)]
 fn file_name(date: NaiveDate) -> String {
     managed_log_file_name(date)
 }

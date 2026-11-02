@@ -27,6 +27,7 @@ use uc_observability_contract::diagnostics::{
 };
 use uc_observability_contract::module_log::render_error_chain;
 
+use crate::diagnostic_store::encode_record;
 use crate::local_file::LocalFileRuntime;
 use crate::local_recording::LocalRecordingState;
 use crate::module_log_fields::text_field_allowed;
@@ -277,7 +278,7 @@ where
         let mut record = Map::new();
         record.insert(
             "timestamp".into(),
-            json!(Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)),
+            json!(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)),
         );
         record.insert("level".into(), json!(metadata.level().as_str()));
         record.insert("target".into(), json!(metadata.target()));
@@ -324,19 +325,17 @@ where
 
 impl ModuleLogLayer {
     fn submit(&self, mut record: Value, opaque_layers: usize) {
-        let mut bytes = match serde_json::to_vec(&record) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                bump(&self.stats.rejected, 1);
-                return;
-            }
+        let Some(_slot) = self.file.encoding_slot() else {
+            bump(&self.stats.rejected, 1);
+            return;
         };
-        if bytes.len() >= MAX_RECORD_BYTES {
+        let mut bytes = encode_record(&record, MAX_RECORD_BYTES);
+        if bytes.is_none() {
             bump(&self.stats.truncated, 1);
             record["truncated"] = json!(true);
             record["fields"] = json!({});
-            bytes = serde_json::to_vec(&record).unwrap_or_default();
-            if bytes.len() >= MAX_RECORD_BYTES {
+            bytes = encode_record(&record, MAX_RECORD_BYTES);
+            if bytes.is_none() {
                 if let Some(chain) = record["error.chain"].as_array_mut() {
                     for layer in chain {
                         if let Some(text) = layer.as_str() {
@@ -345,13 +344,16 @@ impl ModuleLogLayer {
                     }
                 }
                 record["spans"] = json!([]);
-                bytes = serde_json::to_vec(&record).unwrap_or_default();
+                bytes = encode_record(&record, MAX_RECORD_BYTES);
             }
-            if bytes.is_empty() || bytes.len() >= MAX_RECORD_BYTES {
+            if bytes.is_none() {
                 bump(&self.stats.rejected, 1);
                 return;
             }
         }
+        let Some(bytes) = bytes else {
+            return;
+        };
         let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if self
             .stats
@@ -363,10 +365,9 @@ impl ModuleLogLayer {
             bump(&self.stats.budget_dropped, 1);
             return;
         }
-        bytes.push(b'\n');
         self.file
             .writer()
-            .write_record(&bytes, LocalDiagnosticSource::Runtime);
+            .write_owned(bytes, LocalDiagnosticSource::Runtime as usize);
         bump(&self.stats.emitted, 1);
         bump(
             &self.stats.opaque_error_layers,

@@ -1,10 +1,16 @@
 //! 真实日文件的停车与恢复探测；不代表完整进程释放回执。
 #![allow(dead_code)]
 
+#[path = "../src/build_source.rs"]
+mod build_source;
+#[path = "../src/diagnostic_store.rs"]
+mod diagnostic_store;
 #[path = "../src/file_statistics.rs"]
 mod file_statistics;
 #[path = "../src/local_file.rs"]
 mod local_file;
+#[path = "../src/run_storage.rs"]
+mod run_storage;
 
 mod remote_health {
     pub(crate) fn record_local_file_failed(_: &'static str) {}
@@ -44,7 +50,7 @@ fn main() {
     let logs = root.path().join("logs");
     let daily = LocalFileRuntime::new(&logs).expect("daily queue");
     let writer = daily.writer();
-    writer.write_record(b"first\n", LocalDiagnosticSource::Runtime);
+    writer.write_owned(b"first\n".to_vec(), LocalDiagnosticSource::Runtime as usize);
     assert_eq!(
         daily.flush_result(Duration::from_secs(5)),
         SignalResult::Completed
@@ -57,7 +63,7 @@ fn main() {
     let initially_open = descriptor_open(&file);
     let first_park = daily.queue.park(Duration::from_secs(5));
     let closed_after_park = !descriptor_open(&file);
-    writer.write_record(b"late\n", LocalDiagnosticSource::Runtime);
+    writer.write_owned(b"late\n".to_vec(), LocalDiagnosticSource::Runtime as usize);
     let late_flush = daily.flush_result(Duration::from_secs(5));
     let closed_after_late_work = !descriptor_open(&file);
     let parked_directory = root.path().join("parked-logs");

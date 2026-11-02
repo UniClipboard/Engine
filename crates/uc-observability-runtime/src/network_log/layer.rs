@@ -345,7 +345,7 @@ impl Shared {
             increment(&self.counters.oversized);
             return;
         }
-        self.writer.write_indexed(&line, 0);
+        self.writer.write_owned(line, 0);
     }
 
     fn render(&self, kind: Kind, raw: &str, state: &mut State) -> Option<Value> {

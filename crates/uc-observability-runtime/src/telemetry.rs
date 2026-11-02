@@ -18,7 +18,7 @@ use tracing_subscriber::Registry;
 use uc_observability_contract::diagnostics::TELEMETRY_SCHEMA_VERSION;
 
 use crate::config::{ObservabilityConfig, OtlpHttpConfig};
-use crate::diagnostic_history::DiagnosticSpanProcessor;
+use crate::diagnostic_stream::DiagnosticSpanProcessor;
 use crate::filter::{remote_span_enabled, sdk_log_enabled};
 use crate::local_file::LocalFileRuntime;
 use crate::local_log_processor::LocalLogProcessor;

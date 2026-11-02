@@ -835,64 +835,14 @@ impl SpanProcessor for TrackedSpanProcessor {
         let Some(_active) = self.active_spans.ending(id) else {
             return;
         };
-        // tracing-opentelemetry 已启动的 span 忽略 otel.name 更新。
-        // 流程负责人只提供固定显示名，编码前转换并移除内部字段。
-        let mut display_names = span
-            .attributes
-            .iter()
-            .filter(|field| field.key.as_str() == "uc.display.name");
-        if let Some(field) = display_names.next() {
-            if display_names.next().is_some() {
+        match prepare_diagnostic_span(&mut span) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(()) => {
                 self.gate.record_rejection();
                 return;
             }
-            let Value::String(name) = &field.value else {
-                self.gate.record_rejection();
-                return;
-            };
-            span.name = name.as_str().to_owned().into();
-            span.attributes
-                .retain(|field| field.key.as_str() != "uc.display.name");
         }
-        if !span_is_approved(&span) {
-            self.gate.record_rejection();
-            return;
-        }
-        if span.attributes.iter().any(|field| {
-            field.key.as_str() == "uc.operation" && field.value.as_str() == "runtime.shutdown_tasks"
-        }) && span
-            .attributes
-            .iter()
-            .any(|field| field.key.as_str() == "uc.outcome" && field.value.as_str() == "ok")
-        {
-            return;
-        }
-        // 已知无工作量的升级检查不进入业务列表；合法省略不属于丢弃故障。
-        if span.attributes.iter().any(|field| {
-            field.key.as_str() == "uc.operation"
-                && matches!(
-                    field.value.as_str().as_ref(),
-                    "profile_storage_upgrade" | "membership_recovery"
-                )
-        }) && span
-            .attributes
-            .iter()
-            .any(|field| field.key.as_str() == "uc.outcome" && field.value.as_str() == "skipped")
-        {
-            return;
-        }
-        if let Some(kind) = span_record_kind(&span) {
-            if !span
-                .attributes
-                .iter()
-                .any(|field| field.key.as_str() == "uc.record.kind")
-            {
-                span.attributes
-                    .push(opentelemetry::KeyValue::new("uc.record.kind", kind));
-            }
-        }
-        span.attributes
-            .retain(|attribute| SPAN_FIELDS.contains(&attribute.key.as_str()));
         let _ = self.gate.submit(|| self.inner.on_end(span));
     }
 
@@ -1463,4 +1413,67 @@ where
     fn set_resource(&mut self, resource: &Resource) {
         self.inner.set_resource(resource);
     }
+}
+
+/// 本地文件与远端出口共用同一份 span 白名单及派生规则。
+pub(crate) fn prepare_diagnostic_span(span: &mut SpanData) -> Result<bool, ()> {
+    // tracing-opentelemetry 已启动的 span 忽略 otel.name 更新。
+    // 流程负责人只提供固定显示名，编码前转换并移除内部字段。
+    let mut display_names = span
+        .attributes
+        .iter()
+        .filter(|field| field.key.as_str() == "uc.display.name");
+    if let Some(field) = display_names.next() {
+        if display_names.next().is_some() {
+            return Err(());
+        }
+        let Value::String(name) = &field.value else {
+            return Err(());
+        };
+        span.name = name.as_str().to_owned().into();
+        span.attributes
+            .retain(|field| field.key.as_str() != "uc.display.name");
+    }
+    if !span_is_approved(span) {
+        return Err(());
+    }
+    if span.attributes.iter().any(|field| {
+        field.key.as_str() == "uc.operation" && field.value.as_str() == "runtime.shutdown_tasks"
+    }) && span
+        .attributes
+        .iter()
+        .any(|field| field.key.as_str() == "uc.outcome" && field.value.as_str() == "ok")
+    {
+        return Ok(false);
+    }
+    // 已知无工作量的升级检查不进入业务列表；合法省略不属于丢弃故障。
+    if span.attributes.iter().any(|field| {
+        field.key.as_str() == "uc.operation"
+            && matches!(
+                field.value.as_str().as_ref(),
+                "profile_storage_upgrade" | "membership_recovery"
+            )
+    }) && span
+        .attributes
+        .iter()
+        .any(|field| field.key.as_str() == "uc.outcome" && field.value.as_str() == "skipped")
+    {
+        return Ok(false);
+    }
+    if let Some(kind) = span_record_kind(span) {
+        if !span
+            .attributes
+            .iter()
+            .any(|field| field.key.as_str() == "uc.record.kind")
+        {
+            span.attributes
+                .push(opentelemetry::KeyValue::new("uc.record.kind", kind));
+        }
+    }
+    span.attributes
+        .retain(|attribute| SPAN_FIELDS.contains(&attribute.key.as_str()));
+
+    span.instrumentation_scope =
+        opentelemetry::InstrumentationScope::builder("uniclipboard").build();
+    Ok(true)
 }

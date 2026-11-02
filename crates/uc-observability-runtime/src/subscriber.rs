@@ -52,7 +52,7 @@ impl Layer<Registry> for HealthLayer {
         let metadata = event.metadata();
         let mut record = serde_json::json!({
             "timestamp": chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
             "level": metadata.level().as_str(),
             "target": metadata.target(),
             "fields": fields.0,
@@ -63,14 +63,8 @@ impl Layer<Registry> for HealthLayer {
             let _context = opentelemetry::Context::new().attach();
             recording.annotate(&mut record);
         }
-        let Ok(mut bytes) = serde_json::to_vec(&record) else {
-            self.file.record_rejection();
-            return;
-        };
-        bytes.push(b'\n');
         self.file
-            .writer()
-            .write_record(&bytes, LocalDiagnosticSource::Runtime);
+            .record(LocalDiagnosticSource::Runtime as usize, &record);
     }
 }
 
