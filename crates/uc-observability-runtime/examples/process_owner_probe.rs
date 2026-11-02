@@ -282,6 +282,12 @@ fn generation_exhaustion_probe() {
 #[cfg(unix)]
 fn main() {
     #[cfg(feature = "test-process-release")]
+    if std::env::args().any(|arg| arg == "--diagnostic-streaming") {
+        diagnostic_streaming_probe();
+        return;
+    }
+
+    #[cfg(feature = "test-process-release")]
     if std::env::args().any(|arg| arg == "--terminal-admission-deadline") {
         terminal_admission_deadline_probe();
         return;
@@ -2807,4 +2813,89 @@ fn terminal_admission_deadline_probe() {
 #[cfg(not(unix))]
 fn main() {
     panic!("process owner probe requires Unix FIFOs, lsof, and Python fcntl");
+}
+
+#[cfg(all(unix, feature = "test-process-release"))]
+fn diagnostic_streaming_probe() {
+    use diagnostic_store::{METRICS, PROBE_FAULT};
+    use std::sync::atomic::Ordering;
+    let directory = std::path::PathBuf::from(
+        std::env::var_os("UC_TEST_ARTIFACTS_DIR").expect("artifact directory"),
+    );
+    std::fs::create_dir_all(&directory).expect("create evidence");
+    let root = directory.join("logs");
+    let file = local_file::LocalFileRuntime::new(&root).expect("diagnostic runtime");
+    let record = serde_json::json!({"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"synthetic.stream.load","gauge":{"dataPoints":(0..1200).map(|_|serde_json::json!({"timeUnixNano":"1","asInt":"1"})).collect::<Vec<_>>()}}]}]}]});
+    let mut receipt = serde_json::json!({"scope":"real production storage and queue; synthetic producer; not native GUI acceptance"});
+    let start = std::time::Instant::now();
+    for batch in 0..1000 {
+        for _ in 0..8 {
+            file.record(METRICS, &record);
+        }
+        assert!(file.flush(Duration::from_secs(5)));
+        let status = file.stream_summary();
+        if status["writtenBytes"].as_u64().unwrap_or(0) > 32 * 1024 * 1024 {
+            receipt["load"] = status;
+            receipt["batches"] = serde_json::json!(batch + 1);
+            break;
+        }
+    }
+    assert!(receipt["load"]["writtenBytes"].as_u64().unwrap_or(0) > 32 * 1024 * 1024);
+    assert!(receipt["load"]["rotatedFiles"].as_u64().unwrap_or(0) > 0);
+    receipt["loadSeconds"] = serde_json::json!(start.elapsed().as_secs_f64());
+    PROBE_FAULT.store(1, Ordering::SeqCst);
+    let start = std::time::Instant::now();
+    for _ in 0..100 {
+        file.record(METRICS, &record);
+    }
+    receipt["slowDiskSubmissionMs"] = serde_json::json!(start.elapsed().as_millis());
+    assert!(start.elapsed() < Duration::from_millis(300));
+    assert!(file.flush(Duration::from_secs(5)));
+    assert!(file.stream_summary()["queueFull"].as_u64().unwrap_or(0) > 0);
+    PROBE_FAULT.store(6, Ordering::SeqCst);
+    assert_eq!(
+        file.flush_result(Duration::from_millis(10)),
+        SignalResult::TimedOut
+    );
+    let start = std::time::Instant::now();
+    file.record(METRICS, &record);
+    assert!(start.elapsed() < Duration::from_millis(100));
+    assert!(file.flush(Duration::from_secs(5)));
+    for fault in [2, 3, 5] {
+        let before = file.stream_summary()["writeFailed"].as_u64().unwrap_or(0);
+        PROBE_FAULT.store(fault, Ordering::SeqCst);
+        file.record(METRICS, &record);
+        let _ = file.flush(Duration::from_secs(5));
+        assert!(file.stream_summary()["writeFailed"].as_u64().unwrap_or(0) > before);
+        std::thread::sleep(Duration::from_millis(150));
+        file.record(METRICS, &record);
+        assert!(file.flush(Duration::from_secs(5)));
+    }
+    receipt["beforePanic"] = file.stream_summary();
+    PROBE_FAULT.store(4, Ordering::SeqCst);
+    file.record(METRICS, &record);
+    assert_ne!(
+        file.flush_result(Duration::from_secs(5)),
+        SignalResult::Completed
+    );
+    receipt["afterPanic"] = file.stream_summary();
+    assert!(
+        receipt["afterPanic"]["workerTerminated"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(
+        receipt["afterPanic"]["reservedQueueBytesHighWater"]
+            .as_u64()
+            .unwrap_or(u64::MAX)
+            <= 512 * 1024
+    );
+    let _ = file.shutdown(Duration::from_secs(5));
+    receipt["passed"] = serde_json::json!(true);
+    std::fs::write(
+        directory.join("diagnostic-streaming.json"),
+        serde_json::to_vec_pretty(&receipt).expect("encode receipt"),
+    )
+    .expect("write receipt");
 }

@@ -157,6 +157,7 @@ pub(crate) trait RecordCounters: Send + Sync + 'static {
     }
     fn dequeued(&self, _bytes: usize) {}
     fn worker_failed(&self) {}
+    fn submission_dropped(&self, source: usize);
     fn accepted(&self, source: usize);
     fn queue_dropped(&self, source: usize);
     /// 队列已封口后到达的记录；没有单独统计的计数器把它并入队列丢弃。
@@ -181,6 +182,9 @@ impl HealthHooks {
 }
 
 impl RecordCounters for FileStatistics {
+    fn submission_dropped(&self, source: usize) {
+        increment(&self.source_at(source).queue_dropped);
+    }
     fn accepted(&self, source: usize) {
         increment(&self.source_at(source).accepted);
     }
@@ -407,6 +411,9 @@ impl LocalFileRuntime {
     }
 
     pub(crate) fn record_rejection(&self) {
+        if let Some(stream) = &self.stream {
+            increment(&stream.counters.schema_rejected);
+        }
         self.queue.record_rejection();
     }
 
@@ -638,8 +645,20 @@ fn spawn_file_queue<S: RecordStore>(
 }
 
 impl AsyncFileWriter {
-    pub(crate) fn write_owned(&self, bytes: Vec<u8>, source: usize) {
-        let _submission = lock(&self.submission);
+    pub(crate) fn write_owned(&self, bytes: Vec<u8>, source: usize, wait_for_submission: bool) {
+        let _submission = if wait_for_submission {
+            lock(&self.submission)
+        } else {
+            match self.submission.try_lock() {
+                Ok(guard) => guard,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => {
+                    increment(&self.dropped_records);
+                    self.counters.submission_dropped(source);
+                    return;
+                }
+            }
+        };
         if self.closed.load(Ordering::Acquire) || self.parked.load(Ordering::Acquire) {
             increment(&self.dropped_records);
             self.counters.closed_dropped(source);
@@ -667,7 +686,11 @@ impl AsyncFileWriter {
 
 impl Write for AsyncFileWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.write_owned(buffer.to_vec(), LocalDiagnosticSource::Runtime as usize);
+        self.write_owned(
+            buffer.to_vec(),
+            LocalDiagnosticSource::Runtime as usize,
+            true,
+        );
         Ok(buffer.len())
     }
 
@@ -1049,6 +1072,8 @@ fn run_file_worker<S: RecordStore>(
                     Err(_) => {
                         *lock(&park_error) = None;
                         closed.store(true, Ordering::Release);
+                        health.unavailable.store(true, Ordering::Release);
+                        counters.worker_failed();
                         observer.finish(false);
                         let _ = reply.send(false);
                         return;

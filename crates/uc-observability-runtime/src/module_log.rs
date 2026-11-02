@@ -367,7 +367,7 @@ impl ModuleLogLayer {
         }
         self.file
             .writer()
-            .write_owned(bytes, LocalDiagnosticSource::Runtime as usize);
+            .write_owned(bytes, LocalDiagnosticSource::Runtime as usize, false);
         bump(&self.stats.emitted, 1);
         bump(
             &self.stats.opaque_error_layers,

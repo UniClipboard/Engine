@@ -123,7 +123,7 @@ pub(crate) fn collect_old_runs(
         if !expired && total <= root_bytes {
             continue;
         }
-        if remove_inactive_run(&run.path) {
+        if remove_inactive_run(&run.path)? {
             total = total.saturating_sub(run.bytes);
         }
     }
@@ -151,19 +151,22 @@ fn describe_run(path: PathBuf) -> RunEntry {
 }
 
 /// 取得 lease 锁才说明运行不再活动；持锁期间删除目录，缺少 lease 的目录视为孤儿。
-fn remove_inactive_run(directory: &Path) -> bool {
+fn remove_inactive_run(directory: &Path) -> io::Result<bool> {
     let lease_path = directory.join(LEASE_FILE);
     let lease = match OpenOptions::new().write(true).open(&lease_path) {
         Ok(lease) => Some(lease),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(_) => return false,
+        Err(error) => return Err(error),
     };
     if let Some(lease) = &lease {
-        if lease.try_lock().is_err() {
-            return false;
+        match lease.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
         }
     }
     #[cfg(windows)]
     drop(lease);
-    std::fs::remove_dir_all(directory).is_ok()
+    std::fs::remove_dir_all(directory)?;
+    Ok(true)
 }

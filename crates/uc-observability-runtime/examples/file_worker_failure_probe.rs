@@ -50,6 +50,7 @@ impl RecordStore for ControlledStore {
 
 struct Counters;
 impl RecordCounters for Counters {
+    fn submission_dropped(&self, _: usize) {}
     fn accepted(&self, _: usize) {}
     fn queue_dropped(&self, _: usize) {}
     fn write_failed(&self, _: usize) {}

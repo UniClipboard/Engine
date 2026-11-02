@@ -414,7 +414,7 @@ impl SpanProcessor for DiagnosticSpanProcessor {
             resource.resource = Some(self.history.resource.clone());
         }
         match encode_record(&ExportTraceServiceRequest { resource_spans }, RECORD_BYTES) {
-            Some(bytes) => file.writer().write_owned(bytes, TRACES),
+            Some(bytes) => file.writer().write_owned(bytes, TRACES, false),
             None => file.record_rejection(),
         }
     }

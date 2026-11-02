@@ -147,6 +147,10 @@ fn decode_record(
         "level": level, "target": target, "fields": fields,
         "local_schema_version": 1,
     });
+    if let Some(observed) = data.observed_timestamp() {
+        let observed: DateTime<Utc> = observed.into();
+        record["observed_timestamp"] = json!(observed.to_rfc3339_opts(SecondsFormat::Nanos, true));
+    }
     if let Some(context) = data.trace_context() {
         if context.trace_id != opentelemetry::trace::TraceId::INVALID
             && context.span_id != opentelemetry::trace::SpanId::INVALID
