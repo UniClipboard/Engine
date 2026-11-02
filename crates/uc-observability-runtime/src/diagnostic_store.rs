@@ -192,7 +192,7 @@ impl Write for LimitedRecord {
         if self.bytes.len().saturating_add(bytes.len()) > self.limit {
             return Err(io::Error::other("diagnostic record exceeds byte limit"));
         }
-        // Reserve exactly the maximum once. Vec growth cannot exceed the encoding slot budget.
+        // 只预留单条上限；Vec 扩容不能越过编码槽的预算。
         if self.bytes.capacity() == 0 {
             self.bytes.reserve_exact(self.limit);
         }
@@ -373,7 +373,7 @@ impl RecordStore for DiagnosticStore {
         #[cfg(not(feature = "test-process-release"))]
         let result = file.write_all(bytes);
         if let Err(error) = result {
-            // A partial line is never followed by another record in this segment.
+            // 部分行后不再追加记录；后续记录使用新分段。
             if let Ok(metadata) = file.metadata() {
                 let partial = metadata.len().saturating_sub(*size);
                 *size = metadata.len();
