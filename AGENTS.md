@@ -1,75 +1,156 @@
-# UniClipboardEngine 维护地图
+# UniClipboard Engine Maintenance Map
 
-本文件只提供进入仓库所需的硬约束和导航。长期知识位于 `docs/`，当前架构从
-[`ARCHITECTURE.md`](ARCHITECTURE.md) 进入，文档总索引见 [`docs/README.md`](docs/README.md)。
+This file defines repository constraints and navigation. Long-term knowledge belongs in `docs/`.
+Read [ARCHITECTURE.md](ARCHITECTURE.md) for the current architecture and [docs/README.md](docs/README.md) for the documentation index.
 
-## 先读
+## Read first
 
-- [核心信念](docs/design-docs/core-beliefs.md)
-- [工程与模块设计原则](docs/design-docs/engineering-principles.md)
-- [Rust 编写规范](docs/design-docs/rust-style.md)
-- [错误处理与转换](docs/design-docs/error-handling.md)
-- [运行期观测装配](docs/design-docs/observability.md)
-  - 修改日志、tracing、采样或观测验收前，必须阅读其中的[业务记录组织标准](docs/design-docs/observability.md#业务记录组织标准)。
-- [安全架构](docs/SECURITY.md)
-- [执行计划与技术债](docs/PLANS.md)
+- [Resource vision](VISION.md)
+- [Core beliefs](docs/design-docs/core-beliefs.md)
+- [Engineering and module design principles](docs/design-docs/engineering-principles.md)
+- [Rust style](docs/design-docs/rust-style.md)
+- [Error handling and conversion](docs/design-docs/error-handling.md)
+- [Runtime observability](docs/design-docs/observability.md)
+  - Before changing logs, tracing, sampling, or observability acceptance, read the business-record organization standard in that document.
+- [Security architecture](docs/SECURITY.md)
+- [Execution plans and technical debt](docs/PLANS.md)
 
-进入具体目录后继续读取最近的局部 `AGENTS.md`；它们同样只作范围地图，细则链接回 `docs/`。
+Read the nearest local `AGENTS.md` when entering a directory. Local files provide scope maps and link to rules in `docs/`.
 
-## 不可破坏的规则
+## Invariants
 
-- **用户内容持久化必须密文**：用户内容（来自剪贴板或经同步收到的内容及其派生数据，包括剪贴板文件的文件名和路径）写入 SQLite、磁盘缓存、搜索索引或配置文件前必须先经 MasterKey AEAD 加密，严禁明文落库；例外仅限下文已批准的文件内容本体和受管缓存 basename。
-- 凭据和密钥材料（MasterKey、passphrase、KEK、relay 访问令牌、鉴权令牌等）只能保存在系统安全存储中，不得写入配置文件、日志或其他普通文件；Engine 内已有兼容例外仅限「运行期密钥材料」的 `vault/profile-secrets-v1`，不得扩大，宿主侧的已有例外由宿主仓库规定。
-- 配置（用户或程序的偏好与参数，如本机设备名、保存目录、relay 地址、局域网地址）可以明文保存，无需逐项审批；配置不得包含用户内容或凭据，日志与观测规则不变。
-- 仅内容类型枚举、文件内容本体，以及入站文件在受管缓存中经安全清理且只作实际 basename 的原始文件名可明文保存；原始路径、数据库/搜索字段、日志与关联元数据仍须加密或脱敏。
-- 除配置外，新持久字段或文件默认敏感；主张明文例外必须在 PR 说明并取得明确批准。
-- 日志、公开错误和观测事件不得包含剪贴板内容、密码、密钥、完整令牌、邀请、设备名、地址、文件名或路径。
-- 核心问题只在本仓修复，产品仓不维护补丁副本。
-- `uc-engine` 是唯一稳定 Rust 入口；iOS、Android、HarmonyOS 绑定只依赖它并使用同一版本。
-- P2P 是默认能力；LAN 兼容线只由用户明确选择，不因 P2P 失败自动切换。
-- 内部 crate 与绑定不发布到 crates.io；交付只通过带校验信息的 GitHub Release。
+- Encrypt user content with MasterKey AEAD before writing it to SQLite, disk caches, search indexes, or configuration files.
+  Do not write plaintext user content to a database.
+  User content includes clipboard content, synchronized content, derived data, clipboard filenames, and paths.
+  The only plaintext exceptions are the approved file bodies and managed-cache basenames described below.
+- Store credentials and key material only in system secure storage.
+  This includes MasterKey, passphrases, KEKs, relay access tokens, and authentication tokens.
+  Do not write them to configuration, logs, or ordinary files.
+  The existing Engine exception is runtime key material in `vault/profile-secrets-v1`. Do not expand this exception.
+  Host repositories define their own existing exceptions.
+- Configuration can remain plaintext without approval for each field.
+  Configuration includes device names, save directories, relay addresses, and LAN addresses.
+  Configuration must not contain user content or credentials. Logging and observability restrictions still apply.
+- Content-type enums, file bodies, and sanitized original filenames used only as actual basenames in the managed inbound cache can remain plaintext.
+  Original paths, database and search fields, logs, and correlation metadata must remain encrypted or redacted.
+- Except for configuration, treat each new persistent field or file as sensitive by default.
+  Describe any proposed plaintext exception in the PR and obtain explicit approval.
+- Logs, public errors, and observability events must not contain clipboard content, passwords, keys, complete tokens, invitations, device names, addresses, filenames, or paths.
+- Fix core problems in this repository. Product repositories must not maintain patch copies.
+- `uc-engine` is the only stable Rust entry point. iOS, Android, and HarmonyOS bindings depend only on `uc-engine` and use the same version.
+- P2P is the default capability. Enable LAN compatibility only after explicit user selection.
+  Do not switch to LAN automatically after a P2P failure.
+- Do not publish internal crates or bindings to crates.io. Deliver them only through GitHub Releases with verification metadata.
 
-## 目录地图
+## Directory map
 
-- `crates/`：Core 规则、Application 流程、Infra 实现与 Engine 稳定入口。
-- `bindings/`：iOS、Android、HarmonyOS 薄绑定。
-- `compatibility/`：独立版本、独立发布的 LAN 兼容线。
-- `tests/hosts/`：移动平台验收宿主，不承载产品功能。
-- `scripts/architecture/`：所有权、依赖方向和发布来源检查。
-- `scripts/release/`：产物归集、清单与发布前核验。
-- `docs/design-docs/`：长期设计、稳定契约与 ADR。
-- `docs/exec-plans/`：active/completed 计划与技术债。
-- `docs/product-specs/`：产品需求与验收。
-- `docs/generated/`：可再生的 schema 与图表快照。
-- `docs/references/`：领域词表与来源映射。
+- `crates/`: Core rules, Application workflows, Infra implementations, and the stable Engine entry point.
+- `bindings/`: Thin iOS, Android, and HarmonyOS bindings.
+- `compatibility/`: The independently versioned and released LAN compatibility line.
+- `tests/hosts/`: Mobile acceptance hosts. Do not add product features here.
+- `scripts/architecture/`: Ownership, dependency direction, and release provenance checks.
+- `scripts/release/`: Artifact collection, manifests, and pre-release verification.
+- `docs/design-docs/`: Long-term design, stable contracts, and ADRs.
+- `docs/exec-plans/`: Active plans, completed plans, and technical debt.
+- `docs/product-specs/`: Product requirements and acceptance criteria.
+- `docs/generated/`: Reproducible schemas and diagram snapshots.
+- `docs/references/`: Domain glossary and source mappings.
 
-## 修改约束
+## Change requirements
 
-- 项目文档与代码注释使用中文；代码标识符、提交信息使用英文。
-- 保持单一事实来源，不长期保留新旧两套实现或文档入口。
-- 文档中的仓库路径使用相对路径。
-- 使用 planning-with-files 时，`task_plan.md`、`findings.md`、`progress.md` 统一存放在 `.planning/<YYYY-MM-DD>-<任务短名>/` 下，不得创建在仓库根目录；继续已有任务时复用其原目录。
-- Rust 命令从仓库根目录运行，统一通过 `just cargo`；直接运行 Cargo 前 source `scripts/build-cache/env.sh`。
-- Cargo 构建默认复用仓库 `target`；该路径不可用时先停止并修复，不得把任务命名的 `CARGO_TARGET_DIR` 改到 `/tmp` 或 `/private/tmp` 继续构建。
-- 多 Agent 可以并行读代码和修改互不重叠的文件，但 Cargo 验证由一个负责人通过共享 `target` 串行执行；不得让每个 Agent 各建一套完整构建目录。
-- 默认保留环境中的共享编译缓存；除非任务就是诊断缓存本身，不得通过清空 `RUSTC_WRAPPER` 绕过它。
-- 确需隔离的构建目录必须位于明确的外置可再生目录，并在任务结束前检查活动进程后回收；不得把清理责任留给后续会话。
-- 生产代码禁止 `unwrap()`、`expect()`、`println!()` 和 `eprintln!()`。
-- Rust 名称默认在模块入口集中导入，函数签名和正文不重复书写 `crate::` 完整路径；允许情形与豁免格式见 Rust 编写规范。
-- Application 下层失败保留完整 source chain；禁止字符串化或吞错。详细规则见错误处理文档。
-- 跨层功能必须有唯一完整负责人；Core 保存规则、Application 负责流程、Infra 提供能力、Engine 只组装。
-- “一个流程负责人”指流程顺序、成功/失败结果及重启/重试责任由同一个业务模块统一承担，不是要求所有定义塞进一个文件或一个类型。模块内部应按职责组织流程实现、专属 port、数据模型、错误与测试；不得以统一负责人为由将这些内容全部堆进 `mod.rs`。`mod.rs` 应保持为清晰的模块入口，以模块声明和必要导出为主；拆分文件不应扩大公开接口，也不得把内部步骤交给调用方拼接。
-- 跨层持续计时与结果分类只通过 Engine 组装层的领域 port decorator 实现。
-- 日志使用 `uc_*!` 宏（字段名与值类别由字段目录在编译期约束，见 [ADR-030](docs/design-docs/decisions/030-typed-log-events-and-enforcement.md)）；直接使用 `tracing` 日志宏会被 `scripts/architecture/check-direct-log-macros.mjs` 拒绝。
-- 独立业务记录必须说明触发原因、完整动作和最终结果；不得把底层调用或正常清理自动提升为业务入口。业务动作与运行诊断分开，测试与产品记录隔离；关联、结束和验收细则只在[业务记录组织标准](docs/design-docs/observability.md#业务记录组织标准)维护。
-- 为日志、tracing 或流程关联增加观测时，不得向 Engine 新增暴露 Application/Core 内部阶段、状态对象、业务标识或步骤查询，也不得为观测扩大 facade、port 或结果接口。Engine 只能装饰既有完整能力的输入与输出；跨步骤关联必须由完整流程负责人通过不透明观测上下文提供，且不得让 Engine 据此编排业务步骤。
-- 新功能开工前写清完整负责人、调用方唯一动作、成功/失败结果及重启/重试责任。
-- 修改持久化格式前遵守[持久化格式演进规则](docs/design-docs/engineering-principles.md#持久化格式演进)：同一未发布功能分支默认只能新增一个最终格式版本，开发切片和本地提交不是版本冻结边界。
-- 行为、接口、不变量或重要取舍变化时，按实际影响更新对应的 Product Spec、Design Doc、ADR 或执行计划；无长期信息价值的改动不强制追加文档记录。
+- Write project documentation in English. Keep code comments in Chinese. Use English code identifiers and commit messages.
+- Keep one source of truth. Do not retain parallel old and new implementations or documentation entry points indefinitely.
+- Use relative repository paths in documentation.
+- When using planning-with-files, put `task_plan.md`, `findings.md`, and `progress.md` under `.planning/<YYYY-MM-DD>-<task-name>/`.
+  Do not create these files at the repository root. Reuse the original directory when continuing a task.
+- Run Rust commands from the repository root through `just cargo`.
+  Before running Cargo directly, source `scripts/build-cache/env.sh`.
+- Reuse the repository `target` by default. If that path is unavailable, stop and repair it first.
+  Do not move a task-specific `CARGO_TARGET_DIR` to `/tmp` or `/private/tmp` to continue a build.
+- Agents can read in parallel and edit separate files. One owner must run Cargo validation serially through the shared `target`.
+  Do not create a complete build directory for each agent.
+- Preserve the shared compilation cache. Do not clear `RUSTC_WRAPPER` unless the task diagnoses the cache itself.
+- If build isolation is necessary, use an explicitly selected external directory for reproducible outputs.
+  Before task completion, check for active processes and reclaim that directory. Do not leave cleanup to a later session.
+- Do not use `unwrap()`, `expect()`, `println!()`, or `eprintln!()` in production code.
+- Import Rust names at the module entry point by default.
+  Do not repeat fully qualified `crate::` paths in signatures or bodies. Follow the exceptions and exemption format in the Rust style guide.
+- Preserve the complete source chain for lower-layer failures in Application. Do not stringify or discard errors.
+  Follow the error-handling document.
+- Give each cross-layer behavior one complete owner. Core holds rules, Application owns workflows, Infra supplies capabilities, and Engine assembles them.
+- One workflow owner controls order, results, retry, and restart recovery. This does not require one file or one type.
+  Separate implementation, workflow-specific ports, models, errors, and tests by responsibility within the module.
+  Keep `mod.rs` focused on module declarations and necessary exports.
+  File separation must not expand public interfaces or require callers to assemble internal steps.
+- Implement cross-layer duration measurement and result classification only through domain port decorators in the Engine composition layer.
+- Use `uc_*!` logging macros. The field catalog constrains field names and value categories at compile time.
+  Follow [ADR-030](docs/design-docs/decisions/030-typed-log-events-and-enforcement.md).
+  `scripts/architecture/check-direct-log-macros.mjs` rejects direct `tracing` logging macros.
+- Each independent business record must explain the trigger, complete action, and final result.
+  Do not promote lower-layer calls or normal cleanup into business entry points.
+  Separate business actions from runtime diagnostics and test records from product records.
+  Keep correlation, completion, and acceptance rules in the business-record organization standard in `docs/design-docs/observability.md`.
+- Do not expand Engine interfaces for observability by exposing internal Application or Core stages, state objects, business identifiers, or step queries.
+  Do not expand facades, ports, or result interfaces for that purpose.
+  Engine can decorate only existing complete capabilities through their inputs and outputs.
+  The complete workflow owner must supply opaque context for cross-step correlation.
+  Engine must not use that context to orchestrate business steps.
+- Before implementing a feature, define the complete owner, the caller's single action, success and failure results, and retry and restart responsibilities.
+- Before changing a persistent format, follow the format-evolution rules in `docs/design-docs/engineering-principles.md`.
+  An unreleased feature branch normally adds only one final format version.
+  Development slices and local commits do not freeze a format.
+- When behavior, interfaces, invariants, or important tradeoffs change, update the affected Product Spec, Design Doc, ADR, or execution plan.
+  A change without lasting information does not require a new documentation record.
+- Never write unit tests after writing implementation code.
+  Strongly prefer end-to-end tests as the sole test mechanism.
+  Produce a verifiable and repeatable artifact at the end of each end-to-end test.
+  If isolated testing is necessary, enumerate the system's failure modes before writing code.
+- Select the simplest implementation that meets the current requirement.
+  Establish a working end-to-end slice before adding complexity.
+  Check existing dependencies and maintained solutions before adding a library or abstraction.
 
-## 交付前检查
+## Resource design requirements
 
-不涉及行为改动时至少运行：
+Follow [VISION.md](VISION.md) for the resource goals, challenge budgets, and acceptance scenarios.
+The numeric challenges are not enforced limits until platform baselines and explicit gates exist.
+Treat measurable resource use and predictable resource bounds as mandatory design properties.
+Do not claim that the current Engine is lightweight or resource-heavy without measurements.
+
+- Before adding a long-lived allocation, shared owner, cache, queue, task, thread, connection, or worker, identify its complete owner.
+  Define its lifetime, aggregate resource bound, overload result, and release path.
+  Include success, failure, cancellation, shutdown, retry, and restart behavior.
+- Use bounded queues by default. Bound waiting tasks and retained payload bytes as well as active concurrency.
+  A semaphore alone does not bound queued work. Document any exception with a measured or proven bound.
+- Give every long-lived cache a capacity bound or an expiry policy with bounded retention under the maximum admitted workload.
+  Include retained buffer capacity and per-device multiplication in the total budget.
+- Prefer bounded streaming and paginated reads for large payloads and history.
+  Avoid unnecessary full-payload copies. Bound decoded pixels and image conversion concurrency separately.
+  Do not invent an ad hoc chunked-encryption scheme or weaken the existing persistence and protocol contracts.
+- Activate expensive capabilities when needed. Release temporary state when work ends.
+  Preserve required listeners, connections, discovery, and synchronization latency.
+  Prefer event-driven waits to polling. If the platform requires polling, bound its frequency and apply backoff.
+- Keep CPU-intensive and blocking work off asynchronous executor and platform-affine threads.
+  Bound worker admission and blocking work. Measure runtime and thread changes before selecting a configuration.
+- Reuse existing dependencies before adding a crate. Review default features, duplicate runtimes, background threads, caches, and buffers.
+  Do not replace a maintained library solely because its API or package appears smaller.
+- Prefer borrowing when ownership permits. Justify long-lived shared ownership and buffer retention.
+  Do not ban cloning or require `Arc`, `Bytes`, `Cow`, or a small-container library without evidence.
+- Every performance-sensitive change must be evaluated against a reproducible baseline under equivalent conditions.
+  Performance claims must be supported by measured evidence.
+  Compare the baseline and candidate with a repeatable end-to-end workload.
+  Report memory, CPU, or latency results for the affected resource and check for costs shifted to other resources.
+  Include peaks, post-work recovery, and a verifiable artifact as specified in `VISION.md`.
+- In the PR, state the resource bound, comparison conditions, results, and tradeoffs.
+  Record missing measurements as skipped. Do not describe an unmeasured change as a proven optimization.
+  If a required check cannot run, state the blocker and leave acceptance incomplete.
+- Preserve data security, synchronization correctness, and recovery guarantees during every optimization.
+  Do not disable the shared build cache or alter release panic behavior merely to improve a benchmark.
+- Add numeric CI gates only after establishing platform baselines, measurement noise, tolerances, and an owner.
+  Do not claim that a proposed benchmark or gate already runs in CI.
+
+## Delivery checks
+
+Even when a change does not alter behavior, run at least:
 
 ```bash
 just cargo metadata --locked --format-version 1
@@ -80,10 +161,10 @@ node scripts/architecture/check-engine-repository.mjs
 git diff --check
 ```
 
-涉及发布时另运行：
+For release changes, also run:
 
 ```bash
-node scripts/release/verify-release-bundle.mjs <产物目录>
+node scripts/release/verify-release-bundle.mjs <artifact-directory>
 ```
 
-设备矩阵中未执行的项目记为“跳过”，不得记为“通过”。
+Record unexecuted device-matrix items as skipped. Do not mark them as passed.
