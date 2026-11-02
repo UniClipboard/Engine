@@ -2879,6 +2879,7 @@ fn diagnostic_streaming_probe() {
         SignalResult::Completed
     );
     receipt["afterPanic"] = file.stream_summary();
+    assert_eq!(receipt["afterPanic"]["countsComplete"], false);
     assert!(
         receipt["afterPanic"]["workerTerminated"]
             .as_u64()

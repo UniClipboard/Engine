@@ -170,7 +170,7 @@ impl StreamCounters {
             "writtenBytes": load(&c.written_bytes), "submissionBusy": load(&c.submission_busy), "writeFailed": load(&c.failed), "queueFull": load(&c.full), "closedDropped": load(&c.closed),
             "schemaRejected": load(&c.schema_rejected), "encodingBusy": load(&c.busy), "encodingRejected": load(&c.oversized), "workerTerminated": load(&c.terminated),
             "rotatedFiles": load(&c.rotated), "rotatedBytes": load(&c.rotated_bytes), "cleanupFailures": load(&c.cleanup_failed), "metadataWriteFailures": load(&c.metadata_failed),
-             "countsComplete": true, "counterSnapshot": "non_transactional", "updatedAt": Utc::now().to_rfc3339()})
+             "countsComplete": load(&c.terminated) == 0, "counterSnapshot": "non_transactional", "updatedAt": Utc::now().to_rfc3339()})
     }
 }
 pub(crate) fn encode_record(value: &impl Serialize, limit: usize) -> Option<Vec<u8>> {
