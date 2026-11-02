@@ -4,6 +4,7 @@ use crate::clipboard::inbound::ClipboardInboundRuntime;
 use crate::clipboard::outbound::{
     ClipboardOutboundError, ClipboardOutboundInput, ClipboardOutboundOutcome, ClipboardOutboundPort,
 };
+use crate::facade::host_event::HostEventBus;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::collections::HashMap;
@@ -611,11 +612,11 @@ fn recovery_deps(
         }),
         entries: Arc::new(Entries(entries)),
         events: Arc::new(Sources { sources }),
-        deliveries,
+        deliveries: deliveries.clone(),
         device_identity: Arc::new(LocalDevice(DeviceId::new("local"))),
         clock: Arc::new(FixedClock),
         delivery,
-        delivery_results: DeliveryResultFeed::new(),
+        delivery_results: DeliveryResultFeed::new(deliveries, Arc::new(HostEventBus::new())),
         delivery_gate: Arc::new(tokio::sync::Mutex::new(())),
     }
 }

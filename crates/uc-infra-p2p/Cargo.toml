@@ -7,7 +7,9 @@ description = "Iroh node, pairing discovery, and Space admission rendezvous tran
 publish = false
 
 [features]
+network-test-probe = []
 default = []
+clipboard-stream-fault = ["uuid/serde", "uc-application/clipboard-stream-fault"]
 # Allows test harnesses to bind sponsor and joiner endpoints in one process.
 # Production builds must not enable it: the runtime lease must reject a second
 # live node. See src/network/iroh/node.rs for the production lifecycle guard.
@@ -30,6 +32,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
+arc-swap = "1.9.1"
 thiserror = "2.0"
 async-trait = "0.1"
 # Stream consumption for iroh-blobs Downloader progress events

@@ -14,6 +14,10 @@
 //! The old path keeps a deprecated re-export shim until Slice 5 deletes
 //! `uc-app`.
 
+#[cfg(feature = "clipboard-stream-fault")]
+use crate::clipboard::testing_receive::{
+    current_attempt, os_write_started, ReceiveStage, CURRENT_RECEIVE,
+};
 use anyhow::{Error, Result};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -252,6 +256,8 @@ impl ClipboardWriteCoordinator {
     ) -> Result<()> {
         let owner = self.clone();
         let observation = ObservationContext::capture();
+        #[cfg(feature = "clipboard-stream-fault")]
+        let attempt = current_attempt();
         // 调用方停止等待后，已接受的写入仍持有顺序锁，直到来源记录清理完成。
         tokio::spawn(
             observation
@@ -259,7 +265,12 @@ impl ClipboardWriteCoordinator {
                     let _serial = owner.serial.lock().await;
                     owner.writing.store(true, Ordering::Release);
                     let _writing = WritingGuard(&owner.writing);
-                    owner.write_inner(snapshot, intent).await
+                    let writing = owner.write_inner(snapshot, intent);
+                    #[cfg(feature = "clipboard-stream-fault")]
+                    let result = CURRENT_RECEIVE.scope(attempt, writing).await;
+                    #[cfg(not(feature = "clipboard-stream-fault"))]
+                    let result = writing.await;
+                    result
                 })
                 .in_current_span(),
         )
@@ -324,8 +335,28 @@ impl ClipboardWriteCoordinator {
             let clipboard = Arc::clone(&self.system_clipboard);
             let span = Span::current();
             let observation = ObservationContext::capture();
+            #[cfg(feature = "clipboard-stream-fault")]
+            let attempt = current_attempt();
             let written = spawn_blocking(move || {
-                observation.sync_scope(|| span.in_scope(|| clipboard.write_snapshot(snapshot)))
+                observation.sync_scope(|| {
+                    span.in_scope(|| {
+                        #[cfg(feature = "clipboard-stream-fault")]
+                        os_write_started(attempt);
+                        let result = clipboard.write_snapshot(snapshot);
+                        #[cfg(feature = "clipboard-stream-fault")]
+                        if let Some(attempt) = attempt {
+                            attempt.record(
+                                if result.is_ok() {
+                                    ReceiveStage::OsWriteSucceeded
+                                } else {
+                                    ReceiveStage::OsWriteFailed
+                                },
+                                None,
+                            );
+                        }
+                        result
+                    })
+                })
             })
             .await
             .map_err(|source| Error::new(source).context("system clipboard writer failed"))

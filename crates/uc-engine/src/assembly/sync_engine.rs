@@ -99,6 +99,7 @@ pub(crate) struct SyncApplicationAdapters {
 
 pub(crate) struct PreparedSyncSession {
     pub application: SyncApplicationAdapters,
+    pub clipboard_connectivity: ConnectivityManager,
     pub prepared_session: PreparedIrohSession,
 }
 
@@ -166,11 +167,15 @@ pub async fn prepare_sync_session(
             ..ConnectivityPolicy::default()
         },
     );
+    let presence_wire = Arc::new(PeerReachabilityWire);
+    #[cfg(all(test, feature = "dev-tools", target_os = "linux"))]
+    let presence_wire =
+        receive_streams::decorate_presence(&space_setup.iroh_blob_store_dir, presence_wire);
     let presence_owner = PeerReachabilityTransport::new(
         presence_manager,
         space_setup.peer_access.clone(),
         PeerReachabilityTransportPorts {
-            wire: Arc::new(PeerReachabilityWire),
+            wire: presence_wire,
             environment: presence_environment,
             address_refresh: verified_peer_address_refresh.clone(),
         },
@@ -272,7 +277,8 @@ pub async fn prepare_sync_session(
     let ClipboardHandlers {
         dispatch: clipboard_dispatch,
         receiver: clipboard_receiver,
-    } = builder.install_clipboard(manager)?;
+    } = builder.install_clipboard(manager.clone())?;
+    let clipboard_connectivity = manager;
     let clipboard_dispatch: Arc<dyn ClipboardDispatchPort> = clipboard_dispatch;
     let clipboard_receiver: Arc<dyn ClipboardReceiverPort> = clipboard_receiver;
     // Install the active-clipboard state ALPN (0xC3) as an independent
@@ -686,6 +692,7 @@ pub async fn prepare_sync_session(
 
     uc_info!("Iroh adapters registered against the Application network binding");
     Ok(PreparedSyncSession {
+        clipboard_connectivity,
         application: SyncApplicationAdapters {
             binding: application_network,
             active_pull_client: active_clipboard_pull_client,

@@ -106,6 +106,23 @@ impl LifetimeMdns {
         self.inner.service.borrow().is_some()
     }
 
+    /// 服务建立后唤醒连接负责人；可用性只提供重试机会，不表示对端可达。
+    pub(in super::super) fn availability_changes(&self) -> BoxStream<'static, ()> {
+        let installed = self.inner.service.subscribe();
+        Box::pin(futures_util::stream::unfold(
+            installed,
+            |mut installed| async move {
+                loop {
+                    installed.changed().await.ok()?;
+                    let available = installed.borrow_and_update().is_some();
+                    if available {
+                        return Some(((), installed));
+                    }
+                }
+            },
+        ))
+    }
+
     fn current(&self) -> Option<MdnsAddressLookup> {
         self.inner.service.borrow().clone()
     }

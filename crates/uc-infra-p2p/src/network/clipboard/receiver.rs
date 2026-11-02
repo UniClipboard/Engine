@@ -1,4 +1,6 @@
 use super::super::trace_context::set_remote_parent;
+#[cfg(feature = "clipboard-stream-fault")]
+use super::stream_fault::{Attempt, FaultPhase};
 use async_trait::async_trait;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use std::sync::Arc;
@@ -6,6 +8,8 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 use tracing::Instrument;
+#[cfg(feature = "clipboard-stream-fault")]
+use uc_application::deps::{applied_push_since, receive_commit_cursor};
 use uc_application::deps::{
     ClipboardDelivery, ClipboardReceiverPort, ConnectionLease, ConnectionMode, ConnectionProtocol,
     ConnectivityError, ConnectivityManager, PeerConnection, PeerSendStream, StreamLease,
@@ -231,6 +235,10 @@ impl ClipboardReceiverAdapter {
             // 认证后的任务通过原有广播交接；没有消费者时拒绝，绝不伪报保存成功。
             let (receipt, result) = InboundClipboardReceipt::pending();
             let transport = connection.channel();
+            #[cfg(feature = "clipboard-stream-fault")]
+            let commit_cursor = receive_commit_cursor();
+            #[cfg(feature = "clipboard-stream-fault")]
+            let commit_hash = decoded.header.snapshot_hash.clone();
             let inbound = InboundClipboard {
                 peer_device_id,
                 header: decoded.header,
@@ -292,6 +300,26 @@ impl ClipboardReceiverAdapter {
             }
 
             // 独立流发送持久接受结果；其他流不等待本次结算。
+            #[cfg(feature = "clipboard-stream-fault")]
+            if matches!(ack, AckCode::Accepted) {
+                // 屏障与原 ACK 写入共用一个绝对预算；超时或关闭不改写已完成的保存。
+                let ack_deadline = tokio::time::Instant::now() + FRAME_READ_TIMEOUT;
+                let evidence = applied_push_since(commit_cursor, peer_device_id, &commit_hash);
+                let mut attempt = Attempt::receiver_applied(evidence);
+                let released = tokio::select! {
+                    biased;
+                    _ = connection.closed() => false,
+                    result = tokio::time::timeout_at(ack_deadline, attempt.reach(FaultPhase::ReceiverAppliedBeforeAck)) => result.is_ok(),
+                };
+                if !released {
+                    attempt.receiver_end(true);
+                    return;
+                }
+                attempt.receiver_ack_write();
+                let finished = tokio::time::timeout_at(ack_deadline, emit_ack(&mut stream.send, ack)).await;
+                attempt.receiver_end(finished.is_err());
+                return;
+            }
             emit_ack(&mut stream.send, ack).await;
         }
         .instrument(span);

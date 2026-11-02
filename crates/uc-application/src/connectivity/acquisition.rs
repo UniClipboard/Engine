@@ -3,6 +3,8 @@ use super::connection::ConnectionRecord;
 use super::lifetime::ConnectionLifetime;
 use super::manager::{Inner, PeerState};
 use super::retention::ConnectionActivity;
+#[cfg(feature = "clipboard-stream-fault")]
+use super::testing_fault;
 use super::ConnectivityManager;
 use super::{
     AdmissionAttempt, ConnectivityBackend, ConnectivityError, ConnectivityPolicy, PeerConnection,
@@ -21,6 +23,7 @@ pub(super) struct Acquisition {
     pub inbound: Arc<Semaphore>,
     pub waiting: Arc<Semaphore>,
     pub stop: CancellationToken,
+    pub suspend_prepared: Arc<AtomicBool>,
     pub cancel: CancellationToken,
     pub pending: Arc<Mutex<Option<Arc<dyn PeerConnection>>>>,
 }
@@ -67,11 +70,15 @@ impl Acquisition {
         attempt: Arc<dyn AdmissionAttempt>,
         lifetime: Arc<ConnectionLifetime>,
     ) -> Result<Arc<ConnectionRecord>, ConnectivityError> {
+        let connecting =
+            self.backend
+                .connect(target, self.address_hint.clone(), self.cancel.clone());
+        #[cfg(feature = "clipboard-stream-fault")]
+        let connected = testing_fault::poll_backend(connecting).await?;
+        #[cfg(not(feature = "clipboard-stream-fault"))]
+        let connected = connecting.await?;
         let mut pending = PendingConnection {
-            connection: self
-                .backend
-                .connect(target, self.address_hint.clone(), self.cancel.clone())
-                .await?,
+            connection: connected,
             adopted: false,
         };
         *self.pending.lock().unwrap_or_else(PoisonError::into_inner) =
@@ -103,6 +110,7 @@ impl Acquisition {
             address_hint: self.address_hint.clone(),
             activity: Arc::new(ConnectionActivity::new(self.policy.idle_retention.as_ref())),
             stop: self.stop.clone(),
+            suspend_prepared: self.suspend_prepared.clone(),
             cache_cancel: CancellationToken::new(),
             supervise_local_work: self.policy.wait_for_local_work(),
             accepted_stream_timeout: self.policy.accepted_stream_timeout,

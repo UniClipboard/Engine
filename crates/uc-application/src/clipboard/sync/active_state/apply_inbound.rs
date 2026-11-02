@@ -28,6 +28,10 @@
 //!    retry. The pull/store seam is optional — when unwired this branch logs
 //!    and returns, leaving the register untouched.
 
+#[cfg(feature = "clipboard-stream-fault")]
+use crate::clipboard::testing_receive::{
+    prepared, ReceiveAttempt, ReceivePath, ReceiveStage, CURRENT_RECEIVE, RECEIVE_SHUTDOWN,
+};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -43,7 +47,7 @@ use uc_core::ports::clipboard::{
     ActiveClipboardReceiverPort, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
     FindEntryIdBySnapshotHashPort, InboundActiveClipboardState, LoadActiveClipboardPort,
 };
-use uc_core::ports::{ClockPort, PeerAddressRepositoryPort, PeerReachabilityPort};
+use uc_core::ports::{ClockPort, PeerAddressRepositoryPort, PeerReachabilityPort, SettingsPort};
 use uc_observability_contract::{
     error_source::io_error_kind, log_fields::log_id, uc_debug, uc_info, uc_warn,
 };
@@ -56,7 +60,7 @@ use crate::clipboard::write::{
 };
 use crate::space::IsSpaceUnlockedPort;
 
-use super::super::receive_gate::{MemberReceiveGate, MemberReceivePermit};
+use super::super::receive_gate::{inbound_sync_enabled, MemberReceiveGate, MemberReceivePermit};
 use super::super::send_gate::MemberSendGate;
 use super::super::snapshot_from_entry::SnapshotReconstructor;
 use super::fanout::{fan_out_active_state, ActiveStateBroadcastTrigger};
@@ -140,6 +144,7 @@ pub(crate) struct ApplyInboundActiveClipboardStateUseCase {
     peer_reachability: Arc<dyn PeerReachabilityPort>,
     send_gate: MemberSendGate,
     clock: Arc<dyn ClockPort>,
+    settings: Arc<dyn SettingsPort>,
     mobile_consumability: MobileConsumabilityProbe,
     /// On-demand pull of content this device observed but does not hold (D6).
     /// `None` when the pull subsystem is unwired — the "content missing"
@@ -175,6 +180,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
         peer_scope: Arc<dyn CurrentSpaceMemberScopePort>,
         peer_reachability: Arc<dyn PeerReachabilityPort>,
         clock: Arc<dyn ClockPort>,
+        settings: Arc<dyn SettingsPort>,
         mobile_consumability: MobileConsumabilityProbe,
         converged_tx: broadcast::Sender<ActiveClipboardConvergedEvent>,
     ) -> Self {
@@ -193,6 +199,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
             peer_reachability,
             send_gate: MemberSendGate::new(member_repo),
             clock,
+            settings,
             mobile_consumability,
             pull_client: None,
             pulled_content_store: None,
@@ -245,7 +252,14 @@ impl ApplyInboundActiveClipboardStateUseCase {
                 inbound = rx.recv() => inbound,
             };
             match inbound {
-                Ok(inbound) => self.handle_one(inbound).await,
+                Ok(inbound) => {
+                    #[cfg(feature = "clipboard-stream-fault")]
+                    RECEIVE_SHUTDOWN
+                        .scope(cancel.clone(), self.handle_one(inbound))
+                        .await;
+                    #[cfg(not(feature = "clipboard-stream-fault"))]
+                    self.handle_one(inbound).await;
+                }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     uc_warn!(
                         missed = missed,
@@ -289,6 +303,10 @@ impl ApplyInboundActiveClipboardStateUseCase {
         // 1. Locked → fully lazy (D5).
         if !self.is_unlocked.is_unlocked(&Self::space_id()).await {
             uc_debug!("active state inbound dropped: space locked");
+            return;
+        }
+
+        if !inbound_sync_enabled(self.settings.as_ref()).await {
             return;
         }
 
@@ -438,9 +456,28 @@ impl ApplyInboundActiveClipboardStateUseCase {
             return None;
         };
 
+        // 等待已有内容查询完成后，在发起新拉取前重新检查。
+        if !inbound_sync_enabled(self.settings.as_ref()).await {
+            return None;
+        }
+
         // Pull the transfer envelope (the client bounds this with the 10s pull
         // deadline). Every failure mode is a logged drop.
-        let envelope = match pull_client.pull(peer, snapshot_hash).await {
+        #[cfg(feature = "clipboard-stream-fault")]
+        let attempt = ReceiveAttempt::begin(ReceivePath::ActivePull, *peer, snapshot_hash);
+        #[cfg(feature = "clipboard-stream-fault")]
+        let pulled = CURRENT_RECEIVE
+            .scope(attempt, pull_client.pull(peer, snapshot_hash))
+            .await;
+        #[cfg(not(feature = "clipboard-stream-fault"))]
+        let pulled = pull_client.pull(peer, snapshot_hash).await;
+        #[cfg(feature = "clipboard-stream-fault")]
+        if pulled.is_err() {
+            if let Some(attempt) = attempt {
+                attempt.record(ReceiveStage::Failed, None);
+            }
+        }
+        let envelope = match pulled {
             Ok(bytes) => bytes,
             Err(ActiveClipboardPullClientError::Unreachable) => {
                 uc_debug!(
@@ -466,10 +503,18 @@ impl ApplyInboundActiveClipboardStateUseCase {
 
         // Decrypt + validate receive policy + persist. A store failure or a
         // policy rejection leaves the register untouched.
-        match store
-            .store(peer, snapshot_hash, source_entry, envelope, receive_permit)
-            .await
-        {
+        let storing = store.store(peer, snapshot_hash, source_entry, envelope, receive_permit);
+        #[cfg(feature = "clipboard-stream-fault")]
+        let stored = CURRENT_RECEIVE.scope(attempt, storing).await;
+        #[cfg(not(feature = "clipboard-stream-fault"))]
+        let stored = storing.await;
+        #[cfg(feature = "clipboard-stream-fault")]
+        if stored.is_err() {
+            if let Some(attempt) = attempt {
+                attempt.record(ReceiveStage::Failed, None);
+            }
+        }
+        match stored {
             Ok(InboundPulledContentStoreOutcome::Stored(entry_id)) => {
                 uc_info!(
                     entry_id = log_id(&entry_id),
@@ -499,7 +544,7 @@ impl ApplyInboundActiveClipboardStateUseCase {
     /// converge identically.
     async fn converge_with_entry(
         &self,
-        _peer: &DeviceId,
+        peer: &DeviceId,
         incoming: &ActiveClipboardState,
         local_entry_id: EntryId,
         receive_permit: &MemberReceivePermit,
@@ -545,8 +590,24 @@ impl ApplyInboundActiveClipboardStateUseCase {
             .mobile_consumability
             .is_mobile_consumable(&local_entry_id)
             .await;
-        self.write_then_converge(snapshot, advance_state, categories, mobile_consumable)
-            .await;
+        #[cfg(feature = "clipboard-stream-fault")]
+        let attempt = ReceiveAttempt::begin(
+            ReceivePath::ActiveConvergence,
+            *peer,
+            &incoming.snapshot_hash,
+        );
+        #[cfg(not(feature = "clipboard-stream-fault"))]
+        let _ = peer;
+        #[cfg(feature = "clipboard-stream-fault")]
+        if !prepared(attempt, local_entry_id.as_str()).await {
+            return;
+        }
+        let writing =
+            self.write_then_converge(snapshot, advance_state, categories, mobile_consumable);
+        #[cfg(feature = "clipboard-stream-fault")]
+        CURRENT_RECEIVE.scope(attempt, writing).await;
+        #[cfg(not(feature = "clipboard-stream-fault"))]
+        writing.await;
     }
 
     /// 系统写入、状态推进及重新通知作为同一次完整动作，由接收循环等待结束。
@@ -569,6 +630,21 @@ impl ApplyInboundActiveClipboardStateUseCase {
         // The active-clipboard write is a remote-originated push: use the
         // RemotePush intent so the OS-write origin guard matches the bulk
         // inbound path (avoids the watcher re-capturing our own write).
+        // 此实时检查之后，交给写入负责人之前不得再等待准备动作。
+        if !inbound_sync_enabled(self.settings.as_ref()).await {
+            #[cfg(feature = "clipboard-stream-fault")]
+            if let Ok(Some(attempt)) = CURRENT_RECEIVE.try_with(|attempt| *attempt) {
+                attempt.record(
+                    ReceiveStage::GlobalGateRejected,
+                    Some(state.entry_id.as_str()),
+                );
+            }
+            return;
+        }
+        #[cfg(feature = "clipboard-stream-fault")]
+        if let Ok(Some(attempt)) = CURRENT_RECEIVE.try_with(|attempt| *attempt) {
+            attempt.record(ReceiveStage::WriteHandoff, Some(state.entry_id.as_str()));
+        }
         if let Err(err) = coordinator
             .write(snapshot, ClipboardWriteIntent::RemotePush)
             .await
@@ -641,6 +717,8 @@ impl ApplyInboundActiveClipboardStateUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard::sync::dispatch_entry::test_support::MockSettings_;
+    use uc_core::settings::model::Settings;
 
     #[path = "lifecycle.rs"]
     mod lifecycle;
@@ -985,6 +1063,8 @@ mod tests {
             Arc::new(StubOrigin),
         ));
         let (converged_tx, _) = broadcast::channel(16);
+        let mut settings = MockSettings_::new();
+        settings.expect_load().returning(|| Ok(Settings::default()));
         let uc = ApplyInboundActiveClipboardStateUseCase::new(
             Arc::new(NoopReceiver),
             Arc::new(FixedUnlocked(unlocked)),
@@ -999,6 +1079,7 @@ mod tests {
             member_scope,
             Arc::new(StaticPeerReachability(ReachabilityState::Online)),
             Arc::new(FixedClock(now_ms)),
+            Arc::new(settings),
             MobileConsumabilityProbe::new(Arc::new(crate::test_support::FixedFileSets::empty())),
             converged_tx,
         );
@@ -1369,6 +1450,8 @@ mod tests {
             Arc::new(StubOrigin),
         ));
         let (converged_tx, _) = broadcast::channel(16);
+        let mut settings = MockSettings_::new();
+        settings.expect_load().returning(|| Ok(Settings::default()));
         let mut uc = ApplyInboundActiveClipboardStateUseCase::new(
             Arc::new(NoopReceiver),
             Arc::new(FixedUnlocked(true)),
@@ -1385,6 +1468,7 @@ mod tests {
             Arc::new(crate::clipboard::sync::dispatch_entry::AllTestPeerScope),
             Arc::new(StaticPeerReachability(ReachabilityState::Online)),
             Arc::new(FixedClock(1_000)),
+            Arc::new(settings),
             probe,
             converged_tx,
         );

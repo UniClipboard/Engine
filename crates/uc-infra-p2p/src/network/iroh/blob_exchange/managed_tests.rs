@@ -282,7 +282,14 @@ async fn managed_provider_preserves_sibling_after_stream_cancel_and_settles_peer
     );
     let a = tokio::spawn(async move {
         IrohBlobExchangeAdapter::new(store)
-            .receive(stream, first, token, Arc::new(Progress))
+            .receive(
+                stream,
+                Instant::now() + Duration::from_secs(5),
+                Duration::from_secs(5),
+                first,
+                token,
+                Arc::new(Progress),
+            )
             .await
     });
     // 使用实际传输统计确认提供端已写出正文，而不是只取消一个尚未开始的请求。
@@ -298,7 +305,14 @@ async fn managed_provider_preserves_sibling_after_stream_cancel_and_settles_peer
         .await?;
     let b = tokio::spawn(async move {
         IrohBlobExchangeAdapter::new(store)
-            .receive(stream, second, CancellationToken::new(), Arc::new(Progress))
+            .receive(
+                stream,
+                Instant::now() + Duration::from_secs(5),
+                Duration::from_secs(5),
+                second,
+                CancellationToken::new(),
+                Arc::new(Progress),
+            )
             .await
     });
     cancel.cancel();
@@ -331,7 +345,14 @@ async fn managed_provider_preserves_sibling_after_stream_cancel_and_settles_peer
     );
     let disconnected = tokio::spawn(async move {
         IrohBlobExchangeAdapter::new(store)
-            .receive(stream, first, token, Arc::new(Progress))
+            .receive(
+                stream,
+                Instant::now() + Duration::from_secs(5),
+                Duration::from_secs(5),
+                first,
+                token,
+                Arc::new(Progress),
+            )
             .await
     });
     timeout(Duration::from_secs(5), async {

@@ -8,14 +8,22 @@
 //! follow-up read must observe the DB write — reordering or batching
 //! emit-before-write surfaces a stale snapshot to the detail view.
 
+#[cfg(feature = "clipboard-stream-fault")]
+use crate::clipboard::testing_recovery::{
+    self as observation, EventInput, RecoveryEventKind, ScheduleObservation,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
+#[cfg(feature = "clipboard-stream-fault")]
+use tokio::time::Instant;
 
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio::task::{JoinError, JoinSet};
 use tracing::Instrument;
 
-use uc_core::clipboard::{DeliveryFailureReason, EntryDeliveryRecord, EntryDeliveryStatus};
+use uc_core::clipboard::{
+    DeliveryFailureReason, EntryDeliveryError, EntryDeliveryRecord, EntryDeliveryStatus,
+};
 use uc_core::ids::{DeviceId, EntryId};
 use uc_core::ports::{ClipboardDispatchError, ClockPort, DispatchAck, EntryDeliveryRepositoryPort};
 use uc_observability_contract::diagnostics::{DiagnosticTaskKind, ObservationContext};
@@ -234,24 +242,102 @@ pub(crate) struct DeliveryResult {
 /// 投递结果的订阅入口。只由投递记录负责人在每次写入结束后发布（成功落库或写入失败），
 /// 自动投递、后台收尾、恢复补发与手动重发共用同一来源。
 #[derive(Clone)]
-pub(crate) struct DeliveryResultFeed(broadcast::Sender<DeliveryResult>);
+pub(crate) struct DeliveryResultFeed {
+    events: broadcast::Sender<DeliveryResult>,
+    writes: Arc<DeliveryWriteOwner>,
+}
+
+struct DeliveryWriteOwner {
+    entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
+    host_event_bus: SharedHostEventEmitter,
+    current: Mutex<HashMap<(EntryId, DeviceId), Weak<()>>>,
+}
 
 impl DeliveryResultFeed {
-    pub(crate) fn new() -> Self {
-        Self(broadcast::channel(DELIVERY_RESULT_CAPACITY).0)
+    pub(crate) fn new(
+        entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
+        host_event_bus: SharedHostEventEmitter,
+    ) -> Self {
+        Self {
+            events: broadcast::channel(DELIVERY_RESULT_CAPACITY).0,
+            writes: Arc::new(DeliveryWriteOwner {
+                entry_delivery_repo,
+                host_event_bus,
+                current: Mutex::new(HashMap::new()),
+            }),
+        }
     }
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<DeliveryResult> {
-        self.0.subscribe()
+        self.events.subscribe()
+    }
+
+    /// 恢复终态与新意图、旧结果共用唯一写锁；提交成功后才撤销旧结果写入权。
+    pub(crate) async fn record_recovery_terminal(
+        &self,
+        record: &EntryDeliveryRecord,
+        replacement: Option<&EntryId>,
+    ) -> Result<(), EntryDeliveryError> {
+        let mut current = self.writes.current.lock().await;
+        if let Some(replacement) = replacement {
+            let records = self
+                .writes
+                .entry_delivery_repo
+                .list_by_entry(replacement)
+                .await?;
+            // 新意图未提交时不能取代旧回执；检查和旧状态提交共用写锁。
+            if !records.iter().any(|stored| {
+                stored.target_device_id == record.target_device_id
+                    && !matches!(stored.status, EntryDeliveryStatus::Superseded)
+            }) {
+                return Ok(());
+            }
+        }
+        let records = self
+            .writes
+            .entry_delivery_repo
+            .list_by_entry(&record.entry_id)
+            .await?;
+        if !records.iter().any(|stored| {
+            stored.target_device_id == record.target_device_id
+                && matches!(
+                    stored.status,
+                    EntryDeliveryStatus::Pending | EntryDeliveryStatus::Unreachable
+                )
+        }) {
+            return Ok(());
+        }
+        self.writes
+            .entry_delivery_repo
+            .record_attempt(record)
+            .await?;
+        current.remove(&(record.entry_id.clone(), record.target_device_id));
+        self.writes.emit_status_changed(record);
+        self.publish(
+            &record.entry_id,
+            record.target_device_id,
+            persisted_result_kind(&record.status),
+        );
+        Ok(())
     }
 
     fn publish(&self, entry_id: &EntryId, target_device_id: DeviceId, kind: DeliveryResultKind) {
         // 没有订阅者只说明恢复负责人尚未启动或已停止；启动扫描会按持久状态再处理。
-        let _ = self.0.send(DeliveryResult {
+        let _ = self.events.send(DeliveryResult {
             entry_id: entry_id.clone(),
             target_device_id,
             kind,
         });
+    }
+}
+
+impl DeliveryWriteOwner {
+    fn emit_status_changed(&self, record: &EntryDeliveryRecord) {
+        self.host_event_bus
+            .emit_or_warn(HostEvent::Delivery(DeliveryHostEvent::StatusChanged {
+                entry_id: record.entry_id.to_string(),
+                target_device_id: record.target_device_id.as_str().to_string(),
+            }));
     }
 }
 
@@ -270,9 +356,6 @@ fn persisted_result_kind(status: &EntryDeliveryStatus) -> DeliveryResultKind {
 
 /// Persists per-peer delivery outcomes and pings the frontend to refetch.
 pub(crate) struct DeliveryRecorder {
-    entry_delivery_repo: Arc<dyn EntryDeliveryRepositoryPort>,
-    host_event_bus: SharedHostEventEmitter,
-    current: Arc<Mutex<HashMap<(EntryId, DeviceId), Weak<()>>>>,
     attempt: Option<Arc<()>>,
     results: DeliveryResultFeed,
 }
@@ -281,12 +364,9 @@ impl DeliveryRecorder {
     /// 每个完整发送持有自己的尝试；同目标新尝试取代旧结果写入权，不取消远端提交。
     pub(super) async fn begin_attempt(self: &Arc<Self>) -> Arc<Self> {
         let attempt = Arc::new(());
-        let mut current = self.current.lock().await;
+        let mut current = self.results.writes.current.lock().await;
         current.retain(|_, token| token.strong_count() > 0);
         Arc::new(Self {
-            entry_delivery_repo: self.entry_delivery_repo.clone(),
-            host_event_bus: self.host_event_bus.clone(),
-            current: self.current.clone(),
             attempt: Some(attempt),
             results: self.results.clone(),
         })
@@ -313,9 +393,11 @@ impl DeliveryRecorder {
         entry_id: &EntryId,
         target_device_id: DeviceId,
         now_ms: i64,
-    ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
-        let mut current = self.current.lock().await;
+    ) -> Result<(), EntryDeliveryError> {
+        let mut current = self.results.writes.current.lock().await;
         if let Err(error) = self
+            .results
+            .writes
             .entry_delivery_repo
             .record_attempt(&EntryDeliveryRecord {
                 entry_id: entry_id.clone(),
@@ -371,11 +453,8 @@ impl DeliveryRecorder {
         host_event_bus: SharedHostEventEmitter,
     ) -> Self {
         Self {
-            entry_delivery_repo,
-            host_event_bus,
-            current: Arc::new(Mutex::new(HashMap::new())),
             attempt: None,
-            results: DeliveryResultFeed::new(),
+            results: DeliveryResultFeed::new(entry_delivery_repo, host_event_bus),
         }
     }
 
@@ -389,11 +468,19 @@ impl DeliveryRecorder {
     pub(crate) async fn flush(&self, records: &[EntryDeliveryRecord]) {
         for record in records {
             // 与新尝试登记共用写锁，检查及落库不可被另一尝试穿插。
-            let current = self.current.lock().await;
+            let current = self.results.writes.current.lock().await;
             if !self.is_current(&current, &record.entry_id, record.target_device_id) {
+                #[cfg(feature = "clipboard-stream-fault")]
+                record_fenced_result(record);
                 continue;
             }
-            if let Err(err) = self.entry_delivery_repo.record_attempt(record).await {
+            if let Err(err) = self
+                .results
+                .writes
+                .entry_delivery_repo
+                .record_attempt(record)
+                .await
+            {
                 uc_warn!(
                     error_kind = "delivery_record",
                     io_error_kind = io_error_kind(&err),
@@ -407,12 +494,7 @@ impl DeliveryRecorder {
                 );
                 continue;
             }
-            self.host_event_bus.emit_or_warn(HostEvent::Delivery(
-                DeliveryHostEvent::StatusChanged {
-                    entry_id: record.entry_id.to_string(),
-                    target_device_id: record.target_device_id.as_str().to_string(),
-                },
-            ));
+            self.results.writes.emit_status_changed(record);
             self.results.publish(
                 &record.entry_id,
                 record.target_device_id,
@@ -420,6 +502,21 @@ impl DeliveryRecorder {
             );
         }
     }
+}
+
+#[cfg(feature = "clipboard-stream-fault")]
+fn record_fenced_result(record: &EntryDeliveryRecord) {
+    observation::record(EventInput {
+        kind: RecoveryEventKind::ResultWriteFenced,
+        target: record.target_device_id,
+        entry: Some(&record.entry_id),
+        tracked_entry: None,
+        schedule: ScheduleObservation::default(),
+        at: Instant::now(),
+        trigger: None,
+        outcome: None,
+        cause: None,
+    });
 }
 
 /// 前台期限后继续等待已发出的对端结果，每条完成即记录并通知，不重试发送。
@@ -494,7 +591,7 @@ mod tests {
             async fn record_attempt(
                 &self,
                 _: &EntryDeliveryRecord,
-            ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+            ) -> Result<(), EntryDeliveryError> {
                 self.0.notify_one();
                 Ok(())
             }
@@ -553,7 +650,7 @@ mod tests {
             async fn record_attempt(
                 &self,
                 record: &EntryDeliveryRecord,
-            ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+            ) -> Result<(), EntryDeliveryError> {
                 if record.updated_at_ms == 99 {
                     return Err(uc_core::clipboard::EntryDeliveryError::InvalidStatus);
                 }
@@ -742,7 +839,7 @@ mod tests {
             async fn record_attempt(
                 &self,
                 record: &EntryDeliveryRecord,
-            ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+            ) -> Result<(), EntryDeliveryError> {
                 if record.updated_at_ms == 99 {
                     return Err(uc_core::clipboard::EntryDeliveryError::InvalidStatus);
                 }
@@ -813,7 +910,7 @@ mod tests {
             async fn record_attempt(
                 &self,
                 _: &EntryDeliveryRecord,
-            ) -> Result<(), uc_core::clipboard::EntryDeliveryError> {
+            ) -> Result<(), EntryDeliveryError> {
                 Err(uc_core::clipboard::EntryDeliveryError::InvalidStatus)
             }
             async fn list_by_entry(

@@ -1,5 +1,6 @@
 use super::{ConnectivityError, PeerReceiveStream, PeerSendStream, StreamPair};
 use async_trait::async_trait;
+use std::error::Error;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
@@ -55,6 +56,10 @@ pub trait PeerConnection: Send + Sync {
     fn is_closed(&self) -> bool;
     /// 明确的连接级不可达证据；本地授权/任务失败不能冒充离线。
     fn is_unreachable(&self) -> bool {
+        false
+    }
+    /// 仅实际由本连接所有者确认离线并关闭所引起的错误；未知来源必须返回 false。
+    fn is_offline_close_error(&self, _source: &(dyn Error + 'static)) -> bool {
         false
     }
     fn close(&self);

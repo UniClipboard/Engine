@@ -1,6 +1,8 @@
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use crate::clipboard::sync::apply_inbound::classify_apply_failure;
 use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
+#[cfg(feature = "clipboard-stream-fault")]
+use crate::clipboard::testing_receive::{ReceiveAttempt, ReceivePath, ReceiveStage};
 use std::fmt;
 use std::sync::Arc;
 
@@ -24,7 +26,7 @@ use uc_observability_contract::diagnostics::connectivity::{
 };
 
 use crate::clipboard::sync::decode_v3_bytes_to_snapshot;
-use crate::clipboard::sync::receive_gate::MemberReceiveGate;
+use crate::clipboard::sync::receive_gate::{inbound_sync_enabled, MemberReceiveGate};
 use crate::clipboard::write::ClipboardWriteIntent;
 use crate::deps::CurrentSpaceMemberScopePort;
 
@@ -176,6 +178,16 @@ impl InboundProcessor {
         let Some(prepared) = self.prepare(inbound).await else {
             return;
         };
+        #[cfg(feature = "clipboard-stream-fault")]
+        let attempt = ReceiveAttempt::begin(
+            ReceivePath::ClipboardPush,
+            prepared.from_device,
+            &prepared.snapshot_hash,
+        );
+        #[cfg(feature = "clipboard-stream-fault")]
+        if let Some(attempt) = attempt {
+            attempt.record(ReceiveStage::ApplyStarted, None);
+        }
         let (text_preview, representations) = summarize_plaintext(&prepared.plaintext);
         let result = self
             .apply
@@ -189,6 +201,13 @@ impl InboundProcessor {
                 activation_owner: InboundActivationOwner::Inbound,
             })
             .await;
+        #[cfg(feature = "clipboard-stream-fault")]
+        if let Some(attempt) = attempt {
+            match &result {
+                Ok(outcome) => attempt.apply_outcome(outcome),
+                Err(_) => attempt.record(ReceiveStage::Failed, None),
+            }
+        }
         let (action, disposition) = match &result {
             Ok(InboundClipboardApplyOutcome::Applied { entry_id }) => {
                 uc_info!(entry_id = log_id(&entry_id), "inbound clipboard applied");
@@ -311,28 +330,6 @@ impl InboundProcessor {
             at_ms: self.clock.now_ms(),
             receipt,
         })
-    }
-}
-
-async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
-    match settings.load().await {
-        Ok(settings) if settings.sync.sync_enabled => true,
-        Ok(_) => {
-            describe_clipboard_receive_failure(ClipboardReceiveFailure::SyncDisabled);
-            uc_info!(
-                reason = "sync_disabled",
-                "clipboard inbound: delivery rejected by global sync setting"
-            );
-            false
-        }
-        Err(_) => {
-            describe_clipboard_receive_failure(ClipboardReceiveFailure::SettingsUnavailable);
-            uc_warn!(
-                error_kind = "settings_load",
-                "clipboard inbound: delivery rejected"
-            );
-            false
-        }
     }
 }
 

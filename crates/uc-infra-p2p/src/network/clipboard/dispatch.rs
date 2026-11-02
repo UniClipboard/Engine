@@ -1,9 +1,13 @@
 use super::super::trace_context::inject_current;
+#[cfg(feature = "clipboard-stream-fault")]
+use super::stream_fault::{Attempt, FaultAction, FaultPhase};
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
+#[cfg(feature = "clipboard-stream-fault")]
+use uc_application::deps::with_clipboard_acquisition;
 use uc_application::deps::{
     ConnectionLease, ConnectionProtocol, ConnectivityError, ConnectivityManager,
 };
@@ -37,11 +41,32 @@ impl ClipboardDispatchAdapter {
         header: &ClipboardHeader,
         payload: &SyncPayload,
         deadline: Instant,
+        #[cfg(feature = "clipboard-stream-fault")] attempt: &Attempt,
     ) -> Result<DispatchAck, ClipboardDispatchError> {
+        #[cfg(feature = "clipboard-stream-fault")]
+        tokio::select! {
+            _ = attempt.reach(FaultPhase::BeforeOpen) => {},
+            _ = connection.closed() => {},
+        }
         let mut stream = connection
             .open_bi(deadline)
             .await
-            .map_err(map_connectivity_err)?;
+            // 开流前的请求失效与获取连接时相同：旧请求未写帧，应交给恢复负责人。
+            .map_err(map_acquisition_err)?;
+        #[cfg(feature = "clipboard-stream-fault")]
+        {
+            let action = tokio::select! {
+                action = attempt.reach(FaultPhase::BeforeFrame) => action,
+                _ = connection.closed() => None,
+            };
+            if matches!(
+                action,
+                Some(FaultAction::ResetSend | FaultAction::ResetSendThenHoldCompletion)
+            ) {
+                stream.send.reset(0).map_err(map_connectivity_err)?;
+                attempt.send_reset();
+            }
+        }
         let mut wire_header = header.clone();
         if connection.protocol() != ConnectionProtocol::AttributedClipboard {
             // 实际协商的旧能力只发送冻结旧头；不追加尾随数据或在错误后重试旧格式。
@@ -88,7 +113,11 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
         payload: SyncPayload,
     ) -> DispatchReport {
         let deadline = Instant::now() + self.timeout;
+        #[cfg(feature = "clipboard-stream-fault")]
+        let mut attempt = Attempt::begin();
         if payload.ciphertext.len() > clipboard_wire::MAX_PAYLOAD_SIZE as usize {
+            #[cfg(feature = "clipboard-stream-fault")]
+            attempt.returned(false);
             return DispatchReport {
                 transport: ConnectionChannel::Unknown,
                 outcome: Err(ClipboardDispatchError::LocalPolicyExceeded(format!(
@@ -98,14 +127,18 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
                 ))),
             };
         }
-        let connection = match self
-            .manager
-            .request(*target)
-            .connect(deadline, &CancellationToken::new())
-            .await
-        {
+        let request = self.manager.request(*target);
+        let cancel = CancellationToken::new();
+        #[cfg(feature = "clipboard-stream-fault")]
+        let acquired =
+            with_clipboard_acquisition(attempt.alias(), request.connect(deadline, &cancel)).await;
+        #[cfg(not(feature = "clipboard-stream-fault"))]
+        let acquired = request.connect(deadline, &cancel).await;
+        let connection = match acquired {
             Ok(connection) => connection,
             Err(error) => {
+                #[cfg(feature = "clipboard-stream-fault")]
+                attempt.returned(false);
                 return DispatchReport {
                     transport: ConnectionChannel::Unknown,
                     outcome: Err(map_acquisition_err(error)),
@@ -114,7 +147,14 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
         };
         let outcome = match timeout_at(
             deadline,
-            self.exchange(&connection, header, &payload, deadline),
+            self.exchange(
+                &connection,
+                header,
+                &payload,
+                deadline,
+                #[cfg(feature = "clipboard-stream-fault")]
+                &attempt,
+            ),
         )
         .await
         {
@@ -128,6 +168,16 @@ impl ClipboardDispatchPort for ClipboardDispatchAdapter {
             }
             outcome => outcome,
         };
+        #[cfg(feature = "clipboard-stream-fault")]
+        {
+            attempt.result_ready(outcome.is_ok());
+            // 只挂起真实结果交接，不制造结果；关闭或原期限结束时交回原结果。
+            tokio::select! {
+                _ = timeout_at(deadline, attempt.reach(FaultPhase::BeforeCompletion)) => {},
+                _ = connection.closed() => {},
+            }
+            attempt.returned(outcome.is_ok());
+        }
         DispatchReport {
             transport: connection.channel(),
             outcome,

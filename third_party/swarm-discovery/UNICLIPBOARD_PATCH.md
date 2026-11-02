@@ -19,3 +19,9 @@
 ## 来源与删除条件
 
 只有上游提供同等的接收者生命周期、IPv4 与 IPv6 期望接口集合、安装重试与按接口维护的组播成员关系，且 `iroh-mdns-address-lookup` 的补丁也可移除后，才能删除本副本；替换前重跑上述单元测试以及 Engine 的 `mdns_discovery_contract`。
+
+## IPv4 wildcard lifetime without a default route
+
+`socket_v4(None)` binds the main wildcard receiver without requiring default-interface multicast membership. Explicit initial interfaces join the group on that receiver through the existing tracked installation path. When no explicit initial IPv4 interfaces exist, `Sockets::new` keeps the original one-shot default-interface join attempt after retaining the receiver. With an IPv6 fallback, a failed optional default join does not discard the receiver. Without that fallback, it returns the original typed join error. Explicit joins still return errors and remain incomplete until guardian retry succeeds. A missing main IPv4 receiver cannot count as successful membership.
+
+When Auto receives explicit initial IPv4 interfaces, a real IPv4 socket construction failure propagates to the existing whole-service retry owner. Auto retains its IPv6-only fallback when no IPv4 interfaces were requested. The default IPv4 join result is stored separately from receiver existence. With no explicit sockets, `Mode::Any` selects default IPv4 only after that join succeeds; otherwise it uses IPv6. If a default IPv4 send fails, `Mode::Any` gives the existing IPv6 socket one send opportunity. Protocol-specific sends do not change protocol, and multi-interface `Any` retains its existing single IPv6 send path. No new socket lifecycle, retry timer or interface policy is introduced. The native no-default-route control demonstrates the mechanism; Engine changed-port restart and delivery acceptance remain required.

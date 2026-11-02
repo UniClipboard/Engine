@@ -670,3 +670,28 @@ pub use crate::transfer::progress::{
     ProgressHistoryEvidence, ProgressHistoryReadError, ProgressHistoryRepresentation,
     ReadProgressHistoryPort,
 };
+
+#[cfg(feature = "clipboard-stream-fault")]
+pub use crate::clipboard::testing_recovery::{
+    begin_recovery_observation, recovery_snapshot, RecoveryEvent, RecoveryEventKind,
+    RecoveryEventRef, RecoveryObservationError, RecoverySnapshot,
+};
+
+#[cfg(feature = "clipboard-stream-fault")]
+pub use crate::clipboard::testing_receive::{
+    arm_active_convergence_hold, begin_receive_observation, receive_snapshot,
+    release_active_convergence_hold, reset_receive_faults, ConvergenceHold, ReceiveEvent,
+    ReceiveHoldError, ReceiveObservationError, ReceivePath, ReceiveSnapshot, ReceiveStage,
+};
+
+#[cfg(feature = "clipboard-stream-fault")]
+pub use crate::connectivity::testing_fault::{
+    acquisition_snapshot, arm_acquisition_hold, release_acquisition_hold, reset_acquisition_faults,
+    with_clipboard_acquisition, AcquisitionControlError, AcquisitionEvent, AcquisitionEventKind,
+    AcquisitionHold, AcquisitionSnapshot,
+};
+
+#[cfg(feature = "clipboard-stream-fault")]
+pub use crate::clipboard::testing_receive::{
+    applied_push_since, receive_commit_cursor, ReceiveCommitCursor, ReceiveCommitEvidence,
+};

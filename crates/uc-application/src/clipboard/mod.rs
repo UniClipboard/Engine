@@ -28,3 +28,9 @@ pub(crate) mod resource;
 pub(crate) mod restore;
 pub(crate) mod sync;
 pub(crate) mod write;
+
+#[cfg(feature = "clipboard-stream-fault")]
+pub(crate) mod testing_recovery;
+
+#[cfg(feature = "clipboard-stream-fault")]
+pub(crate) mod testing_receive;

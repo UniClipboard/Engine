@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
@@ -96,6 +97,8 @@ impl BlobExchangePort for RejectUnexpectedNetwork {
     async fn receive(
         &self,
         _: StreamLease,
+        _: Instant,
+        _: Duration,
         _: BlobDigest,
         _: CancellationToken,
         _: Arc<dyn BlobValidatedProgress>,

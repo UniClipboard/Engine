@@ -4,6 +4,8 @@ use std::{
 };
 
 use futures_util::{stream::BoxStream, StreamExt};
+#[cfg(feature = "network-test-probe")]
+use iroh::EndpointAddr;
 use iroh::{
     address_lookup::{
         AddressLookup, AddressLookupBuilder, AddressLookupBuilderError, DnsAddressLookup,
@@ -16,6 +18,8 @@ use uc_observability_contract::diagnostics::connectivity::{DiscoverySource, Netw
 
 use super::super::addr_filter::restrict_to_local_network;
 use super::super::observed_address_lookup::ObservedAddressLookupBuilder;
+#[cfg(feature = "network-test-probe")]
+use super::super::testing_network_probe::{record_discovery, AddressRefreshStage};
 use super::{
     cloud::CloudDiscoveryProvider, configured::ConfiguredAddressProvider,
     mdns::MdnsDiscoveryProvider, ConfiguredPeerAddresses, LifetimeMdns,
@@ -106,6 +110,12 @@ impl AddressLookup for DirectoryAddressLookup {
     }
 
     fn resolve(&self, endpoint: EndpointId) -> Option<BoxStream<'static, Result<Item, Error>>> {
+        #[cfg(feature = "network-test-probe")]
+        record_discovery(
+            AddressRefreshStage::DirectoryLookupStarted,
+            &EndpointAddr::new(endpoint),
+            None,
+        );
         let results = self.manager.resolve(peer_id(endpoint));
         let lan_only = self.lan_only;
         Some(Box::pin(results.map(move |candidate| {
@@ -116,6 +126,12 @@ impl AddressLookup for DirectoryAddressLookup {
             if lan_only {
                 address = restrict_to_local_network(address);
             }
+            #[cfg(feature = "network-test-probe")]
+            record_discovery(
+                AddressRefreshStage::DirectoryCandidateReady,
+                &address,
+                Some(true),
+            );
             Ok(Item::new(
                 EndpointInfo::from(address),
                 candidate.source.0,

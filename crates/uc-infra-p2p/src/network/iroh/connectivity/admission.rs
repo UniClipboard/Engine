@@ -12,10 +12,12 @@ use uc_application::deps::{
     InboundIdentityReservation, PeerConnection, PeerIdentityDirectoryPort,
     SessionConnectionAdmissionPort,
 };
+use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
 use uc_core::membership::PeerAdmissionPort;
 use uc_core::ports::security::IdentityFingerprintFactoryPort;
 use uc_observability_contract::diagnostics::connectivity::InboundPeerProtocol;
+use uc_observability_contract::uc_warn;
 
 #[derive(Clone)]
 pub struct IrohConnectionAdmission {
@@ -233,12 +235,25 @@ impl SessionConnectionAdmissionPort for IrohConnectionAdmission {
                 record_inbound_rejection(self.protocol, error.rejection());
                 ConnectivityError::Admission(Box::new(error))
             })?;
-        reservation.identified(peer)?;
+        reservation.identified(peer).inspect_err(|source| {
+            if self.protocol == InboundPeerProtocol::Blob {
+                uc_warn!(
+                    error_class = source.class(),
+                    "Blob 入站准入失败：身份预留返回拒绝"
+                );
+            }
+        })?;
         // 先交接额度并检查入口围栏，再冻结登记用的撤销基线。
         let result = self
             .register_and_check(peer, self.connections.epoch(&peer), connection)
             .await;
         if let Err(error) = &result {
+            if self.protocol == InboundPeerProtocol::Blob {
+                uc_warn!(
+                    error_class = error.class(),
+                    "Blob 入站准入失败：登记与资格检查"
+                );
+            }
             let rejection = if matches!(
                 error,
                 ConnectivityError::Denied | ConnectivityError::Invalidated(_)

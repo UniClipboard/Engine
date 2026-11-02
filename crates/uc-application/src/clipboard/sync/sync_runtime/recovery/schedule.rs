@@ -13,6 +13,12 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
+#[cfg(feature = "clipboard-stream-fault")]
+use super::RecoveryTrigger;
+#[cfg(feature = "clipboard-stream-fault")]
+use crate::clipboard::testing_recovery::{
+    self as observation, EventInput, RecoveryEventKind, RecoveryEventRef, ScheduleObservation,
+};
 use uc_core::ids::{DeviceId, EntryId};
 
 /// 同一目标上同一条目的计时重试间隔，项数即计时重试的上限：最多 3 次，分别约在 2、5、10 秒后。
@@ -29,6 +35,8 @@ pub(super) const RETRY_BACKOFF: [Duration; 3] = [
 #[derive(Default)]
 pub(super) struct RetrySchedule {
     targets: HashMap<DeviceId, TargetRetry>,
+    #[cfg(feature = "clipboard-stream-fault")]
+    pub(super) observation_source: Option<RecoveryEventRef>,
     /// 读取失败而未完成的通知核对：下一次再核对的到期时间，以及已开始的再核对次数。
     /// 同样按 [`RETRY_BACKOFF`] 退避、最多 3 次；核对只排期不补发，不改动任何目标的次数。
     reconcile_due: Option<Instant>,
@@ -36,6 +44,8 @@ pub(super) struct RetrySchedule {
 }
 
 struct TargetRetry {
+    #[cfg(feature = "clipboard-stream-fault")]
+    observation_origin: Option<RecoveryEventRef>,
     /// 当前条目已经因到期而开始的计时重试次数，用于选择下一次间隔；达到
     /// [`RETRY_BACKOFF`] 的项数后不再排期，状态保留为该条目的“已用尽”标记。
     rounds: usize,
@@ -57,7 +67,13 @@ impl RetrySchedule {
         entry: Option<EntryId>,
         now: Instant,
     ) {
+        #[cfg(feature = "clipboard-stream-fault")]
+        let previous_due = self.targets.get(&target).and_then(|retry| retry.due);
+        #[cfg(feature = "clipboard-stream-fault")]
+        let source = self.observation_source.take();
         let retry = self.targets.entry(target).or_insert(TargetRetry {
+            #[cfg(feature = "clipboard-stream-fault")]
+            observation_origin: None,
             rounds: 0,
             due: None,
             entry: None,
@@ -69,12 +85,16 @@ impl RetrySchedule {
                 if let Some(first) = retry_at(0, now) {
                     retry.due = Some(retry.due.map_or(first, |due| due.min(first)));
                 }
+                #[cfg(feature = "clipboard-stream-fault")]
+                self.observe_update(target, previous_due, source, now);
                 return;
             }
         }
         if retry.due.is_none() {
             retry.due = retry_at(retry.rounds, now);
         }
+        #[cfg(feature = "clipboard-stream-fault")]
+        self.observe_update(target, previous_due, source, now);
     }
 
     /// 目标正在跟踪的条目：最近一次被记录为可恢复或等待结果的条目；没有退避状态或只有
@@ -131,6 +151,22 @@ impl RetrySchedule {
             .min_by_key(|(due, _)| *due)
             .map(|(_, target)| target)?;
         if let Some(retry) = self.targets.get_mut(&target) {
+            #[cfg(feature = "clipboard-stream-fault")]
+            observation::record(EventInput {
+                kind: RecoveryEventKind::RetryDue,
+                target,
+                entry: retry.entry.as_ref(),
+                tracked_entry: retry.entry.as_ref(),
+                schedule: ScheduleObservation {
+                    rounds: retry.rounds + 1,
+                    due: retry.due,
+                    origin: retry.observation_origin,
+                },
+                at: now,
+                trigger: Some(RecoveryTrigger::Retry.wire()),
+                outcome: None,
+                cause: None,
+            });
             retry.due = None;
             retry.rounds = retry.rounds.saturating_add(1);
         }
@@ -153,6 +189,14 @@ impl RetrySchedule {
             }
             retry.entry = Some(entry);
         }
+        #[cfg(feature = "clipboard-stream-fault")]
+        self.observe(
+            RecoveryEventKind::AwaitingResult,
+            *target,
+            None,
+            Instant::now(),
+            None,
+        );
     }
 
     /// 目标最近等待或记录的条目已结算（送达、重复确认或终态失败）时清除其退避，包括
@@ -163,13 +207,93 @@ impl RetrySchedule {
             .get(target)
             .is_some_and(|retry| retry.entry.as_ref() == Some(entry))
         {
+            #[cfg(feature = "clipboard-stream-fault")]
+            self.observe(
+                RecoveryEventKind::SettlementApplied,
+                *target,
+                Some(entry),
+                Instant::now(),
+                self.observation_source,
+            );
             self.targets.remove(target);
+        } else {
+            #[cfg(feature = "clipboard-stream-fault")]
+            self.observe(
+                RecoveryEventKind::SettlementIgnored,
+                *target,
+                Some(entry),
+                Instant::now(),
+                self.observation_source,
+            );
         }
     }
 
     /// 目标已送达、进入终态，或改由上线事件负责时清除退避状态，包括已用尽标记。
     pub(super) fn clear(&mut self, target: &DeviceId) {
+        #[cfg(feature = "clipboard-stream-fault")]
+        self.observe(
+            RecoveryEventKind::Cleared,
+            *target,
+            None,
+            Instant::now(),
+            None,
+        );
         self.targets.remove(target);
+    }
+
+    #[cfg(feature = "clipboard-stream-fault")]
+    pub(super) fn observation(&self, target: &DeviceId) -> ScheduleObservation {
+        self.targets
+            .get(target)
+            .map_or_else(ScheduleObservation::default, |retry| ScheduleObservation {
+                rounds: retry.rounds,
+                due: retry.due,
+                origin: retry.observation_origin,
+            })
+    }
+
+    #[cfg(feature = "clipboard-stream-fault")]
+    pub(super) fn observe(
+        &self,
+        kind: RecoveryEventKind,
+        target: DeviceId,
+        entry: Option<&EntryId>,
+        at: Instant,
+        cause: Option<RecoveryEventRef>,
+    ) -> Option<RecoveryEventRef> {
+        observation::record(EventInput {
+            kind,
+            target,
+            entry: entry.or_else(|| self.tracked_entry(&target)),
+            tracked_entry: self.tracked_entry(&target),
+            schedule: self.observation(&target),
+            at,
+            trigger: None,
+            outcome: None,
+            cause,
+        })
+    }
+
+    #[cfg(feature = "clipboard-stream-fault")]
+    fn observe_update(
+        &mut self,
+        target: DeviceId,
+        previous_due: Option<Instant>,
+        source: Option<RecoveryEventRef>,
+        now: Instant,
+    ) {
+        if let Some(retry) = self.targets.get_mut(&target) {
+            if retry.due != previous_due {
+                retry.observation_origin = source;
+            }
+        }
+        self.observe(
+            RecoveryEventKind::ScheduleUpdated,
+            target,
+            None,
+            now,
+            source,
+        );
     }
 
     #[cfg(test)]

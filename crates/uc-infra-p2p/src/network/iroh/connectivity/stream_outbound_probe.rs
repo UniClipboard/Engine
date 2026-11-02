@@ -178,6 +178,8 @@ async fn settled_file_single_action_registers_sends_and_observes_exact_adopted_a
         let stop = CancellationToken::new();
         let get = store.receive(
             blobs.sending.open_bi(Instant::now() + BUDGET).await?,
+            Instant::now() + BUDGET,
+            BUDGET,
             digest,
             stop.clone(),
             Arc::new(Validated),

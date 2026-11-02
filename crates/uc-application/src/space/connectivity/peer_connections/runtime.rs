@@ -415,9 +415,9 @@ impl ConnectionRuntime {
             ReachabilityState::Online => {
                 peer.online = true;
                 peer.failures = 0;
-                peer.rerun = false;
                 if peer.in_flight.is_none() && !awaiting_refresh {
-                    peer.due = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
+                    let at = Instant::now() + HEALTH_CHECK_INTERVAL;
+                    peer.due = Some(peer.due.map_or(at, |due| due.min(at)));
                 }
             }
             _ => {
@@ -548,9 +548,15 @@ impl ConnectionRuntime {
         if matches!(result, DialResult::State(ReachabilityState::Online)) {
             peer.online = true;
             peer.failures = 0;
-            peer.due = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
-            peer.next_trigger = "health_check";
-            peer.rerun = false;
+            if peer.rerun {
+                // 验证开始后的网络或发现机会仍需一次新验证，旧成功不能消费该机会。
+                peer.rerun = false;
+                let reason = peer.next_trigger;
+                self.opportunity(Some(device), reason);
+            } else {
+                peer.due = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
+                peer.next_trigger = "health_check";
+            }
         } else {
             peer.online = false;
             let seconds = [1, 2, 5, 10, 30, 60][peer.failures.min(5)];

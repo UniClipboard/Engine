@@ -88,6 +88,12 @@ impl IrohNode {
             failures.push(source.context("stop peer discovery runtime"));
         }
 
+        if let Some(local_subnets) = &mut self.local_subnets {
+            if let Err(source) = local_subnets.shutdown().await {
+                failures.push(source.context("stop local subnet policy refresh"));
+            }
+        }
+
         if self.router.is_shutdown() {
             // 当前库不会再返回提前结束的 Router 结果，不能把这条路径当作正常关闭。
             failures.push(RouterStoppedBeforeShutdown.into());

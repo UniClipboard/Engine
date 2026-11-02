@@ -7,7 +7,7 @@ use iroh_blobs::util::AsyncReadRecvStream;
 use iroh_blobs::Hash;
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use tokio::time::Instant;
+use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{BlobExchangeError, BlobExchangeFailure, BlobValidatedProgress};
 
@@ -17,9 +17,16 @@ pub(super) async fn receive(
     reader: AsyncReadRecvStream<SdkReceive>,
     control: ReceiveControl,
     hash: Hash,
+    response_deadline: Instant,
     cancel: &CancellationToken,
     progress: Arc<dyn BlobValidatedProgress>,
 ) -> Result<u64, BlobExchangeError> {
+    // 本地保护准备已耗尽原逻辑期限时，不再启动网络请求。
+    if Instant::now() >= response_deadline {
+        return Err(BlobExchangeError::refused(
+            BlobExchangeFailure::RequestExpired,
+        ));
+    }
     let prepare_header = async {
         let connected = AtConnected::new(
             Instant::now(),
@@ -38,8 +45,17 @@ pub(super) async fn receive(
     let (mut data, size) = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled)),
-        result = prepare_header => result?,
+        // timeout_at 先轮询网络结果，已就绪的真实拒绝不被期限覆盖。
+        result = timeout_at(response_deadline, prepare_header) => result
+            .map_err(|source| BlobExchangeError::new(BlobExchangeFailure::ResponseTimedOut, source))??,
     };
+    // timeout_at 可能先读到期限后的成功响应；开始任何本地导入前拒绝迟到成功。
+    // 真实响应错误已由上方 ? 返回，不会被此期限判断覆盖。
+    if Instant::now() >= response_deadline {
+        return Err(BlobExchangeError::refused(
+            BlobExchangeFailure::ResponseTimedOut,
+        ));
+    }
     let Some(nonzero) = NonZeroU64::new(size) else {
         let finish = async {
             let end = data.drain().await.map_err(content)?;

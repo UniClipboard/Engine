@@ -7,6 +7,7 @@ use super::{
 use async_trait::async_trait;
 use iroh_blobs::{api::TempTag, store::fs::FsStore, Hash, HashAndFormat};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uc_application::deps::{
@@ -37,6 +38,8 @@ impl BlobExchangePort for IrohBlobExchangeAdapter {
     async fn receive(
         &self,
         mut stream: StreamLease,
+        logical_deadline: Instant,
+        response_timeout: Duration,
         digest: BlobDigest,
         cancel: CancellationToken,
         progress: Arc<dyn BlobValidatedProgress>,
@@ -73,9 +76,20 @@ impl BlobExchangePort for IrohBlobExchangeAdapter {
                     }
                 },
             };
+            // 本地保护完成后才开始本轮网络等待；原逻辑期限仍是上限。
+            let response_deadline = (Instant::now() + response_timeout).min(logical_deadline);
             let (send, reader, control, work, completion) = io::split(stream);
-            let received =
-                receive::receive(&self.store, send, reader, control, hash, &cancel, progress).await;
+            let received = receive::receive(
+                &self.store,
+                send,
+                reader,
+                control,
+                hash,
+                response_deadline,
+                &cancel,
+                progress,
+            )
+            .await;
             let size = combine(received, completion.finish())?;
             Ok(BlobReceived {
                 digest,

@@ -38,6 +38,8 @@ pub mod relay_probe;
 pub(crate) mod runtime_consts;
 mod session_generation;
 pub mod space_admission;
+#[cfg(feature = "network-test-probe")]
+pub mod testing_network_probe;
 pub(crate) use super::trace_context;
 
 #[cfg(test)]

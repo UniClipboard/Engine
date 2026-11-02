@@ -140,6 +140,8 @@ impl BlobExchangePort for ObservedExchange {
     async fn receive(
         &self,
         mut stream: StreamLease,
+        logical_deadline: Instant,
+        response_timeout: Duration,
         digest: BlobDigest,
         cancel: CancellationToken,
         progress: Arc<dyn BlobValidatedProgress>,
@@ -159,6 +161,8 @@ impl BlobExchangePort for ObservedExchange {
             self.inner
                 .receive(
                     stream,
+                    logical_deadline,
+                    response_timeout,
                     digest,
                     cancel,
                     Arc::new(Validated {
@@ -168,7 +172,16 @@ impl BlobExchangePort for ObservedExchange {
                 )
                 .await
         } else {
-            self.inner.receive(stream, digest, cancel, progress).await
+            self.inner
+                .receive(
+                    stream,
+                    logical_deadline,
+                    response_timeout,
+                    digest,
+                    cancel,
+                    progress,
+                )
+                .await
         }
     }
     async fn provide(

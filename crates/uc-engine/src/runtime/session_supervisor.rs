@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::{timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use uc_application::deps::LifecycleError;
+use uc_application::deps::{ConnectivityManager, LifecycleError};
 use uc_application::facade::{
     AppFacade, ApplicationAssembly, ApplicationRuntime, ClipboardInboundEvent,
     ClipboardInboundEventAction, ClipboardInboundEventPort, CompletePendingSpaceTransitionError,
@@ -212,6 +212,7 @@ struct ProductionSessionFactory {
 
 struct ProductionSession {
     facade: Arc<AppFacade>,
+    clipboard_connectivity: ConnectivityManager,
     application: Arc<ApplicationRuntime>,
     #[cfg(feature = "lan-compat")]
     mobile_sync: Arc<uc_mobile_lan::MobileSyncFacade>,
@@ -1016,6 +1017,7 @@ impl ProductionSessionFactory {
         )
         .await
         .map_err(|error| session_runtime_error("p2p session", error))?;
+        let clipboard_connectivity = prepared.clipboard_connectivity;
         let network_adapters = prepared.application;
         let prepared_session = prepared.prepared_session;
         let application_runtime = match observe_local_result(
@@ -1097,6 +1099,7 @@ impl ProductionSessionFactory {
         Ok(PreparedProductionSession {
             session: ProductionSession {
                 facade,
+                clipboard_connectivity,
                 application: application_runtime,
                 #[cfg(feature = "lan-compat")]
                 mobile_sync,

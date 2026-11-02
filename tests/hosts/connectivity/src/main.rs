@@ -10,6 +10,12 @@ mod content;
 mod network_faults;
 mod observe;
 
+#[cfg(all(
+    feature = "production-e2e",
+    any(feature = "current-engine", feature = "test-network-config")
+))]
+compile_error!("production-e2e must be built with --no-default-features");
+
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -23,6 +29,12 @@ use uc_engine::observability::{
     DeploymentEnvironment, LocalLogConfig, ObservabilityConfig, ObservabilityResource,
     OperatingSystem, ProcessObservabilityRuntime,
 };
+#[cfg(feature = "production-e2e")]
+use uc_engine::observability::{NetworkLogBudget, NetworkLogConfig, NetworkProcessRole};
+#[cfg(feature = "network-test-probe")]
+use uc_engine::testing_network_probe::{self, subnets};
+#[cfg(feature = "clipboard-stream-fault")]
+use uc_engine::testing_stream_fault;
 #[cfg(feature = "connectivity-opportunity")]
 use uc_engine::ConnectivityOpportunity;
 use uc_engine::{
@@ -246,13 +258,19 @@ fn space_work_event_json(event: uc_engine::DevSpaceWorkEvent) -> Value {
 
 const PASSPHRASE: &str = "connection-recovery-synthetic-passphrase";
 
-#[cfg(feature = "current-engine")]
+#[cfg(any(feature = "current-engine", feature = "production-e2e"))]
 async fn shutdown_engine(engine: &Engine) -> Result<()> {
+    #[cfg(feature = "clipboard-stream-fault")]
+    {
+        testing_stream_fault::reset();
+        testing_stream_fault::reset_receive_faults();
+        testing_stream_fault::reset_acquisition_faults();
+    }
     engine.shutdown_until_complete().await?;
     Ok(())
 }
 
-#[cfg(not(feature = "current-engine"))]
+#[cfg(not(any(feature = "current-engine", feature = "production-e2e")))]
 async fn shutdown_engine(engine: &Engine) -> Result<()> {
     engine.shutdown(Duration::from_secs(15)).await?;
     Ok(())
@@ -266,6 +284,124 @@ async fn operation(
 ) -> Result<Value> {
     let command = string(request, "command")?;
     match command {
+        #[cfg(feature = "clipboard-stream-fault")]
+        "stream_fault" => {
+            match string(request, "action")? {
+                "arm" => testing_stream_fault::arm(
+                    serde_json::from_value(request["phase"].clone())?,
+                    serde_json::from_value(request["fault"].clone())?,
+                    u32::try_from(
+                        request["hits"]
+                            .as_u64()
+                            .context("missing fault hit count")?,
+                    )?,
+                )?,
+                "release" => {
+                    let released =
+                        testing_stream_fault::release(string(request, "attempt_alias")?.parse()?);
+                    return Ok(json!({ "released": released }));
+                }
+                "release_hold" => {
+                    let released =
+                        testing_stream_fault::release_hold(string(request, "hold_alias")?.parse()?);
+                    return Ok(json!({ "released": released }));
+                }
+                "reset" => testing_stream_fault::reset(),
+                "snapshot" => {}
+                "begin_recovery" => {
+                    return Ok(serde_json::to_value(
+                        testing_stream_fault::begin_recovery_observation(),
+                    )?);
+                }
+                "begin_receive" => {
+                    return Ok(serde_json::to_value(
+                        testing_stream_fault::begin_receive_observation(
+                            request["reset_active_pull"]
+                                .as_bool()
+                                .context("missing active pull reset flag")?,
+                        ),
+                    )?);
+                }
+                "receive_snapshot" => {
+                    return Ok(serde_json::to_value(
+                        testing_stream_fault::receive_snapshot()?,
+                    )?);
+                }
+                "reset_receive" => testing_stream_fault::reset_receive_faults(),
+                "arm_convergence" => {
+                    testing_stream_fault::arm_active_convergence_hold(u32::try_from(
+                        request["hits"]
+                            .as_u64()
+                            .context("missing convergence hit count")?,
+                    )?)?
+                }
+                "release_convergence" => {
+                    return Ok(
+                        json!({ "released": testing_stream_fault::release_active_convergence_hold(
+                        string(request, "hold_alias")?.parse()?,
+                    ) }),
+                    );
+                }
+                "arm_acquisition" => testing_stream_fault::arm_acquisition_hold(u32::try_from(
+                    request["hits"]
+                        .as_u64()
+                        .context("missing acquisition hit count")?,
+                )?)?,
+                "acquisition_snapshot" => {
+                    return Ok(serde_json::to_value(
+                        testing_stream_fault::acquisition_snapshot()?,
+                    )?);
+                }
+                "release_acquisition" => {
+                    return Ok(
+                        json!({ "released": testing_stream_fault::release_acquisition_hold(
+                        string(request, "hold_alias")?.parse()?,
+                    ) }),
+                    );
+                }
+                "reset_acquisition" => testing_stream_fault::reset_acquisition_faults(),
+                "recovery_snapshot" => {
+                    return Ok(serde_json::to_value(
+                        testing_stream_fault::recovery_snapshot()?,
+                    )?);
+                }
+                _ => bail!("unsupported stream fault control"),
+            }
+            return Ok(serde_json::to_value(testing_stream_fault::snapshot())?);
+        }
+        #[cfg(feature = "network-test-probe")]
+        "subnet_probe" => {
+            let accepted = match string(request, "action")? {
+                "arm" => subnets::arm_read(serde_json::from_value(request["fault"].clone())?),
+                "release" => subnets::release_read(),
+                "mark" => subnets::mark(serde_json::from_value(request["marker"].clone())?),
+                "snapshot" => return Ok(serde_json::to_value(subnets::snapshot())?),
+                _ => bail!("unsupported subnet probe control"),
+            };
+            return Ok(json!({ "accepted": accepted }));
+        }
+        #[cfg(feature = "network-test-probe")]
+        "address_probe" => {
+            match string(request, "action")? {
+                "install" => {
+                    if !testing_network_probe::install(string(request, "peer")?) {
+                        bail!("address probe installation rejected");
+                    }
+                }
+                "expect" => {
+                    if !testing_network_probe::set_expected(
+                        string(request, "socket")?.parse()?,
+                        None,
+                    ) {
+                        bail!("address probe expectation rejected");
+                    }
+                }
+                "clear" => testing_network_probe::clear(),
+                "snapshot" => {}
+                _ => bail!("unsupported address probe control"),
+            }
+            return Ok(serde_json::to_value(testing_network_probe::snapshot())?);
+        }
         #[cfg(feature = "connectivity-opportunity")]
         "network_endpoint" => {
             let uc_engine::DevOperationResult::NetworkEndpointId(endpoint) = engine
@@ -452,9 +588,30 @@ async fn operation(
     }
     if command == "shutdown" {
         shutdown_engine(engine).await?;
+        #[cfg(feature = "network-test-probe")]
+        {
+            let probe = testing_network_probe::snapshot();
+            let subnet_probe = subnets::snapshot();
+            testing_network_probe::clear();
+            subnets::clear();
+            return Ok(json!({ "address_probe": probe, "subnet_probe": subnet_probe }));
+        }
+        #[cfg(not(feature = "network-test-probe"))]
         return Ok(json!(true));
     }
     let op = match command {
+        #[cfg(feature = "production-e2e")]
+        "settings" => Operation::QuerySettings,
+        #[cfg(feature = "production-e2e")]
+        "relay_overview" => Operation::QueryRelayOverview,
+        #[cfg(feature = "production-e2e")]
+        "delivery" => Operation::QueryEntryDelivery(HistoryEntryInput {
+            entry_id: string(request, "entry")?.into(),
+        }),
+        #[cfg(feature = "production-e2e")]
+        "settings_update" => {
+            Operation::UpdateSettings(Box::new(serde_json::from_value(request["patch"].clone())?))
+        }
         "create" => Operation::CreateSpace(CreateSpaceInput {
             device_name: Some(string(request, "name")?.into()),
             passphrase: SecretString::new(PASSPHRASE),
@@ -520,12 +677,16 @@ async fn operation(
         }),
         "send_file" => {
             let handle = string(request, "handle")?;
+            let bytes = match request.get("bytes") {
+                Some(bytes) => serde_json::from_value::<Vec<u8>>(bytes.clone())?,
+                None => string(request, "content")?.as_bytes().to_vec(),
+            };
             files.0.lock().map_err(|_| unavailable())?.insert(
                 handle.to_owned(),
                 ManagedFile {
                     display_name: string(request, "display_name")?.to_owned(),
                     mime_type: request["mime_type"].as_str().map(str::to_owned),
-                    bytes: string(request, "content")?.as_bytes().to_vec(),
+                    bytes,
                 },
             );
             Operation::SendFiles(SendFilesInput {
@@ -602,6 +763,12 @@ async fn operation(
         OperationResult::OutboundProgressReconciliation(outcome) => serde_json::to_value(outcome)?,
         OperationResult::EntrySent(report) => serde_json::to_value(report)?,
         OperationResult::SettingsUpdated(outcome) => serde_json::to_value(outcome)?,
+        #[cfg(feature = "production-e2e")]
+        OperationResult::Settings(settings) => serde_json::to_value(settings)?,
+        #[cfg(feature = "production-e2e")]
+        OperationResult::RelayOverview(overview) => serde_json::to_value(overview)?,
+        #[cfg(feature = "production-e2e")]
+        OperationResult::EntryDelivery(delivery) => serde_json::to_value(delivery)?,
         OperationResult::ActiveClipboard(active) => serde_json::to_value(active)?,
         OperationResult::ClipboardRestored(outcome) => json!({
             "restored": matches!(outcome, ClipboardRestoreOutcome::Restored),
@@ -626,6 +793,20 @@ fn host_identity() -> Value {
     ];
     for (enabled, name) in [
         (cfg!(feature = "test-network-config"), "local-network"),
+        (
+            cfg!(feature = "production-e2e"),
+            "production-network-policy",
+        ),
+        (cfg!(feature = "production-e2e"), "network-settings"),
+        (cfg!(feature = "network-test-probe"), "network-test-probe"),
+        (
+            cfg!(feature = "clipboard-stream-fault"),
+            "clipboard-stream-fault",
+        ),
+        (
+            cfg!(any(feature = "current-engine", feature = "production-e2e")),
+            "detailed-network-capture",
+        ),
         (cfg!(feature = "network-recovery"), "network-recovery"),
         (
             cfg!(feature = "device-group-choices"),
@@ -673,8 +854,26 @@ async fn main() -> Result<()> {
     let mut lines = io::stdin().lock().lines();
     let start: Value = serde_json::from_str(&lines.next().context("missing startup request")??)?;
     let root = PathBuf::from(string(&start, "root")?);
+    #[cfg(feature = "network-test-probe")]
+    if let Some(probe) = start.get("subnet_probe") {
+        if !subnets::install(string(probe, "expected")?.parse()?) {
+            bail!("startup subnet probe rejected");
+        }
+    }
+    #[cfg(feature = "clipboard-stream-fault")]
+    if let Some(reset) = start.get("reset_active_pull").and_then(Value::as_bool) {
+        testing_stream_fault::begin_receive_observation(reset);
+    }
+    #[cfg(feature = "network-test-probe")]
+    if let Some(probe) = start.get("address_probe") {
+        if !testing_network_probe::install(string(probe, "peer")?)
+            || !testing_network_probe::set_expected(string(probe, "socket")?.parse()?, None)
+        {
+            bail!("startup address probe rejected");
+        }
+    }
     // 旧版无法在启动时关闭默认 relay 与公共发现；宿主拒绝启动，避免测试访问外部服务。
-    #[cfg(not(feature = "test-network-config"))]
+    #[cfg(not(any(feature = "test-network-config", feature = "production-e2e")))]
     {
         respond(
             json!({ "ready": false, "error": "local_network_unavailable", "host": host_identity() }),
@@ -688,17 +887,34 @@ async fn main() -> Result<()> {
         } else {
             OperatingSystem::Macos
         };
-        ProcessObservabilityRuntime::install(
-            ObservabilityConfig::new(ObservabilityResource::new(
-                env!("CARGO_PKG_VERSION"),
-                DeploymentEnvironment::Test,
-                os,
-                "test",
-            )?)
-            .with_local_logs(LocalLogConfig::new(root.join("logs"))),
-        )?
-        .handle()
+        let config = ObservabilityConfig::new(ObservabilityResource::new(
+            env!("CARGO_PKG_VERSION"),
+            DeploymentEnvironment::Test,
+            os,
+            "test",
+        )?)
+        .with_local_logs(LocalLogConfig::new(root.join("logs")));
+        #[cfg(feature = "production-e2e")]
+        let config = config.with_network_logs(NetworkLogConfig::new(
+            root.join("logs"),
+            NetworkProcessRole::Daemon,
+            NetworkLogBudget {
+                record_bytes: 16 * 1024,
+                queue_records: 4096,
+                file_bytes: 4 * 1024 * 1024,
+                run_bytes: 16 * 1024 * 1024,
+                root_bytes: 64 * 1024 * 1024,
+                retention: Duration::from_secs(3600),
+            },
+        )?);
+        ProcessObservabilityRuntime::install(config)?.handle()
     };
+    #[cfg(feature = "production-e2e")]
+    observability.start_local_diagnostic_capture(
+        uc_engine::observability::DetailedCaptureRequest {
+            duration: Duration::from_secs(300),
+        },
+    )?;
     let storage = SecureStorage::default();
     if let Some(value) = start.get("secure_storage") {
         *storage
@@ -721,8 +937,9 @@ async fn main() -> Result<()> {
     );
     // 应用版本决定 Engine 对升级与降级的判断；矩阵传入锚点对应的 Desktop 版本。
     let app_version = start["app_version"].as_str().unwrap_or("1.1.0");
-    let config =
-        EngineConfig::new(app_version).with_rendezvous_base_url(string(&start, "rendezvous")?);
+    let config = EngineConfig::new(app_version);
+    #[cfg(not(feature = "production-e2e"))]
+    let config = config.with_rendezvous_base_url(string(&start, "rendezvous")?);
     #[cfg(feature = "test-network-config")]
     let config = config.with_test_relay_fallback(start["relay"].as_bool().unwrap_or(false));
     #[cfg(feature = "current-engine")]
@@ -838,7 +1055,7 @@ async fn main() -> Result<()> {
                 observability.force_flush(Duration::from_secs(2));
                 Ok(json!(true))
             }
-            #[cfg(feature = "current-engine")]
+            #[cfg(any(feature = "current-engine", feature = "production-e2e"))]
             "start_network_capture" => observability
                 .start_local_diagnostic_capture(uc_engine::observability::DetailedCaptureRequest {
                     duration: Duration::from_secs(300),

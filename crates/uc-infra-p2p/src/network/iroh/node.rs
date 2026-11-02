@@ -46,6 +46,7 @@ use uc_observability_contract::{
 use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
 
+use super::addr_filter::LocalSubnetRuntime;
 use super::admitted_connections::AdmittedConnections;
 use super::discovery::{
     ConfiguredPeerAddresses, DirectoryAddressLookupBuilder, DiscoveryRuntime, LifetimeMdns,
@@ -235,6 +236,7 @@ pub struct IrohNode {
     /// 周期性连接/路径数量普查；节点关闭时 abort。
     connection_census: Option<tokio::task::JoinHandle<()>>,
     discovery_runtime: DiscoveryRuntime,
+    local_subnets: Option<LocalSubnetRuntime>,
     /// Keeps the process-wide single-node reservation until shutdown is
     /// complete. Dropping a partially-built or live node releases it too.
     _run_lease: NodeRunLease,
@@ -663,9 +665,11 @@ pub struct IrohNodeBuilder {
     session_protocols: Arc<SessionProtocolRegistry>,
     run_lease: NodeRunLease,
     discovery_runtime: DiscoveryRuntime,
+    local_subnets: Option<LocalSubnetRuntime>,
 }
 
 struct IrohSessionContext {
+    mdns: LifetimeMdns,
     discovery: Arc<DiscoveryManager>,
     endpoint: Arc<Endpoint>,
     demand_recovery: Arc<DemandRecoveryCoordinator>,
@@ -763,7 +767,15 @@ impl IrohSessionBuilder {
             };
             Some((Ok(hint), receiver))
         });
-        let hints = stream::select(stream::select(local, discovered), recovery);
+        let mdns_recovered = self
+            .context
+            .mdns
+            .availability_changes()
+            .map(|_| Ok(ConnectionHint::NetworkChanged));
+        let hints = stream::select(
+            stream::select(local, mdns_recovered),
+            stream::select(discovered, recovery),
+        );
         #[cfg(any(test, feature = "test-util"))]
         let hints = hints.filter_map({
             let gate = self.context.config.network_partition_gate.clone();
@@ -864,6 +876,7 @@ impl IrohNodeBuilder {
 
         let secret = identity_store.ensure_secret_key()?;
         let relay_mode = relay_mode_from_config(&config)?;
+        let mut local_subnets = config.disable_relays.then(LocalSubnetRuntime::prepare);
         let recorder =
             uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
         // 本机 mDNS 是可降级的发现来源：组播套接字无法建立时节点照常启动，显式地址、已保存的
@@ -907,6 +920,9 @@ impl IrohNodeBuilder {
                 .addr_filter(build_addr_filter(allow_overlay))
                 .hooks(session_protocols.endpoint_hooks())
         });
+        if let Some(local_subnets) = &local_subnets {
+            endpoint_builder = endpoint_builder.hooks(local_subnets.policy());
+        }
         // 保留 N0 原生平台的原服务及原配置，只包裹固定的采集入口。
         if !config.disable_relays {
             use super::observed_address_lookup::ObservedAddressLookupBuilder;
@@ -999,6 +1015,13 @@ impl IrohNodeBuilder {
         .await
         .map_err(|err| IrohNodeError::Bind(anyhow::Error::new(err)))?;
         let endpoint = Arc::new(endpoint);
+        if let Some(local_subnets) = &mut local_subnets {
+            local_subnets.start().await.map_err(|source| {
+                IrohNodeError::Bind(
+                    anyhow::Error::new(source).context("initialize local subnet policy"),
+                )
+            })?;
+        }
         // 只有 bind 完成才将来源标记为可采集；失败构造不能留下 Enabled 假象。
         {
             use uc_observability_contract::diagnostics::connectivity::{
@@ -1063,8 +1086,9 @@ impl IrohNodeBuilder {
             .ok_or_else(|| IrohNodeError::Discovery {
                 source: DiscoveryError::NotInitialized.into(),
             })?;
-        let discovery_runtime = DiscoveryRuntime::start(discovery.clone(), mdns);
+        let discovery_runtime = DiscoveryRuntime::start(discovery.clone(), mdns.clone());
         let session_context = Arc::new(IrohSessionContext {
+            mdns,
             discovery,
             endpoint,
             demand_recovery,
@@ -1079,6 +1103,7 @@ impl IrohNodeBuilder {
             session_protocols,
             run_lease,
             discovery_runtime,
+            local_subnets,
         })
     }
 }
@@ -1577,6 +1602,7 @@ impl IrohNodeBuilder {
             net_recovery,
             connection_census,
             discovery_runtime: self.discovery_runtime,
+            local_subnets: self.local_subnets,
             _run_lease: self.run_lease,
         }
     }
@@ -2399,6 +2425,8 @@ mod tests {
             async fn receive(
                 &self,
                 _: StreamLease,
+                _: tokio::time::Instant,
+                _: std::time::Duration,
                 _: BlobDigest,
                 _: tokio_util::sync::CancellationToken,
                 _: Arc<dyn BlobValidatedProgress>,

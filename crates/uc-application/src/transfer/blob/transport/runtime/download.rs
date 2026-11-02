@@ -1,4 +1,6 @@
 //! 下载获取及时间预算；许可和内容保护交给同一 transfer 模块的输出结算持有。
+mod round;
+
 use super::super::{
     BlobExchangeError, BlobExchangeFailure, BlobReadStorePort, BlobReceived, BlobSource,
     BlobSourcePort, BlobValidatedProgress,
@@ -255,113 +257,156 @@ impl BlobDownloadResources {
             return Ok(content);
         }
         let mut connection: Option<ConnectionLease> = None;
-        loop {
-            if cancel.is_cancelled() || self.transport.stop.is_cancelled() {
-                return Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled));
-            }
-            let result = {
-                let exchange = async {
-                    let lease = match connection.take() {
-                        Some(previous) if previous.is_closed() => self
-                            .transport
-                            .manager
-                            .refresh(previous, deadline(), cancel)
-                            .await
-                            .map_err(|source| self.transport.exchange.connection_failure(source))?,
-                        Some(previous) => previous,
-                        None => request
-                            .connect(deadline(), cancel)
-                            .await
-                            .map_err(|source| self.transport.exchange.connection_failure(source))?,
-                    };
-                    connection = Some(lease);
-                    let lease = connection
-                        .as_ref()
-                        .ok_or_else(|| BlobExchangeError::refused(BlobExchangeFailure::Closed))?;
-                    self.transport
-                        .manager
-                        .retain(lease)
-                        .await
-                        .map_err(|source| self.transport.exchange.connection_failure(source))?;
-                    let stream = lease
-                        .open_bi_with_cancel(deadline(), cancel)
-                        .await
-                        .map_err(|source| self.transport.exchange.connection_failure(source))?;
-                    self.transport
-                        .exchange
-                        .receive(stream, digest, cancel.clone(), progress.clone())
-                        .await
-                };
-                exchange.await
-            };
-            match result {
-                Ok(content) => {
-                    progress
-                        .timing
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .check(Instant::now())
-                        .map_err(|source| {
-                            BlobExchangeError::new(BlobExchangeFailure::RequestExpired, source)
-                        })?;
-                    return Ok(content);
+        let result = async {
+            loop {
+                if cancel.is_cancelled() || self.transport.stop.is_cancelled() {
+                    return Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled));
                 }
-                Err(error) if error.kind == BlobExchangeFailure::TransientNetwork => {
-                    let next = progress
-                        .timing
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .schedule_recovery(Instant::now())
-                        .map_err(|source| BlobExchangeError {
-                            kind: BlobExchangeFailure::RequestExpired,
-                            source: source.into(),
-                            additional: vec![error],
-                        })?;
-                    let round = progress
-                        .timing
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .round();
-                    if let Some(sink) = progress
-                        .sink
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .as_ref()
+                let result = {
+                    let exchange = async {
+                        let lease = match connection.take() {
+                            Some(previous) if previous.is_closed() => self
+                                .transport
+                                .manager
+                                .refresh(previous, deadline(), cancel)
+                                .await
+                                .map_err(|source| self.transport.exchange.connection_failure(source))?,
+                            Some(previous) => previous,
+                            None => request
+                                .connect(deadline(), cancel)
+                                .await
+                                .map_err(|source| self.transport.exchange.connection_failure(source))?,
+                        };
+                        connection = Some(lease);
+                        let lease = connection
+                            .as_ref()
+                            .ok_or_else(|| BlobExchangeError::refused(BlobExchangeFailure::Closed))?;
+                        self.transport
+                            .manager
+                            .retain(lease)
+                            .await
+                            .map_err(|source| self.transport.exchange.connection_failure(source))?;
+                        let stream = lease
+                            .open_bi_with_cancel(deadline(), cancel)
+                            .await
+                            .map_err(|source| self.transport.exchange.connection_failure(source))?;
+                        self.receive_round(stream, digest, cancel, progress.clone())
+                            .await
+                    };
+                    exchange.await
+                };
+                let result = result.map_err(|error| {
+                    if !cancel.is_cancelled()
+                        && !self.transport.stop.is_cancelled()
+                        && error.is_disconnected_network()
+                        && connection.as_ref().is_some_and(|lease| {
+                            lease.is_offline_close_error(error.source.as_ref())
+                        })
                     {
-                        sink.observe_retrying(round);
+                        BlobExchangeError::new(BlobExchangeFailure::TransientNetwork, error)
+                    } else {
+                        error
                     }
-                    progress.changed.notify_one();
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => return Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled)),
-                        _ = self.transport.stop.cancelled() => return Err(BlobExchangeError::refused(BlobExchangeFailure::Closed)),
-                        _ = sleep_until(deadline()) => return Err(BlobExchangeError::refused(BlobExchangeFailure::RequestExpired)),
-                        _ = sleep_until(next) => {},
+                });
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error.kind == BlobExchangeFailure::ResponseTimedOut)
+                {
+                    // 网络响应已超时并完成本流结算；仅退出复用，兄弟流仍持有原使用权。
+                    if let Some(previous) = connection.take() {
+                        self.transport.manager.evict(&previous);
                     }
-                    let round = {
-                        let mut timing = progress
+                }
+                match result {
+                    Ok(content) => {
+                        progress
                             .timing
                             .lock()
-                            .unwrap_or_else(PoisonError::into_inner);
-                        timing.start_retry(Instant::now()).map_err(|source| {
-                            BlobExchangeError::new(BlobExchangeFailure::RequestExpired, source)
-                        })?;
-                        timing.round()
-                    };
-                    let sink = progress
-                        .sink
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .clone();
-                    if let Some(sink) = sink {
-                        sink.observe_round(round, 0, None);
-                        sink.observe_retrying(round);
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .check(Instant::now())
+                            .map_err(|source| {
+                                BlobExchangeError::new(BlobExchangeFailure::RequestExpired, source)
+                            })?;
+                        return Ok(content);
                     }
-                    // 下一轮仍正常时只重开本交换；真实失活才消费旧租约并等待方向名额。
+                    Err(error)
+                        if matches!(
+                            error.kind,
+                            BlobExchangeFailure::TransientNetwork
+                                | BlobExchangeFailure::ResponseTimedOut
+                        ) =>
+                    {
+                        let next = progress
+                            .timing
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .schedule_recovery(Instant::now())
+                            .map_err(|source| BlobExchangeError {
+                                kind: BlobExchangeFailure::RequestExpired,
+                                source: source.into(),
+                                additional: vec![error],
+                            })?;
+                        let round = progress
+                            .timing
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .round();
+                        if let Some(sink) = progress
+                            .sink
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .as_ref()
+                        {
+                            sink.observe_retrying(round);
+                        }
+                        progress.changed.notify_one();
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Err(BlobExchangeError::refused(BlobExchangeFailure::Cancelled)),
+                            _ = self.transport.stop.cancelled() => return Err(BlobExchangeError::refused(BlobExchangeFailure::Closed)),
+                            _ = sleep_until(deadline()) => return Err(BlobExchangeError::refused(BlobExchangeFailure::RequestExpired)),
+                            _ = sleep_until(next) => {},
+                        }
+                        let round = {
+                            let mut timing = progress
+                                .timing
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            timing.start_retry(Instant::now()).map_err(|source| {
+                                BlobExchangeError::new(BlobExchangeFailure::RequestExpired, source)
+                            })?;
+                            timing.round()
+                        };
+                        let sink = progress
+                            .sink
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .clone();
+                        if let Some(sink) = sink {
+                            sink.observe_round(round, 0, None);
+                            sink.observe_retrying(round);
+                        }
+                        // 正常租约只重开本交换；失活或已结算停滞轮次按原请求重获。
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
             }
         }
+        .await;
+        // 原预算耗尽后停止跨请求复用；兄弟流和已开始的本地工作仍持有原使用权。
+        if result.is_err()
+            && progress
+                .timing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .check(Instant::now())
+                .is_err()
+        {
+            if let Some(lease) = connection.as_ref() {
+                self.transport.manager.evict(lease);
+            }
+        }
+        result
     }
 }
 async fn report_progress(

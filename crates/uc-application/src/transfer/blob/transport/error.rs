@@ -1,6 +1,7 @@
 use crate::connectivity::ConnectivityError;
 use crate::transfer::receive::scheduler::{ScheduleError, ScheduleRefusal};
 use std::fmt;
+use std::io::{Error as IoError, ErrorKind};
 use std::sync::Arc;
 use uc_core::error_class::ErrorClass;
 use uc_observability_contract::wire_enum;
@@ -32,6 +33,8 @@ wire_enum! {
         Network => "blob_exchange_network_failed",
         #[error("blob exchange temporary network failure")]
         TransientNetwork => "blob_exchange_temporary_network_failed",
+        #[error("blob exchange response deadline expired")]
+        ResponseTimedOut => "blob_exchange_response_timed_out",
         #[error("blob content verification failed")]
         Integrity => "blob_integrity_failed",
         #[error("blob local store failed")]
@@ -67,6 +70,32 @@ impl ErrorClass for BlobExchangeError {
     }
 }
 impl BlobExchangeError {
+    /// 只识别网络来源；实际关闭原因由持有 native 能力的连接进一步核对。
+    pub(super) fn is_disconnected_network(&self) -> bool {
+        fn network_connection(error: &ConnectivityError) -> bool {
+            match error {
+                ConnectivityError::Shared(source) => network_connection(source),
+                ConnectivityError::Backend(_) | ConnectivityError::Stream(_) => true,
+                _ => false,
+            }
+        }
+        let network = match self.kind {
+            BlobExchangeFailure::Network => true,
+            BlobExchangeFailure::Connectivity => self
+                .source
+                .chain()
+                .find_map(|source| source.downcast_ref::<ConnectivityError>())
+                .is_some_and(network_connection),
+            _ => false,
+        };
+        network
+            && self.additional.is_empty()
+            && self.source.chain().any(|source| {
+                source
+                    .downcast_ref::<IoError>()
+                    .is_some_and(|source| source.kind() == ErrorKind::NotConnected)
+            })
+    }
     pub(crate) fn settled_cancellation(&self) -> bool {
         if self.kind == BlobExchangeFailure::Settlement || !self.additional.is_empty() {
             return false;

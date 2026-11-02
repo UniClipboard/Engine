@@ -75,6 +75,22 @@ impl fmt::Debug for ConnectivityError {
     }
 }
 impl ConnectivityError {
+    /// 只有生命周期负责人明确准备暂停时，才将旧请求的停止保留为带来源的失效。
+    /// 授权拒绝、调用方取消及其他本地失败不借此改类。
+    pub(super) fn invalidated_if_stopped(self, suspended: bool) -> Self {
+        fn stopped(error: &ConnectivityError) -> bool {
+            match error {
+                ConnectivityError::Stopped => true,
+                ConnectivityError::Shared(source) => stopped(source),
+                _ => false,
+            }
+        }
+        if suspended && stopped(&self) {
+            Self::Invalidated(Some(Box::new(self)))
+        } else {
+            self
+        }
+    }
     /// 稳定业务端口仍把无法取得可用连接归类为离线；资源与任务失败保留来源。
     pub fn is_admission_read_failure(&self) -> bool {
         match self {

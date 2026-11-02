@@ -33,6 +33,8 @@
 //!
 //! [`PeerAddressRepositoryPort`]: uc_core::ports::PeerAddressRepositoryPort
 
+#[cfg(feature = "network-test-probe")]
+use super::testing_network_probe::{record, AddressRefreshStage};
 use std::collections::BTreeSet;
 
 use chrono::{TimeZone, Utc};
@@ -121,15 +123,47 @@ pub(super) fn refreshed_remote_addr(
 pub(super) async fn observed_refreshed_remote_addr(
     endpoint: &Endpoint,
     existing: &EndpointAddr,
+    #[cfg(feature = "network-test-probe")] peer: &DeviceId,
 ) -> Option<EndpointAddr> {
-    let info = endpoint.remote_info(existing.id).await?;
-    refreshed_remote_addr(
+    let Some(info) = endpoint.remote_info(existing.id).await else {
+        #[cfg(feature = "network-test-probe")]
+        record(peer, AddressRefreshStage::RemoteMissing, None, None);
+        return None;
+    };
+    #[cfg(feature = "network-test-probe")]
+    {
+        let known = EndpointAddr::from_parts(
+            existing.id,
+            info.addrs().map(|address| address.addr().clone()),
+        );
+        let active = EndpointAddr::from_parts(
+            existing.id,
+            info.addrs()
+                .filter(|address| matches!(address.usage(), TransportAddrUsage::Active))
+                .map(|address| address.addr().clone()),
+        );
+        record(peer, AddressRefreshStage::RemoteKnown, Some(&known), None);
+        record(peer, AddressRefreshStage::RemoteActive, Some(&active), None);
+    }
+    let refreshed = refreshed_remote_addr(
         existing,
         info.into_addrs().map(|addr| {
             let active = matches!(addr.usage(), TransportAddrUsage::Active);
             (addr.into_addr(), active)
         }),
-    )
+    );
+    #[cfg(feature = "network-test-probe")]
+    record(
+        peer,
+        if refreshed.is_some() {
+            AddressRefreshStage::MergeChanged
+        } else {
+            AddressRefreshStage::MergeUnchanged
+        },
+        Some(refreshed.as_ref().unwrap_or(existing)),
+        None,
+    );
+    refreshed
 }
 
 pub(super) async fn persist_observed_stable_addr(
@@ -139,20 +173,48 @@ pub(super) async fn persist_observed_stable_addr(
     addr: EndpointAddr,
 ) {
     let Ok(addr_blob) = postcard::to_stdvec(&addr) else {
+        #[cfg(feature = "network-test-probe")]
+        record(
+            device,
+            AddressRefreshStage::EncodeFailed,
+            Some(&addr),
+            Some(false),
+        );
         return;
     };
     let Some(observed_at) = Utc.timestamp_millis_opt(clock.now_ms()).single() else {
+        #[cfg(feature = "network-test-probe")]
+        record(
+            device,
+            AddressRefreshStage::ClockInvalid,
+            Some(&addr),
+            Some(false),
+        );
         return;
     };
     // 仅记录仓储写入失败：编码与时钟越界几乎不会失败；失败会留下陈旧地址，后续拨号才暴露。
-    if let Err(error) = repository
+    #[cfg(feature = "network-test-probe")]
+    record(
+        device,
+        AddressRefreshStage::UpsertStarted,
+        Some(&addr),
+        None,
+    );
+    let result = repository
         .upsert(&PeerAddressRecord {
             device_id: device.clone(),
             addr_blob,
             observed_at,
         })
-        .await
-    {
+        .await;
+    #[cfg(feature = "network-test-probe")]
+    record(
+        device,
+        AddressRefreshStage::UpsertFinished,
+        Some(&addr),
+        Some(result.is_ok()),
+    );
+    if let Err(error) = result {
         let (category, stage) = error.diagnostic();
         uc_warn!(
             error_kind = "peer_address_persist",

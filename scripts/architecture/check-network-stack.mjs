@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '../..')
 const vendor = 'third_party/iroh'
-const reviewedCommit = '413531dd7503c87ce89f21b69196f8c26eed909d'
+const reviewedCommit = '1ea24ade280dd73fe4e5cfb68e6a657b96be3bb5'
 const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
 if (!existsSync(resolve(root, vendor, 'iroh/Cargo.toml'))) {
   throw new Error('网络栈 submodule 未初始化：运行 git submodule update --init --recursive')

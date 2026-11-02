@@ -7,6 +7,8 @@ use url::Url;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "production-e2e")]
+use uc_engine::ObserveClipboardChangeInput;
 use uc_engine::{
     Engine, HostCapabilityError, HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot,
     HostFileHandle, Operation, OperationResult,
@@ -230,8 +232,20 @@ pub(crate) async fn capture(
         observed_at_ms,
         representations: vec![representation],
     };
-    match engine.execute(Operation::CaptureCurrentClipboard).await? {
+    let operation = if request["dispatch"] == true {
+        #[cfg(feature = "production-e2e")]
+        {
+            Operation::ObserveClipboardChange(ObserveClipboardChangeInput { dispatch: true })
+        }
+        #[cfg(not(feature = "production-e2e"))]
+        bail!("observed dispatch requires the production E2E host");
+    } else {
+        Operation::CaptureCurrentClipboard
+    };
+    match engine.execute(operation).await? {
         OperationResult::ClipboardCaptured { entry_id, .. } => Ok(json!({ "entry": entry_id })),
+        #[cfg(feature = "production-e2e")]
+        OperationResult::ClipboardChangeObserved { report } => Ok(json!({ "report": report })),
         _ => bail!("clipboard capture result expected"),
     }
 }

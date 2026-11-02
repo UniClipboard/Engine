@@ -466,7 +466,7 @@ pub(crate) const RULES: &[Rule] = &[
         burst: 16,
         refill_ms: 250,
     },
-    // 固定提交 `c8efae0` 的 `remote_state.rs:1089`：路径打开因 CID/路径号耗尽被推迟后重试。
+    // 固定提交 `1ea24ade280dd73fe4e5cfb68e6a657b96be3bb5` 的 `remote_state.rs:1096`：路径打开因 CID/路径号耗尽被推迟后重试。
     // 只输出事件本身（原始字段是候选地址，一律丢弃）；出现频率就是 #214 H1 的直接证据。
     Rule {
         event: "path.open_deferred",
@@ -474,7 +474,7 @@ pub(crate) const RULES: &[Rule] = &[
         version_dir: IROH,
         site: Site::Line {
             file: "src/socket/remote_map/remote_state.rs",
-            line: 1089,
+            line: 1096,
         },
         level: Level::TRACE,
         tier: CaptureTier::Detailed,

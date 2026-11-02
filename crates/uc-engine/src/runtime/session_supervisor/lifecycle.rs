@@ -86,7 +86,18 @@ async fn suspend_owned(
     let mut errors = Vec::new();
     if let Err(error) = drain_operations_and_stop_session(
         owner.operations.close_and_wait(None, context.deadline()),
-        owner.stop_current_session(FileTransferCancellationReason::Unknown, context.deadline()),
+        async {
+            // 此 future 只在前台工作排空后轮询；最终停止不赋予旧请求恢复资格。
+            if !context.is_final_stop() {
+                let runtime = owner.runtime.lock().await;
+                if let Some(session) = &runtime.session {
+                    session.clipboard_connectivity.prepare_suspend();
+                }
+            }
+            owner
+                .stop_current_session(FileTransferCancellationReason::Unknown, context.deadline())
+                .await
+        },
     )
     .await
     {

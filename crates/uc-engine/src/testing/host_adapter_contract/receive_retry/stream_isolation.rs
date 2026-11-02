@@ -28,6 +28,15 @@ const PASSPHRASE: &str = "engine streams fixture";
 #[path = "resource_reads.rs"]
 mod resource_reads;
 
+#[path = "response_timeout.rs"]
+mod response_timeout;
+
+#[path = "presence_blob.rs"]
+mod presence_blob;
+
+#[path = "response_timeout_sibling.rs"]
+mod response_timeout_sibling;
+
 struct StreamFiles;
 impl HostFileAccess for StreamFiles {
     fn metadata(&self, handle: &HostFileHandle) -> Result<HostFileMetadata, HostCapabilityError> {

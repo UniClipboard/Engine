@@ -265,6 +265,8 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
         IrohBlobExchangeAdapter::new(saved)
             .receive(
                 self::paused(stream_a, paused),
+                Instant::now() + BUDGET,
+                BUDGET,
                 BlobDigest::from_bytes(*tag.hash.as_bytes()),
                 stop,
                 Arc::new(Progress),
@@ -295,6 +297,8 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
         IrohBlobExchangeAdapter::new(saved)
             .receive(
                 self::paused(stream_b, paused),
+                Instant::now() + BUDGET,
+                BUDGET,
                 BlobDigest::from_bytes(*sibling.hash.as_bytes()),
                 CancellationToken::new(),
                 Arc::new(Progress),

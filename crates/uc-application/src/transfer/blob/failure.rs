@@ -33,7 +33,9 @@ fn exchange_reason(error: &BlobExchangeError) -> FileTransferFailureReason {
     use FileTransferFailureReason as Reason;
     match error.kind {
         BlobExchangeFailure::Integrity => Reason::IntegrityCheckFailed,
-        BlobExchangeFailure::RequestExpired => Reason::TimedOut,
+        BlobExchangeFailure::RequestExpired | BlobExchangeFailure::ResponseTimedOut => {
+            Reason::TimedOut
+        }
         BlobExchangeFailure::Store | BlobExchangeFailure::Settlement => {
             io_reason(error).unwrap_or(Reason::StorageUnavailable)
         }

@@ -7,7 +7,9 @@ description = "Stable cross-platform engine interface for UniClipboard hosts"
 publish = false
 
 [features]
+network-test-probe = ["uc-infra-p2p/network-test-probe"]
 default = []
+clipboard-stream-fault = ["uc-infra-p2p/clipboard-stream-fault", "uc-application/clipboard-stream-fault"]
 dev-tools = ["dep:serde_json", "dep:tracing-subscriber", "uc-infra-profile/test-util"]
 lan-compat = [
   "dep:uc-mobile-lan",
@@ -45,6 +47,7 @@ uc-observability-runtime = { path = "../uc-observability-runtime" }
 zeroize = "1.8"
 
 [dev-dependencies]
+blake3 = "1.8.2"
 cargo_metadata = "0.19.2"
 chrono = { version = "0.4", features = ["serde"] }
 diesel = { version = "2.3.5", features = ["sqlite"] }

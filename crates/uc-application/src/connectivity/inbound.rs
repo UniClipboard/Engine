@@ -3,15 +3,17 @@ use super::lifetime::ConnectionLifetime;
 use super::manager::PeerState;
 use super::pending::UnboundConnection;
 use super::{
-    ConnectivityError, ConnectivityManager, InboundAdmissionFence, InboundConnectionError,
-    InboundIdentityReservation, PeerConnection,
+    ConnectionProtocol, ConnectivityError, ConnectivityManager, InboundAdmissionFence,
+    InboundConnectionError, InboundIdentityReservation, PeerConnection,
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use uc_core::error_class::ErrorClass;
 use uc_core::ids::DeviceId;
+use uc_observability_contract::uc_warn;
 
 #[derive(Clone, Copy)]
 pub struct InboundAdmissionPolicy {
@@ -121,21 +123,49 @@ impl InboundReservation {
 impl InboundIdentityReservation for InboundReservation {
     fn identified(&self, peer: DeviceId) -> Result<(), ConnectivityError> {
         if self.session.is_cancelled() {
-            return Err(ConnectivityError::Stopped);
+            let source = ConnectivityError::Stopped;
+            if self.raw.raw.protocol() == ConnectionProtocol::Blob {
+                uc_warn!(
+                    error_class = source.class(),
+                    "Blob 入站身份预留失败：会话已停止"
+                );
+            }
+            return Err(source);
         }
         if self
             .deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
-            return Err(ConnectivityError::AdmissionDeadlineExpired);
+            let source = ConnectivityError::AdmissionDeadlineExpired;
+            if self.raw.raw.protocol() == ConnectionProtocol::Blob {
+                uc_warn!(
+                    error_class = source.class(),
+                    "Blob 入站身份预留失败：准入期限"
+                );
+            }
+            return Err(source);
         }
-        self.fence.identified(peer)?;
+        self.fence.identified(peer).inspect_err(|source| {
+            if self.raw.raw.protocol() == ConnectionProtocol::Blob {
+                uc_warn!(
+                    error_class = source.class(),
+                    "Blob 入站身份预留失败：入口围栏"
+                );
+            }
+        })?;
         let mut capacity = self.capacity.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(identified) = &capacity.identified {
             return if identified.peer == peer {
                 Ok(())
             } else {
-                Err(ConnectivityError::Denied)
+                let source = ConnectivityError::Denied;
+                if self.raw.raw.protocol() == ConnectionProtocol::Blob {
+                    uc_warn!(
+                        error_class = source.class(),
+                        "Blob 入站身份预留失败：身份冲突"
+                    );
+                }
+                Err(source)
             };
         }
         let state = self.manager.peer(peer);
@@ -145,11 +175,28 @@ impl InboundIdentityReservation for InboundReservation {
                     .pending_inbound
                     .clone()
                     .try_acquire_owned()
-                    .map_err(ConnectivityError::Busy)?,
+                    .map_err(ConnectivityError::Busy)
+                    .inspect_err(|source| {
+                        if self.raw.raw.protocol() == ConnectionProtocol::Blob {
+                            uc_warn!(
+                                error_class = source.class(),
+                                "Blob 入站身份预留失败：待准入容量"
+                            );
+                        }
+                    })?,
             ),
             None => None,
         };
-        self.lifetime.reserve(state.clone(), true)?;
+        self.lifetime
+            .reserve(state.clone(), true)
+            .inspect_err(|source| {
+                if self.raw.raw.protocol() == ConnectionProtocol::Blob {
+                    uc_warn!(
+                        error_class = source.class(),
+                        "Blob 入站身份预留失败：方向名额"
+                    );
+                }
+            })?;
         capacity.identified = Some(IdentifiedPeer {
             peer,
             _state: state,

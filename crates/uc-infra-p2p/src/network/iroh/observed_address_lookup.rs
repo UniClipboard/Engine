@@ -1,5 +1,7 @@
 //! 保留原发现服务及结果，只在实际交接处记录安全事实。
 use super::connection_diagnostics::candidate_summary;
+#[cfg(feature = "network-test-probe")]
+use super::testing_network_probe::{record_discovery, AddressRefreshStage};
 use futures_util::{stream::BoxStream, Stream};
 use iroh::address_lookup::{
     AddressLookup, AddressLookupBuilder, AddressLookupBuilderError, EndpointData, Error, Item,
@@ -65,6 +67,11 @@ impl<T> std::fmt::Debug for ObservedAddressLookup<T> {
 impl<T: AddressLookup> AddressLookup for ObservedAddressLookup<T> {
     fn publish(&self, data: &EndpointData) {
         self.inner.publish(data);
+        #[cfg(feature = "network-test-probe")]
+        if matches!(self.source, DiscoverySource::Mdns) {
+            let address = EndpointAddr::from_parts(self.local_id, data.addrs().cloned());
+            record_discovery(AddressRefreshStage::LocalPublishRequested, &address, None);
+        }
         // DNS resolver 的默认 publish 是空实现，不把它记作发布请求。
         if !self.recorder.is_enabled() || matches!(self.source, DiscoverySource::Dns) {
             return;

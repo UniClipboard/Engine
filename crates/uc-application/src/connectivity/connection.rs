@@ -6,6 +6,7 @@ use super::{
     AdmissionAttempt, AdmissionGrant, ConnectionMode, ConnectionProtocol, ConnectivityError,
     PeerConnection, StreamLease, StreamPair,
 };
+use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
@@ -20,6 +21,7 @@ pub(super) struct ConnectionRecord {
     pub address_hint: Option<Vec<u8>>,
     pub activity: Arc<ConnectionActivity>,
     pub stop: CancellationToken,
+    pub suspend_prepared: Arc<AtomicBool>,
     pub cache_cancel: CancellationToken,
     pub supervise_local_work: bool,
     pub accepted_stream_timeout: Option<Duration>,
@@ -90,6 +92,9 @@ impl ConnectionLease {
     pub fn is_unreachable(&self) -> bool {
         self.record.connection.is_unreachable()
     }
+    pub fn is_offline_close_error(&self, source: &(dyn Error + 'static)) -> bool {
+        self.record.connection.is_offline_close_error(source)
+    }
     pub fn close(&self) {
         self.record.connection.close();
     }
@@ -129,6 +134,19 @@ impl ConnectionLease {
     }
     /// 按协议策略停止网络步骤；受监督的 grant 读取持许可到实际结算。
     pub async fn open_bi_with_cancel(
+        &self,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<StreamLease, ConnectivityError> {
+        self.open_bi_inner(deadline, cancel).await.map_err(|error| {
+            error.invalidated_if_stopped(
+                self.record.stop.is_cancelled()
+                    && !cancel.is_cancelled()
+                    && self.record.suspend_prepared.load(Ordering::Acquire),
+            )
+        })
+    }
+    async fn open_bi_inner(
         &self,
         deadline: Instant,
         cancel: &CancellationToken,

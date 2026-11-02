@@ -4,6 +4,8 @@ use super::{
     ActiveClipboardTransportError, ActiveClipboardWirePort, ActivePullResponse,
     ACTIVE_EXCHANGE_TIMEOUT,
 };
+#[cfg(feature = "clipboard-stream-fault")]
+use crate::clipboard::testing_receive::{current_stage, reset_active_pull, ReceiveStage};
 use crate::connectivity::ConnectivityManager;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -38,6 +40,14 @@ impl ActiveClipboardPullClientPort for ActivePullClient {
                 .connect(deadline, &CancellationToken::new())
                 .await?;
             let mut stream = connection.open_bi(deadline).await?;
+            #[cfg(feature = "clipboard-stream-fault")]
+            {
+                current_stage(ReceiveStage::StreamOpened);
+                if reset_active_pull() {
+                    stream.send.reset(0)?;
+                    current_stage(ReceiveStage::SendReset);
+                }
+            }
             self.wire
                 .write_pull_request(stream.send.as_mut(), snapshot_hash)
                 .await?;
@@ -53,7 +63,11 @@ impl ActiveClipboardPullClientPort for ActivePullClient {
         .await
         .map_err(ActiveClipboardTransportError::from)??;
         match response {
-            ActivePullResponse::Envelope(envelope) => Ok(envelope),
+            ActivePullResponse::Envelope(envelope) => {
+                #[cfg(feature = "clipboard-stream-fault")]
+                current_stage(ReceiveStage::EnvelopeReceived);
+                Ok(envelope)
+            }
             ActivePullResponse::NotAvailable => Err(ActivePullRemoteRefusal::NotAvailable.into()),
             ActivePullResponse::Locked => Err(ActivePullRemoteRefusal::Locked.into()),
             ActivePullResponse::Internal => Err(ActivePullRemoteRefusal::Internal.into()),

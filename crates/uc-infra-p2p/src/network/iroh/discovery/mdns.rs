@@ -8,6 +8,8 @@ use uc_application::deps::{
     DiscoveryStream,
 };
 
+#[cfg(feature = "network-test-probe")]
+use super::super::testing_network_probe::{record_discovery, AddressRefreshStage};
 use super::{endpoint_id, observation, peer_id, LifetimeMdns, MDNS};
 
 /// 复用 endpoint 的同一个 mDNS 实例，不增加广播服务或修改线格式。实例在启动时不可用时，
@@ -56,9 +58,19 @@ impl DiscoveryProvider for MdnsDiscoveryProvider {
 }
 
 fn mdns_observation(item: Item) -> Result<DiscoveryEvent, DiscoveryError> {
+    #[cfg(feature = "network-test-probe")]
+    let sampled = item.to_endpoint_addr();
     // 本仓 mDNS 服务提供原观察时间；时间不明时不把缓存读取误当作刷新。
-    if item.last_updated().is_none() {
-        return Err(DiscoveryError::InvalidObservation);
-    }
-    observation(item)
+    let result = if item.last_updated().is_none() {
+        Err(DiscoveryError::InvalidObservation)
+    } else {
+        observation(item)
+    };
+    #[cfg(feature = "network-test-probe")]
+    record_discovery(
+        AddressRefreshStage::MdnsCandidateValidated,
+        &sampled,
+        Some(result.is_ok()),
+    );
+    result
 }

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uc_core::ids::DeviceId;
@@ -51,10 +52,15 @@ pub trait BlobExchangePort: Send + Sync {
     fn connection_failure(&self, source: ConnectivityError) -> BlobExchangeError {
         BlobExchangeError::from(source)
     }
-    /// 取消或网络失败后仍等待同次 import 完成，不允许直接丢弃此 future。
+    /// logical_deadline 保留原逻辑期限；response_timeout 在本地保护完成后才起算。
+    /// 网络响应期限为 min(logical_deadline, 本地保护完成时刻 + response_timeout)。
+    /// 该期限只限制请求写入和响应头等待；成功响应头必须严格早于期限。
+    /// 真实响应错误保留原结果；超时只停止本流并结算，不允许丢弃已开始的本地 import。
     async fn receive(
         &self,
         stream: StreamLease,
+        logical_deadline: Instant,
+        response_timeout: Duration,
         digest: BlobDigest,
         cancel: CancellationToken,
         progress: Arc<dyn BlobValidatedProgress>,

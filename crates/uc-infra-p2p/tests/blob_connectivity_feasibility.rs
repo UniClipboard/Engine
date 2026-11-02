@@ -225,6 +225,8 @@ async fn sdk_get_error_returns_before_import_worker_finishes() -> anyhow::Result
         adapter
             .receive(
                 stream,
+                Instant::now() + DEADLINE,
+                DEADLINE,
                 BlobDigest::from_bytes(*tag.hash.as_bytes()),
                 stop,
                 Arc::new(blob_leases::Progress(data_ready)),
@@ -312,6 +314,8 @@ async fn prove_provider_settlement(gate: &Arc<ImportGate>) -> anyhow::Result<()>
         adapter
             .receive(
                 stream,
+                Instant::now() + DEADLINE,
+                DEADLINE,
                 BlobDigest::from_bytes(*tag.hash.as_bytes()),
                 CancellationToken::new(),
                 Arc::new(blob_leases::Progress(Arc::new(Notify::new()))),
@@ -344,6 +348,8 @@ async fn prove_provider_settlement(gate: &Arc<ImportGate>) -> anyhow::Result<()>
         adapter
             .receive(
                 stream,
+                Instant::now() + DEADLINE,
+                DEADLINE,
                 BlobDigest::from_bytes(*sibling.hash.as_bytes()),
                 CancellationToken::new(),
                 Arc::new(blob_leases::Progress(Arc::new(Notify::new()))),
@@ -413,6 +419,8 @@ async fn prove_provider_settlement(gate: &Arc<ImportGate>) -> anyhow::Result<()>
             adapter
                 .receive(
                     stream,
+                    Instant::now() + DEADLINE,
+                    DEADLINE,
                     BlobDigest::from_bytes(*tag.hash.as_bytes()),
                     CancellationToken::new(),
                     Arc::new(blob_leases::Progress(Arc::new(Notify::new()))),
@@ -442,6 +450,8 @@ async fn prove_provider_settlement(gate: &Arc<ImportGate>) -> anyhow::Result<()>
         adapter
             .receive(
                 stream,
+                Instant::now() + DEADLINE,
+                DEADLINE,
                 BlobDigest::from_bytes(*missing.as_bytes()),
                 CancellationToken::new(),
                 Arc::new(blob_leases::Progress(Arc::new(Notify::new()))),
@@ -481,6 +491,8 @@ async fn prove_provider_settlement(gate: &Arc<ImportGate>) -> anyhow::Result<()>
         adapter
             .receive(
                 stream,
+                Instant::now() + DEADLINE,
+                DEADLINE,
                 BlobDigest::from_bytes(*source_hash.hash.as_bytes()),
                 stop,
                 Arc::new(blob_leases::Progress(Arc::new(Notify::new()))),
@@ -592,6 +604,8 @@ async fn prove_export_worker_failure(gate: &Arc<ImportGate>) -> anyhow::Result<(
         adapter
             .receive(
                 stream,
+                Instant::now() + DEADLINE,
+                DEADLINE,
                 BlobDigest::from_bytes(*tag.hash.as_bytes()),
                 CancellationToken::new(),
                 Arc::new(blob_leases::Progress(Arc::new(Notify::new()))),

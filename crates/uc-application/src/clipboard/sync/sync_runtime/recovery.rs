@@ -1,3 +1,7 @@
+#[cfg(feature = "clipboard-stream-fault")]
+use crate::clipboard::testing_recovery::{
+    self as observation, RecoveryEventKind, RoundObservation,
+};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -357,6 +361,16 @@ async fn reconcile_lost_results(
         }
         match newest_recoverable_entry(deps, &peer.device_id, cancel).await {
             Ok(Some(entry)) => {
+                #[cfg(feature = "clipboard-stream-fault")]
+                {
+                    schedule.observation_source = schedule.observe(
+                        RecoveryEventKind::Reconciliation,
+                        peer.device_id,
+                        Some(&entry),
+                        Instant::now(),
+                        None,
+                    );
+                }
                 schedule.record_recoverable(peer.device_id, Some(entry), Instant::now());
             }
             Ok(None) => {}
@@ -386,6 +400,16 @@ async fn apply_delivery_result(
     cancel: &CancellationToken,
 ) {
     let target = result.target_device_id;
+    #[cfg(feature = "clipboard-stream-fault")]
+    {
+        let kind = match result.kind {
+            DeliveryResultKind::Recoverable => RecoveryEventKind::ResultRecoverable,
+            DeliveryResultKind::NotPersisted => RecoveryEventKind::ResultNotPersisted,
+            DeliveryResultKind::Settled => RecoveryEventKind::ResultSettled,
+        };
+        schedule.observation_source =
+            schedule.observe(kind, target, Some(&result.entry_id), Instant::now(), None);
+    }
     match result.kind {
         DeliveryResultKind::Recoverable | DeliveryResultKind::NotPersisted => {
             let tracked = match schedule.tracked_entry(&target) {
@@ -407,6 +431,10 @@ async fn apply_delivery_result(
         DeliveryResultKind::Settled => {
             schedule.settle(&target, &result.entry_id);
         }
+    }
+    #[cfg(feature = "clipboard-stream-fault")]
+    {
+        schedule.observation_source = None;
     }
 }
 
@@ -433,10 +461,33 @@ async fn recover_and_schedule(
     schedule: &mut RetrySchedule,
     cancel: &CancellationToken,
 ) {
+    #[cfg(feature = "clipboard-stream-fault")]
+    let round = observation::ROUND_SCHEDULE
+        .scope(
+            RoundObservation {
+                schedule: schedule.observation(&target),
+                trigger: trigger.wire(),
+            },
+            recover_online_target(deps, target, trigger, cancel),
+        )
+        .await;
+    #[cfg(not(feature = "clipboard-stream-fault"))]
     let round = recover_online_target(deps, target, trigger, cancel).await;
     match round.outcome.retry_after_round() {
         RetryAfterRound::Clear => schedule.clear(&target),
-        RetryAfterRound::Again => schedule.record_recoverable(target, None, Instant::now()),
+        RetryAfterRound::Again => {
+            #[cfg(feature = "clipboard-stream-fault")]
+            {
+                schedule.observation_source = schedule.observe(
+                    RecoveryEventKind::RoundFailure,
+                    target,
+                    None,
+                    Instant::now(),
+                    None,
+                );
+            }
+            schedule.record_recoverable(target, None, Instant::now());
+        }
         RetryAfterRound::AwaitResult => {
             if let Some(entry) = round.awaiting {
                 schedule.await_result(&target, entry);
@@ -460,7 +511,23 @@ async fn recover_online_target(
         }
         gate = deps.delivery_gate.lock() => gate,
     };
+    #[cfg(feature = "clipboard-stream-fault")]
+    observation::round_event(
+        RecoveryEventKind::RoundStarted,
+        target,
+        None,
+        Some(trigger.wire()),
+        None,
+    );
     let round = recover_for_target(deps, target, cancel).await;
+    #[cfg(feature = "clipboard-stream-fault")]
+    observation::round_event(
+        RecoveryEventKind::RoundFinished,
+        target,
+        round.awaiting.as_ref(),
+        Some(trigger.wire()),
+        Some(round.outcome.wire()),
+    );
     record_recovery(trigger, round.outcome);
     round
 }
@@ -533,6 +600,14 @@ async fn recover_for_target(
     if cancel.is_cancelled() {
         return RecoveryOutcome::Cancelled.into();
     }
+    #[cfg(feature = "clipboard-stream-fault")]
+    observation::round_event(
+        RecoveryEventKind::DispatchStarted,
+        target,
+        Some(&entry_id),
+        None,
+        None,
+    );
     match deps
         .delivery
         .deliver_existing_local_entry(entry_id.clone(), vec![target])
@@ -746,7 +821,12 @@ async fn supersede_older_recoverable_entries(
                 reason_detail: None,
                 updated_at_ms: deps.clock.now_ms(),
             };
-            if deps.deliveries.record_attempt(&superseded).await.is_err() {
+            if deps
+                .delivery_results
+                .record_recovery_terminal(&superseded, Some(entry_id))
+                .await
+                .is_err()
+            {
                 return false;
             }
         }
@@ -771,7 +851,12 @@ async fn stop_automatic_recovery(
         reason_detail: None,
         updated_at_ms: deps.clock.now_ms(),
     };
-    if deps.deliveries.record_attempt(&record).await.is_err() {
+    if deps
+        .delivery_results
+        .record_recovery_terminal(&record, None)
+        .await
+        .is_err()
+    {
         uc_warn!(
             error_kind = "delivery_record",
             "clipboard delivery recovery: failed to stop unavailable entry recovery"
@@ -791,7 +876,12 @@ async fn supersede_delivery(
         reason_detail: None,
         updated_at_ms: deps.clock.now_ms(),
     };
-    if deps.deliveries.record_attempt(&record).await.is_err() {
+    if deps
+        .delivery_results
+        .record_recovery_terminal(&record, None)
+        .await
+        .is_err()
+    {
         uc_warn!(
             error_kind = "delivery_record",
             "clipboard delivery recovery: failed to stop ineligible target recovery"

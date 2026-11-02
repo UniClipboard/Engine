@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use uc_core::clipboard::ClipboardContentCategorySet;
 use uc_core::ids::DeviceId;
+use uc_core::ports::SettingsPort;
 use uc_core::MemberRepositoryPort;
 use uc_core::MemberSyncPreferences;
 
@@ -130,6 +131,29 @@ impl MemberReceiveGate {
                 "receive gate: dropping inbound per per-device content_types filter"
             );
             return false;
+        }
+    }
+}
+
+/// 所有入站协议共用的全局同步门禁；读取失败同样拒绝接收。
+pub(crate) async fn inbound_sync_enabled(settings: &dyn SettingsPort) -> bool {
+    match settings.load().await {
+        Ok(settings) if settings.sync.sync_enabled => true,
+        Ok(_) => {
+            describe_clipboard_receive_failure(ClipboardReceiveFailure::SyncDisabled);
+            uc_info!(
+                reason = "sync_disabled",
+                "clipboard inbound: delivery rejected by global sync setting"
+            );
+            false
+        }
+        Err(_) => {
+            describe_clipboard_receive_failure(ClipboardReceiveFailure::SettingsUnavailable);
+            uc_warn!(
+                error_kind = "settings_load",
+                "clipboard inbound: delivery rejected"
+            );
+            false
         }
     }
 }

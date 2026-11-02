@@ -813,6 +813,8 @@ mod tests {
             .exchange
             .receive(
                 stream,
+                TokioInstant::now() + Duration::from_secs(5),
+                Duration::from_secs(5),
                 digest,
                 CancellationToken::new(),
                 Arc::new(CountingProgressSink::default()),
@@ -893,6 +895,8 @@ mod tests {
             .exchange
             .receive(
                 stream,
+                TokioInstant::now() + Duration::from_secs(5),
+                Duration::from_secs(5),
                 missing_digest,
                 CancellationToken::new(),
                 missing_progress.clone(),

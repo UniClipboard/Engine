@@ -2,6 +2,8 @@ use super::super::peer_address_resolver::PeerAddressResolver;
 use super::super::persistable_addr::{
     observed_refreshed_remote_addr, persist_observed_stable_addr,
 };
+#[cfg(feature = "network-test-probe")]
+use super::super::testing_network_probe::{record, AddressRefreshStage};
 use async_trait::async_trait;
 use iroh::Endpoint;
 use std::collections::HashMap;
@@ -42,14 +44,39 @@ impl IrohVerifiedPeerAddressRefresh {
     async fn refresh_once(&self, peer: &DeviceId) {
         let address = match self.resolver.resolve(peer).await {
             Ok(Some(address)) => address,
-            Ok(None) => return,
+            Ok(None) => {
+                #[cfg(feature = "network-test-probe")]
+                record(peer, AddressRefreshStage::RefreshStoredMissing, None, None);
+                return;
+            }
             Err(source) => {
+                #[cfg(feature = "network-test-probe")]
+                record(
+                    peer,
+                    AddressRefreshStage::RefreshReadFailed,
+                    None,
+                    Some(false),
+                );
                 uc_warn!(error_kind = source.kind(), "成员历史验证后地址读取失败");
                 return;
             }
         };
+        #[cfg(feature = "network-test-probe")]
+        record(
+            peer,
+            AddressRefreshStage::RefreshStored,
+            Some(&address),
+            None,
+        );
         // 合并而不是替换：使用中的路径是新证据，未被否定的旧直连线索继续保留。
-        if let Some(observed) = observed_refreshed_remote_addr(&self.endpoint, &address).await {
+        if let Some(observed) = observed_refreshed_remote_addr(
+            &self.endpoint,
+            &address,
+            #[cfg(feature = "network-test-probe")]
+            peer,
+        )
+        .await
+        {
             persist_observed_stable_addr(
                 self.repository.as_ref(),
                 self.clock.as_ref(),
@@ -76,6 +103,8 @@ struct Running<'a> {
 impl Drop for Running<'_> {
     fn drop(&mut self) {
         if !self.finished {
+            #[cfg(feature = "network-test-probe")]
+            record(&self.peer, AddressRefreshStage::Cancelled, None, None);
             self.owner.in_flight().remove(&self.peer);
         }
     }
@@ -84,10 +113,14 @@ impl Drop for Running<'_> {
 #[async_trait]
 impl RefreshVerifiedPeerAddressPort for IrohVerifiedPeerAddressRefresh {
     async fn refresh_verified_peer_address(&self, peer: &DeviceId) {
+        #[cfg(feature = "network-test-probe")]
+        record(peer, AddressRefreshStage::Requested, None, None);
         {
             let mut in_flight = self.in_flight();
             if let Some(pending) = in_flight.get_mut(peer) {
                 *pending = true;
+                #[cfg(feature = "network-test-probe")]
+                record(peer, AddressRefreshStage::Coalesced, None, None);
                 return;
             }
             in_flight.insert(*peer, false);
@@ -98,6 +131,8 @@ impl RefreshVerifiedPeerAddressPort for IrohVerifiedPeerAddressRefresh {
             finished: false,
         };
         loop {
+            #[cfg(feature = "network-test-probe")]
+            record(peer, AddressRefreshStage::Started, None, None);
             self.refresh_once(peer).await;
             // 是否再运行一次与释放该对端在同一把锁内决定，不会漏掉期间到达的请求。
             let mut in_flight = self.in_flight();
@@ -106,6 +141,8 @@ impl RefreshVerifiedPeerAddressPort for IrohVerifiedPeerAddressRefresh {
                 _ => {
                     in_flight.remove(peer);
                     running.finished = true;
+                    #[cfg(feature = "network-test-probe")]
+                    record(peer, AddressRefreshStage::Finished, None, None);
                     return;
                 }
             }

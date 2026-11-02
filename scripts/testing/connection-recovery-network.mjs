@@ -933,13 +933,13 @@ async function selectedPaths() {
 }
 
 async function legacyPairingIsRejected(sponsor, joiner) {
-  assert.equal(legacySide, 0, 'legacy incompatibility validation requires the legacy sponsor')
   const created = await sponsor.call('create', { name: sponsor.label })
   sponsor.id = created.device
   const invitation = await sponsor.call('invite')
   const initial = await joiner.call('join', { invitation: invitation.invitation, name: joiner.label })
   assert.equal(initial.status, 'pending')
-  await scenario('E09-legacy-pairing-rejected', async () => {
+  await scenario(legacySide === 0 ? 'E09-legacy-pairing-rejected' : 'E09-current-invitation-rejected-by-legacy', async () => {
+    let rejection
     await until(async () => {
       const choices = await joiner.call('eligibility')
       const current = choices.device_trust.current_join
@@ -949,8 +949,13 @@ async function legacyPairingIsRejected(sponsor, joiner) {
         ['authentication_rejected', 'peer_upgrade_required'].includes(current.reason),
         'legacy pairing ended with an unexpected result',
       )
+      rejection = current.reason
       return true
     }, 20_000, 'legacy pairing did not reach a stable rejection')
+    const setup = await joiner.raw({ command: 'setup' })
+    assert(setup.ok && !setup.ok.has_completed, 'joiner completed incompatible admission')
+    assert(!(await sponsor.call('peers')).some(peer => peer.connected), 'sponsor admitted an incompatible peer')
+    return { stable_rejection: rejection, no_admission: true, legacy_side: legacySide }
   })
 }
 

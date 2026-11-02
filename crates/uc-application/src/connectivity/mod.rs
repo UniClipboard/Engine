@@ -37,3 +37,6 @@ pub use unidirectional::UniStreamLease;
 mod tests;
 
 pub(crate) use request::ConnectionRequestScope;
+
+#[cfg(feature = "clipboard-stream-fault")]
+pub(crate) mod testing_fault;

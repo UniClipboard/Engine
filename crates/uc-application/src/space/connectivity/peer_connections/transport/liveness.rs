@@ -161,6 +161,8 @@ impl Runner {
                         }
                         state.succeeded(peer);
                         self.publish(&mut state, peer, ReachabilityState::Online);
+                        drop(state);
+                        self.refresh_contact_address(peer);
                         record_presence_check_result(PresenceCheckResult::Reachable);
                         return Ok(ReachabilityState::Online);
                     }
@@ -245,6 +247,7 @@ impl Runner {
         self.promote(&attempt, lease.clone(), false)?;
         drop(stream);
         self.watch(attempt.clone(), lease);
+        self.refresh_contact_address(peer);
         record_presence_check_result(PresenceCheckResult::Reachable);
         Ok(ReachabilityState::Online)
     }

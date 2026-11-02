@@ -109,11 +109,30 @@ UniFFI 和 N-API 提供单条查询与进行中列表；N-API 的字节数使用
 目录接收在创建或探测候选暂存区前，先以既有密文 Staging 日志保存完整根映射；日志失败不创建目录或启动回退下载。候选切换先清理旧暂存区，再写新映射，重启不依赖当前保存目录定位旧责任。Staging 尚无发布输出，恢复只清理暂存区，不认领用户重用的计划目标。
 重启后的完整结果重建、重试可用性与完整选择重试的迁移状态仍以当前执行计划为准。
 
-bridge 对出站连接在握手后订阅既有确认离线事件；已排队的 Offline 即便随后 Online，获取租约及原生开流前仍同步判旧连接失效；后台观察同时推进同步游标，其他 peer 的健康事件不积压成假失活。消息尚未发送时，准入后已确认失活的连接最多更新一次，仍用原准入快照和原 deadline；迟到共同结果已关闭时有界重新获取，不重发已写出的内容。manager 的原 JoinSet 监督连接结束并在 shutdown join，监督只持原生能力，不保活租约。Offline/Lagged 关闭本条连接，不推进成员 epoch、不复用 presence 连接、不自行重发内容；明确不可达的网络 I/O 返回原 Offline，本地授权来源保持 Io source。剪贴板发送边界把确认前的暂时性失败（开流、写帧、FIN 或读确认失败，读写超时，以及连接容量暂满）返回为 `Transient`，Application 发送负责人把它与 Offline 一样持久化为可恢复的 `Unreachable`；策略拒绝、协议不兼容、准入拒绝、本机负责人停止、地址资料读取失败与本机编码错误保持终态 `Failed`。取得连接时的准入拒绝（成员权威拒绝或身份不符，包括经共享拨号结果返回的拒绝）先于既有的宽泛不可用判断识别，返回保留原始来源的 `Io`，不会被记为可恢复的离线；请求失效（`Invalidated`，例如拨号期间锁定准备暂停连接）不是拒绝，旧请求不发送帧并返回 Offline，由恢复负责人在对端重新上线时以新请求重新核对成员权威；无地址、无可用连接与底层拨号失败同样返回 Offline。确认丢失时对端可能已保存，重试依赖接收端去重得到重复确认。
+bridge 对除 Blob 外的出站连接在握手后订阅既有确认离线事件；已排队的 Offline 即便随后 Online，获取租约及原生开流前仍同步判旧连接失效；后台观察同时推进同步游标，其他 peer 的健康事件不积压成假失活。消息尚未发送时，准入后已确认失活的连接最多更新一次，仍用原准入快照和原 deadline；迟到共同结果已关闭时有界重新获取，不重发已写出的内容。manager 的原 JoinSet 监督连接结束并在 shutdown join，监督只持原生能力，不保活租约。Offline/Lagged 关闭本条连接，不推进成员 epoch、不复用 presence 连接、不自行重发内容；明确不可达的网络 I/O 返回原 Offline，本地授权来源保持 Io source。剪贴板发送边界把确认前的暂时性失败（开流、写帧、FIN 或读确认失败，读写超时，以及连接容量暂满）返回为 `Transient`，Application 发送负责人把它与 Offline 一样持久化为可恢复的 `Unreachable`；策略拒绝、协议不兼容、准入拒绝、本机负责人停止、地址资料读取失败与本机编码错误保持终态 `Failed`。取得连接时的准入拒绝（成员权威拒绝或身份不符，包括经共享拨号结果返回的拒绝）先于既有的宽泛不可用判断识别，返回保留原始来源的 `Io`，不会被记为可恢复的离线；请求失效（`Invalidated`，例如拨号期间锁定准备暂停连接）不是拒绝，旧请求不发送帧并返回 Offline，由恢复负责人在对端重新上线时以新请求重新核对成员权威；无地址、无可用连接与底层拨号失败同样返回 Offline。确认丢失时对端可能已保存，重试依赖接收端去重得到重复确认。
+
+Blob connections have an independent lifetime. Presence Offline or event lag does not close an
+already authorized Blob connection. Native failure, the original receive deadline, owner cancellation,
+membership revocation and managed session retirement still terminate the corresponding work.
+Outbound construction preserves its existing ownership. It does not acquire inbound session work.
+Connection and download capacity, actual local-work settlement, idle retention and retry limits remain
+unchanged. A real disconnect can therefore take until native failure or the original receive deadline
+to end Blob work. This policy does not change presence status or authorize new clipboard sends.
 
 离线投递恢复（`OfflineDeliveryRecovery`）是自动重试的唯一负责人。除启动扫描与上线事件外，投递记录负责人在每次写入结束后经同一结果通知告知恢复负责人三类结果之一：`Unreachable` 已落库（可恢复）、意图或最终结果写入失败（未能落库，持久状态停在此前的 `Pending`/`Unreachable`），或送达、重复确认、终态失败已落库（已结算）。前两类由恢复负责人按目标计时重试，同一目标上的同一条目最多 3 次，分别约在 2、5、10 秒后，因此一次写入失败不会让在线目标的投递停在未结算状态，首次发送的最终写入失败也同样交给恢复；恢复轮次自身失败且没有新结果时同样按退避再试并计入这 3 次。第三次重试仍未送达后不再计时重试：恢复负责人为该目标与条目保留“已用尽”标记，而不是删除状态，因此这次失败及之后同一条目发布的可恢复结果都不会重新开始计时；该条目随后只能由设备的下一次上线事件再补发一次，或被较新的内容取代。上限来自桌面产品规则“禁止自动重发历史/最终一致性”：离线是预期状态，不建立队列，不把同步变成最终一致；自动同步开启时，既有设备恢复在线只补发该设备最新一条未送达内容一次。上线事件（以及启动扫描）清除该目标的退避与已用尽标记后执行一轮恢复；这次补发若仍未送达，其可恢复结果开启新的 3 次计时窗口，所以每次上线至多带来一次补发加 3 次计时重试，仍然有界。较新的条目同样重新获得完整的 3 次。“较新”只按恢复轮次选择补发内容的同一规则判断（按新到旧第一条带有该目标投递记录的本机条目），结果通知本身不携带先后：较旧条目的结果迟到（例如仍在后台收尾，期间较新内容已发出）时不算新内容，不重置次数或已用尽标记。判断先后时若有条目读取失败，先后视为未知：不改动次数，而是按上文的退避再核对，通知不会因此丢失；恢复轮次同样不跳过无法读取的条目去补发较旧内容，这一轮按失败计入次数。到期时目标不在线则清除退避、改由下一次上线事件负责；本轮没有发出补发而进入终态或不再适合自动恢复时即清除（含已用尽标记）；补发一旦发出（无论对端是否已确认，也包括越过前台期限、由后台收尾结算的情形），恢复负责人记下所等待的条目（等待的仍是同一条目时沿用已增长的间隔与已用次数，改为等待另一条较新内容时退避从 2 秒重新开始、次数归零），只有收到该条目的已结算通知才清除退避。对端确认不等于结算：确认后最终结果写入失败时持久状态仍未结束，随后的未能落库通知按同一条目已用的次数继续计时，不会每次确认后重新开始 3 次窗口。其他条目的结算不影响仍在等待的最新内容。仍只补发该目标最新的待恢复内容，旧内容按既有规则标记为已取代；连接管理器不重放内容，也不为重试伪造 Offline/Online 转换。结果通知积压丢失（超出 64 条缓冲）时不执行恢复轮次，也不清除任何状态：恢复负责人按持久记录核对当前在线的已知目标，最新内容仍未结束的目标像收到可恢复结果一样记入既有退避，沿用已用次数与已用尽标记，由到期重试补发。核对只读不发，不会产生新的结果通知，因此不会自我触发下一次积压。核对中某个目标读取失败时不放弃其余目标；配对设备列表或某个目标读取失败时，按同样的 2、5、10 秒退避再核对，最多 3 次，完整核对一次后次数归零。
 
-原 Application 发送 owner 内部按内容/目标围栏在途尝试：新 Pending 持久成功后才能取代旧写入权，旧 deferred 不覆盖同条内容的新结果；失败的新意图不丢失旧回执。私有 token 只存内存且弱表可回收，不改变持久格式。跨内容 Superseded 的既有竞态见[技术债](../exec-plans/tech-debt-tracker.md)。
+The Application delivery record owner serializes Pending, final results, superseding older content,
+and stopping recovery under one shared write fence. A successful Pending commit transfers the
+entry/target token. A failed Pending commit retains the prior valid receipt's write right.
+Cross-content superseding first verifies that the replacement has a committed delivery record for
+that target. Recovery rechecks the old record under the same lock and changes only Pending or
+Unreachable. Only a successful terminal commit revokes the prior token; failed writes retain it.
+Late deferred results cannot overwrite Superseded or another committed recovery terminal.
+The owner emits its normal status notification and Settled feed only after the terminal write.
+A fenced late result performs no write and emits no fake persisted-result notification.
+Tokens remain private, weak and reclaimable; no persistent format or stable API changes.
+The controlled R04, R04F and R04E scenarios each passed three fresh Linux runs.
+See the [final validation record](../exec-plans/completed/2026-11-01-pr343-linux-validation.md).
 
 ## 协商和回执
 
@@ -204,3 +223,126 @@ FIN 后最多等待 3 秒，且不能超过入口剩余时间。通知完成只�
 日志丢弃与关联缺口仍按原有限输出统计；路径已验证不等于整条诊断记录无丢失。
 
 实施验收见[当前剪贴板执行计划](../exec-plans/completed/2026-10-14-active-clipboard-connectivity-plan.md)。
+
+
+## Global inbound synchronization control
+
+`sync.sync_enabled` is the global inbound control for both ordinary clipboard push and
+ActiveClipboard state convergence. Per-member receive permissions and content-type permissions
+add restrictions; they cannot override this global control. `auto_sync_enabled` does not authorize
+incoming content and is not a substitute for the global inbound check.
+
+The clipboard receive owner uses one fail-closed settings check for all these paths. Ordinary push
+rejects before decryption when global sync is disabled or settings cannot be read. ActiveClipboard
+handling checks the same control before looking up content, initiating a pull, or converging an
+existing local entry. After an awaited local-content lookup, the owner checks again before starting
+a new pull. Existing-content and pulled-content convergence both check again after reconstruction
+and mobile-consumability preparation, immediately before handing the snapshot to the write
+coordinator. No awaited preparation follows that final check before handoff. A pulled envelope is
+checked again in the store owner before decryption and immediately before handing content to the
+shared persistence owner. A setting change during pull
+or decoding therefore cannot rely on an earlier member permit to authorize new persistence.
+
+Global rejection leaves the active register unchanged and does not schedule a receive retry.
+An ordinary push still returns the real Rejected ACK and remains terminal at the sender; receipt
+through another content protocol must not bypass the disabled setting. Active-state observation
+or a presence transition does not reopen that terminal sender delivery.
+
+These checks do not roll back content already committed or cancel a persistence/write action
+already handed to its existing owner. They do not close presence connections, expand the Engine
+paused interface, add a configuration field, or change any wire protocol. Runtime acceptance must
+keep receiver absence, terminal sender status and no-timed-retry assertions, with ActivePull
+isolation disabled for the global-control cell so another path cannot be hidden by a test fault.
+
+## Pre-frame interruption during Engine suspension
+
+A non-final Engine suspension preserves unfinished ordinary clipboard delivery for the existing
+recovery owner. After foreground operations drain, the Engine marks only the retiring ordinary
+clipboard manager before quiescing the old protocols. The mark records the existing lifecycle
+intent; it does not cancel work or grant a replacement request.
+
+If an acquisition or stream-open operation then returns Stopped, its frozen session must actually
+be cancelled and its caller token must remain uncancelled before the result becomes Invalidated.
+The Invalidated error retains the original stopped/shared source chain. The existing transport
+boundary classifies it as recoverable, and the delivery owner records Unreachable through its
+normal result feed. Resume creates a new manager and a new request that checks current authority.
+An old request never gains permission to open a stream or submit a frame.
+
+Final Engine stop, direct manager shutdown, and space reset/transition do not set this suspension
+mark. Explicit caller cancellation remains terminal. Denied, admission errors, backend errors,
+and local settlement failures retain their existing classification. Preparation without actual
+old-session cancellation does not reclassify a local Stopped error. Post-frame ambiguity and ACK
+handling keep their existing behavior and deadlines. Presence and other protocol managers do not
+participate in this ordinary clipboard lifecycle mark.
+
+## Expired Blob download retention
+
+The Blob download owner removes a borrowed connection from future cache reuse when the download
+returns an error after its original ReceiveTiming budget expires. Releasing only the local lease
+is insufficient because the manager can retain the same nonclosed connection for another request.
+The owner uses the existing manager eviction capability after actual exchange/local settlement.
+The original error and all additional settlement sources remain unchanged.
+
+Eviction removes only cache eligibility. Existing sibling streams and started local work retain
+their original ownership until completion. A following request uses normal acquisition and current
+admission/address policy; the owner does not force a connection or extend any deadline. Successful
+downloads and failures before the original deadline do not trigger this expiry-based eviction.
+
+## Native close attribution and Blob exclusions
+
+The production Blob profile does not subscribe to reachability events. An Offline observation cannot
+create an Offline-owned Blob close or make a later opaque network error recoverable. The internal
+attribution capability remains conservative for subscribed profiles and other backend implementations;
+it does not restore presence-driven Blob termination.
+
+Closed and unreachable are independent state observations, not a close-cause certificate. The
+native bridge records an Offline-owned closure only when a real Offline event wins the native
+close_if_open operation. That operation checks the native closed state and performs the close
+under one native mutex, returning whether this exact call initiated the close. Iroh only forwards
+that complete action. Bridge explicit closes use the same operation to preserve an existing cause.
+A separate open check, first-close snapshot or current reason is not an ownership certificate.
+A preexisting close, another native close owner winning first, or a lagged liveness queue cannot
+create this attribution. A later nonwinning close cannot replace the recorded cause.
+
+The internal connection capability also checks the actual failed source for native LocallyClosed.
+ApplicationClosed, stream reset, stream stop and an opaque NotConnected do not qualify. Application
+additionally requires a network-domain NotConnected failure without additional settlement failure,
+and uncancelled caller/transport tokens. Only then does the complete Blob download owner retain the
+original error as the source of its existing in-budget recovery. The original admission fence,
+retry cap, deadlines and normal closed-lease refresh remain authoritative. Other backends default
+to no attribution. No stable Engine interface exposes the native cause or internal business stage.
+
+## Blob request and response deadline
+
+An active exchange keeps its connection out of ordinary idle retirement. A logically open cached
+connection can therefore consume the full first-data budget without returning a response header,
+even while peer presence remains online. The Blob download owner passes the original ReceiveTiming
+deadline and the existing 30-second RECOVERY_TIMEOUT to the complete receive capability. Infra first
+awaits local temp-tag protection. It then derives an absolute network response deadline from the
+earlier of the original logical deadline and now plus that response timeout. Local protection retains
+the original logical budget. A 35-second local preparation does not expire the network wait before
+that wait starts. The original 60-second first-data, 300-second validated-data stall and 30-second
+cumulative recovery budgets remain unchanged. Attempts and backoffs remain unchanged.
+
+Infra applies the response timer only to the SDK network request write and response header read.
+A ready real response error takes priority over timer expiry. After successful header decoding,
+receive checks that the current time is strictly before the response deadline. A successful header
+at or after the deadline produces ResponseTimedOut before any local import or empty-content branch
+starts. This check never replaces an actual response error. Local protection that exhausts the
+original logical deadline produces RequestExpired before network work starts. Import preparation,
+content reading, local store backpressure, empty-content verification and output settlement retain
+their existing logical deadlines and cancellation. The response timer never drops started local work.
+
+A network response timeout stops only this stream through the existing SDK half owners and completes
+the original IoCompletion before returning blob_exchange_response_timed_out. A genuine stream cleanup
+failure produces Settlement and preserves both sources. Actual caller cancellation, transport shutdown,
+storage failure, source refusal, denial and terminal native failure retain their existing contracts.
+The response timeout is not relabelled as a native transient network error. No stage query or new
+configuration layer is exposed.
+
+After a settled response timeout, Application removes only the borrowed connection's future reuse
+eligibility and releases its own lease. Existing sibling streams retain ownership. The next normal
+acquisition uses the same frozen request and original recovery schedule, count and deadlines. Healthy
+response headers do not force redial. Existing direction capacity and old lifetime settlement remain
+mandatory. A slow local settlement or sibling can still exhaust the remaining budget; the owner does
+not force a connection or extend that budget.

@@ -12,3 +12,6 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 mod receiver_lifecycle_tests;
+
+#[cfg(feature = "clipboard-stream-fault")]
+pub mod stream_fault;

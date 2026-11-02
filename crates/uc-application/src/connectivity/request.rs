@@ -5,6 +5,7 @@ use super::{
     InboundAdmissionFence, PeerConnection,
 };
 use async_trait::async_trait;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -80,6 +81,20 @@ impl ConnectionRequestScope {
 }
 impl ConnectionRequest {
     pub async fn connect(
+        &self,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<ConnectionLease, ConnectivityError> {
+        let result = self.connect_inner(deadline, cancel).await;
+        result.map_err(|error| {
+            error.invalidated_if_stopped(
+                self.session.is_cancelled()
+                    && !cancel.is_cancelled()
+                    && self.manager.inner.suspend_prepared.load(Ordering::Acquire),
+            )
+        })
+    }
+    async fn connect_inner(
         &self,
         deadline: Instant,
         cancel: &CancellationToken,

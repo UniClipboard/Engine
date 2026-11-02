@@ -123,6 +123,8 @@ impl BlobExchangePort for Exchange {
     async fn receive(
         &self,
         _: StreamLease,
+        _: Instant,
+        _: Duration,
         digest: BlobDigest,
         cancel: CancellationToken,
         progress: Arc<dyn BlobValidatedProgress>,

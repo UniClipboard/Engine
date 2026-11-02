@@ -817,6 +817,8 @@ impl crate::transfer::blob::transport::BlobExchangePort for NoNetwork {
     async fn receive(
         &self,
         _: crate::connectivity::StreamLease,
+        _: tokio::time::Instant,
+        _: std::time::Duration,
         _: uc_core::ports::blob::BlobDigest,
         _: tokio_util::sync::CancellationToken,
         _: Arc<dyn crate::transfer::blob::transport::BlobValidatedProgress>,

@@ -8,6 +8,8 @@
 //! and coordinated shutdown.
 
 use crate::clipboard::active::transport::ActivePullPreparationPort;
+#[cfg(feature = "clipboard-stream-fault")]
+use crate::clipboard::testing_receive::{current_apply_outcome, current_stage, ReceiveStage};
 mod current;
 mod lifecycle;
 mod reconcile;
@@ -64,7 +66,7 @@ use crate::clipboard::sync::active_state::serve_pull::{
     ActiveClipboardPullServeDeps, ActiveClipboardPullServeUseCase,
 };
 use crate::clipboard::sync::payload_codec::decode_v3_bytes_to_snapshot;
-use crate::clipboard::sync::receive_gate::MemberReceiveGate;
+use crate::clipboard::sync::receive_gate::{inbound_sync_enabled, MemberReceiveGate};
 use crate::clipboard::sync::send_gate::MemberSendGate;
 use crate::clipboard::sync::snapshot_from_entry::SnapshotReconstructor;
 use crate::clipboard::write::{
@@ -253,6 +255,7 @@ impl ActiveClipboardFacade {
             Arc::clone(&deps.peer_scope),
             Arc::clone(&deps.peer_reachability),
             deps.clock,
+            Arc::clone(&deps.settings),
             mobile_consumability,
             converged_tx,
         );
@@ -266,6 +269,7 @@ impl ActiveClipboardFacade {
         if let (Some(pull_client), Some(pull_apply)) = (deps.pull_client, deps.pull_apply) {
             let store: Arc<dyn InboundPulledContentStore> = Arc::new(PulledContentStore {
                 cipher: Arc::clone(&deps.transfer_cipher),
+                settings: Arc::clone(&deps.settings),
                 receive_gate: MemberReceiveGate::new(
                     Arc::clone(&deps.member_repo),
                     Arc::clone(&deps.peer_scope),
@@ -379,6 +383,7 @@ async fn resurface_entry(
 /// the active-clipboard register — the inbound convergence tail owns that.
 struct PulledContentStore {
     cipher: Arc<dyn TransferCipherPort>,
+    settings: Arc<dyn SettingsPort>,
     receive_gate: MemberReceiveGate,
     apply: Arc<dyn InboundClipboardApplyPort>,
 }
@@ -393,6 +398,10 @@ impl InboundPulledContentStore for PulledContentStore {
         transfer_envelope: Vec<u8>,
         receive_permit: &crate::clipboard::sync::receive_gate::MemberReceivePermit,
     ) -> Result<InboundPulledContentStoreOutcome, InboundPulledContentStoreError> {
+        if !inbound_sync_enabled(self.settings.as_ref()).await {
+            return Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy);
+        }
+
         // Decrypt first because categories are inside the encrypted V3
         // envelope. Decode and enforce the receive allowlist before invoking
         // the shared inbound apply path, which can persist entries and blobs.
@@ -412,9 +421,16 @@ impl InboundPulledContentStore for PulledContentStore {
             return Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy);
         }
 
+        // 拉取、解密和分类期间设置可能变化；在交给持久负责人之前复核。
+        if !inbound_sync_enabled(self.settings.as_ref()).await {
+            return Ok(InboundPulledContentStoreOutcome::RejectedByReceivePolicy);
+        }
+
         // Persist via the shared inbound apply path (decode V3 → materialize
         // blobs → capture). Reuses the same pipeline the bulk 0xC1 path uses,
         // so the pulled entry's schema matches a normal inbound entry.
+        #[cfg(feature = "clipboard-stream-fault")]
+        current_stage(ReceiveStage::ApplyStarted);
         let outcome = self
             .apply
             .apply(InboundClipboardApplyInput {
@@ -433,6 +449,8 @@ impl InboundPulledContentStore for PulledContentStore {
             .await
             .map_err(|err| InboundPulledContentStoreError::Store(anyhow::Error::from(err)))?;
 
+        #[cfg(feature = "clipboard-stream-fault")]
+        current_apply_outcome(&outcome);
         match outcome {
             InboundClipboardApplyOutcome::Applied { entry_id } => Ok(
                 InboundPulledContentStoreOutcome::Stored(EntryId::from(entry_id)),
@@ -474,7 +492,9 @@ mod pull_store_tests {
 
     use super::*;
     use crate::clipboard::inbound::InboundClipboardApplyError;
+    use crate::clipboard::sync::dispatch_entry::test_support::MockSettings_;
     use crate::clipboard::sync::payload_codec::encode_snapshot_to_v3_bytes;
+    use uc_core::settings::model::Settings;
 
     struct PlaintextCipher(Vec<u8>);
 
@@ -572,7 +592,10 @@ mod pull_store_tests {
             .authorize(&peer)
             .await
             .expect("device-level receive is allowed");
+        let mut settings = MockSettings_::new();
+        settings.expect_load().returning(|| Ok(Settings::default()));
         let store = PulledContentStore {
+            settings: Arc::new(settings),
             cipher: Arc::new(PlaintextCipher(plaintext.to_vec())),
             receive_gate,
             apply: Arc::new(ApplyNeverCalled),

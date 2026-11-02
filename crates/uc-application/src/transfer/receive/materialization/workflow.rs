@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use uc_core::error_class::ErrorClass;
 use uc_core::ports::TrackedFileTransferStatus;
 
 use anyhow::{anyhow, Context, Error as SourceError, Result};
@@ -48,11 +49,13 @@ use uc_observability_contract::{
 };
 
 use crate::clipboard::sync::payload_codec::V3BlobRef;
+use crate::connectivity::ConnectivityError;
 use crate::facade::blob_transfer::{
     BatchPosition, BlobTransferError, FetchBlobCommand, FetchBlobToPathCommand,
     FetchTransferContext,
 };
 use crate::transfer::blob::facade::FetchTerminalFailure;
+use crate::transfer::blob::transport::BlobExchangeError;
 use crate::transfer::blob::{fetch_failure_reason, BlobOutputPreparationError};
 
 use super::{
@@ -1068,12 +1071,33 @@ impl InboundBlobMaterializer for FileCacheBlobMaterializer {
                                 .await?;
                         }
                     }
+                    let error_class = e
+                        .chain()
+                        .find_map(|source| {
+                            source
+                                .downcast_ref::<BlobExchangeError>()
+                                .map(ErrorClass::class)
+                                .or_else(|| {
+                                    source
+                                        .downcast_ref::<Arc<BlobExchangeError>>()
+                                        .map(|source| source.class())
+                                })
+                        })
+                        .unwrap_or("unclassified");
+                    let source_class = e
+                        .chain()
+                        .find_map(|source| source.downcast_ref::<ConnectivityError>())
+                        .map(ErrorClass::class)
+                        .unwrap_or("unclassified");
                     uc_warn!(
                         idx = idx,
                         total = blob_ref_total,
                         entry_id = log_id(&entry_id),
                         size_bytes = advertised_size,
                         error_kind = "blob_fetch",
+                        error_class = log_vocab(&error_class),
+                        source_class = log_vocab(&source_class),
+                        error = e.as_ref(),
                         io_error_kind = io_error_kind(e.as_ref()),
                         "materialize: blob fetch failed, marking partial"
                     );

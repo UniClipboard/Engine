@@ -1,3 +1,5 @@
+#[cfg(feature = "network-test-probe")]
+use super::testing_network_probe::{record as record_probe, AddressRefreshStage};
 use std::sync::Arc;
 
 use iroh::EndpointAddr;
@@ -31,11 +33,22 @@ impl PeerAddressResolver {
         &self,
         device: &DeviceId,
     ) -> Result<Option<EndpointAddr>, PeerAddressResolutionError> {
-        let record = self
-            .repository
-            .get(device)
-            .await
-            .map_err(|source| PeerAddressResolutionError::Repository { source })?;
+        #[cfg(feature = "network-test-probe")]
+        record_probe(device, AddressRefreshStage::StoredReadStarted, None, None);
+        let record = self.repository.get(device).await.map_err(|source| {
+            #[cfg(feature = "network-test-probe")]
+            record_probe(
+                device,
+                AddressRefreshStage::StoredReadFailed,
+                None,
+                Some(false),
+            );
+            PeerAddressResolutionError::Repository { source }
+        })?;
+        #[cfg(feature = "network-test-probe")]
+        if record.is_none() {
+            record_probe(device, AddressRefreshStage::StoredMissing, None, None);
+        }
         record
             .map(|record| {
                 use uc_observability_contract::diagnostics::connectivity::{
@@ -45,10 +58,24 @@ impl PeerAddressResolver {
                     StoredAddressObservation::new(device.as_str(), Some(&record.addr_blob));
                 let addr: EndpointAddr =
                     postcard::from_bytes(&record.addr_blob).map_err(|source| {
+                        #[cfg(feature = "network-test-probe")]
+                        record_probe(
+                            device,
+                            AddressRefreshStage::StoredInvalid,
+                            None,
+                            Some(false),
+                        );
                         NetworkRecorder::current()
                             .address_record(&observation, AddressRecordResult::InvalidEncoding);
                         PeerAddressResolutionError::InvalidEncoding { source }
                     })?;
+                #[cfg(feature = "network-test-probe")]
+                record_probe(
+                    device,
+                    AddressRefreshStage::StoredDecoded,
+                    Some(&addr),
+                    None,
+                );
                 let (summary, signature) = super::connection_diagnostics::candidate_summary(&addr);
                 observation.in_scope(|| {
                     NetworkRecorder::current().address_loaded(

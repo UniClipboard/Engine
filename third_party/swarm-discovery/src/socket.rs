@@ -138,24 +138,16 @@ pub fn socket_v4(interface_addr: Option<Ipv4Addr>) -> Result<UdpSocket, SocketEr
             source,
         })?;
 
-    // Join the multicast group once, on the interface of the default route.
-    //
-    // Group membership is per interface, so packets arriving on any other
-    // interface are not delivered to this socket. IP_MULTICAST_ALL would
-    // paper over this on Linux when another membership exists, but that
-    // socket option is Linux-only; on macOS and other BSD-derived systems
-    // reception from non-default interfaces does not work. The per-interface
-    // sockets cannot take over reception either: they are bound to a unicast
-    // address and therefore never match multicast-destined packets. Reception
-    // on further interfaces is instead set up by
-    // `Sockets::join_group_on_main_v4`, which joins the group per interface on
-    // this main wildcard socket.
-    socket
-        .join_multicast_v4(&MDNS_IPV4, &interface_addr.unwrap_or(Ipv4Addr::UNSPECIFIED))
-        .map_err(|source| SocketError::JoinMulticast {
-            domain: IP::Ipv4,
-            source,
-        })?;
+    // 主通配套接字必须独立于默认路由存活；其成员关系由 Sockets 按接口安装。
+    // 显式接口套接字仍保留加入失败，交给 guardian 的安装重试处理。
+    if let Some(addr) = interface_addr {
+        socket
+            .join_multicast_v4(&MDNS_IPV4, &addr)
+            .map_err(|source| SocketError::JoinMulticast {
+                domain: IP::Ipv4,
+                source,
+            })?;
+    }
 
     // Pin multicast egress to the requested interface. Binding to the
     // interface address alone does not reliably select the outgoing
@@ -555,6 +547,9 @@ pub(crate) mod probe {
 pub struct Sockets {
     v4: Option<Arc<UdpSocket>>,
     v6: Option<Arc<UdpSocket>>,
+    /// 默认 IPv4 加入是否成功；仅有接收套接字不能启用默认 IPv4 发送路径。
+    /// 显式接口仍由接口表与 guardian 的成员关系安装结果管理。
+    default_v4_joined: bool,
     interface_sockets_v4: Arc<RwLock<HashMap<Ipv4Addr, Arc<UdpSocket>>>>,
     /// UniClipboard 补丁：仍在接口表中、但主通配套接字尚未确认为其加入组播组的地址。
     ///
@@ -592,11 +587,21 @@ impl Sockets {
         }
         let interface_sockets_v4 = Arc::new(RwLock::new(interface_sockets_v4));
 
-        let sockets = match class {
+        let mut sockets = match class {
             IpClass::Auto => {
+                let v4 = match socket_v4(None) {
+                    Ok(socket) => Some(Arc::new(socket)),
+                    // 已声明 IPv4 接口时，构造失败由长期 mDNS 所有者重试，不能降为仅 IPv6。
+                    Err(error) if !multicast_interfaces.is_empty() => return Err(error),
+                    Err(error) => {
+                        tracing::debug!(%error, "IPv4 multicast socket unavailable");
+                        None
+                    }
+                };
                 let socket = Self {
-                    v4: socket_v4(None).ok().map(Arc::new),
+                    v4,
                     v6: socket_v6().ok().map(Arc::new),
+                    default_v4_joined: false,
                     interface_sockets_v4: interface_sockets_v4.clone(),
                     unjoined_v4: Arc::default(),
                     interface_sockets_v6: Arc::default(),
@@ -617,6 +622,7 @@ impl Sockets {
                     .has_v6()
                     .then(|| socket_v6().map(Arc::new))
                     .transpose()?,
+                default_v4_joined: false,
                 interface_sockets_v4: interface_sockets_v4.clone(),
                 unjoined_v4: Arc::default(),
                 interface_sockets_v6: Arc::default(),
@@ -624,6 +630,40 @@ impl Sockets {
                 probe,
             },
         };
+        // Join the multicast group once, on the interface of the default route.
+        //
+        // Group membership is per interface, so packets arriving on any other
+        // interface are not delivered to this socket. IP_MULTICAST_ALL would
+        // paper over this on Linux when another membership exists, but that
+        // socket option is Linux-only; on macOS and other BSD-derived systems
+        // reception from non-default interfaces does not work. The per-interface
+        // sockets cannot take over reception either: they are bound to a unicast
+        // address and therefore never match multicast-destined packets. Reception
+        // on further interfaces is instead set up by
+        // `Sockets::join_group_on_main_v4`, which joins the group per interface on
+        // this main wildcard socket.
+        // 无显式接口的调用方保留原有的一次默认接口加入尝试；有 IPv6 回退时保留主套接字。
+        // 后续显式接口仍由 guardian 安装，各自的失败不能被这次可选尝试掩盖。
+        if multicast_interfaces.is_empty() {
+            if let Some(v4) = &sockets.v4 {
+                match v4.join_multicast_v4(MDNS_IPV4, Ipv4Addr::UNSPECIFIED) {
+                    Ok(()) => sockets.default_v4_joined = true,
+                    Err(source) => {
+                        // 无显式接口也无 IPv6 能力时，不能把默认加入失败当作可用服务。
+                        if sockets.v6.is_none() {
+                            return Err(SocketError::JoinMulticast {
+                                domain: IP::Ipv4,
+                                source,
+                            });
+                        }
+                        tracing::debug!(
+                            error_kind = ?source.kind(),
+                            "default IPv4 multicast membership unavailable"
+                        );
+                    }
+                }
+            }
+        }
         for addr in sockets.get_all_interface_addresses_v4() {
             // 失败已记入 `unjoined_v4`；期望集合模式下由 guardian 重试。
             let _ = sockets.join_group_on_main_v4(addr);
@@ -660,7 +700,10 @@ impl Sockets {
                 Err(e) if e.kind() == io::ErrorKind::AddrInUse => Ok(()),
                 result => result,
             },
-            None => Ok(()),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "IPv4 multicast receiver unavailable",
+            )),
         };
         let mut unjoined = self
             .unjoined_v4
@@ -708,7 +751,7 @@ impl Sockets {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&addr);
-        if !unjoined {
+        if !unjoined && self.v4.is_some() {
             return Ok(());
         }
         self.rejoin_group_on_main_v4(addr)
@@ -937,8 +980,10 @@ impl Sockets {
                         self.interface_sockets_v4.read().unwrap().len()
                     );
                     self.send_msg_multi_interface_v4(&bytes, msg).await;
-                } else if let Some(v4) = &self.v4 {
-                    Self::send_on_main(v4, IpAddr::from(MDNS_IPV4), &bytes, msg).await;
+                } else if self.default_v4_joined {
+                    if let Some(v4) = &self.v4 {
+                        Self::send_on_main(v4, IpAddr::from(MDNS_IPV4), &bytes, msg).await;
+                    }
                 }
             }
             if matches!(mode, Mode::V6 | Mode::Any) {
@@ -950,24 +995,35 @@ impl Sockets {
             }
         } else {
             // Single interface mode or IPv6-only
-            let (socket, addr) = match mode {
-                Mode::V4 => (self.v4.as_ref().unwrap(), IpAddr::from(MDNS_IPV4)),
-                Mode::V6 => (self.v6.as_ref().unwrap(), IpAddr::from(MDNS_IPV6)),
-                Mode::Any => {
-                    if let Some(v4) = &self.v4 {
-                        (v4, IpAddr::from(MDNS_IPV4))
-                    } else {
-                        (self.v6.as_ref().unwrap(), IpAddr::from(MDNS_IPV6))
+            let selected = match mode {
+                Mode::V4 | Mode::Any if self.default_v4_joined => self
+                    .v4
+                    .as_ref()
+                    .map(|socket| (socket, IpAddr::from(MDNS_IPV4))),
+                Mode::V6 | Mode::Any => self
+                    .v6
+                    .as_ref()
+                    .map(|socket| (socket, IpAddr::from(MDNS_IPV6))),
+                Mode::V4 => None,
+            };
+            if let Some((socket, addr)) = selected {
+                let sent = Self::send_on_main(socket, addr, &bytes, msg).await;
+                // Any 在真实 IPv4 发送失败后保留一次 IPv6 机会，不改变单协议响应。
+                if !sent && matches!(mode, Mode::Any) && addr.is_ipv4() {
+                    if let Some(v6) = &self.v6 {
+                        Self::send_on_main(v6, IpAddr::from(MDNS_IPV6), &bytes, msg).await;
                     }
                 }
-            };
-            Self::send_on_main(socket, addr, &bytes, msg).await;
+            } else {
+                tracing::debug!("no multicast sender available for requested mode");
+            }
         }
     }
 
-    async fn send_on_main(socket: &UdpSocket, addr: IpAddr, bytes: &[u8], msg: &Message) {
+    async fn send_on_main(socket: &UdpSocket, addr: IpAddr, bytes: &[u8], msg: &Message) -> bool {
         if let Err(e) = socket.send_to(bytes, (addr, MDNS_PORT)).await {
             tracing::warn!("error sending mDNS: {}", e);
+            false
         } else {
             tracing::debug!(
                 q = msg.queries.len(),
@@ -976,6 +1032,7 @@ impl Sockets {
                 "sent {} bytes",
                 bytes.len()
             );
+            true
         }
     }
 

@@ -7,6 +7,7 @@ publish = false
 
 [features]
 default = []
+clipboard-stream-fault = ["uuid/serde"]
 lan-compat = []
 test-support = []
 

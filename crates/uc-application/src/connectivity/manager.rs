@@ -6,6 +6,8 @@ use super::lifetime::ConnectionLifetime;
 use super::pending::{PendingInboundLease, UnboundConnection};
 use super::request::ConnectionRequestScope;
 use super::retention::{ConnectionActivity, IdleRetentionPolicy};
+#[cfg(feature = "clipboard-stream-fault")]
+use super::testing_fault;
 use super::{
     AdmissionAttempt, AdmissionGrant, ConnectionLease, ConnectionMode, ConnectionRequest,
     ConnectivityBackend, ConnectivityError, InboundConnectionError, InboundIdentityReservation,
@@ -145,6 +147,7 @@ pub(super) struct Inner {
     tasks: Mutex<JoinSet<()>>,
     stop: CancellationToken,
     session: Mutex<CancellationToken>,
+    pub(super) suspend_prepared: Arc<AtomicBool>,
     failure: Mutex<Option<Arc<JoinError>>>,
     waiting: Arc<Semaphore>,
     flights: Arc<Semaphore>,
@@ -180,6 +183,7 @@ impl ConnectivityManager {
                 failure: Mutex::new(None),
                 stop: CancellationToken::new(),
                 session: Mutex::new(CancellationToken::new()),
+                suspend_prepared: Arc::new(AtomicBool::new(false)),
                 waiting: Arc::new(Semaphore::new(policy.waiters_per_session)),
                 flights: Arc::new(Semaphore::new(policy.flights_per_session)),
                 inbound: Arc::new(Semaphore::new(policy.inbound_per_session)),
@@ -231,6 +235,12 @@ impl ConnectivityManager {
         state.peers.insert(target, Arc::downgrade(&peer));
         peer
     }
+    /// 仅由生命周期负责人在非最终暂停、旧协议关闭前调用。
+    /// 此标记不取消工作、不重启 manager，也不改变调用方主动取消的分类。
+    pub fn prepare_suspend(&self) {
+        self.inner.suspend_prepared.store(true, Ordering::Release);
+    }
+
     /// 同步冻结本请求的准入与会话；协议可在自己的有界队列之前创建它。
     pub fn request(&self, target: DeviceId) -> ConnectionRequest {
         ConnectionRequest {
@@ -339,6 +349,15 @@ impl ConnectivityManager {
         }
         let mut rx = flight.result.subscribe();
         let awaiting = timeout_at(deadline, async {
+            #[cfg(feature = "clipboard-stream-fault")]
+            tokio::select! {
+                biased;
+                _ = self.inner.stop.cancelled() => return Err(ConnectivityError::Stopped),
+                _ = testing_fault::after_registered(launch, async {
+                    // 这里只观察提前完成；原循环仍读取并返回完整结果或通道来源。
+                    let _ = rx.wait_for(|result| result.is_some()).await;
+                }) => {},
+            }
             loop {
                 if let Some(result) = rx.borrow_and_update().clone() {
                     return result.map_err(ConnectivityError::Shared);
@@ -491,9 +510,17 @@ impl ConnectivityManager {
         while let Some(result) = tasks.try_join_next() {
             Self::record_task_result(&self.inner, result);
         }
+        #[cfg(feature = "clipboard-stream-fault")]
+        let acquisition_context = testing_fault::capture_worker_context();
         tasks.spawn(
             async move {
-                let acquisition = async move { acquisition.connect(target, peer, attempt).await };
+                let acquisition = async move {
+                    #[cfg(feature = "clipboard-stream-fault")]
+                    let connecting = testing_fault::scope_worker(acquisition_context, acquisition.connect(target, peer, attempt));
+                    #[cfg(not(feature = "clipboard-stream-fault"))]
+                    let connecting = acquisition.connect(target, peer, attempt);
+                    connecting.await
+                };
                 let mut worker = AbortOnDropHandle::new(tokio::spawn(
                     acquisition
                         .instrument(Span::none())
@@ -571,6 +598,7 @@ impl ConnectivityManager {
             inbound: self.inner.inbound.clone(),
             waiting: self.inner.waiting.clone(),
             stop: self.stop_token(),
+            suspend_prepared: self.inner.suspend_prepared.clone(),
             cancel: self.stop_token().child_token(),
             pending: Arc::new(Mutex::new(None)),
         }
@@ -816,6 +844,7 @@ impl ConnectivityManager {
                 address_hint: None,
                 activity,
                 stop: pending.session.clone(),
+                suspend_prepared: manager.inner.suspend_prepared.clone(),
                 cache_cancel: CancellationToken::new(),
                 supervise_local_work: manager.policy().wait_for_local_work(),
                 accepted_stream_timeout: manager.policy().accepted_stream_timeout,

@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "required_repetitions": 3,
+  "required_cases": [
+    "L01",
+    "L02",
+    "L03",
+    "L03C",
+    "L04",
+    "L05",
+    "L06",
+    "M01",
+    "M02",
+    "M02R",
+    "M03",
+    "M04",
+    "M03R",
+    "M03V",
+    "S01",
+    "S02",
+    "S03C",
+    "S03A",
+    "S03I",
+    "S03P",
+    "S03D",
+    "S05",
+    "S03N",
+    "S03G",
+    "S03F",
+    "S03L",
+    "S03T",
+    "R01",
+    "R02",
+    "R02A",
+    "R03",
+    "R04",
+    "R04F",
+    "R04E",
+    "R05T",
+    "R05O",
+    "R05I",
+    "R05A",
+    "R05G",
+    "S04"
+  ],
+  "groups": {
+    "lan_discovery": [
+      "L01",
+      "L02",
+      "L03",
+      "L03C",
+      "L04",
+      "L05",
+      "L06",
+      "M01",
+      "M02",
+      "M02R",
+      "M03",
+      "M04",
+      "M03R",
+      "M03V"
+    ],
+    "static_profile": [
+      "S01",
+      "S02",
+      "S03C",
+      "S03A",
+      "S03I",
+      "S03P",
+      "S03D",
+      "S05"
+    ],
+    "dynamic_subnet": [
+      "S03N",
+      "S03G",
+      "S03F",
+      "S03L",
+      "S03T"
+    ],
+    "delivery_recovery": [
+      "R01",
+      "R02",
+      "R02A",
+      "R03",
+      "R04",
+      "R04F",
+      "R04E",
+      "R05T",
+      "R05O",
+      "R05I",
+      "R05A",
+      "R05G"
+    ],
+    "transport": [
+      "S04"
+    ]
+  },
+  "transport_subcases_per_iteration": 23,
+  "additional_controls": {
+    "normal_features": [
+      "L03",
+      "L03C"
+    ],
+    "same_binary_probe_disabled": [
+      "L03",
+      "L03C"
+    ],
+    "required_repetitions": 3
+  },
+  "driver_sha256": "ff1673d04b854ace7ae5a38fa29215561fdda08529b8e3094fd59349ca692fba",
+  "acceptance": "Every required final-source execution must pass with complete evidence, readback and settlement, cleanup and privacy. Historical failures remain preserved.",
+  "platform_not_run": [
+    "native clipboard",
+    "platform keychain",
+    "GUI",
+    "real OS sleep/wake",
+    "mobile devices",
+    "actual Tailscale"
+  ]
+}

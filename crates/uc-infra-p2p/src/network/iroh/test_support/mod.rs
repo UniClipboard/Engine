@@ -29,6 +29,23 @@ impl BlobNativeObservation {
             initial: handles.len(),
         }
     }
+    /// 统计已失效或已有真实关闭原因的弱句柄，不把已关闭连接的缓冲读取当作存活。
+    pub fn closed_count(&self) -> usize {
+        let observed = {
+            let handles = NATIVE_HANDLES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            handles[self.initial..].to_vec()
+        };
+        observed
+            .iter()
+            .filter(|handle| {
+                handle
+                    .upgrade()
+                    .is_none_or(|connection| connection.close_reason().is_some())
+            })
+            .count()
+    }
     pub fn counts(&self) -> (usize, usize) {
         let handles = NATIVE_HANDLES
             .lock()

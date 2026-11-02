@@ -193,7 +193,9 @@ impl ConnectivityBackend for IrohConnectivityBackend {
                     Some(reachability) => IrohPeerConnection::wrap_outbound(
                         connection,
                         target,
-                        reachability.subscribe(),
+                        // 在线状态协议失活不能关闭独立的文件连接。
+                        (!matches!(self.profile, ConnectivityProfile::Blob))
+                            .then(|| reachability.subscribe()),
                     ),
                     None => IrohPeerConnection::wrap(connection),
                 })

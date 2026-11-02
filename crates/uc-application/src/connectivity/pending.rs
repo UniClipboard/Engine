@@ -121,6 +121,7 @@ impl PendingInboundLease {
                 self.manager.policy().idle_retention.as_ref(),
             )),
             stop: self.session.clone(),
+            suspend_prepared: self.manager.inner.suspend_prepared.clone(),
             cache_cancel: tokio_util::sync::CancellationToken::new(),
             supervise_local_work: self.manager.policy().wait_for_local_work(),
             accepted_stream_timeout: self.manager.policy().accepted_stream_timeout,

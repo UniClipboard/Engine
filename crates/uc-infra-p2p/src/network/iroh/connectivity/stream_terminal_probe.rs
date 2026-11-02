@@ -259,7 +259,14 @@ async fn prove(interruption: WaitEnd) -> anyhow::Result<()> {
     let store = IrohBlobExchangeAdapter::new(destination.clone());
     let provider = IrohBlobExchangeAdapter::new(source.clone());
     let stop = CancellationToken::new();
-    let get = store.receive(downloading, digest, stop.clone(), Arc::new(Validated));
+    let get = store.receive(
+        downloading,
+        Instant::now() + BUDGET,
+        BUDGET,
+        digest,
+        stop.clone(),
+        Arc::new(Validated),
+    );
     let provide = async {
         provider
             .provide(

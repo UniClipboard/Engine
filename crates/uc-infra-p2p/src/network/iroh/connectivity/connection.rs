@@ -6,7 +6,9 @@ use super::super::session_generation::{begin_session_local_work, SessionLocalWor
 use super::super::test_support::register_resource_connection;
 use super::stream::{wrap, wrap_receive, wrap_send};
 use async_trait::async_trait;
-use iroh::endpoint::{Connection, Side};
+use iroh::endpoint::{Connection, ConnectionError, Side};
+use std::error::Error;
+use std::iter::successors;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::broadcast;
@@ -36,6 +38,7 @@ pub(crate) struct IrohPeerConnection {
     native: Connection,
     _session_work: Option<SessionLocalWork>,
     unreachable: AtomicBool,
+    offline_closure: Mutex<bool>,
     close_recorded: AtomicBool,
     liveness: Option<(
         DeviceId,
@@ -49,7 +52,7 @@ impl IrohPeerConnection {
         let session_work = if connection.alpn() == BLOBS_ALPN {
             let work = begin_session_local_work();
             if work.is_none() {
-                connection.close(0u32.into(), b"session_retired");
+                connection.close_if_open(0u32.into(), b"session_retired");
             }
             work
         } else {
@@ -59,6 +62,7 @@ impl IrohPeerConnection {
             _session_work: session_work,
             native: connection,
             unreachable: AtomicBool::new(false),
+            offline_closure: Mutex::new(false),
             close_recorded: AtomicBool::new(false),
             liveness: None,
         })
@@ -74,23 +78,36 @@ impl IrohPeerConnection {
                     if event.device_id == *target && event.state == ReachabilityState::Offline =>
                 {
                     self.unreachable.store(true, Ordering::Release);
-                    self.close();
+                    self.close_for_liveness(true);
                     return;
                 }
                 Ok(_) => {}
                 Err(broadcast::error::TryRecvError::Lagged(_)) => {
                     self.unreachable.store(true, Ordering::Release);
-                    self.close();
+                    self.close_for_liveness(false);
                     return;
                 }
                 Err(_) => return,
             }
         }
     }
+    fn close_for_liveness(&self, confirmed_offline: bool) {
+        let mut offline_closure = self
+            .offline_closure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // 只有同一 native 临界区内实际赢得关闭的调用，才能登记本次关闭归属。
+        if self
+            .native
+            .close_if_open(0u32.into(), b"reachability ended")
+        {
+            *offline_closure = confirmed_offline;
+        }
+    }
     pub(crate) fn wrap_outbound(
         connection: Connection,
         target: DeviceId,
-        events: broadcast::Receiver<PeerReachabilityChanged>,
+        events: Option<broadcast::Receiver<PeerReachabilityChanged>>,
     ) -> Arc<dyn PeerConnection> {
         #[cfg(feature = "test-util")]
         register_resource_connection(&connection);
@@ -98,8 +115,9 @@ impl IrohPeerConnection {
             _session_work: None,
             native: connection,
             unreachable: AtomicBool::new(false),
+            offline_closure: Mutex::new(false),
             close_recorded: AtomicBool::new(false),
-            liveness: Some((target, Mutex::new(events))),
+            liveness: events.map(|events| (target, Mutex::new(events))),
         })
     }
 }
@@ -160,8 +178,25 @@ impl PeerConnection for IrohPeerConnection {
     fn is_unreachable(&self) -> bool {
         self.unreachable.load(Ordering::Acquire)
     }
+    fn is_offline_close_error(&self, source: &(dyn Error + 'static)) -> bool {
+        if !*self
+            .offline_closure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            return false;
+        }
+        // 状态本身不够；实际失败链必须仍证明是本机关闭，而非远端拒绝或流 reset。
+        successors(Some(source), |&source| source.source())
+            .find_map(|source| source.downcast_ref::<ConnectionError>())
+            .is_some_and(|reason| matches!(reason, ConnectionError::LocallyClosed))
+    }
     fn close(&self) {
-        self.native.close(0u32.into(), b"exchange ended");
+        let _closure = self
+            .offline_closure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.native.close_if_open(0u32.into(), b"exchange ended");
     }
     async fn closed(&self) {
         if let Some((target, events)) = &self.liveness {
@@ -176,14 +211,14 @@ impl PeerConnection for IrohPeerConnection {
                     event = events.recv() => match event {
                         Ok(event) if event.device_id == *target && event.state == ReachabilityState::Offline => {
                             self.unreachable.store(true, Ordering::Release);
-                            self.close();
+                            self.close_for_liveness(true);
                             return;
                         }
                         Ok(_) => self.observe_liveness(),
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             // 丢失已确认离线的历史后，不让未知旧连接继续供新交换复用。
                             self.unreachable.store(true, Ordering::Release);
-                            self.close();
+                            self.close_for_liveness(false);
                             return;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,

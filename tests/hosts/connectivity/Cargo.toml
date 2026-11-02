@@ -14,6 +14,7 @@ default = ["current-engine", "inbound-network-faults", "transfer-progress"]
 transfer-progress = []
 inbound-network-faults = ["current-engine"]
 current-engine = [
+  "uc-engine/dev-tools",
   "connectivity-opportunity",
   "device-group-choices",
   "join-status",
@@ -28,7 +29,11 @@ join-status = []
 network-recovery = []
 process-observability = []
 startup-progress = []
-test-network-config = []
+test-network-config = ["uc-engine/dev-tools"]
+# 独立进程验收保留生产的进程级网络策略，不启用 Engine dev-tools。
+production-e2e = ["join-status", "device-group-choices", "network-recovery", "process-observability", "startup-progress", "transfer-progress"]
+clipboard-stream-fault = ["uc-engine/clipboard-stream-fault"]
+network-test-probe = ["uc-engine/network-test-probe"]
 
 [dependencies]
 anyhow = "1"
@@ -36,7 +41,7 @@ serde_json = "1"
 sha2 = "0.10"
 url = "2"
 tokio = { version = "1", features = ["full"] }
-uc-engine = { path = "../../../crates/uc-engine", features = ["dev-tools"] }
+uc-engine = { path = "../../../crates/uc-engine" }
 
 [dev-dependencies]
 diesel = { version = "2.3.5", features = ["sqlite"] }
