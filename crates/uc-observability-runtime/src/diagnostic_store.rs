@@ -1,4 +1,5 @@
-//! 诊断三种信号共用的分段存储与编码预算。
+//! Segmented storage and encoding budgets shared by all three diagnostic signals.
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Write};
@@ -29,7 +30,8 @@ use crate::run_storage::{
 pub(crate) const RECORD_BYTES: usize = 64 * 1024;
 #[cfg(feature = "test-process-release")]
 pub(crate) static PROBE_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-const QUEUE_RECORDS: usize = 8;
+const QUEUE_RECORDS: usize = 256;
+const QUEUE_BYTES: usize = 512 * 1024;
 const FILE_BYTES: u64 = 4 * 1024 * 1024;
 const RUN_BYTES: u64 = 16 * 1024 * 1024;
 const ROOT_BYTES: u64 = 100_000_000;
@@ -47,7 +49,6 @@ pub(crate) struct StreamCounters {
     failed: AtomicU64,
     full: AtomicU64,
     closed: AtomicU64,
-    busy: AtomicU64,
     oversized: AtomicU64,
     pub(crate) schema_rejected: AtomicU64,
     queued_bytes: AtomicU64,
@@ -61,25 +62,33 @@ pub(crate) struct StreamCounters {
 impl RecordCounters for StreamCounters {
     fn accepted(&self, source: usize) {
         increment(&self.accepted);
-        self.files.accepted(source);
+        if !matches!(source, METRICS | TRACES) {
+            self.files.accepted(source);
+        }
     }
     fn queue_dropped(&self, source: usize) {
         increment(&self.full);
-        self.files.queue_dropped(source);
+        if !matches!(source, METRICS | TRACES) {
+            self.files.queue_dropped(source);
+        }
     }
     fn closed_dropped(&self, source: usize) {
         increment(&self.closed);
-        self.files.queue_dropped(source);
+        if !matches!(source, METRICS | TRACES) {
+            self.files.queue_dropped(source);
+        }
     }
     fn write_failed(&self, source: usize) {
         increment(&self.failed);
-        self.files.write_failed(source);
+        if !matches!(source, METRICS | TRACES) {
+            self.files.write_failed(source);
+        }
     }
     fn queued(&self, bytes: usize) -> bool {
         let Ok(previous) =
             self.queued_bytes
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    (current + bytes as u64 <= (QUEUE_RECORDS * RECORD_BYTES) as u64)
+                    (current + bytes as u64 <= (QUEUE_BYTES) as u64)
                         .then_some(current + bytes as u64)
                 })
         else {
@@ -94,7 +103,9 @@ impl RecordCounters for StreamCounters {
     }
     fn submission_dropped(&self, source: usize) {
         increment(&self.submission_busy);
-        self.files.queue_dropped(source);
+        if !matches!(source, METRICS | TRACES) {
+            self.files.queue_dropped(source);
+        }
     }
     fn worker_failed(&self) {
         increment(&self.terminated);
@@ -136,20 +147,23 @@ impl DiagnosticWriter {
         })
     }
     pub(crate) fn encoding_slot(&self) -> Option<MutexGuard<'_, ()>> {
-        match self.encoding.try_lock() {
-            Ok(slot) => Some(slot),
-            Err(_) => {
-                increment(&self.counters.busy);
-                None
-            }
-        }
+        // This gate covers bounded encoding and nonblocking submission only. Disk I/O stays on the worker.
+        Some(
+            self.encoding
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
+
     pub(crate) fn record(&self, source: usize, value: &impl Serialize) {
         let Some(_slot) = self.encoding_slot() else {
             return;
         };
         match encode_record(value, RECORD_BYTES) {
-            Some(bytes) => self.queue.writer().write_owned(bytes, source, false),
+            Some(bytes) => self
+                .queue
+                .writer()
+                .write_record(Cow::Borrowed(&bytes), source, false),
             None => increment(&self.counters.oversized),
         }
     }
@@ -165,10 +179,10 @@ impl StreamCounters {
         let c = self;
         let load = |v: &AtomicU64| v.load(Ordering::Relaxed);
         json!({"schemaVersion": 1,  "reservedQueueBytes": load(&c.queued_bytes),
-            "reservedQueueBytesHighWater": load(&c.high_water), "queueByteBudget": QUEUE_RECORDS * RECORD_BYTES,
+            "reservedQueueBytesHighWater": load(&c.high_water), "queueByteBudget": QUEUE_BYTES, "queueRecordLimit": QUEUE_RECORDS,
             "recordByteLimit": RECORD_BYTES, "accepted": load(&c.accepted), "written": load(&c.written),
             "writtenBytes": load(&c.written_bytes), "submissionBusy": load(&c.submission_busy), "writeFailed": load(&c.failed), "queueFull": load(&c.full), "closedDropped": load(&c.closed),
-            "schemaRejected": load(&c.schema_rejected), "encodingBusy": load(&c.busy), "encodingRejected": load(&c.oversized), "workerTerminated": load(&c.terminated),
+            "schemaRejected": load(&c.schema_rejected), "encodingRejected": load(&c.oversized), "workerTerminated": load(&c.terminated),
             "rotatedFiles": load(&c.rotated), "rotatedBytes": load(&c.rotated_bytes), "cleanupFailures": load(&c.cleanup_failed), "metadataWriteFailures": load(&c.metadata_failed),
              "countsComplete": load(&c.terminated) == 0, "counterSnapshot": "non_transactional", "updatedAt": Utc::now().to_rfc3339()})
     }
@@ -192,7 +206,7 @@ impl Write for LimitedRecord {
         if self.bytes.len().saturating_add(bytes.len()) > self.limit {
             return Err(io::Error::other("diagnostic record exceeds byte limit"));
         }
-        // 只预留单条上限；Vec 扩容不能越过编码槽的预算。
+        // Reserve only the record limit so Vec growth stays within the encoding budget.
         if self.bytes.capacity() == 0 {
             self.bytes.reserve_exact(self.limit);
         }
@@ -244,7 +258,7 @@ impl RecordStore for DiagnosticStore {
         let manifest = serde_json::to_vec(&json!({"schemaVersion": 1, "runId": self.run_id,
             "startedAt": self.started_at, "engineSourceCommit": source.commit, "engineSourceState": source.state,
             "budget": {"fileBytes": FILE_BYTES, "runBytes": RUN_BYTES, "rootTargetBytes": ROOT_BYTES,
-                "retentionSeconds": RETENTION.as_secs(), "queueBytes": QUEUE_RECORDS * RECORD_BYTES, "recordBytes": RECORD_BYTES}}))?;
+                "retentionSeconds": RETENTION.as_secs(), "queueBytes": QUEUE_BYTES, "queueRecords": QUEUE_RECORDS, "recordBytes": RECORD_BYTES}}))?;
         write_atomically(&directory.join("run.json"), &manifest)?;
         let mut segments = VecDeque::new();
         let mut total = 0_u64;
@@ -373,7 +387,7 @@ impl RecordStore for DiagnosticStore {
         #[cfg(not(feature = "test-process-release"))]
         let result = file.write_all(bytes);
         if let Err(error) = result {
-            // 部分行后不再追加记录；后续记录使用新分段。
+            // Close a partial segment. Write subsequent records to a new segment.
             if let Ok(metadata) = file.metadata() {
                 let partial = metadata.len().saturating_sub(*size);
                 *size = metadata.len();
@@ -394,12 +408,14 @@ impl RecordStore for DiagnosticStore {
         self.counters
             .written_bytes
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        let counts = self.counters.files.source_at(source);
-        increment(&counts.written);
-        counts.last_written_at_ms.store(
-            Utc::now().timestamp_millis().max(0) as u64,
-            Ordering::Relaxed,
-        );
+        if !matches!(source, METRICS | TRACES) {
+            let counts = self.counters.files.source_at(source);
+            increment(&counts.written);
+            counts.last_written_at_ms.store(
+                Utc::now().timestamp_millis().max(0) as u64,
+                Ordering::Relaxed,
+            );
+        }
         if source == METRICS
             && self
                 .last_status
@@ -420,6 +436,18 @@ impl RecordStore for DiagnosticStore {
         Ok(())
     }
     fn settle(&mut self) -> io::Result<()> {
+        if self.open.as_ref().is_some_and(|run| {
+            !run.directory.is_dir()
+                || run.files.iter().flatten().any(|(file, name, _)| {
+                    !std::fs::symlink_metadata(run.directory.join(name))
+                        .is_ok_and(|metadata| same_file(&metadata, file))
+                })
+        }) {
+            self.open = None;
+        }
+        if !self.parked {
+            self.prepare()?;
+        }
         #[cfg(feature = "test-process-release")]
         if PROBE_FAULT
             .compare_exchange(6, 0, Ordering::SeqCst, Ordering::SeqCst)

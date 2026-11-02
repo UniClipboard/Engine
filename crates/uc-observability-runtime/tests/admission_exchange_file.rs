@@ -93,16 +93,18 @@ fn standard_capture_preserves_exchange_steps_failure_and_interruption() {
         ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(5)),
         SignalResult::Completed
     );
-    let records: Vec<serde_json::Value> = std::fs::read_dir(directory.path())
-        .expect("files")
-        .flat_map(|entry| {
-            std::fs::read_to_string(entry.expect("entry").path())
-                .expect("file")
-                .lines()
-                .map(|line| serde_json::from_str(line).expect("record"))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let records: Vec<serde_json::Value> =
+        uc_observability_runtime::managed_log_files(directory.path())
+            .expect("files")
+            .into_iter()
+            .flat_map(|entry| {
+                std::fs::read_to_string(entry)
+                    .expect("file")
+                    .lines()
+                    .map(|line| serde_json::from_str(line).expect("record"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
     let completions: Vec<_> = records
         .iter()
         .filter(|r| r["fields"]["event.name"] == "uc.operation.completed")

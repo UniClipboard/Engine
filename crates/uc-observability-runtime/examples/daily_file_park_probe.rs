@@ -24,11 +24,12 @@ use std::process::Command;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
-#[cfg(target_os = "macos")]
 use file_statistics::LocalDiagnosticSource;
 #[cfg(target_os = "macos")]
 use local_file::LocalFileRuntime;
-use uc_observability_runtime::{SignalResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS};
+#[cfg(target_os = "macos")]
+use std::borrow::Cow;
+use uc_observability_runtime::SignalResult;
 
 #[cfg(target_os = "macos")]
 fn descriptor_open(path: &Path) -> bool {
@@ -50,8 +51,8 @@ fn main() {
     let logs = root.path().join("logs");
     let daily = LocalFileRuntime::new(&logs).expect("daily queue");
     let writer = daily.writer();
-    writer.write_owned(
-        b"first\n".to_vec(),
+    writer.write_record(
+        Cow::Borrowed(b"first\n"),
         LocalDiagnosticSource::Runtime as usize,
         false,
     );
@@ -66,8 +67,8 @@ fn main() {
     let initially_open = descriptor_open(&file);
     let first_park = daily.queue.park(Duration::from_secs(5));
     let closed_after_park = !descriptor_open(&file);
-    writer.write_owned(
-        b"late\n".to_vec(),
+    writer.write_record(
+        Cow::Borrowed(b"late\n"),
         LocalDiagnosticSource::Runtime as usize,
         false,
     );

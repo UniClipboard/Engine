@@ -24,7 +24,7 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use local_file::{FileQueue, HealthHooks, RecordCounters, RecordStore};
-use uc_observability_runtime::{SignalResult, LOCAL_LOG_MAX_BYTES, LOCAL_LOG_RETENTION_DAYS};
+use uc_observability_runtime::SignalResult;
 
 struct ControlledStore {
     _lease: File,

@@ -1,5 +1,6 @@
 //! 独立网络日志层：按已审定调用点把第三方网络事件编码为脱敏摘要，写入自己的队列。
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -345,7 +346,7 @@ impl Shared {
             increment(&self.counters.oversized);
             return;
         }
-        self.writer.write_owned(line, 0, true);
+        self.writer.write_record(Cow::Owned(line), 0, true);
     }
 
     fn render(&self, kind: Kind, raw: &str, state: &mut State) -> Option<Value> {

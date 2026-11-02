@@ -1,4 +1,4 @@
-//! 受管运行目录、租约与非活动运行回收。
+//! Managed run directories, leases, and inactive-run reclamation.
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(unix)]
@@ -43,7 +43,7 @@ pub(crate) fn open_lease(path: &Path) -> io::Result<File> {
 
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("json.tmp");
-    // 先清掉可能残留的临时文件（含符号链接本身），再以独占创建写入，不跟随任何已有路径。
+    // Remove any stale temporary entry, including symlinks, then create exclusively without following an existing path.
     match std::fs::remove_file(&temporary) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -65,11 +65,11 @@ struct RunEntry {
     modified: SystemTime,
 }
 
-/// 回收没有活动写入者的旧运行目录：先按保留时间，再在根目录超额时从最旧的起。
+/// Reclaim inactive runs by age, then oldest first when the root exceeds its target.
 ///
-/// 清理锁串行不同进程的扫描与运行目录的建立；运行是否活动只看它的 lease 锁，成功取得锁才可删除。
-/// 锁忙、权限失败或任何 I/O 错误都跳过，不等待、不影响采集。
-/// 取得串行各进程扫描的清理锁；忙时返回 `WouldBlock`。
+/// Serialize scans and run creation with the cleanup lock. Delete a run only after acquiring its lease.
+/// Skip busy locks and I/O failures without waiting or blocking collection.
+/// Acquire the cross-process cleanup lock. Return `WouldBlock` when it is busy.
 pub(crate) fn open_cleanup_lock(network_root: &Path) -> io::Result<File> {
     create_private_directory(network_root)?;
     let mut options = OpenOptions::new();
@@ -90,7 +90,7 @@ pub(crate) fn open_cleanup_lock(network_root: &Path) -> io::Result<File> {
     Ok(cleanup)
 }
 
-/// 调用方已持有清理锁。
+/// The caller holds the cleanup lock.
 pub(crate) fn collect_old_runs(
     network_root: &Path,
     own_directory: &Path,
@@ -150,7 +150,7 @@ fn describe_run(path: PathBuf) -> RunEntry {
     }
 }
 
-/// 取得 lease 锁才说明运行不再活动；持锁期间删除目录，缺少 lease 的目录视为孤儿。
+/// Acquire the lease before deleting an inactive run. Treat directories without leases as orphaned.
 fn remove_inactive_run(directory: &Path) -> io::Result<bool> {
     let lease_path = directory.join(LEASE_FILE);
     let lease = match OpenOptions::new().write(true).open(&lease_path) {

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -645,7 +646,12 @@ fn spawn_file_queue<S: RecordStore>(
 }
 
 impl AsyncFileWriter {
-    pub(crate) fn write_owned(&self, bytes: Vec<u8>, source: usize, wait_for_submission: bool) {
+    pub(crate) fn write_record(
+        &self,
+        bytes: Cow<'_, [u8]>,
+        source: usize,
+        wait_for_submission: bool,
+    ) {
         let _submission = if wait_for_submission {
             lock(&self.submission)
         } else {
@@ -665,12 +671,16 @@ impl AsyncFileWriter {
             return;
         }
         let length = bytes.len();
+        // Reserve bytes before copying a borrowed record. The candidate copy shares the queue budget.
         if !self.counters.queued(length) {
             increment(&self.dropped_records);
             self.counters.queue_dropped(source);
             return;
         }
-        match self.sender.try_send(FileMessage::Line(bytes, source)) {
+        match self
+            .sender
+            .try_send(FileMessage::Line(bytes.into_owned(), source))
+        {
             Ok(()) => self.counters.accepted(source),
             Err(error) => {
                 self.counters.dequeued(length);
@@ -686,8 +696,8 @@ impl AsyncFileWriter {
 
 impl Write for AsyncFileWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.write_owned(
-            buffer.to_vec(),
+        self.write_record(
+            Cow::Borrowed(buffer),
             LocalDiagnosticSource::Runtime as usize,
             true,
         );
@@ -1410,7 +1420,46 @@ pub fn migrate_managed_log_files(from: &Path, to: &Path) -> io::Result<usize> {
 }
 
 pub fn managed_log_files(directory: &Path) -> io::Result<Vec<PathBuf>> {
-    managed_files(directory).map(|files| files.into_iter().map(|entry| entry.path).collect())
+    let mut files: Vec<_> = managed_files(directory)?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    let runs = match std::fs::read_dir(directory.join("diagnostics/engine")) {
+        Ok(runs) => runs,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(files),
+        Err(error) => return Err(error),
+    };
+    for run in runs {
+        let run = run?;
+        let name = run.file_name();
+        if !run.file_type()?.is_dir()
+            || name
+                .to_str()
+                .is_none_or(|name| name.len() != 36 || Uuid::parse_str(name).is_err())
+        {
+            continue;
+        }
+        for entry in std::fs::read_dir(run.path())? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let managed = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("logs.")?.strip_suffix(".jsonl"))
+                .and_then(|name| name.split_once('.'))
+                .is_some_and(|(date, sequence)| {
+                    date.len() == 8
+                        && NaiveDate::parse_from_str(date, "%Y%m%d").is_ok()
+                        && (10..=20).contains(&sequence.len())
+                        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+                        && sequence.parse::<u64>().is_ok()
+                });
+            if managed && entry.file_type()?.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 //! 只接收 `uc_*` 目标的事件；合同目标仍走既有的合同/SDK 通道，不在此重复。标准模式记录 INFO 及以上，
 //! Detailed 采集窗口内提升到 DEBUG。限额、限速与截断都计数并随导出报告给出，不承诺无限无损。
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -365,9 +366,11 @@ impl ModuleLogLayer {
             bump(&self.stats.budget_dropped, 1);
             return;
         }
-        self.file
-            .writer()
-            .write_owned(bytes, LocalDiagnosticSource::Runtime as usize, false);
+        self.file.writer().write_record(
+            Cow::Borrowed(&bytes),
+            LocalDiagnosticSource::Runtime as usize,
+            false,
+        );
         bump(&self.stats.emitted, 1);
         bump(
             &self.stats.opaque_error_layers,

@@ -1,5 +1,6 @@
-//! 持续采样与已结束 span 的文件流提交。
+//! Continuous sampling and file submission for completed spans.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -236,7 +237,7 @@ impl DiagnosticStream {
 
     pub(crate) fn stop(&self) -> OTelSdkResult {
         self.stopped.store(true, Ordering::Release);
-        // 关闭请求端会唤醒正在等待下一次采样的线程。生命周期负责人在后台等待完整收尾。
+        // Closing the request sender wakes the sampler. The lifecycle owner joins it in the background.
         self.sample_request
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -451,7 +452,9 @@ impl SpanProcessor for DiagnosticSpanProcessor {
             resource.resource = Some(self.history.resource.clone());
         }
         match encode_record(&ExportTraceServiceRequest { resource_spans }, RECORD_BYTES) {
-            Some(bytes) => file.writer().write_owned(bytes, TRACES, false),
+            Some(bytes) => file
+                .writer()
+                .write_record(Cow::Borrowed(&bytes), TRACES, false),
             None => file.record_rejection(),
         }
     }

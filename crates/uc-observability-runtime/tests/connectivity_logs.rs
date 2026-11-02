@@ -69,9 +69,10 @@ fn connectivity_diagnostics_survive_the_export_file_without_private_fields() {
         ProcessObservabilityRuntime::flush_local_logs(Duration::from_secs(5)),
         SignalResult::Completed
     );
-    let output = std::fs::read_dir(directory.path())
+    let output = uc_observability_runtime::managed_log_files(directory.path())
         .expect("files")
-        .map(|e| std::fs::read_to_string(e.expect("file").path()).expect("content"))
+        .into_iter()
+        .map(|e| std::fs::read_to_string(e).expect("content"))
         .collect::<String>();
     assert!(!output.contains("PRIVATE_"));
     let rows: Vec<serde_json::Value> = output
