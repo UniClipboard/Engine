@@ -1,0 +1,13 @@
+{
+  "status": "failed",
+  "topology": "three_real_tailnet_nodes_one_physical_vps",
+  "host_sha256": "8bdf1f5f15a05278ddaf5bf814d879aafd7b2d52e3a626c473e146f098a6f09d",
+  "fixture_sha256": "446c03d4726a80fed3f766209b6239ca9eaaa7bb5f96557c956fee1b5a8221c5",
+  "transfers": [],
+  "cleanup": true,
+  "privacy_scan": true,
+  "phase": "udp_preflight",
+  "failure": "control_command_failed",
+  "privacy_files_scanned": 0,
+  "elapsed_seconds": 12.454
+}

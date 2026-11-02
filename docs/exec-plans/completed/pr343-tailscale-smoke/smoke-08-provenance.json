@@ -1,0 +1,22 @@
+{
+  "engine_commit": "cd774b4c5db78c0470d2cdbefd2e4bef1c1cb36f",
+  "iroh_commit": "1ea24ade280dd73fe4e5cfb68e6a657b96be3bb5",
+  "executed_source_manifest_sha256": "d77589ca363497bcbaa41a16b7b6e202ea547de2e4e0f5819d272b91aa04e540",
+  "driver_sha256": "1acae46a54ca8ee37edafdbb2f455ef1a7a7b6956056ff7f576776c8c612c9d3",
+  "result_sha256": "e63eaa132443296a0f188022c452a080ba81454590ca7088b800bbde2ab29799",
+  "tailscale_images": [
+    "tailscale/tailscale@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c",
+    "tailscale/tailscale@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c",
+    "tailscale/tailscale@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c"
+  ],
+  "tailscale_versions": [
+    "1.104.4",
+    "1.104.4",
+    "1.104.4"
+  ],
+  "three_distinct_node_identities": true,
+  "network_policy_tables_removed": true,
+  "tailscale_nodes_retained_for_next_cases": true,
+  "continuous_transport_classification": "NOT_RUN",
+  "different_host_engine_transfer": "NOT_RUN"
+}

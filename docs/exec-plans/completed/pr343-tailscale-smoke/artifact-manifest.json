@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "accepted_attempt": "smoke-08.json",
+  "historical_attempts_accepted": false,
+  "artifacts": {
+    "smoke-01.json": {
+      "bytes": 416,
+      "sha256": "d0c345abcbefde55cceb1667d322bc88c2dfac62577391cd6039531a142bd240"
+    },
+    "smoke-02.json": {
+      "bytes": 439,
+      "sha256": "c1e5d1e83313e6e7e441906394033c32bb3a11322e7902b8dfff8bed09266fd1"
+    },
+    "smoke-03.json": {
+      "bytes": 445,
+      "sha256": "f2b7f51df8deddd97262bc4d5dcd3a59fcc097f6cd083090508fca69405437b8"
+    },
+    "smoke-04.json": {
+      "bytes": 924,
+      "sha256": "d2c055cdfb7f298861158e8cdfe55fc2fdf3fe25977983577d32f35797e1aedb"
+    },
+    "smoke-05.json": {
+      "bytes": 941,
+      "sha256": "8ab5b46c4353219a2e3d4550d98740f47effe248efb32e0c6edbea3db9003f22"
+    },
+    "smoke-06.json": {
+      "bytes": 1294,
+      "sha256": "e4782c90c8ce864eb6cf3c9c2f9031d7d4f10cf66d609fab642400950c5aef06"
+    },
+    "smoke-07.json": {
+      "bytes": 2157,
+      "sha256": "245d65b3f261a6f1969c74caa5938b44bbd79df420b2c9ccadfcb662e0522b84"
+    },
+    "smoke-08-provenance.json": {
+      "bytes": 1039,
+      "sha256": "9c4b4fe4c3724b4457c01ec805336075437ccac258828e1ae9acc4b6e06d0910"
+    },
+    "smoke-08.json": {
+      "bytes": 5120,
+      "sha256": "e63eaa132443296a0f188022c452a080ba81454590ca7088b800bbde2ab29799"
+    }
+  }
+}

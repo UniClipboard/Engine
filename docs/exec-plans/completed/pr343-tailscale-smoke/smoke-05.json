@@ -1,0 +1,36 @@
+{
+  "status": "failed",
+  "topology": "three_real_tailnet_nodes_one_physical_vps",
+  "host_sha256": "8bdf1f5f15a05278ddaf5bf814d879aafd7b2d52e3a626c473e146f098a6f09d",
+  "fixture_sha256": "446c03d4726a80fed3f766209b6239ca9eaaa7bb5f96557c956fee1b5a8221c5",
+  "transfers": [],
+  "cleanup": true,
+  "privacy_scan": true,
+  "phase": "pairing",
+  "route_controls": [
+    {
+      "from": "A",
+      "to": "B",
+      "exact_tail_route": true,
+      "same_uid_udp_roundtrip": true,
+      "underlay_udp_drop_hit": true
+    },
+    {
+      "from": "B",
+      "to": "C",
+      "exact_tail_route": true,
+      "same_uid_udp_roundtrip": true,
+      "underlay_udp_drop_hit": true
+    },
+    {
+      "from": "C",
+      "to": "A",
+      "exact_tail_route": true,
+      "same_uid_udp_roundtrip": true,
+      "underlay_udp_drop_hit": true
+    }
+  ],
+  "failure": "host_operation_failed_setup_1103",
+  "privacy_files_scanned": 77,
+  "elapsed_seconds": 70.637
+}

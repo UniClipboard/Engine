@@ -1,0 +1,223 @@
+{
+  "status": "passed",
+  "topology": "three_real_tailnet_nodes_one_physical_vps",
+  "host_sha256": "8bdf1f5f15a05278ddaf5bf814d879aafd7b2d52e3a626c473e146f098a6f09d",
+  "fixture_sha256": "446c03d4726a80fed3f766209b6239ca9eaaa7bb5f96557c956fee1b5a8221c5",
+  "transfers": [
+    {
+      "from": "A",
+      "to": "B",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "2564d071e6074dc91f9947ac355f399acf43a1e70d168d96593f990846d6a5f1",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "A",
+      "to": "C",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "733d85a50653f9e50cd1bacf46176483166613b92d0d76c9a4931120dcc67f3a",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "B",
+      "to": "A",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "4945b42319222dcd86ea822d5265e8cd1c949a04b2649b9382722e72ba9af5bd",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "B",
+      "to": "C",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "803e4ecd680a2d5e51e4fb1cb561e349f888a9922a06581cdb8e1dc2499befe9",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "C",
+      "to": "A",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "74eacfbd787437af193c2fab930d668aed726a38ea0a2e3081054f66e32f7fed",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "C",
+      "to": "B",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "7e2552338d5c3905865b4b3549e069d760ebf52e79a0b14513ab1a7d6df8305f",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "A",
+      "to": "B",
+      "kind": "file",
+      "bytes": 524288,
+      "sha256": "5b21ef536d7667b65edbc0cdd668fede1bdeb21cd293dda1c87eb8a85a49950f",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "A",
+      "to": "C",
+      "kind": "file",
+      "bytes": 524288,
+      "sha256": "a4014976d72acf975a14f74a48bc1caa1ab42004cc3c3dbda4e67f7efc6cf2ce",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "B",
+      "to": "A",
+      "kind": "file",
+      "bytes": 524288,
+      "sha256": "ef54507f61caedf19ce653d2a08ff41f7addfe2083583f3a313a4c41c0ffaea0",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "B",
+      "to": "C",
+      "kind": "file",
+      "bytes": 524288,
+      "sha256": "2062da7217bffe5905f7dc1e6bce3ae1b9a17fbf81b2dbb2cdb30beb8653eb74",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "C",
+      "to": "A",
+      "kind": "file",
+      "bytes": 524288,
+      "sha256": "f238ceed76b1a750a5902d972f3375a7fc3d4f1ba860263bf171b064448b87c9",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "C",
+      "to": "B",
+      "kind": "file",
+      "bytes": 524288,
+      "sha256": "19e92a32adeefc697f462e67b6793cce7a313e17c777b6e43fa6a302110883db",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    }
+  ],
+  "cleanup": true,
+  "privacy_scan": true,
+  "phase": "transfer_CB_file",
+  "route_controls": [
+    {
+      "from": "A",
+      "to": "B",
+      "exact_tail_route": true,
+      "same_uid_udp_roundtrip": true,
+      "underlay_udp_drop_hit": true
+    },
+    {
+      "from": "B",
+      "to": "C",
+      "exact_tail_route": true,
+      "same_uid_udp_roundtrip": true,
+      "underlay_udp_drop_hit": true
+    },
+    {
+      "from": "C",
+      "to": "A",
+      "exact_tail_route": true,
+      "same_uid_udp_roundtrip": true,
+      "underlay_udp_drop_hit": true
+    }
+  ],
+  "paired_nodes": [
+    "B",
+    "C"
+  ],
+  "three_node_membership": true,
+  "network_counters": {
+    "A": {
+      "overlay_packets": 1028,
+      "underlay_dropped": 1654
+    },
+    "B": {
+      "overlay_packets": 891,
+      "underlay_dropped": 1180
+    },
+    "C": {
+      "overlay_packets": 866,
+      "underlay_dropped": 989
+    }
+  },
+  "privacy_files_scanned": 115,
+  "elapsed_seconds": 90.888
+}

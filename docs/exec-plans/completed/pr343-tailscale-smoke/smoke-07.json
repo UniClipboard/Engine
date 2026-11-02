@@ -1,0 +1,90 @@
+{
+  "status": "failed",
+  "topology": "three_real_tailnet_nodes_one_physical_vps",
+  "host_sha256": "8bdf1f5f15a05278ddaf5bf814d879aafd7b2d52e3a626c473e146f098a6f09d",
+  "fixture_sha256": "446c03d4726a80fed3f766209b6239ca9eaaa7bb5f96557c956fee1b5a8221c5",
+  "transfers": [
+    {
+      "from": "A",
+      "to": "B",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "ba19099051d52fe5bf37324e163d2a2e52ef806225fdeebc100020af1336f52c",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "A",
+      "to": "C",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "eb780aceedc738145f1335a300de8993f2d949c95d506a01e8e7d0a4493cf3bf",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": [
+        "pending"
+      ]
+    },
+    {
+      "from": "B",
+      "to": "A",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "beba92daaff2a5f311978fca7f87e400ad1055ce73409acea43343250fc6f6c9",
+      "receiver_matched": true,
+      "sender_statuses": [
+        "delivered"
+      ],
+      "other_target_statuses": []
+    },
+    {
+      "from": "B",
+      "to": "C",
+      "kind": "text",
+      "bytes": 54,
+      "sha256": "c20ae08a2e6b8d94ca704da45d4c44bf1927b844f37da681cf20a85666b328ee",
+      "receiver_matched": false
+    }
+  ],
+  "cleanup": true,
+  "privacy_scan": true,
+  "phase": "transfers",
+  "route_controls": [
+    {
+      "from": "A",
+      "to": "B",
+      "exact_tail_route": true,
+      "same_uid_udp_roundtrip": true,
+      "underlay_udp_drop_hit": true
+    },
+    {
+      "from": "B",
+      "to": "C",
+      "exact_tail_route": true,
+      "same_uid_udp_roundtrip": true,
+      "underlay_udp_drop_hit": true
+    },
+    {
+      "from": "C",
+      "to": "A",
+      "exact_tail_route": true,
+      "same_uid_udp_roundtrip": true,
+      "underlay_udp_drop_hit": true
+    }
+  ],
+  "paired_nodes": [
+    "B",
+    "C"
+  ],
+  "three_node_membership": true,
+  "failure": "receiver_readback_deadline",
+  "privacy_files_scanned": 90,
+  "elapsed_seconds": 91.99
+}
