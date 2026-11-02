@@ -607,7 +607,11 @@ function checkPlaintextScanner() {
   }
 
   const rules = read('AGENTS.md')
-  if (!rules.includes('文件内容本体') || !rules.includes('严禁明文落库')) {
+  if (
+    !rules.includes('Encrypt user content with MasterKey AEAD') ||
+    !rules.includes('Do not write plaintext user content to a database.') ||
+    !rules.includes('The only plaintext exceptions are the approved file bodies and managed-cache basenames described below.')
+  ) {
     addProblem(problems, 'persistence gate', 'repository rules weakened encrypted persistence')
   }
   return problems
