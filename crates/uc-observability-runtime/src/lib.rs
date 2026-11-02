@@ -26,6 +26,7 @@ mod module_log;
 mod module_log_fields;
 mod network_log;
 mod process_census;
+mod process_identity;
 mod process_release;
 pub use local_capture::{
     CaptureEndReason, DetailedCaptureRequest, LocalCaptureMode, LocalCaptureStatus,
@@ -41,12 +42,14 @@ pub use network_log::{
 pub use process_release::{
     ProcessFailureKind, ProcessReleaseReport, ProcessReleaseResult, ProcessResumeResult,
 };
+mod offline;
 mod remote_health;
 mod runtime;
 mod status;
 mod subscriber;
 mod subscriber_gate;
 mod telemetry;
+pub use offline::{OfflineDiagnosticSnapshot, OfflineHistoryStorage};
 
 #[cfg(target_os = "android")]
 pub use android::*;

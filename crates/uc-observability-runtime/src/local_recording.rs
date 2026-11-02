@@ -3,11 +3,14 @@ use crate::build_source::build_source;
 use crate::config::ObservabilityResource;
 use crate::local_capture::CapturePolicy;
 use crate::local_file::LocalFileRuntime;
+use crate::offline::OfflineHistory;
 use crate::{
     DetailedCaptureRequest, LocalCaptureStatus, LocalDiagnosticError, LocalDiagnosticSource,
     LocalDiagnosticStatus, OperatingSystem, SetupStatus, SourceCapability, SourceCollection,
     SourceCoverage, StopCaptureResult,
 };
+use opentelemetry::KeyValue;
+use opentelemetry_sdk::Resource;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -119,6 +122,7 @@ impl PeerRecording {
 
 pub(crate) struct LocalRecordingState {
     pub(crate) capture: Mutex<CapturePolicy>,
+    pub(crate) offline: Arc<OfflineHistory>,
     run_id: Uuid,
     started: Instant,
     resource: ObservabilityResource,
@@ -134,6 +138,14 @@ impl LocalRecordingState {
         file: Option<&Arc<LocalFileRuntime>>,
     ) -> Self {
         Self {
+            offline: OfflineHistory::new(
+                &Resource::builder_empty()
+                    .with_attributes([
+                        KeyValue::new("service.version", resource.service_version.clone()),
+                        KeyValue::new("os.type", resource.os.as_str()),
+                    ])
+                    .build(),
+            ),
             capture: Mutex::new(CapturePolicy::new()),
             run_id: Uuid::new_v4(),
             started: Instant::now(),
