@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::diagnostic_store::{encode_record, METRICS, RECORD_BYTES, TRACES};
@@ -22,7 +22,7 @@ use opentelemetry_proto::tonic::metrics::v1::{
 use opentelemetry_proto::tonic::resource::v1::Resource as ProtoResource;
 use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
 use opentelemetry_proto::transform::trace::tonic::group_spans_by_resource_and_scope;
-use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::trace::{Span, SpanData, SpanProcessor};
 use opentelemetry_sdk::Resource;
 use serde::Serialize;
@@ -39,6 +39,8 @@ pub(crate) struct DiagnosticStream {
     started: AtomicBool,
     stopped: AtomicBool,
     sample_request: Mutex<Option<SyncSender<SyncSender<()>>>>,
+    sampler: Mutex<Option<JoinHandle<()>>>,
+    sampler_failed: AtomicBool,
     host_registration_failures: AtomicU64,
     hosts: Mutex<HashMap<u32, HostProcess>>,
 }
@@ -91,6 +93,8 @@ impl DiagnosticStream {
             started: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             sample_request: Mutex::new(None),
+            sampler: Mutex::new(None),
+            sampler_failed: AtomicBool::new(false),
             host_registration_failures: AtomicU64::new(0),
             hosts: Mutex::new(HashMap::new()),
         })
@@ -100,6 +104,10 @@ impl DiagnosticStream {
         self: &Arc<Self>,
         recording: Weak<LocalRecordingState>,
     ) -> std::io::Result<()> {
+        let mut sampler = self.sampler.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "diagnostic sampling is stopped"));
+        }
         if self.started.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -109,12 +117,19 @@ impl DiagnosticStream {
             .sample_request
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(tx);
-        if let Err(error) = thread::Builder::new()
+        match thread::Builder::new()
             .name("uc-process-metrics".into())
             .spawn(move || sample_process(weak, rx, recording))
         {
-            self.started.store(false, Ordering::Release);
-            return Err(error);
+            Ok(worker) => *sampler = Some(worker)
+            Err(error) => {
+                self.started.store(false, Ordering::Release);
+                self.sample_request
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -216,8 +231,27 @@ impl DiagnosticStream {
         Ok(())
     }
 
-    pub(crate) fn stop(&self) {
+    pub(crate) fn stop(&self) -> OTelSdkResult {
         self.stopped.store(true, Ordering::Release);
+        // 关闭请求端会唤醒正在等待下一次采样的线程。生命周期负责人在后台等待完整收尾。
+        self.sample_request
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(worker) = self
+            .sampler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            if worker.join().is_err() {
+                self.sampler_failed.store(true, Ordering::Release);
+                return Err(OTelSdkError::InternalFailure(
+                    "diagnostic sampling worker terminated".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn push(&self, signal: usize, record: &impl Serialize) {
@@ -243,7 +277,7 @@ impl DiagnosticStream {
             "runId": self.run_id, "hostCoverage": host_coverage,
             "hostRegistrationFailures": self.host_registration_failures.load(Ordering::Relaxed),
             "stream": self.file.as_ref().and_then(Weak::upgrade).map(|file| file.stream_summary()),
-            "traceCoverage": "completed spans only", "metricScope": "per_process_no_application_total"})
+            "samplerFailed": self.sampler_failed.load(Ordering::Acquire), "traceCoverage": "completed spans only", "metricScope": "per_process_no_application_total"})
     }
 }
 

@@ -324,9 +324,16 @@ impl TelemetryRuntime {
     }
 
     pub(crate) fn shutdown(&self, deadline: Duration) -> TelemetrySignalSummary {
-        self.recording.diagnostics.stop();
+        let sampling = self.recording.diagnostics.stop();
         let (traces, trace_error) = signal_with_error(self.traces.shutdown_with_timeout(deadline));
-        let (logs, log_error) = signal_with_error(self.logs.shutdown_with_timeout(deadline));
+        let (mut logs, mut log_error) =
+            signal_with_error(self.logs.shutdown_with_timeout(deadline));
+        if let Err(error) = sampling {
+            logs = SignalResult::Failed;
+            if log_error.is_none() {
+                log_error = Some(Arc::new(error));
+            }
+        }
         TelemetrySignalSummary {
             traces,
             logs,
