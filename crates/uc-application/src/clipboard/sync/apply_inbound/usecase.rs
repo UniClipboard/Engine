@@ -1131,6 +1131,21 @@ impl ApplyInboundClipboardUseCase {
                     )
                     .await?;
                 }
+                receive_action
+                    .accept_fully_held(
+                        existing_id,
+                        input.from_device,
+                        input.source_entry.as_ref(),
+                        &blob_refs,
+                        file_set_manifest.as_ref(),
+                    )
+                    .map_err(|error| match error {
+                        ReceiveRegistrationError::GateClosed
+                        | ReceiveRegistrationError::EntryDeleted => ApplyInboundError::Stopped,
+                        ReceiveRegistrationError::CleanupInProgress => {
+                            ApplyInboundError::Internal(SourceError::new(error))
+                        }
+                    })?;
                 return Ok(self
                     .resurface_held_entry(&input, existing_id, snapshot.ts_ms)
                     .await);
