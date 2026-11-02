@@ -18,11 +18,11 @@ use tracing_subscriber::Registry;
 use uc_observability_contract::diagnostics::TELEMETRY_SCHEMA_VERSION;
 
 use crate::config::{ObservabilityConfig, OtlpHttpConfig};
+use crate::diagnostic_history::DiagnosticSpanProcessor;
 use crate::filter::{remote_span_enabled, sdk_log_enabled};
 use crate::local_file::LocalFileRuntime;
 use crate::local_log_processor::LocalLogProcessor;
 use crate::local_recording::LocalRecordingState;
-use crate::offline::OfflineSpanProcessor;
 use crate::remote_health::{
     RemoteHealthCounters, RemoteHealthSnapshot, RemoteSubmissionControl, TracingSpans,
     TrackedLogProcessor, TrackedSpanProcessor,
@@ -324,7 +324,7 @@ impl TelemetryRuntime {
     }
 
     pub(crate) fn shutdown(&self, deadline: Duration) -> TelemetrySignalSummary {
-        self.recording.offline.stop();
+        self.recording.diagnostics.stop();
         let (traces, trace_error) = signal_with_error(self.traces.shutdown_with_timeout(deadline));
         let (logs, log_error) = signal_with_error(self.logs.shutdown_with_timeout(deadline));
         TelemetrySignalSummary {
@@ -368,8 +368,8 @@ impl TelemetryRuntime {
     ) -> Self {
         Self {
             traces: SdkTracerProvider::builder()
-                .with_span_processor(OfflineSpanProcessor::new(
-                    recording.offline.clone(),
+                .with_span_processor(DiagnosticSpanProcessor::new(
+                    recording.diagnostics.clone(),
                     &resource,
                 ))
                 .with_resource(resource.clone())
@@ -424,8 +424,8 @@ impl TelemetryRuntime {
         let submission = RemoteSubmissionControl::new(health.clone());
         Ok(Self {
             traces: SdkTracerProvider::builder()
-                .with_span_processor(OfflineSpanProcessor::new(
-                    recording.offline.clone(),
+                .with_span_processor(DiagnosticSpanProcessor::new(
+                    recording.diagnostics.clone(),
                     &resource,
                 ))
                 .with_sampler(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)))

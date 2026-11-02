@@ -1,4 +1,4 @@
-//! Bounded local OTLP exchange records. No plaintext history is written to disk.
+//! Bounded in-memory OTLP records for explicit diagnostic export.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -28,10 +28,6 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-#[path = "offline/storage.rs"]
-mod storage;
-pub use storage::OfflineHistoryStorage;
-use storage::RecoveryRecord;
 use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System};
 use uuid::Uuid;
 
@@ -41,7 +37,7 @@ const RETENTION: Duration = Duration::from_secs(1800);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OfflineDiagnosticSnapshot {
+pub struct DiagnosticSnapshot {
     pub metrics: String,
     pub logs: String,
     pub traces: String,
@@ -50,7 +46,6 @@ pub struct OfflineDiagnosticSnapshot {
 
 struct Entry {
     at: Instant,
-    wall_ms: u64,
     signal: usize,
     line: String,
 }
@@ -62,22 +57,18 @@ struct History {
     rejected: u64,
 }
 
-pub(crate) struct OfflineHistory {
+pub(crate) struct DiagnosticHistory {
     history: Mutex<History>,
     resource: ProtoResource,
     run_id: String,
     started: AtomicBool,
     stopped: AtomicBool,
     sample_request: Mutex<Option<SyncSender<SyncSender<()>>>>,
-    storage: Mutex<Option<OfflineHistoryStorage>>,
-    persistence: Mutex<&'static str>,
-    persistence_trimmed: AtomicU64,
-    recovery: Mutex<Option<RecoveryRecord>>,
     host_registration_failures: AtomicU64,
     hosts: Mutex<HashMap<u32, HostProcess>>,
 }
 
-impl OfflineHistory {
+impl DiagnosticHistory {
     pub(crate) fn new(resource: &Resource) -> Arc<Self> {
         let run_id = Uuid::new_v4().to_string();
         // Select resource attributes explicitly. SDK defaults can contain host identity.
@@ -121,10 +112,6 @@ impl OfflineHistory {
             started: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             sample_request: Mutex::new(None),
-            storage: Mutex::new(None),
-            persistence: Mutex::new("key_unavailable"),
-            persistence_trimmed: AtomicU64::new(0),
-            recovery: Mutex::new(None),
             host_registration_failures: AtomicU64::new(0),
             hosts: Mutex::new(HashMap::new()),
         })
@@ -250,10 +237,6 @@ impl OfflineHistory {
         Ok(())
     }
 
-    pub(crate) fn protect(&self, storage: OfflineHistoryStorage) {
-        *self.storage.lock().unwrap_or_else(PoisonError::into_inner) = Some(storage);
-    }
-
     pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
     }
@@ -289,13 +272,12 @@ impl OfflineHistory {
         history.bytes += line.len();
         history.entries.push_back(Entry {
             at: now,
-            wall_ms: unix_ms(),
             signal,
             line,
         });
     }
 
-    pub(crate) fn snapshot(&self) -> OfflineDiagnosticSnapshot {
+    pub(crate) fn snapshot(&self) -> DiagnosticSnapshot {
         let (done, completed) = mpsc::sync_channel(1);
         let refresh = self
             .sample_request
@@ -326,9 +308,9 @@ impl OfflineHistory {
             .rev()
             .find(|entry| entry.signal == 0)
             .map(|entry| entry.at.elapsed());
-        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "registered_processes" } else { "not_started" }, "metricScope": "per_process_no_application_total", "processMemorySemanticConventionVersion": "1.37.0", "processMemorySemanticConventionStability": "development", "hostCoverage": host_coverage, "hostRegistrationFailures": self.host_registration_failures.load(Ordering::Relaxed), "webviewAttribution": "unknown_unless_explicitly_registered_by_owner", "runId": self.run_id, "persistence": *self.persistence.lock().unwrap_or_else(PoisonError::into_inner), "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "persistenceTrimmedRecords": self.persistence_trimmed.load(Ordering::Acquire), "historyRecovery": self.recovery.lock().unwrap_or_else(PoisonError::into_inner).clone(), "lastMetricAgeMs": last_metric_age.map(|age| age.as_millis()), "metricsStale": last_metric_age.is_none_or(|age| age > Duration::from_secs(15)), "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
+        let summary = json!({"snapshotRefresh": if refresh { "completed" } else { "unavailable_or_timeout" }, "schemaVersion": 1, "coverage": if self.started.load(Ordering::Acquire) { "registered_processes" } else { "not_started" }, "metricScope": "per_process_no_application_total", "processMemorySemanticConventionVersion": "1.37.0", "processMemorySemanticConventionStability": "development", "hostCoverage": host_coverage, "hostRegistrationFailures": self.host_registration_failures.load(Ordering::Relaxed), "webviewAttribution": "unknown_unless_explicitly_registered_by_owner", "runId": self.run_id, "retentionSeconds": RETENTION.as_secs(), "maxBytes": MAX_BYTES, "retainedBytes": history.bytes, "evictedRecords": history.evicted, "rejectedRecords": history.rejected, "lastMetricAgeMs": last_metric_age.map(|age| age.as_millis()), "metricsStale": last_metric_age.is_none_or(|age| age > Duration::from_secs(15)), "snapshotAt": chrono::Utc::now().to_rfc3339(), "lastRecordAgeMs": history.entries.back().map(|e| e.at.elapsed().as_millis()), "cpuUtilization": "single logical core fraction; uc.process.cpu.utilization, not normalized process.cpu.utilization", "memory": "process.memory.usage bytes; RSS on Unix, working set on Windows", "traceCoverage": "completed spans only; eviction may leave incomplete traces"});
         let [metrics, logs, traces] = signals;
-        OfflineDiagnosticSnapshot {
+        DiagnosticSnapshot {
             metrics,
             logs,
             traces,
@@ -466,7 +448,7 @@ fn gauge(name: &str, unit: &str, value: f64, at: u64, state: &str) -> Metric {
 }
 
 fn sample_process(
-    weak: Weak<OfflineHistory>,
+    weak: Weak<DiagnosticHistory>,
     requests: mpsc::Receiver<SyncSender<()>>,
     recording: Weak<LocalRecordingState>,
 ) {
@@ -480,7 +462,6 @@ fn sample_process(
             return;
         };
         if history.stopped.load(Ordering::Acquire) {
-            history.persist();
             return;
         }
         let now = Instant::now();
@@ -551,7 +532,6 @@ fn sample_process(
                 );
             }
         }
-        history.persist();
         drop(history);
         if let Some(done) = reply.take() {
             let _ = done.try_send(());
@@ -573,24 +553,24 @@ fn sample_process(
     }
 }
 
-pub(crate) struct OfflineSpanProcessor {
-    history: Arc<OfflineHistory>,
+pub(crate) struct DiagnosticSpanProcessor {
+    history: Arc<DiagnosticHistory>,
     resource: ResourceAttributesWithSchema,
 }
-impl OfflineSpanProcessor {
-    pub(crate) fn new(history: Arc<OfflineHistory>, resource: &Resource) -> Self {
+impl DiagnosticSpanProcessor {
+    pub(crate) fn new(history: Arc<DiagnosticHistory>, resource: &Resource) -> Self {
         Self {
             history,
             resource: resource.into(),
         }
     }
 }
-impl std::fmt::Debug for OfflineSpanProcessor {
+impl std::fmt::Debug for DiagnosticSpanProcessor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("OfflineSpanProcessor")
+        f.write_str("DiagnosticSpanProcessor")
     }
 }
-impl SpanProcessor for OfflineSpanProcessor {
+impl SpanProcessor for DiagnosticSpanProcessor {
     fn on_start(&self, _: &mut Span, _: &Context) {}
     fn on_end(&self, span: SpanData) {
         let mut resource_spans = group_spans_by_resource_and_scope(vec![span], &self.resource);
@@ -608,13 +588,6 @@ impl SpanProcessor for OfflineSpanProcessor {
     }
 }
 
-fn unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
-        .unwrap_or_default()
-}
-
 struct HostProcess {
     identity: u128,
     start: u64,
@@ -626,7 +599,7 @@ struct HostProcess {
 }
 
 fn record_process(
-    history: &OfflineHistory,
+    history: &DiagnosticHistory,
     process: &Process,
     resource: &ProtoResource,
     now: Instant,

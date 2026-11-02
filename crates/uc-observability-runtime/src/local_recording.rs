@@ -1,9 +1,9 @@
 //! 进程运行时的本地关联元数据；对端映射有界且只驻留内存。
 use crate::build_source::build_source;
 use crate::config::ObservabilityResource;
+use crate::diagnostic_history::DiagnosticHistory;
 use crate::local_capture::CapturePolicy;
 use crate::local_file::LocalFileRuntime;
-use crate::offline::OfflineHistory;
 use crate::{
     DetailedCaptureRequest, LocalCaptureStatus, LocalDiagnosticError, LocalDiagnosticSource,
     LocalDiagnosticStatus, OperatingSystem, SetupStatus, SourceCapability, SourceCollection,
@@ -122,7 +122,7 @@ impl PeerRecording {
 
 pub(crate) struct LocalRecordingState {
     pub(crate) capture: Mutex<CapturePolicy>,
-    pub(crate) offline: Arc<OfflineHistory>,
+    pub(crate) diagnostics: Arc<DiagnosticHistory>,
     run_id: Uuid,
     started: Instant,
     resource: ObservabilityResource,
@@ -138,7 +138,7 @@ impl LocalRecordingState {
         file: Option<&Arc<LocalFileRuntime>>,
     ) -> Self {
         Self {
-            offline: OfflineHistory::new(
+            diagnostics: DiagnosticHistory::new(
                 &Resource::builder_empty()
                     .with_attributes([
                         KeyValue::new("service.version", resource.service_version.clone()),

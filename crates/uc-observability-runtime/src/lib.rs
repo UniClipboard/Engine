@@ -42,14 +42,14 @@ pub use network_log::{
 pub use process_release::{
     ProcessFailureKind, ProcessReleaseReport, ProcessReleaseResult, ProcessResumeResult,
 };
-mod offline;
+mod diagnostic_history;
 mod remote_health;
 mod runtime;
 mod status;
 mod subscriber;
 mod subscriber_gate;
 mod telemetry;
-pub use offline::{OfflineDiagnosticSnapshot, OfflineHistoryStorage};
+pub use diagnostic_history::DiagnosticSnapshot;
 
 #[cfg(target_os = "android")]
 pub use android::*;

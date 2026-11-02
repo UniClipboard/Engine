@@ -16,6 +16,8 @@ mod build_source {
 }
 #[path = "../src/config.rs"]
 mod config;
+#[path = "../src/diagnostic_history.rs"]
+mod diagnostic_history;
 #[path = "../src/engine_activity.rs"]
 mod engine_activity;
 #[path = "../src/file_statistics.rs"]
@@ -38,8 +40,6 @@ mod module_log;
 mod module_log_fields;
 #[path = "../src/network_log/mod.rs"]
 mod network_log;
-#[path = "../src/offline.rs"]
-mod offline;
 #[path = "../src/process_census.rs"]
 mod process_census;
 #[path = "../src/process_identity.rs"]
@@ -56,7 +56,7 @@ mod status;
 mod subscriber;
 #[path = "../src/subscriber_gate.rs"]
 mod subscriber_gate;
-pub use offline::{OfflineDiagnosticSnapshot, OfflineHistoryStorage};
+pub use diagnostic_history::DiagnosticSnapshot;
 #[path = "../src/telemetry.rs"]
 mod telemetry;
 

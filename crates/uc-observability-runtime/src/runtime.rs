@@ -44,13 +44,13 @@ use crate::status::{
 };
 use crate::subscriber::{local_health_layer, system_layer, HealthRecording};
 use crate::telemetry::TelemetryRuntime;
+use crate::DiagnosticSnapshot;
 use crate::{
     DetailedCaptureRequest, HostDiagnosticEvent, HostDiagnosticReceipt, HostDiagnosticRecordStatus,
     HostDiagnosticSource, HostLogLayer, LocalCaptureStatus, LocalDiagnosticError,
     LocalDiagnosticExportReport, LocalDiagnosticStatus, SourceCapability, SourceCollection,
     StopCaptureResult,
 };
-use crate::{OfflineDiagnosticSnapshot, OfflineHistoryStorage};
 
 static INSTALL_GUARD: Mutex<()> = Mutex::new(());
 static INSTALLED: OnceLock<Arc<RuntimeState>> = OnceLock::new();
@@ -103,12 +103,6 @@ impl ProcessResumeObservation {
     pub fn wait(&self, deadline: Duration) -> ProcessResumeResult {
         self.observation.wait(deadline)
     }
-}
-
-pub fn installed_process_observability() -> Option<ProcessObservabilityHandle> {
-    INSTALLED.get().map(|state| ProcessObservabilityHandle {
-        state: Arc::clone(state),
-    })
 }
 
 /// 已安装运行期的网络日志；未安装或未配置时为空。
@@ -1211,13 +1205,8 @@ impl ProcessObservabilityHandle {
         self.state
             .telemetry
             .recording
-            .offline
+            .diagnostics
             .register_host(pid, role)
-    }
-
-    /// Attach the profile-owned cipher without exposing key material to the runtime.
-    pub fn protect_offline_diagnostic_history(&self, storage: OfflineHistoryStorage) {
-        self.state.telemetry.recording.offline.protect(storage);
     }
 
     /// Start daemon-only performance collection independently of remote telemetry.
@@ -1225,13 +1214,13 @@ impl ProcessObservabilityHandle {
         self.state
             .telemetry
             .recording
-            .offline
+            .diagnostics
             .start(Arc::downgrade(&self.state.telemetry.recording))
     }
 
-    /// Freeze bounded in-memory OTLP records without writing plaintext history.
-    pub fn offline_diagnostic_snapshot(&self) -> OfflineDiagnosticSnapshot {
-        self.state.telemetry.recording.offline.snapshot()
+    /// Freeze the current process's bounded in-memory OTLP records.
+    pub fn diagnostic_snapshot(&self) -> DiagnosticSnapshot {
+        self.state.telemetry.recording.diagnostics.snapshot()
     }
 
     pub fn prepare_local_diagnostic_export(
