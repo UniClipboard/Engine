@@ -22,15 +22,17 @@ fn nft(args: &[&str]) {
 
 fn records(host: &mut HostProcess, role: &str, phase: &str) -> Vec<Value> {
     host.request(json!({"command": "flush"}));
-    let rows: Vec<Value> = std::fs::read_dir(host.root.path().join("logs"))
-        .unwrap()
-        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
-        .flat_map(|text| {
-            text.lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let rows: Vec<Value> =
+        uc_engine::observability::managed_log_files(&host.root.path().join("logs"))
+            .unwrap()
+            .into_iter()
+            .map(|entry| std::fs::read_to_string(entry).unwrap())
+            .flat_map(|text| {
+                text.lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
     let out = PathBuf::from(std::env::var_os("UC_TEST_ARTIFACTS_DIR").unwrap());
     std::fs::write(
         out.join(format!("{phase}-{role}.json")),

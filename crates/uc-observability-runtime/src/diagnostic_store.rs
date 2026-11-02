@@ -1,4 +1,4 @@
-//! Segmented storage and encoding budgets shared by all three diagnostic signals.
+//! 诊断三种信号共用的分段存储与编码预算。
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -147,7 +147,7 @@ impl DiagnosticWriter {
         })
     }
     pub(crate) fn encoding_slot(&self) -> Option<MutexGuard<'_, ()>> {
-        // This gate covers bounded encoding and nonblocking submission only. Disk I/O stays on the worker.
+        // 此锁只保护有界编码与非阻塞入队。磁盘 I/O 由文件线程执行。
         Some(
             self.encoding
                 .lock()
@@ -206,7 +206,7 @@ impl Write for LimitedRecord {
         if self.bytes.len().saturating_add(bytes.len()) > self.limit {
             return Err(io::Error::other("diagnostic record exceeds byte limit"));
         }
-        // Reserve only the record limit so Vec growth stays within the encoding budget.
+        // 只预留单条上限；Vec 扩容不能越过编码槽的预算。
         if self.bytes.capacity() == 0 {
             self.bytes.reserve_exact(self.limit);
         }
@@ -387,7 +387,7 @@ impl RecordStore for DiagnosticStore {
         #[cfg(not(feature = "test-process-release"))]
         let result = file.write_all(bytes);
         if let Err(error) = result {
-            // Close a partial segment. Write subsequent records to a new segment.
+            // 部分行后不再追加记录；后续记录使用新分段。
             if let Ok(metadata) = file.metadata() {
                 let partial = metadata.len().saturating_sub(*size);
                 *size = metadata.len();

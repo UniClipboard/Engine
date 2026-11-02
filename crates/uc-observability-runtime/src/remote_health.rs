@@ -1415,10 +1415,10 @@ where
     }
 }
 
-/// Local files and remote exporters share the span allowlist and derivation rules.
+/// 本地文件与远端出口共用同一份 span 白名单及派生规则。
 pub(crate) fn prepare_diagnostic_span(span: &mut SpanData) -> Result<bool, ()> {
-    // tracing-opentelemetry ignores otel.name updates after a span starts.
-    // The operation owner supplies a static display name. Convert and remove the internal field before encoding.
+    // tracing-opentelemetry 已启动的 span 忽略 otel.name 更新。
+    // 流程负责人只提供固定显示名。编码前转换并移除内部字段。
     let mut display_names = span
         .attributes
         .iter()
@@ -1446,7 +1446,7 @@ pub(crate) fn prepare_diagnostic_span(span: &mut SpanData) -> Result<bool, ()> {
     {
         return Ok(false);
     }
-    // Omit update checks with no work. This deliberate omission is not a dropped-record failure.
+    // 已知无工作量的升级检查不进入业务列表。合法省略不属于丢弃故障。
     if span.attributes.iter().any(|field| {
         field.key.as_str() == "uc.operation"
             && matches!(

@@ -140,10 +140,10 @@ fn assert_complete_content(kind: &str, clipboard: &Value) {
 }
 fn network_records(host: &mut HostProcess) -> Vec<Value> {
     host.request(json!({ "command": "flush" }));
-    std::fs::read_dir(host.root.path().join("logs"))
+    uc_engine::observability::managed_log_files(&host.root.path().join("logs"))
         .unwrap()
-        .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .into_iter()
+        .filter_map(|entry| std::fs::read_to_string(entry).ok())
         .flat_map(|text| {
             text.lines()
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())

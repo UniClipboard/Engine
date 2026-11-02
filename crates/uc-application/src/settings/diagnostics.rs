@@ -7,6 +7,7 @@ use super::config_migration::RejectedConfigImportView;
 use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tracing::instrument;
 use uc_core::diagnostics::HostLogProfile;
 use uc_core::error_class::ErrorClass;
@@ -145,28 +146,61 @@ fn export_logs_blocking(
     let mut files = collect_recent_log_files(logs_dir, since)?;
     files.sort_by(|a, b| a.archive_name.cmp(&b.archive_name));
 
-    let output = File::create(output_path)
-        .context("create export archive")
-        .map_err(DiagnosticsFacadeError::Export)?;
-    let mut zip = zip::ZipWriter::new(output);
+    let mut output = tempfile::NamedTempFile::new_in(output_path.parent().ok_or_else(|| {
+        DiagnosticsFacadeError::Export(anyhow!("export output path has no parent"))
+    })?)
+    .context("create export archive")
+    .map_err(DiagnosticsFacadeError::Export)?;
+    let mut zip = zip::ZipWriter::new(output.as_file_mut());
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let mut included = Vec::with_capacity(files.len());
 
+    let mut receipts = Vec::new();
     for file in &files {
         zip.start_file(format!("logs/{}", file.archive_name), options)
             .context("start log archive entry")
             .map_err(DiagnosticsFacadeError::Export)?;
-        let mut input = File::open(&file.path)
+        let input = File::open(&file.path)
             .context("open log file")
             .map_err(DiagnosticsFacadeError::Export)?;
-        let mut buf = Vec::new();
-        input
-            .read_to_end(&mut buf)
-            .context("read log file")
+        let metadata = input
+            .metadata()
+            .context("read opened log metadata")
             .map_err(DiagnosticsFacadeError::Export)?;
-        zip.write_all(&buf)
-            .context("write log archive entry")
-            .map_err(DiagnosticsFacadeError::Export)?;
+        if !metadata.is_file() {
+            return Err(DiagnosticsFacadeError::Export(anyhow!(
+                "opened log is not a regular file"
+            )));
+        }
+        let cutoff = metadata.len();
+        let mut limited = input.take(cutoff);
+        let mut hash = Sha256::new();
+        let mut copied = 0_u64;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = limited
+                .read(&mut buffer)
+                .context("read log prefix")
+                .map_err(DiagnosticsFacadeError::Export)?;
+            if count == 0 {
+                break;
+            }
+            zip.write_all(&buffer[..count])
+                .context("write log archive entry")
+                .map_err(DiagnosticsFacadeError::Export)?;
+            hash.update(&buffer[..count]);
+            copied += count as u64;
+        }
+        if copied != cutoff {
+            return Err(DiagnosticsFacadeError::Export(anyhow!(
+                "log prefix was truncated during export"
+            )));
+        }
+        receipts.push(LogFileReceipt {
+            name: file.archive_name.clone(),
+            bytes: copied,
+            sha256: format!("{:x}", hash.finalize()),
+        });
         included.push(file.archive_name.clone());
     }
 
@@ -175,6 +209,7 @@ fn export_logs_blocking(
         since,
         effective_log_profile,
         included_files: included.clone(),
+        files: receipts,
         app_version,
         platform: std::env::consts::OS,
     };
@@ -191,6 +226,15 @@ fn export_logs_blocking(
         .context("finish export archive")
         .map_err(DiagnosticsFacadeError::Export)?;
 
+    output
+        .as_file()
+        .sync_all()
+        .context("sync export archive")
+        .map_err(DiagnosticsFacadeError::Export)?;
+    output
+        .persist(output_path)
+        .context("save export archive")
+        .map_err(DiagnosticsFacadeError::Export)?;
     Ok(included)
 }
 
@@ -247,6 +291,75 @@ fn collect_recent_log_files(
             archive_name: name,
         });
     }
+    let runs = logs_dir.join("diagnostics/engine");
+    match fs::read_dir(&runs) {
+        Ok(runs) => {
+            for run in runs {
+                let run = run
+                    .context("read diagnostic run")
+                    .map_err(DiagnosticsFacadeError::Export)?;
+                let name = run.file_name();
+                if !run
+                    .file_type()
+                    .context("read run type")
+                    .map_err(DiagnosticsFacadeError::Export)?
+                    .is_dir()
+                    || name
+                        .to_str()
+                        .is_none_or(|v| v.len() != 36 || uuid::Uuid::parse_str(v).is_err())
+                {
+                    continue;
+                }
+                for entry in fs::read_dir(run.path())
+                    .context("read diagnostic run files")
+                    .map_err(DiagnosticsFacadeError::Export)?
+                {
+                    let entry = entry
+                        .context("read diagnostic file")
+                        .map_err(DiagnosticsFacadeError::Export)?;
+                    if !entry
+                        .file_type()
+                        .context("read diagnostic file type")
+                        .map_err(DiagnosticsFacadeError::Export)?
+                        .is_file()
+                    {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let managed = matches!(name.as_str(), "run.json" | "status.json")
+                        || name.strip_suffix(".jsonl").is_some_and(|v| {
+                            let parts: Vec<_> = v.split('.').collect();
+                            parts.len() == 3
+                                && matches!(parts[0], "logs" | "metrics" | "traces")
+                                && parts[1].len() == 8
+                                && chrono::NaiveDate::parse_from_str(parts[1], "%Y%m%d").is_ok()
+                                && (10..=20).contains(&parts[2].len())
+                                && parts[2].bytes().all(|b| b.is_ascii_digit())
+                        });
+                    if !managed {
+                        continue;
+                    }
+                    let metadata = entry
+                        .metadata()
+                        .context("read diagnostic metadata")
+                        .map_err(DiagnosticsFacadeError::Export)?;
+                    if metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH) < since_system {
+                        continue;
+                    }
+                    let path = entry.path();
+                    let archive_name = path
+                        .strip_prefix(logs_dir)
+                        .context("diagnostic path escaped logs")
+                        .map_err(DiagnosticsFacadeError::Export)?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push(LogFileCandidate { path, archive_name });
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(DiagnosticsFacadeError::Export(error.into())),
+    }
     Ok(out)
 }
 
@@ -286,8 +399,17 @@ struct LogExportManifest<'a> {
     since: DateTime<Utc>,
     effective_log_profile: Option<&'a str>,
     included_files: Vec<String>,
+    files: Vec<LogFileReceipt>,
     app_version: &'a str,
     platform: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogFileReceipt {
+    name: String,
+    bytes: u64,
+    sha256: String,
 }
 
 #[cfg(test)]

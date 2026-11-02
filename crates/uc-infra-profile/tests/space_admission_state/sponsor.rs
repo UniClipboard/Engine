@@ -58,10 +58,11 @@ async fn sponsor_state_load_is_correlated_in_standard_log_file() {
         ProcessObservabilityRuntime::flush_local_logs(std::time::Duration::from_secs(5)),
         SignalResult::Completed
     );
-    let records: Vec<serde_json::Value> = std::fs::read_dir(logs.path())
+    let records: Vec<serde_json::Value> = uc_observability_runtime::managed_log_files(logs.path())
         .expect("files")
+        .into_iter()
         .flat_map(|entry| {
-            std::fs::read_to_string(entry.expect("entry").path())
+            std::fs::read_to_string(entry)
                 .expect("file")
                 .lines()
                 .map(|line| serde_json::from_str(line).expect("record"))

@@ -671,7 +671,7 @@ impl AsyncFileWriter {
             return;
         }
         let length = bytes.len();
-        // Reserve bytes before copying a borrowed record. The candidate copy shares the queue budget.
+        // 先预留字节，再分配借用记录的入队副本。候选副本也受队列预算约束。
         if !self.counters.queued(length) {
             increment(&self.dropped_records);
             self.counters.queue_dropped(source);

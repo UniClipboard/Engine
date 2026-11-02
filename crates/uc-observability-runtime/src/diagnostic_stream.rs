@@ -1,4 +1,4 @@
-//! Continuous sampling and file submission for completed spans.
+//! 持续采样与已结束 span 的文件流提交。
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -237,7 +237,7 @@ impl DiagnosticStream {
 
     pub(crate) fn stop(&self) -> OTelSdkResult {
         self.stopped.store(true, Ordering::Release);
-        // Closing the request sender wakes the sampler. The lifecycle owner joins it in the background.
+        // 关闭请求端会唤醒采样线程。生命周期负责人在后台等待完整收尾。
         self.sample_request
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

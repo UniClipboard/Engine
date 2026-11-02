@@ -486,8 +486,7 @@ async fn separate_process_membership_history_reuses_connections_across_rounds() 
 
 fn history_connection_report(root: &std::path::Path) -> HashMap<String, Vec<String>> {
     let mut records = Vec::new();
-    for entry in std::fs::read_dir(root.join("logs")).unwrap() {
-        let path = entry.unwrap().path();
+    for path in uc_engine::observability::managed_log_files(&root.join("logs")).unwrap() {
         if !path.is_file() {
             continue;
         }

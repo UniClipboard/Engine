@@ -685,3 +685,11 @@ Apple 系统日志仅消费已经过滤的事件。既有 `OsLogger` 的活动�
 此对象不安装全局 subscriber、不重新发射记录。业务关联仍由共同运行时写入 JSONL 与远程日志。
 
 编码槽只执行有界编码与非阻塞入队，不执行磁盘 I/O。队列在复制编码记录前预留字节，避免小记录按 64 KiB 容量占用整个队列。
+
+### Engine 既有原始日志导出入口
+
+`ExportDiagnosticLogs` 继续保留原始日志 ZIP 合同。它先刷新本进程文件队列，再由 `DiagnosticsFacade` 识别旧每日日志与新的受管运行文件。Logs、Metrics、Traces 都从同一个文件事实来源读取；没有第二份持久历史。该入口不生成 Desktop 的 OTLP 交换清单。
+
+复制按已打开句柄的长度截止，使用 8 KiB 缓冲。清单逐文件记录实际字节与 SHA-256。复用既有 `tempfile` 库创建临时 ZIP，完成后再替换目标。读取、截短或写入失败时返回失败并保留已有目标。
+
+原有网络验收、连接复用验收与时间线工具必须同时读取旧每日日志和新的 `diagnostics/engine/<run_id>/logs.*.jsonl`。不得通过删除协议或关联断言迁就文件布局变化。公共导出入口的补充验收复用 Desktop 的 `diagnostics_acceptance_run.py`，由 `diagnostic_export_probe` 调用真实 Facade，不另建调度器。

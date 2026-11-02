@@ -871,17 +871,11 @@ async function prepairedUpgrade() {
 
 async function observedNegotiatedProtocols(node) {
   await node.call('flush')
-  const facts = []
-  for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
-    for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
-      try {
-        const fields = JSON.parse(line).fields ?? {}
-        if (fields['event.name'] === 'connection.protocol.negotiated' && typeof fields.protocol === 'string') facts.push(fields.protocol)
-      } catch {}
-    }
-  }
-  return facts
+  return localDiagnostics(node)
+    .filter(row => row.fields?.['event.name'] === 'connection.protocol.negotiated' && typeof row.fields.protocol === 'string')
+    .map(row => row.fields.protocol)
 }
+
 async function observedProgressHandshakes(node) {
   await node.call('flush')
   return localDiagnostics(node).filter(row => row.fields?.['event.name'] === 'connection.protocol.negotiated'
@@ -958,10 +952,28 @@ async function stopRelay() {
 }
 
 /** 读取当前节点的本地诊断工件，用于核对地址采样时间。 */
+function localDiagnosticFiles(node) {
+  const root = join(node.root, 'logs')
+  const files = readdirSync(root, { withFileTypes: true })
+    .filter(entry => entry.isFile() && /^engine\..*\.jsonl$/.test(entry.name))
+    .map(entry => join(root, entry.name))
+  const runs = join(root, 'diagnostics', 'engine')
+  let entries
+  try { entries = readdirSync(runs, { withFileTypes: true }) } catch (error) {
+    if (error.code === 'ENOENT') return files.sort()
+    throw error
+  }
+  for (const run of entries) {
+    if (!run.isDirectory() || !/^[0-9a-f-]{36}$/i.test(run.name)) continue
+    for (const file of readdirSync(join(runs, run.name), { withFileTypes: true })) {
+      if (file.isFile() && /^logs\.[0-9]{8}\.[0-9]{10,20}\.jsonl$/.test(file.name)) files.push(join(runs, run.name, file.name))
+    }
+  }
+  return files.sort()
+}
 function localDiagnostics(node) {
-  return readdirSync(join(node.root, 'logs'))
-    .filter(name => /^engine\..*\.jsonl$/.test(name))
-    .flatMap(name => readFileSync(join(node.root, 'logs', name), 'utf8').split('\n').filter(Boolean).map(JSON.parse))
+  return localDiagnosticFiles(node)
+    .flatMap(path => readFileSync(path, 'utf8').split('\n').filter(Boolean).map(JSON.parse))
 }
 
 // HTTP 探测也使用 Relay 端口；同时核对 TCP 与本轮原生 Relay 协议状态。
@@ -1186,8 +1198,8 @@ finally {
     node.networkFacts = []
     node.networkDiagnostics = []
     try {
-      for (const name of readdirSync(join(node.root, 'logs')).filter(name => name.includes('.json'))) {
-        for (const line of readFileSync(join(node.root, 'logs', name), 'utf8').split('\n')) {
+      for (const path of localDiagnosticFiles(node)) {
+        for (const line of readFileSync(path, 'utf8').split('\n')) {
           try {
             const row = JSON.parse(line)
             const receiveKind = receiveFailureKind(row)

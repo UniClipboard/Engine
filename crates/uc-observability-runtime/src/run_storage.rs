@@ -1,4 +1,4 @@
-//! Managed run directories, leases, and inactive-run reclamation.
+//! 受管运行目录、租约与非活动运行回收。
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(unix)]
@@ -34,7 +34,7 @@ pub(crate) fn open_lease(path: &Path) -> io::Result<File> {
     file.try_lock().map_err(|error| match error {
         std::fs::TryLockError::WouldBlock => io::Error::new(
             io::ErrorKind::WouldBlock,
-            "network log run lease is held by another writer",
+            "log run lease is held by another writer",
         ),
         std::fs::TryLockError::Error(error) => error,
     })?;
@@ -43,7 +43,7 @@ pub(crate) fn open_lease(path: &Path) -> io::Result<File> {
 
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("json.tmp");
-    // Remove any stale temporary entry, including symlinks, then create exclusively without following an existing path.
+    // 先删除残留的临时文件或符号链接，再以独占创建写入，不跟随已有路径。
     match std::fs::remove_file(&temporary) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -65,13 +65,9 @@ struct RunEntry {
     modified: SystemTime,
 }
 
-/// Reclaim inactive runs by age, then oldest first when the root exceeds its target.
-///
-/// Serialize scans and run creation with the cleanup lock. Delete a run only after acquiring its lease.
-/// Skip busy locks and I/O failures without waiting or blocking collection.
-/// Acquire the cross-process cleanup lock. Return `WouldBlock` when it is busy.
-pub(crate) fn open_cleanup_lock(network_root: &Path) -> io::Result<File> {
-    create_private_directory(network_root)?;
+/// 获取串行各进程扫描的清理锁；忙时返回 `WouldBlock`。
+pub(crate) fn open_cleanup_lock(root: &Path) -> io::Result<File> {
+    create_private_directory(root)?;
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
@@ -79,26 +75,26 @@ pub(crate) fn open_cleanup_lock(network_root: &Path) -> io::Result<File> {
         .create(true)
         .truncate(false)
         .write(true)
-        .open(network_root.join(CLEANUP_LOCK_FILE))?;
+        .open(root.join(CLEANUP_LOCK_FILE))?;
     cleanup.try_lock().map_err(|error| match error {
         std::fs::TryLockError::WouldBlock => io::Error::new(
             io::ErrorKind::WouldBlock,
-            "network log cleanup is running in another process",
+            "log cleanup is running in another process",
         ),
         std::fs::TryLockError::Error(error) => error,
     })?;
     Ok(cleanup)
 }
 
-/// The caller holds the cleanup lock.
+/// 调用方已持有清理锁。
 pub(crate) fn collect_old_runs(
-    network_root: &Path,
+    root: &Path,
     own_directory: &Path,
     retention: Duration,
     root_bytes: u64,
 ) -> io::Result<()> {
     let mut runs = Vec::new();
-    for role in std::fs::read_dir(network_root)? {
+    for role in std::fs::read_dir(root)? {
         let role = role?;
         if !role.file_type()?.is_dir() {
             continue;
@@ -150,7 +146,7 @@ fn describe_run(path: PathBuf) -> RunEntry {
     }
 }
 
-/// Acquire the lease before deleting an inactive run. Treat directories without leases as orphaned.
+/// 取得租约锁后才删除非活动运行。缺少租约的目录视为孤儿。
 fn remove_inactive_run(directory: &Path) -> io::Result<bool> {
     let lease_path = directory.join(LEASE_FILE);
     let lease = match OpenOptions::new().write(true).open(&lease_path) {
