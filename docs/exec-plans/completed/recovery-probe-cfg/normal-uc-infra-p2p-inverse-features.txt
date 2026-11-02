@@ -1,0 +1,21 @@
+uc-infra-p2p v1.1.0-rc.23 (/work/source/crates/uc-infra-p2p)
+└── uc-infra-p2p feature "default"
+    ├── uc-engine v1.1.0-rc.23 (/work/source/crates/uc-engine)
+    │   └── uc-engine feature "default"
+    │       └── uc-connectivity-host v1.1.0-rc.23 (/work/source/tests/hosts/connectivity)
+    │           ├── uc-connectivity-host feature "device-group-choices"
+    │           │   └── uc-connectivity-host feature "production-e2e" (command-line)
+    │           ├── uc-connectivity-host feature "join-status"
+    │           │   └── uc-connectivity-host feature "production-e2e" (command-line)
+    │           ├── uc-connectivity-host feature "network-recovery"
+    │           │   └── uc-connectivity-host feature "production-e2e" (command-line)
+    │           ├── uc-connectivity-host feature "process-observability"
+    │           │   └── uc-connectivity-host feature "production-e2e" (command-line)
+    │           ├── uc-connectivity-host feature "production-e2e" (command-line)
+    │           ├── uc-connectivity-host feature "startup-progress"
+    │           │   └── uc-connectivity-host feature "production-e2e" (command-line)
+    │           └── uc-connectivity-host feature "transfer-progress"
+    │               └── uc-connectivity-host feature "production-e2e" (command-line)
+    └── uc-infra-profile v1.1.0-rc.23 (/work/source/crates/uc-infra-profile)
+        └── uc-infra-profile feature "default"
+            └── uc-engine v1.1.0-rc.23 (/work/source/crates/uc-engine) (*)

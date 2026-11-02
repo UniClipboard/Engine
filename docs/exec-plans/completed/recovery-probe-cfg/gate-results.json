@@ -1,0 +1,50 @@
+{
+  "result": "PASS",
+  "local_delivery_exit_code": 0,
+  "logs": {
+    "check-off.log": {
+      "bytes": 1408,
+      "sha256": "084e2b3d820406741d17581b8e4338a33160060fcd358ad5f65f0c31d752a60e"
+    },
+    "check-on.log": {
+      "bytes": 1379,
+      "sha256": "972d10e39ebc19a4fef6a56bb1bab63121e6a3971de4b2560e478ca62fdaa69f"
+    },
+    "metadata.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "workspace-check.log": {
+      "bytes": 11688,
+      "sha256": "cc1ccd4d1742b126538f21e282a07b38eecfc05953646f70b8f3d8f2d50d7f60"
+    },
+    "fmt.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "style.log": {
+      "bytes": 30,
+      "sha256": "2a790b74f113c00b3bb68d491fd8f85f113d60fc5993a0848d293c0fadf616a9"
+    },
+    "repository.log": {
+      "bytes": 4969,
+      "sha256": "c00ec3b1624306c373244c24c1d29e928b0087254ab739702450f82f42071d43"
+    },
+    "diff-check.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "local_commands": [
+    "just cargo check -p uc-application --no-default-features --locked",
+    "just cargo check -p uc-application --no-default-features --features clipboard-stream-fault --locked",
+    "just cargo metadata --locked --format-version 1",
+    "just cargo check --workspace --all-targets --locked",
+    "just cargo fmt --all -- --check",
+    "node scripts/architecture/check-rust-style.mjs",
+    "node scripts/architecture/check-engine-repository.mjs",
+    "git diff --check"
+  ],
+  "evidence_archive_sha256": "ebdf2409407c5353200804ccfae6b18ca04a3f7fde93ca400f5febe99160f76d",
+  "engineer_execution_deviation": "Engineer self-reported an accidental repository preflight invoking Cargo metadata and six OpenMLS revocation tests, contrary to the no-Cargo assignment. No raw execution log supplied. Excluded from acceptance. Root independently ran all required gates."
+}

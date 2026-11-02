@@ -1,0 +1,42 @@
+{
+  "method": "Frozen ELF SHA-256 matches Cargo deps executable and compiled fingerprint. Inverse graphs use the original feature selections.",
+  "source_manifest_sha256": "7f46829510af42f420bb08ecd049b3ba388de72ad6f1a224f765c4a903c12d30",
+  "records": [
+    {
+      "binary": "normal",
+      "binary_sha256": "123bb451adb0df2688ab34664f176be92576f0fe05cbeba9479cc3fb6c81055f",
+      "deps_executable": "uc_connectivity_host-4d5184b819a2deb0",
+      "fingerprint": "target/debug/.fingerprint/uc-connectivity-host-4d5184b819a2deb0/bin-uc-connectivity-host.json",
+      "fingerprint_sha256": "f717435531be3be5aa1d10fe5e245d8724d19bb919d9ff0150f95a738275786b",
+      "compiled_features": [
+        "device-group-choices",
+        "join-status",
+        "network-recovery",
+        "process-observability",
+        "production-e2e",
+        "startup-progress",
+        "transfer-progress"
+      ],
+      "profile": 8975708381643900482
+    },
+    {
+      "binary": "fault",
+      "binary_sha256": "1c363c642be4b576a0e5cb8df6ea623b9f042d53068ee979917e997a5c678c4c",
+      "deps_executable": "uc_connectivity_host-991b500fe17433d1",
+      "fingerprint": "target/debug/.fingerprint/uc-connectivity-host-991b500fe17433d1/bin-uc-connectivity-host.json",
+      "fingerprint_sha256": "fa5b393d09b52b4ccbc1f05f627342691e8dfb204dcb9ea5073a1cae79100cf5",
+      "compiled_features": [
+        "clipboard-stream-fault",
+        "device-group-choices",
+        "join-status",
+        "network-recovery",
+        "network-test-probe",
+        "process-observability",
+        "production-e2e",
+        "startup-progress",
+        "transfer-progress"
+      ],
+      "profile": 8975708381643900482
+    }
+  ]
+}

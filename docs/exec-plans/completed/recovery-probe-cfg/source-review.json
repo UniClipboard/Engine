@@ -1,0 +1,95 @@
+{
+  "base": "7359c9044c105edd65dede3bd6ba00f7811d2bd6",
+  "branch": "test/engine-343-e2e",
+  "dirty": true,
+  "iroh": "1ea24ade280dd73fe4e5cfb68e6a657b96be3bb5",
+  "comparisons": "PASS: scope whitelist, original enabled journal bytes, fenced event, 10 schedule methods, 5 recovery methods, delivery business source, existing tests, receive selector; observation erasure is textual, not a behavioral proof",
+  "cfg_attributes": {
+    "crates/uc-application/src/clipboard/mod.rs": {
+      "base_cfg": 1,
+      "candidate_cfg": 0
+    },
+    "crates/uc-application/src/clipboard/testing_recovery.rs": {
+      "base_cfg": 0,
+      "candidate_cfg": 0
+    },
+    "crates/uc-application/src/clipboard/sync/sync_runtime/recovery.rs": {
+      "base_cfg": 10,
+      "candidate_cfg": 6
+    },
+    "crates/uc-application/src/clipboard/sync/sync_runtime/recovery/schedule.rs": {
+      "base_cfg": 17,
+      "candidate_cfg": 2
+    },
+    "crates/uc-application/src/clipboard/sync/dispatch_entry/delivery.rs": {
+      "base_cfg": 4,
+      "candidate_cfg": 0
+    },
+    "crates/uc-application/src/clipboard/testing_recovery/disabled.rs": {
+      "base_cfg": 0,
+      "candidate_cfg": 0
+    },
+    "crates/uc-application/src/clipboard/testing_recovery/schedule_enabled.rs": {
+      "base_cfg": 0,
+      "candidate_cfg": 0
+    },
+    "crates/uc-application/src/clipboard/testing_recovery/schedule_disabled.rs": {
+      "base_cfg": 0,
+      "candidate_cfg": 0
+    }
+  },
+  "source": [
+    {
+      "path": "crates/uc-application/src/clipboard/mod.rs",
+      "sha256": "58da15d10efe26c97e34b32305cf5c2c15420cb893e16567ae9a50b3c03aeca3",
+      "bytes": 1403,
+      "base_sha256": "06b7c803bd9bafb3c3e37babb653b120f09b4e4dc119dcd20f977bab21992470"
+    },
+    {
+      "path": "crates/uc-application/src/clipboard/testing_recovery.rs",
+      "sha256": "2347a4495644fcb072a75d5bc7b1efdeffed5a9d53343f0e3f58d92e0b7ec365",
+      "bytes": 7674,
+      "base_sha256": "77f69e48073fe6fc9944a793c779d14710359246328f6b799153458ed2796b67"
+    },
+    {
+      "path": "crates/uc-application/src/clipboard/sync/sync_runtime/recovery.rs",
+      "sha256": "94dc695fe0efb4ce8f88dd8cc82117cf652286be732a1583071c26aaff57fe6b",
+      "bytes": 32897,
+      "base_sha256": "592f4000da0bd8fef815a91d8c856823dd8b72fa179e3d92aaaad5d7fd650bc4"
+    },
+    {
+      "path": "crates/uc-application/src/clipboard/sync/sync_runtime/recovery/schedule.rs",
+      "sha256": "cfbf7b47a2618c29df257a6784d8e0c582b8d0738c9e42f2c8512022d70e605f",
+      "bytes": 20993,
+      "base_sha256": "54416136fbb5546f7ba07aa16248a7c1b309459203cfda93b127f2151c324367"
+    },
+    {
+      "path": "crates/uc-application/src/clipboard/sync/dispatch_entry/delivery.rs",
+      "sha256": "b3640d3177f93ea0e89fe66c836cddab64b414d26fcb21f01583c2bc3f194c97",
+      "bytes": 38169,
+      "base_sha256": "11cff576106fce2d4dc35f1ddf5c69b06931f92f64fa75858a25a51af45a9733"
+    },
+    {
+      "path": "crates/uc-application/src/clipboard/testing_recovery/disabled.rs",
+      "sha256": "1366bd529bce1b3fb53bcccf19437f9a8e3f8a92ca196361d347c42bafc261e1",
+      "bytes": 165,
+      "base_sha256": null
+    },
+    {
+      "path": "crates/uc-application/src/clipboard/testing_recovery/schedule_enabled.rs",
+      "sha256": "43835ade06114baae129a472b7fc8ff60ae2037832d31545b23c9a93a33466e8",
+      "bytes": 5800,
+      "base_sha256": null
+    },
+    {
+      "path": "crates/uc-application/src/clipboard/testing_recovery/schedule_disabled.rs",
+      "sha256": "9df5620c5d86a7ee5f8cc5305ee0f6a4627fe8f34e7017feff76e0a4766d4b05",
+      "bytes": 1117,
+      "base_sha256": null
+    }
+  ],
+  "redacted_fields": [
+    "target_symlink"
+  ],
+  "original_receipt_sha256": "9aebc1fd4bdff048e01bd5e0a07dee36fc825b8ca0085d8dc2cabd23cb5f2f5b"
+}

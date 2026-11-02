@@ -8,14 +8,9 @@
 //! follow-up read must observe the DB write — reordering or batching
 //! emit-before-write surfaces a stale snapshot to the detail view.
 
-#[cfg(feature = "clipboard-stream-fault")]
-use crate::clipboard::testing_recovery::{
-    self as observation, EventInput, RecoveryEventKind, ScheduleObservation,
-};
+use crate::clipboard::testing_recovery as observation;
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
-#[cfg(feature = "clipboard-stream-fault")]
-use tokio::time::Instant;
 
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio::task::{JoinError, JoinSet};
@@ -470,8 +465,7 @@ impl DeliveryRecorder {
             // 与新尝试登记共用写锁，检查及落库不可被另一尝试穿插。
             let current = self.results.writes.current.lock().await;
             if !self.is_current(&current, &record.entry_id, record.target_device_id) {
-                #[cfg(feature = "clipboard-stream-fault")]
-                record_fenced_result(record);
+                observation::record_fenced_result(record);
                 continue;
             }
             if let Err(err) = self
@@ -502,21 +496,6 @@ impl DeliveryRecorder {
             );
         }
     }
-}
-
-#[cfg(feature = "clipboard-stream-fault")]
-fn record_fenced_result(record: &EntryDeliveryRecord) {
-    observation::record(EventInput {
-        kind: RecoveryEventKind::ResultWriteFenced,
-        target: record.target_device_id,
-        entry: Some(&record.entry_id),
-        tracked_entry: None,
-        schedule: ScheduleObservation::default(),
-        at: Instant::now(),
-        trigger: None,
-        outcome: None,
-        cause: None,
-    });
 }
 
 /// 前台期限后继续等待已发出的对端结果，每条完成即记录并通知，不重试发送。

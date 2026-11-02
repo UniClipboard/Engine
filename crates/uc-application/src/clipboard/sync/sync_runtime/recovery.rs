@@ -361,16 +361,7 @@ async fn reconcile_lost_results(
         }
         match newest_recoverable_entry(deps, &peer.device_id, cancel).await {
             Ok(Some(entry)) => {
-                #[cfg(feature = "clipboard-stream-fault")]
-                {
-                    schedule.observation_source = schedule.observe(
-                        RecoveryEventKind::Reconciliation,
-                        peer.device_id,
-                        Some(&entry),
-                        Instant::now(),
-                        None,
-                    );
-                }
+                schedule.observe_reconciliation(peer.device_id, &entry);
                 schedule.record_recoverable(peer.device_id, Some(entry), Instant::now());
             }
             Ok(None) => {}
@@ -400,16 +391,7 @@ async fn apply_delivery_result(
     cancel: &CancellationToken,
 ) {
     let target = result.target_device_id;
-    #[cfg(feature = "clipboard-stream-fault")]
-    {
-        let kind = match result.kind {
-            DeliveryResultKind::Recoverable => RecoveryEventKind::ResultRecoverable,
-            DeliveryResultKind::NotPersisted => RecoveryEventKind::ResultNotPersisted,
-            DeliveryResultKind::Settled => RecoveryEventKind::ResultSettled,
-        };
-        schedule.observation_source =
-            schedule.observe(kind, target, Some(&result.entry_id), Instant::now(), None);
-    }
+    schedule.observe_result(&result);
     match result.kind {
         DeliveryResultKind::Recoverable | DeliveryResultKind::NotPersisted => {
             let tracked = match schedule.tracked_entry(&target) {
@@ -432,10 +414,7 @@ async fn apply_delivery_result(
             schedule.settle(&target, &result.entry_id);
         }
     }
-    #[cfg(feature = "clipboard-stream-fault")]
-    {
-        schedule.observation_source = None;
-    }
+    schedule.reset_observation_source();
 }
 
 /// 退避到期的目标只在仍然在线时重试；否则交给下一次上线事件，避免为离线目标空转。
@@ -476,16 +455,7 @@ async fn recover_and_schedule(
     match round.outcome.retry_after_round() {
         RetryAfterRound::Clear => schedule.clear(&target),
         RetryAfterRound::Again => {
-            #[cfg(feature = "clipboard-stream-fault")]
-            {
-                schedule.observation_source = schedule.observe(
-                    RecoveryEventKind::RoundFailure,
-                    target,
-                    None,
-                    Instant::now(),
-                    None,
-                );
-            }
+            schedule.observe_failure(target);
             schedule.record_recoverable(target, None, Instant::now());
         }
         RetryAfterRound::AwaitResult => {

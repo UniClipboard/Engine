@@ -1,0 +1,71 @@
+{
+  "recorded_at": "2026-11-02T05:43:30.451010+00:00",
+  "checks": [
+    {
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2021",
+        "--check",
+        "--config",
+        "skip_children=true",
+        "crates/uc-application/src/clipboard/mod.rs",
+        "crates/uc-application/src/clipboard/testing_recovery.rs",
+        "crates/uc-application/src/clipboard/testing_recovery/disabled.rs",
+        "crates/uc-application/src/clipboard/testing_recovery/schedule_enabled.rs",
+        "crates/uc-application/src/clipboard/testing_recovery/schedule_disabled.rs",
+        "crates/uc-application/src/clipboard/sync/sync_runtime/recovery.rs",
+        "crates/uc-application/src/clipboard/sync/sync_runtime/recovery/schedule.rs",
+        "crates/uc-application/src/clipboard/sync/dispatch_entry/delivery.rs"
+      ],
+      "exit_code": 0,
+      "status": "PASSED",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2021",
+        "--check",
+        "crates/uc-application/src/clipboard/sync/sync_runtime/recovery/schedule.rs"
+      ],
+      "exit_code": 0,
+      "status": "PASSED",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "node",
+        "scripts/architecture/check-rust-style.mjs"
+      ],
+      "exit_code": 0,
+      "status": "PASSED",
+      "stdout": "Rust \u7f16\u5199\u89c4\u8303\u68c0\u67e5\u901a\u8fc7\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0,
+      "status": "PASSED",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "python3",
+        ".planning/2026-11-02-recovery-probe-cfg/source-review.py"
+      ],
+      "exit_code": 0,
+      "status": "PASSED",
+      "stdout": "{\n  \"comparisons\": \"PASS\",\n  \"cfg\": {\n    \"crates/uc-application/src/clipboard/mod.rs\": {\n      \"base_cfg\": 1,\n      \"candidate_cfg\": 0\n    },\n    \"crates/uc-application/src/clipboard/testing_recovery.rs\": {\n      \"base_cfg\": 0,\n      \"candidate_cfg\": 0\n    },\n    \"crates/uc-application/src/clipboard/sync/sync_runtime/recovery.rs\": {\n      \"base_cfg\": 10,\n      \"candidate_cfg\": 6\n    },\n    \"crates/uc-application/src/clipboard/sync/sync_runtime/recovery/schedule.rs\": {\n      \"base_cfg\": 17,\n      \"candidate_cfg\": 2\n    },\n    \"crates/uc-application/src/clipboard/sync/dispatch_entry/delivery.rs\": {\n      \"base_cfg\": 4,\n      \"candidate_cfg\": 0\n    },\n    \"crates/uc-application/src/clipboard/testing_recovery/disabled.rs\": {\n      \"base_cfg\": 0,\n      \"candidate_cfg\": 0\n    },\n    \"crates/uc-application/src/clipboard/testing_recovery/schedule_enabled.rs\": {\n      \"base_cfg\": 0,\n      \"candidate_cfg\": 0\n    },\n    \"crates/uc-application/src/clipboard/testing_recovery/schedule_disabled.rs\": {\n      \"base_cfg\": 0,\n      \"candidate_cfg\": 0\n    }\n  },\n  \"source_files\": 8\n}\n",
+      "stderr": ""
+    }
+  ]
+}

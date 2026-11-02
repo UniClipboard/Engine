@@ -4,6 +4,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
 use tokio::time::Instant;
+use uc_core::clipboard::EntryDeliveryRecord;
 use uc_core::ids::{DeviceId, EntryId};
 use uc_observability_contract::wire_enum;
 use uuid::Uuid;
@@ -241,6 +242,20 @@ pub(crate) fn round_event(
         at: Instant::now(),
         trigger: trigger.or(context_trigger),
         outcome,
+        cause: None,
+    });
+}
+
+pub(crate) fn record_fenced_result(result: &EntryDeliveryRecord) {
+    record(EventInput {
+        kind: RecoveryEventKind::ResultWriteFenced,
+        target: result.target_device_id,
+        entry: Some(&result.entry_id),
+        tracked_entry: None,
+        schedule: ScheduleObservation::default(),
+        at: Instant::now(),
+        trigger: None,
+        outcome: None,
         cause: None,
     });
 }
