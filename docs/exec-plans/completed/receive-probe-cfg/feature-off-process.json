@@ -1,0 +1,40 @@
+{
+  "binary_sha256": "ff3d56fb97c14a4402c6187f4fd80a4a17807439e767d56034c13681b5109938",
+  "commands": [
+    {
+      "command": "stream_fault",
+      "rejected": true,
+      "error": "operation_failed"
+    },
+    {
+      "command": "address_probe",
+      "rejected": true,
+      "error": "operation_failed"
+    },
+    {
+      "command": "subnet_probe",
+      "rejected": true,
+      "error": "operation_failed"
+    }
+  ],
+  "capabilities": [
+    "capture",
+    "observe",
+    "unlock",
+    "sync_preference",
+    "restore",
+    "active",
+    "clipboard",
+    "production-network-policy",
+    "network-settings",
+    "detailed-network-capture",
+    "network-recovery",
+    "device-group-choices",
+    "join-status",
+    "startup-progress",
+    "transfer-progress"
+  ],
+  "shutdown_complete": true,
+  "profile_removed": true,
+  "result": "PASS"
+}

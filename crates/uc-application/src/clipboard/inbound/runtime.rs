@@ -1,7 +1,6 @@
 use crate::clipboard::inbound::ClipboardReceiverPort;
 use crate::clipboard::sync::apply_inbound::classify_apply_failure;
 use crate::clipboard::sync::apply_inbound::InboundActivationOwner;
-#[cfg(feature = "clipboard-stream-fault")]
 use crate::clipboard::testing_receive::{ReceiveAttempt, ReceivePath, ReceiveStage};
 use std::fmt;
 use std::sync::Arc;
@@ -178,13 +177,11 @@ impl InboundProcessor {
         let Some(prepared) = self.prepare(inbound).await else {
             return;
         };
-        #[cfg(feature = "clipboard-stream-fault")]
         let attempt = ReceiveAttempt::begin(
             ReceivePath::ClipboardPush,
             prepared.from_device,
             &prepared.snapshot_hash,
         );
-        #[cfg(feature = "clipboard-stream-fault")]
         if let Some(attempt) = attempt {
             attempt.record(ReceiveStage::ApplyStarted, None);
         }
@@ -201,7 +198,6 @@ impl InboundProcessor {
                 activation_owner: InboundActivationOwner::Inbound,
             })
             .await;
-        #[cfg(feature = "clipboard-stream-fault")]
         if let Some(attempt) = attempt {
             match &result {
                 Ok(outcome) => attempt.apply_outcome(outcome),

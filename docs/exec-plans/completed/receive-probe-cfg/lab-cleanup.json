@@ -1,0 +1,9 @@
+{
+  "owned_container_removed": true,
+  "owned_directory_removed": true,
+  "other_running_containers_preserved": true,
+  "retained_container_count": 8,
+  "shared_caches_preserved": true,
+  "free_bytes_before": 125748109312,
+  "free_bytes_after": 130096828416
+}

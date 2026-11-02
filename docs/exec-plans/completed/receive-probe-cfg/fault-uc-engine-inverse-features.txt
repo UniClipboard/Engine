@@ -1,0 +1,22 @@
+uc-engine v1.1.0-rc.23 (/work/source/crates/uc-engine)
+├── uc-engine feature "clipboard-stream-fault"
+│   └── uc-connectivity-host feature "clipboard-stream-fault" (command-line)
+├── uc-engine feature "default"
+│   └── uc-connectivity-host v1.1.0-rc.23 (/work/source/tests/hosts/connectivity)
+│       ├── uc-connectivity-host feature "clipboard-stream-fault" (command-line)
+│       ├── uc-connectivity-host feature "device-group-choices"
+│       │   └── uc-connectivity-host feature "production-e2e" (command-line)
+│       ├── uc-connectivity-host feature "join-status"
+│       │   └── uc-connectivity-host feature "production-e2e" (command-line)
+│       ├── uc-connectivity-host feature "network-recovery"
+│       │   └── uc-connectivity-host feature "production-e2e" (command-line)
+│       ├── uc-connectivity-host feature "network-test-probe" (command-line)
+│       ├── uc-connectivity-host feature "process-observability"
+│       │   └── uc-connectivity-host feature "production-e2e" (command-line)
+│       ├── uc-connectivity-host feature "production-e2e" (command-line)
+│       ├── uc-connectivity-host feature "startup-progress"
+│       │   └── uc-connectivity-host feature "production-e2e" (command-line)
+│       └── uc-connectivity-host feature "transfer-progress"
+│           └── uc-connectivity-host feature "production-e2e" (command-line)
+└── uc-engine feature "network-test-probe"
+    └── uc-connectivity-host feature "network-test-probe" (command-line)

@@ -1,0 +1,116 @@
+{
+  "result": "PASS",
+  "local_delivery_exit_code": 0,
+  "logs": {
+    "check-off.log": {
+      "bytes": 5202,
+      "sha256": "9cef5fa6c3644b280bcc51fec5adfe19ab32b2a8732a92b84538bd2c5283ab11"
+    },
+    "check-on.log": {
+      "bytes": 1405,
+      "sha256": "01e4a2511126b78f231b1b7779ad58c68e3fd2d61624bd67b52c9344594b6916"
+    },
+    "metadata.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "workspace-check.log": {
+      "bytes": 11709,
+      "sha256": "55221e4eccd8cda57ed76e2eaf46028f79405bfa2c2b815795595c1f50a4f458"
+    },
+    "fmt.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "style.log": {
+      "bytes": 30,
+      "sha256": "2a790b74f113c00b3bb68d491fd8f85f113d60fc5993a0848d293c0fadf616a9"
+    },
+    "repository.log": {
+      "bytes": 4969,
+      "sha256": "c00ec3b1624306c373244c24c1d29e928b0087254ab739702450f82f42071d43"
+    },
+    "diff-check.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "local_commands": [
+    "just cargo check -p uc-application --no-default-features --locked",
+    "just cargo check -p uc-application --no-default-features --features clipboard-stream-fault --locked",
+    "just cargo metadata --locked --format-version 1",
+    "just cargo check --workspace --all-targets --locked",
+    "just cargo fmt --all -- --check",
+    "node scripts/architecture/check-rust-style.mjs",
+    "node scripts/architecture/check-engine-repository.mjs",
+    "git diff --check"
+  ],
+  "evidence_archive_sha256": "dd7c2f8006464c1e5adefa756bc6153182998182e8a230f1a98481c46a845129",
+  "source_comparison": {
+    "base": "b5537ad1232549fce71c5039422ea9f952c3eebe",
+    "branch": "test/engine-343-e2e",
+    "target_symlink": "/Volumes/ExternalSSD/cargo-targets/workspaces/engine/aa783deddbefd0cf",
+    "unchanged_source": {
+      "crates/uc-application/src/clipboard/testing_receive.rs": {
+        "byte_identical": true,
+        "sha256": "7cded9d8b1b7a8a4523b8553192fda09ee39f84dd4ff6daa1cb6671f2b30ce35"
+      },
+      "crates/uc-application/src/clipboard/testing_receive/pre_write.rs": {
+        "byte_identical": true,
+        "sha256": "323bb08364f5d60a6363cb0bbf62a94713d747d1cfc26c710f331bffc8d5ccee"
+      },
+      "crates/uc-application/src/deps.rs": {
+        "byte_identical": true,
+        "sha256": "9b871a8482fd248bf2f7e88cacd5ab243154cfe0460276fb2c858aff64442924"
+      },
+      "crates/uc-engine/src/lib.rs": {
+        "byte_identical": true,
+        "sha256": "9da31f777b28d3e105029fd896102fb13cc6d2cff0de3d3177c657e1b8c4b6e6"
+      },
+      "crates/uc-application/src/clipboard/sync/active_state/apply_inbound.rs": {
+        "byte_identical": true,
+        "sha256": "6f1649474a6d075d183eb28a1804360a1fec535f9350b7945670633021bb19aa"
+      },
+      "crates/uc-application/src/clipboard/write/coordinator.rs": {
+        "byte_identical": true,
+        "sha256": "ac11fd53e1feba6149fb54303dad8d0389b5aecfeddfbc12fb47d18b8824e39b"
+      },
+      "crates/uc-application/src/clipboard/active/transport/pull.rs": {
+        "byte_identical": true,
+        "sha256": "acd5ed7d2d47de26d6cde48d9944b4f8398b42cda512585e4a9bff42dc087b22"
+      }
+    },
+    "caller_cfg_only_comparison": {
+      "crates/uc-application/src/clipboard/active/mod.rs": true,
+      "crates/uc-application/src/clipboard/inbound/runtime.rs": true
+    },
+    "feature_attribute_inventory": {
+      "crates/uc-application/src/clipboard/mod.rs": {
+        "before_positive_cfg": 2,
+        "after_positive_cfg": 1,
+        "after_cfg_attr": 1
+      },
+      "crates/uc-application/src/clipboard/active/mod.rs": {
+        "before_positive_cfg": 3,
+        "after_positive_cfg": 0,
+        "after_cfg_attr": 0
+      },
+      "crates/uc-application/src/clipboard/inbound/runtime.rs": {
+        "before_positive_cfg": 4,
+        "after_positive_cfg": 0,
+        "after_cfg_attr": 0
+      }
+    },
+    "changed_files": [
+      "crates/uc-application/src/clipboard/active/mod.rs",
+      "crates/uc-application/src/clipboard/inbound/runtime.rs",
+      "crates/uc-application/src/clipboard/mod.rs"
+    ],
+    "untracked_files": [
+      "crates/uc-application/src/clipboard/testing_receive/disabled.rs",
+      "target"
+    ],
+    "new_file_sha256": "8e8985373a4c998f64dbfc594071df01eb12850d493aa0025a53f3a622ab6b88",
+    "limitations": "Static source comparison only. No Cargo, build, tests, E2E or codegen checks executed."
+  }
+}

@@ -8,7 +8,6 @@
 //! and coordinated shutdown.
 
 use crate::clipboard::active::transport::ActivePullPreparationPort;
-#[cfg(feature = "clipboard-stream-fault")]
 use crate::clipboard::testing_receive::{current_apply_outcome, current_stage, ReceiveStage};
 mod current;
 mod lifecycle;
@@ -429,7 +428,6 @@ impl InboundPulledContentStore for PulledContentStore {
         // Persist via the shared inbound apply path (decode V3 → materialize
         // blobs → capture). Reuses the same pipeline the bulk 0xC1 path uses,
         // so the pulled entry's schema matches a normal inbound entry.
-        #[cfg(feature = "clipboard-stream-fault")]
         current_stage(ReceiveStage::ApplyStarted);
         let outcome = self
             .apply
@@ -449,7 +447,6 @@ impl InboundPulledContentStore for PulledContentStore {
             .await
             .map_err(|err| InboundPulledContentStoreError::Store(anyhow::Error::from(err)))?;
 
-        #[cfg(feature = "clipboard-stream-fault")]
         current_apply_outcome(&outcome);
         match outcome {
             InboundClipboardApplyOutcome::Applied { entry_id } => Ok(

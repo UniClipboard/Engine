@@ -32,5 +32,8 @@ pub(crate) mod write;
 #[cfg(feature = "clipboard-stream-fault")]
 pub(crate) mod testing_recovery;
 
-#[cfg(feature = "clipboard-stream-fault")]
+#[cfg_attr(
+    not(feature = "clipboard-stream-fault"),
+    path = "testing_receive/disabled.rs"
+)]
 pub(crate) mod testing_receive;
