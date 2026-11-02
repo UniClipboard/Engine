@@ -207,6 +207,11 @@ impl MobileFileUploadCoordinator {
             .file_transfer
             .as_ref()
             .ok_or(MobileFileUploadError::Unavailable)?;
+        // 启动维护和恢复结束后才能创建新记录，避免新上传与旧接收清理并发。
+        file_transfer
+            .ensure_receive_ready()
+            .await
+            .map_err(MobileFileUploadError::upload_failed_from)?;
         let session = file_transfer
             .begin_receiver_transfer(BeginReceiverTransfer {
                 item_role: None,
