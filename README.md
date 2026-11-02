@@ -6,7 +6,7 @@ UniClipboardEngine 是 UniClipboard 在 macOS、Windows、Linux、iOS、Android 
 
 它不是一个可以直接运行的终端应用。桌面程序和移动应用把它作为核心能力接入，并负责提供系统目录、安全存储、系统剪贴板、文件选择与生命周期通知。
 
-> The [workspace version](Cargo.toml) is `1.1.0-rc.23`. Rust consumers depend only on `uc-engine`.
+> The [workspace version](Cargo.toml) is `1.1.0-rc.24`. Rust consumers depend only on `uc-engine`.
 > Mobile consumers must use platform artifacts from the same `v*` Release.
 > Internal crates and bindings are not published to crates.io.
 
