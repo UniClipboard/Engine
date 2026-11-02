@@ -28,6 +28,7 @@ const originalCargoHome = resolve(process.env.CARGO_HOME || join(userHome, '.car
 try {
   execFileSync('git', ['clone', '--quiet', '--no-hardlinks', '--no-checkout', repository, source], { stdio: 'inherit' })
   execFileSync('git', ['-C', source, 'checkout', '--quiet', '--detach', commit], { stdio: 'inherit' })
+  execFileSync('git', ['-C', source, 'submodule', 'update', '--init', '--recursive'], { stdio: 'inherit' })
   mkdirSync(cargoHome)
   // 只复用下载内容，用户配置、源码和编译产物均不共享。
   for (const name of ['registry', 'git']) {
