@@ -50,7 +50,8 @@ jobs:
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'engine-build-cache-writer' || 'engine-build-cache-reader' }}
       deployment: false
-    timeout-minutes: 30
+    # 冷编译包含工作区检查、旧版兼容构建与调用栈验收；为完整构建保留预算。
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -363,6 +364,22 @@ jobs:
 
       - name: Build workspace tests
         run: cargo nextest run --profile ci --locked --workspace --all-targets --no-run
+
+      - name: Verify collector deadline before the full workspace
+        id: collector_deadline
+        env:
+          UC_TEST_ARTIFACTS_DIR: target/collector-deadline
+        run: >-
+          cargo nextest run --profile ci --locked --workspace --all-targets
+          -E 'package(uc-observability-runtime) & binary(collector_unavailable)'
+
+      - name: Retain collector deadline evidence
+        if: always() && (steps.collector_deadline.outcome == 'success' || steps.collector_deadline.outcome == 'failure')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: collector-deadline
+          path: target/collector-deadline
+          if-no-files-found: error
 
       - name: Run workspace tests
         id: workspace_tests
