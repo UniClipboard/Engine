@@ -318,7 +318,7 @@ bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode direc
 runner 工件中的 `timings.prepare_ms`、`scenario_ms`、`cleanup_ms` 和 `total_ms` 用于核对 30 分钟目标；场景 records
 仍保留每个业务步骤耗时，二者不能互相替代。
 
-当前 draft PR 的等价隔离 Linux job 已使用 `--repeat 3` 逐 mode 实测：
+以下为原实现阶段记录的等价隔离 Linux job 历史样本，各 mode 使用 `--repeat 3`；不代表当前提交或最近 nightly 的运行结果：
 
 | mode | prepare | scenario | cleanup | total |
 | --- | ---: | ---: | ---: | ---: |
@@ -327,9 +327,20 @@ runner 工件中的 `timings.prepare_ms`、`scenario_ms`、`cleanup_ms` 和 `tot
 | relay | 5.735 秒 | 131.415 秒 | 0.514 秒 | 137.663 秒 |
 | legacy | 3.544 秒 | 0.504 秒 | 0.625 秒 | 4.674 秒 |
 
-四个工件均记录 `failed=false`、`cleaned=true` 和 `plaintext_clean=true`，因此当前 runner 的单 mode
-准备、场景和清理满足 30 分钟目标。新增 workflow 尚未进入默认分支，scheduled 与 `profile-upgrade` 的首次远程样本
-仍须在合并后取得；这不影响上述 runner 实测，也不能把它写成 nightly 已持续稳定。
+上述历史记录中的四个工件均记录 `failed=false`、`cleaned=true` 和 `plaintext_clean=true`，仅说明这些样本的单 mode
+准备、场景和清理满足 30 分钟目标。
+
+[真实环境工作流](../../.github/workflows/engine-real-environment.yml)已在默认分支 `main` 定义以下入口：
+
+- 定时：每天 02:30 UTC（`30 2 * * *`）。网络矩阵包含 `direct`、`known-peer`、`relay`、
+  `legacy`，各运行三轮；另有 `profile-upgrade`、`membership-e2e` 和升级兼容矩阵任务。
+- 手动：通过 `workflow_dispatch` 的 `mode` 选择网络模式，或 `profile-upgrade`、
+  `membership-e2e`、`upgrade-matrix`、`legacy-blob`。具体参数和任务条件以工作流为准。
+- PR：仅修改工作流列出的升级锚点路径时触发升级兼容矩阵；不因此执行全部真实环境任务。
+
+工作流定义不代表最近运行成功或 nightly 已持续稳定。验收时须核对对应提交、触发方式、job 结果和保留工件；
+未运行的模式与设备项记为跳过。`profile-upgrade` 当前配置覆盖合成迁移与五个进程退出恢复边界，
+其 `alpha.5` 外部 fixture 在任务摘要中明确记为跳过。
 
 ## 编译缓存入口
 
