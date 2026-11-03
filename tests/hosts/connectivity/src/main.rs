@@ -289,8 +289,11 @@ async fn operation(
         "reject_inbound_presence" => {
             return network_faults::execute(engine, command, request).await;
         }
-        "capture" => return content::capture(engine, clipboard, files, request).await,
+        "capture" | "benchmark_inject" => {
+            return content::submit(engine, clipboard, files, request).await
+        }
         "observe" => return observe::observe(engine).await,
+        "benchmark_text_page" => return observe::text_page(engine, request).await,
         "clipboard" => return clipboard.observed(),
         _ => {}
     }
@@ -720,7 +723,10 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow!("storage unavailable"))? = serde_json::from_value(value.clone())?;
     }
     let files = Files::default();
-    let clipboard = Clipboard::new(root.clone());
+    let clipboard = Clipboard::new(
+        root.clone(),
+        start["benchmark_stream"].as_bool().unwrap_or(false),
+    );
     let host = HostCapabilities::new(
         HostDirectories::new(
             root.join("private"),

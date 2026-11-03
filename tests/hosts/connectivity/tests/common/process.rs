@@ -1,90 +1,17 @@
 //! 两类协议共用独立进程、配对与固定宿主夹具。
 
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 pub(crate) const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
-const EXPIRES_AT_MS: i64 = 2_000_000_000_000;
-
-#[derive(Default)]
-struct TicketState {
-    tickets: HashMap<String, String>,
-}
-
-type TicketVault = Arc<Mutex<TicketState>>;
-
-struct CreatePairing(TicketVault);
-
-impl Respond for CreatePairing {
-    fn respond(&self, request: &Request) -> ResponseTemplate {
-        let body: Value = serde_json::from_slice(&request.body).expect("pairing create JSON");
-        let ticket = body["sponsorTicket"]
-            .as_str()
-            .expect("sponsor ticket")
-            .to_owned();
-        let mut state = lock_ticket_vault(&self.0);
-        state.tickets.insert(ticket.clone(), ticket.clone());
-        ResponseTemplate::new(200).set_body_json(json!({
-            "code": ticket,
-            "expiresAtMs": EXPIRES_AT_MS,
-        }))
-    }
-}
-
-struct ResolvePairing(TicketVault);
-
-impl Respond for ResolvePairing {
-    fn respond(&self, request: &Request) -> ResponseTemplate {
-        let body: Value = serde_json::from_slice(&request.body).expect("pairing resolve JSON");
-        let code = body["code"].as_str().expect("pairing code");
-        let state = lock_ticket_vault(&self.0);
-        let ticket = state.tickets.get(code).cloned().expect("registered ticket");
-        ResponseTemplate::new(200).set_body_json(json!({
-            "sponsorTicket": ticket,
-            "sponsorEndpointId": "local-e2e",
-            "expiresAtMs": EXPIRES_AT_MS,
-        }))
-    }
-}
-
-fn lock_ticket_vault(vault: &TicketVault) -> MutexGuard<'_, TicketState> {
-    match vault.lock() {
-        Ok(state) => state,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-pub(crate) async fn mount_rendezvous() -> MockServer {
-    let server = MockServer::start().await;
-    let vault = Arc::new(Mutex::new(TicketState::default()));
-    Mock::given(method("POST"))
-        .and(path("/v1/pairings"))
-        .respond_with(CreatePairing(Arc::clone(&vault)))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/pairings/resolve"))
-        .respond_with(ResolvePairing(vault))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/pairings/consume"))
-        .respond_with(ResponseTemplate::new(204))
-        .mount(&server)
-        .await;
-    server
-}
+pub(crate) use uc_testkit::mount_rendezvous;
 
 pub(crate) struct HostProcess {
     child: Child,

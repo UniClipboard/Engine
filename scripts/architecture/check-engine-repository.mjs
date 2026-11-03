@@ -37,6 +37,7 @@ const OPAQUE_COMPAT_CONSUMERS = {
 
 const EXPECTED_PACKAGES = [
   'openmls-validation',
+  'uc-benchmark',
   'uc-connectivity-host',
   'uc-connectivity-relay',
   'uc-application',

@@ -5,31 +5,79 @@ use std::sync::{Arc, Mutex};
 use url::Url;
 
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
 use uc_engine::{
-    Engine, HostCapabilityError, HostClipboard, HostClipboardRepresentation, HostClipboardSnapshot,
-    HostFileHandle, Operation, OperationResult,
+    Engine, HostCapabilityError, HostClipboard, HostClipboardChange, HostClipboardChangeStream,
+    HostClipboardRepresentation, HostClipboardSnapshot, HostFileHandle, Operation, OperationResult,
 };
 
 use crate::{string, unavailable, Files, ManagedFile};
 
 #[derive(Clone)]
-pub(crate) struct Clipboard(Arc<Mutex<HostClipboardSnapshot>>, PathBuf);
+pub(crate) struct Clipboard(
+    Arc<Mutex<HostClipboardSnapshot>>,
+    PathBuf,
+    Option<Arc<ChangeFeed>>,
+);
+
+struct ChangeFeed {
+    sender: mpsc::Sender<()>,
+    receiver: Mutex<Option<mpsc::Receiver<()>>>,
+}
+struct Changes(mpsc::Receiver<()>);
+#[async_trait]
+impl HostClipboardChangeStream for Changes {
+    async fn next(&mut self) -> Result<HostClipboardChange, HostCapabilityError> {
+        Ok(match self.0.recv().await {
+            Some(()) => HostClipboardChange::Changed,
+            None => HostClipboardChange::Closed,
+        })
+    }
+    async fn shutdown(&mut self) -> Result<(), HostCapabilityError> {
+        self.0.close();
+        Ok(())
+    }
+}
 
 impl Clipboard {
-    pub(crate) fn new(root: PathBuf) -> Self {
+    pub(crate) fn new(root: PathBuf, with_changes: bool) -> Self {
+        let changes = if with_changes {
+            let (sender, receiver) = mpsc::channel(1);
+            Some(Arc::new(ChangeFeed {
+                sender,
+                receiver: Mutex::new(Some(receiver)),
+            }))
+        } else {
+            None
+        };
         Self(
             Arc::new(Mutex::new(HostClipboardSnapshot {
                 observed_at_ms: 0,
                 representations: vec![],
             })),
             root,
+            changes,
         )
     }
 }
 
 impl HostClipboard for Clipboard {
+    fn take_change_stream(
+        &mut self,
+    ) -> Result<Option<Box<dyn HostClipboardChangeStream>>, HostCapabilityError> {
+        match &self.2 {
+            Some(feed) => Ok(feed
+                .receiver
+                .lock()
+                .map_err(|_| unavailable())?
+                .take()
+                .map(|receiver| Box::new(Changes(receiver)) as Box<dyn HostClipboardChangeStream>)),
+            None => Ok(None),
+        }
+    }
     fn read(&self) -> Result<HostClipboardSnapshot, HostCapabilityError> {
         Ok(self.0.lock().map_err(|_| unavailable())?.clone())
     }
@@ -149,7 +197,7 @@ fn bytes(request: &Value) -> Result<Vec<u8>> {
 }
 
 /// 把一份合成内容放入测试剪贴板并捕获为历史条目。
-pub(crate) async fn capture(
+pub(crate) async fn submit(
     engine: &Engine,
     clipboard: &Clipboard,
     files: &Files,
@@ -230,6 +278,16 @@ pub(crate) async fn capture(
         observed_at_ms,
         representations: vec![representation],
     };
+    if request["command"] == "benchmark_inject" {
+        let feed = clipboard
+            .2
+            .as_ref()
+            .context("clipboard stream not enabled")?;
+        feed.sender
+            .try_send(())
+            .context("clipboard change admission failed")?;
+        return Ok(json!({"accepted":true}));
+    }
     match engine.execute(Operation::CaptureCurrentClipboard).await? {
         OperationResult::ClipboardCaptured { entry_id, .. } => Ok(json!({ "entry": entry_id })),
         _ => bail!("clipboard capture result expected"),

@@ -24,6 +24,7 @@ members = [
   "tests/hosts/connectivity-relay",
   "tests/openmls-validation",
   "tests/uc-testkit",
+  "tests/benchmarks",
   "tests/upgrade-matrix",
 ]
 exclude = ["third_party/opaque-ke", "third_party/voprf", "third_party/iroh", "third_party/swarm-discovery", "third_party/iroh-mdns-address-lookup"]
