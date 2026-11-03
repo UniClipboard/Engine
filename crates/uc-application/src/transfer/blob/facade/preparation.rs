@@ -208,6 +208,7 @@ fn preparation_error(source: BlobTransferError) -> BlobExchangeError {
                 FileTransferApplicationError::Store(_)
                 | FileTransferApplicationError::Repository(_) => BlobExchangeFailure::Store,
                 FileTransferApplicationError::Cleanup(_)
+                | FileTransferApplicationError::ReceiveRecovery(_)
                 | FileTransferApplicationError::Publish(_) => BlobExchangeFailure::Settlement,
             })
             .unwrap_or(BlobExchangeFailure::Settlement),

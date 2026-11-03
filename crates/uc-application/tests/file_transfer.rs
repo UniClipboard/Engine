@@ -107,7 +107,7 @@ impl FileTransferEventPublisherPort for InMemoryEventPublisher {
     }
 }
 
-/// No-op lifecycle ports for session tests that never drive readiness.
+/// 会话验收使用空恢复端口；首次登记也经过完整恢复入口。
 #[derive(Default)]
 struct NoopLifecyclePorts;
 
@@ -444,6 +444,10 @@ struct TestContext {
 }
 
 fn build_context() -> TestContext {
+    build_context_with_lifecycle(noop_lifecycle_deps())
+}
+
+fn build_context_with_lifecycle(lifecycle: FileTransferLifecycleDeps) -> TestContext {
     let store = Arc::new(InMemoryEventStore::new());
     let publisher = Arc::new(InMemoryEventPublisher::new());
     let receiver = Arc::new(ReceiverStore::default());
@@ -463,7 +467,7 @@ fn build_context() -> TestContext {
             provisional_path,
             provisional_finalize,
             clock: Arc::new(FixedClock),
-            lifecycle: noop_lifecycle_deps(),
+            lifecycle,
         })),
         store,
         publisher,
@@ -854,4 +858,110 @@ async fn readiness_recovery_failure_preserves_its_source() {
         maintenance.source().map(ToString::to_string).as_deref(),
         Some("privacy database unavailable")
     );
+}
+
+// 隔离验证前列出失败方式：恢复未完成就登记会话、恢复失败后仍写入、关闭后迟到准入。
+// 受控维护端口固定恢复时序；会话、恢复协调器、登记和事件发布都使用完整负责人。
+struct HeldPrivacyMaintenance {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl uc_core::ports::EnsureFileTransferPrivacyMaintenancePort for HeldPrivacyMaintenance {
+    async fn ensure_file_transfer_privacy_maintenance(
+        &self,
+    ) -> Result<(), FileTransferPrivacyMaintenanceError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn receiver_creation_waits_for_privacy_maintenance() {
+    for provisional in [false, true] {
+        let maintenance = Arc::new(HeldPrivacyMaintenance {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let mut lifecycle = noop_lifecycle_deps();
+        lifecycle.privacy_maintenance = maintenance.clone();
+        let ctx = build_context_with_lifecycle(lifecycle);
+        let mut input = entry_transfer("receive-after-maintenance");
+        if provisional {
+            input.registration = ReceiverTransferRegistration::Provisional;
+        }
+        let facade = ctx.facade.clone();
+        let task = tokio::spawn(async move { facade.begin_receiver_transfer(input).await });
+        tokio::time::timeout(Duration::from_secs(2), maintenance.entered.notified())
+            .await
+            .expect("receiver creation must enter receive recovery");
+        assert!(
+            !task.is_finished(),
+            "maintenance must hold new receiver admission"
+        );
+        assert!(ctx.receiver.pending.lock().unwrap().is_empty());
+        assert!(ctx.receiver.provisional.lock().unwrap().is_empty());
+        assert!(history(&ctx, "receive-after-maintenance").await.is_empty());
+        maintenance.release.notify_one();
+        task.await.unwrap().unwrap();
+        assert_eq!(history(&ctx, "receive-after-maintenance").await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn receiver_creation_preserves_failed_privacy_maintenance_without_writes() {
+    let mut lifecycle = noop_lifecycle_deps();
+    lifecycle.privacy_maintenance = Arc::new(FailingPrivacyMaintenance);
+    let ctx = build_context_with_lifecycle(lifecycle);
+    let error = ctx
+        .facade
+        .begin_receiver_transfer(entry_transfer("receive-maintenance-failed"))
+        .await
+        .unwrap_err();
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    let mut found = false;
+    while let Some(error) = source {
+        if error
+            .downcast_ref::<FileTransferPrivacyMaintenanceError>()
+            .is_some()
+        {
+            found = true;
+            break;
+        }
+        source = error.source();
+    }
+    assert!(found, "maintenance error must remain in the source chain");
+    assert!(ctx.receiver.pending.lock().unwrap().is_empty());
+    assert!(ctx.receiver.provisional.lock().unwrap().is_empty());
+    assert!(history(&ctx, "receive-maintenance-failed").await.is_empty());
+}
+
+#[tokio::test]
+async fn receiver_creation_waiting_for_maintenance_cannot_outlive_close() {
+    let maintenance = Arc::new(HeldPrivacyMaintenance {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut lifecycle = noop_lifecycle_deps();
+    lifecycle.privacy_maintenance = maintenance.clone();
+    let ctx = build_context_with_lifecycle(lifecycle);
+    let facade = ctx.facade.clone();
+    let task = tokio::spawn(async move {
+        facade
+            .begin_receiver_transfer(entry_transfer("receive-after-close"))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), maintenance.entered.notified())
+        .await
+        .expect("receiver creation must enter receive recovery");
+    ctx.facade.close().await.unwrap();
+    maintenance.release.notify_one();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(FileTransferApplicationError::LifecycleClosed)
+    ));
+    assert!(ctx.receiver.pending.lock().unwrap().is_empty());
+    assert!(history(&ctx, "receive-after-close").await.is_empty());
 }
