@@ -1,8 +1,10 @@
 use std::fs::{self, File};
+use std::io::{self, BufWriter, Write};
 #[cfg(unix)]
 use std::mem::MaybeUninit;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -58,19 +60,41 @@ async fn unavailable_collector_and_full_batch_queue_do_not_block_business_work()
             .join("collector-unavailable");
         fs::create_dir_all(&artifacts).expect("artifact directory");
         let output = File::create(artifacts.join("process-output.log")).expect("process output");
-        // Linux 系统输出同步写 stdout；不得让 CI 捕获管道阻塞污染远程队列计时。
-        // 保留真实系统输出，子进程仍运行完整的公开运行期和慢 HTTP Collector。
-        let status = Command::new(std::env::current_exe().expect("test executable"))
+        let errors = File::create(artifacts.join("process-errors.log")).expect("process errors");
+        // 宿主持续排空两条管道；各使用 64 KiB 缓冲，避免逐条写工件污染业务计时。
+        // 子进程仍运行完整公开运行期、真实系统输出和慢 HTTP Collector。
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
             .args([
                 "--exact",
                 "unavailable_collector_and_full_batch_queue_do_not_block_business_work",
                 "--nocapture",
             ])
             .env(CHILD_ARTIFACTS, &artifacts)
-            .stdout(Stdio::from(output.try_clone().expect("clone output")))
-            .stderr(Stdio::from(output))
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("run isolated collector scenario");
+        let mut stdout = child.stdout.take().expect("child stdout");
+        let mut stderr = child.stderr.take().expect("child stderr");
+        let status = thread::scope(|scope| {
+            let output = scope.spawn(move || {
+                let mut writer = BufWriter::with_capacity(64 * 1024, output);
+                io::copy(&mut stdout, &mut writer)?;
+                writer.flush()
+            });
+            let errors = scope.spawn(move || {
+                let mut writer = BufWriter::with_capacity(64 * 1024, errors);
+                io::copy(&mut stderr, &mut writer)?;
+                writer.flush()
+            });
+            let status = child.wait().expect("wait for collector scenario");
+            output
+                .join()
+                .expect("output reader")
+                .expect("retain output");
+            errors.join().expect("error reader").expect("retain errors");
+            status
+        });
         assert!(
             status.success(),
             "collector scenario failed; artifacts: {artifacts:?}"

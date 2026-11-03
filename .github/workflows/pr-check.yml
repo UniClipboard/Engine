@@ -368,7 +368,7 @@ jobs:
       - name: Verify collector deadline before the full workspace
         id: collector_deadline
         env:
-          UC_TEST_ARTIFACTS_DIR: target/collector-deadline
+          UC_TEST_ARTIFACTS_DIR: ${{ github.workspace }}/target/collector-deadline
         run: >-
           cargo nextest run --profile ci --locked --workspace --all-targets
           -E 'package(uc-observability-runtime) & binary(collector_unavailable)'
