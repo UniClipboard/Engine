@@ -877,6 +877,12 @@ impl uc_engine::HostClipboard for RecoveryPanicClipboard {
             return Ok(None);
         }
         self.lent = true;
+        if !self.panic_worker {
+            // 在交付真实宿主流时注入，不能让首次异步轮询晚于解锁刷新。
+            std::fs::write(&self.keyslot, b"{}").unwrap();
+            self.panicked
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(Some(Box::new(RecoveryPanicStream {
             panicked: Arc::clone(&self.panicked),
             keyslot: self.keyslot.clone(),
@@ -898,10 +904,10 @@ impl uc_engine::HostClipboardChangeStream for RecoveryPanicStream {
     async fn next(
         &mut self,
     ) -> Result<uc_engine::HostClipboardChange, uc_engine::HostCapabilityError> {
-        std::fs::write(&self.keyslot, b"{}").unwrap();
-        self.panicked
-            .store(true, std::sync::atomic::Ordering::SeqCst);
         if self.panic_worker {
+            std::fs::write(&self.keyslot, b"{}").unwrap();
+            self.panicked
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             panic!("controlled recovered runtime worker failure");
         }
         std::future::pending().await
@@ -1017,18 +1023,22 @@ async fn recovered_unlock_failure_releases_after_successful_cleanup() {
     let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), capabilities)
         .await
         .unwrap();
+    assert!(
+        !entered.load(std::sync::atomic::Ordering::SeqCst),
+        "the recovered host stream must not be acquired before unlock"
+    );
     let unlock = engine
         .execute(Operation::UnlockSpace(UnlockSpaceInput {
             passphrase: SecretString::new(PASSPHRASE),
         }))
         .await;
-    let stream_entered = entered.load(std::sync::atomic::Ordering::SeqCst);
+    let stream_acquired = entered.load(std::sync::atomic::Ordering::SeqCst);
     let outcome = engine.shutdown_with_outcome(Duration::from_secs(15)).await;
     let released = matches!(outcome, uc_engine::ResourceReleaseOutcome::Released { .. });
     let status = std::process::Command::new("python3").args(["-c", "import fcntl,sys\nf=open(sys.argv[1], 'r+')\ntry:\n fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n sys.exit(1)"]).arg(&lease_path).status().unwrap();
     assert!(matches!(status.code(), Some(0 | 1)));
     let available = status.success();
-    let artifact = serde_json::json!({"scope":"actual recovered Engine, temporary keyslot corruption, successful runtime cleanup and independent host-stream lock", "unlock_failed":unlock.is_err(), "stream_entered":stream_entered, "shutdown_released":released, "host_stream_lock_available":available, "device_acceptance":"not established"});
+    let artifact = serde_json::json!({"scope":"actual recovered Engine, keyslot corruption at host-stream acquisition, successful runtime cleanup and independent host-stream lock", "unlock_failed":unlock.is_err(), "stream_acquired":stream_acquired, "shutdown_released":released, "host_stream_lock_available":available, "device_acceptance":"not established"});
     if let Some(dir) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1037,7 +1047,7 @@ async fn recovered_unlock_failure_releases_after_successful_cleanup() {
         )
         .unwrap();
     }
-    assert!(unlock.is_err() && stream_entered && released && available);
+    assert!(unlock.is_err() && stream_acquired && released && available);
 }
 
 #[cfg(target_os = "macos")]
