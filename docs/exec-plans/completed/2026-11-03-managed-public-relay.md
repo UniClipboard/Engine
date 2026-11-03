@@ -1,7 +1,7 @@
 # Anonymous managed public relay (#371)
 
-Status: Engine implementation and local acceptance complete; live acceptance
-blocked by the managed Relay gateway's missing `/ping` route.
+Status: Engine implementation, local acceptance, and live managed-relay
+connection acceptance complete. Native devices and publication remain skipped.
 
 ## Ownership and contract
 
@@ -83,24 +83,32 @@ It adds no production log calls and
 redacts relay tokens in Debug. Its configuration notification retains only one
 change signal and no historical credentials.
 
-## Live blocker
+## Live acceptance
 
-On 2026-11-03, Cloud catalog and anonymous issuance both returned HTTP 200.
-The actual Engine node installed a credential, but did not select a home relay
-within 45 seconds. Its status contained no authentication rejection or relay
-connection error. The public Relay origin returned 404 for `/ping` and 204 for
-`/generate_204`.
+The initial 2026-11-03 run installed an anonymous credential but did not select
+a home relay within 45 seconds. The public gateway returned 404 for `/ping`.
+After the gateway deployment added `/ping`, the same Engine commit
+`de9edfac71dfabe2a3aa5fc417ad16e73333d1cd` passed the live acceptance in
+5.59 seconds without an Engine code change. The public `/ping` returned 200.
 
-The current Relay gateway source permits only `/relay`, `/`, and `/generate_204`
-in its public forwarding allowlist. Both the deployed adapter's declared
-iroh-relay 1.0.0-rc.1 and Engine's iroh-relay 1.3 use `/ping` for HTTPS relay
-latency probes. This prevents HTTPS-only relay selection when QUIC address
-discovery is unavailable. Fix and deploy the gateway route, then rerun live
-acceptance. Do not work around the gateway contract by compiling a secret or
-enabling LAN compatibility.
+The real node installed its anonymous credential and established a relay
+connection. Its status contained one relay, no authentication rejection, and
+no relay error. Shutdown completed and joined the managed worker. This proves
+anonymous issuance and relay connectivity; it does not prove clipboard payload
+transfer, credential renewal against the live service, or native device behavior.
 
-Relevant source:
-[gateway public handler](https://github.com/UniClipboard/relay/blob/main/gateway/gateway.go).
+Reproduce this focused check from the repository root:
+
+```bash
+UC_MANAGED_RELAY_ARTIFACT_DIR="$PWD/target/managed-relay-live-retry" \
+  just cargo test -p uc-infra-p2p \
+  live_managed_relay_accepts_current_endpoint_credential --lib --locked -- --ignored
+```
+
+The retry produced redacted `live.json`, `live.log`, and a source-bound manifest
+under `target/managed-relay-live-retry/`. The earlier failed run remains separate.
+The gateway route blocker is resolved. Native devices, cross-network device
+matrix, publication, and resource measurements remain skipped.
 
 ## Reproduction and artifacts
 

@@ -20,7 +20,7 @@
 
 ## 当前专项计划
 
-- [Anonymous managed public relay (#371)](exec-plans/active/2026-11-03-managed-public-relay.md): Engine implementation and local acceptance complete; live acceptance blocked by the gateway `/ping` route; native devices and publication skipped.
+- [Anonymous managed public relay (#371)](exec-plans/completed/2026-11-03-managed-public-relay.md): Engine implementation, local acceptance, and live anonymous relay connection acceptance complete; native devices and publication skipped.
 
 - [File-addressable receive snapshots (#368)](exec-plans/completed/2026-11-01-receive-item-progress.md): implementation and host verification complete; 61 receive E2E scenarios and both binding projections passed. Native devices, remote CI, and release publication were skipped.
 

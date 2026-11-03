@@ -84,4 +84,4 @@ catalog health alone does not prove that a native endpoint can select a relay.
 
 The external contract is maintained in
 [Cloud's relay control plane](https://github.com/mkdir700/uc-cloud/blob/main/docs/RELAY_CONTROL_PLANE.md).
-Execution status belongs in the [implementation plan](../exec-plans/active/2026-11-03-managed-public-relay.md).
+Execution status belongs in the [implementation plan](../exec-plans/completed/2026-11-03-managed-public-relay.md).
