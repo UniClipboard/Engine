@@ -91,6 +91,9 @@ impl FileTransferFacade {
         &self,
         input: BeginReceiverTransfer,
     ) -> Result<Arc<ReceiverTransferHandle>, FileTransferApplicationError> {
+        self.sessions.ensure_open().await?;
+        // 恢复会执行 VACUUM 并清理旧暂存记录；完成前不能登记新的接收会话。
+        self.lifecycle.ensure_receive_ready().await?;
         let _creation = self.sessions.lock_creation().await;
         self.sessions.ensure_open().await?;
         if let Some(existing) = self.sessions.get(&input.transfer_id).await {

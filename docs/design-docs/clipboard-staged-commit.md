@@ -9,7 +9,34 @@
 端到端验证从公开 Engine 的移动文件上传及图片文档入口进入，使用真实 SQLite、暂存和 blob 后台处理。缩略图必须在首次原图读取之前自行就绪；旧的原图读取触发重新排队行为不能掩盖通知顺序错误。运行：
 
 ```bash
-cargo test --locked -p uc-engine --features lan-compat --test host_contract staged_capture_commit -- --nocapture
+just cargo test --locked -p uc-engine --features lan-compat --test host_contract staged_capture_commit -- --nocapture
 ```
 
 可通过 `UC_STAGED_IMAGE_E2E_RECEIPT` 指定结果 JSON 路径。该场景不接触系统剪贴板、系统钥匙串或真实用户资料。
+
+## Receiver admission and startup recovery
+
+`FileTransferFacade` owns receiver-session admission. Every new receiver session,
+including a provisional mobile upload, waits for receive recovery before it reads
+the transfer timeline or writes a receiver registration or event. Recovery includes
+the SQLite privacy-maintenance checkpoint and `VACUUM`, reconciliation, and staging
+cleanup. A host must not coordinate these steps or retry an upload to work around
+startup ordering.
+
+Recovery failure prevents registration and retains its complete source chain in
+`FileTransferApplicationError::ReceiveRecovery`. The existing readiness coordinator
+owns serialization and retry. Admission checks the session registry before recovery
+and again under the creation lock afterward. Closing the facade while admission
+waits therefore prevents a late session from being created.
+
+Controlled owner-level acceptance holds privacy maintenance to verify entry and
+provisional admission, failed recovery without writes, and close during recovery:
+
+```bash
+just cargo test --locked -p uc-application --test file_transfer receiver_creation_
+```
+
+The public Engine image acceptance above remains the SQLite, staging, blob, and
+thumbnail end-to-end check. Set `UC_STAGED_IMAGE_E2E_RECEIPT` to retain its JSON
+receipt. A successful retry alone does not prove that an older frozen Engine's
+independent intermittent receive failure has been fixed.
