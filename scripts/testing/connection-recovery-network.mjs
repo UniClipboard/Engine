@@ -646,10 +646,13 @@ async function run() {
     net(node, 'ip', 'addr', 'add', `10.233.0.${index + 11}/24`, 'dev', 'eth0')
     net(node, 'ip', 'link', 'set', 'eth0', 'up')
     if (multihomed) {
-      net(node, 'sysctl', '-qw', 'net.ipv6.conf.all.disable_ipv6=1')
-      net(node, 'ip', 'link', 'add', 'wan0', 'type', 'dummy')
+      // 用网络命名空间内的规则隔离 IPv6，不要求容器能写 /proc/sys。
+      nft(node, 'add', 'table', 'ip6', 'uc_ipv4_only')
+      nft(node, 'add', 'chain', 'ip6', 'uc_ipv4_only', 'output', '{ type filter hook output priority -100; policy drop; }')
+      net(node, 'ip', 'link', 'add', 'wan0', 'type', 'veth', 'peer', 'name', 'wanpeer0')
       net(node, 'ip', 'addr', 'add', `192.0.2.${index + 11}/24`, 'dev', 'wan0')
-      net(node, 'ip', 'link', 'set', 'wan0', 'multicast', 'on', 'up')
+      net(node, 'ip', 'link', 'set', 'wanpeer0', 'up')
+      net(node, 'ip', 'link', 'set', 'wan0', 'up')
       net(node, 'ip', 'route', 'add', 'default', 'dev', 'wan0')
       const routes = JSON.parse(net(node, 'ip', '-j', 'route', 'get', '224.0.0.251'))
       assert.equal(routes[0].dev, 'wan0', 'the direct Ethernet must not be the default multicast interface')
