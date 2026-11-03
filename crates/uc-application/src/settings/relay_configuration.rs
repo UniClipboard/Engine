@@ -300,6 +300,19 @@ impl RelayConfiguration {
             credential_configured: false,
             in_effect: in_effect(relay.url),
         }));
+        if applied.is_some_and(|applied| applied.routing == RelayRouting::BuiltIn) {
+            for url in &applied_urls {
+                if !entries.iter().any(|entry| entry.url == *url) {
+                    entries.push(RelayOverviewEntry {
+                        source: RelayEntrySource::BuiltIn,
+                        region: None,
+                        url: url.clone(),
+                        credential_configured: false,
+                        in_effect: true,
+                    });
+                }
+            }
+        }
         entries.extend(custom.into_iter().map(|entry| RelayOverviewEntry {
             source: RelayEntrySource::Custom,
             region: None,
@@ -311,7 +324,8 @@ impl RelayConfiguration {
             saved_routing,
             applied_routing: applied.map(|applied| applied.routing),
             change_pending: applied.is_some_and(|applied| {
-                applied.routing != saved_routing || applied_urls != saved_urls
+                applied.routing != saved_routing
+                    || (saved_routing == RelayRouting::Custom && applied_urls != saved_urls)
             }),
             entries,
         })

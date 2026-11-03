@@ -49,7 +49,11 @@ pub async fn build_network_runtime(
     application.record_applied_relays(None);
     let applied_relays = AppliedRelayRouting {
         routing: relay_routing,
-        urls: relay_urls.clone(),
+        urls: if relay_routing == RelayRouting::BuiltIn {
+            Vec::new()
+        } else {
+            relay_urls.clone()
+        },
     };
     let congestion_controller = prepared_network.congestion_controller;
     let mut iroh_config = crate::assembly::network::relay_policy_to_iroh_config(
@@ -59,7 +63,8 @@ pub async fn build_network_runtime(
         congestion_controller,
         rendezvous_base_url,
     );
-    // 内置 relay 不携带凭据；只有用户自定义路由才读取安全存储。
+    iroh_config.managed_relays = relay_routing == RelayRouting::BuiltIn;
+    // 受管 Relay 在内存中取得短期凭据；只有用户自定义路由读取安全存储。
     if relay_routing == RelayRouting::Custom {
         load_relay_access_tokens(&mut iroh_config, &prepared_network.relay_credentials);
     }
@@ -85,10 +90,17 @@ pub async fn build_network_runtime(
         Arc::clone(&space_setup.iroh_identity_storage),
         Arc::new(Sha256IdentityFingerprintFactory),
     );
-    let builder = IrohNodeBuilder::bind(&identity_store, iroh_config)
+    let mut builder = IrohNodeBuilder::bind(&identity_store, iroh_config)
         .await
         .context("Iroh network bind failed")?;
     application.record_applied_relays(Some(applied_relays));
+    let application = application.clone();
+    builder.track_managed_relays(Arc::new(move |urls| {
+        application.record_applied_relays(Some(AppliedRelayRouting {
+            routing: RelayRouting::BuiltIn,
+            urls,
+        }));
+    }));
     Ok(builder.spawn())
 }
 

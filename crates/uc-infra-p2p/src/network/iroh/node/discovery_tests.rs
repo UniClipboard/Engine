@@ -30,6 +30,7 @@ async fn cloud_enabled_node_registers_directory_and_existing_pkarr_publisher() {
     let builder = IrohNodeBuilder::bind(
         &identity_store(),
         IrohNodeConfig {
+            managed_relays: false,
             relay_urls: vec!["http://127.0.0.1:1".into()],
             ..Default::default()
         },

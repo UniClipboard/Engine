@@ -64,6 +64,7 @@ pub fn relay_policy_to_iroh_config(
         // ↓ 正向同名字段，直接搬运不取反。
         allow_overlay_network_addrs,
         relay_urls,
+        managed_relays: false,
         relay_access_tokens: Default::default(),
         congestion_controller,
         rendezvous_base_url,

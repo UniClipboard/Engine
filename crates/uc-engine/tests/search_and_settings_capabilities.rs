@@ -23,6 +23,99 @@ use uc_engine::{
 
 const PASSPHRASE: &str = "quick-panel-capability-passphrase";
 
+#[tokio::test(flavor = "multi_thread")]
+async fn managed_relay_overview_preserves_custom_and_lan_only_precedence_across_restart() {
+    use uc_engine::{CustomRelayMutation, NetworkSettingsPatch, RelayRoutingMode};
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (engine, _events) = start(root.path(), &storage).await;
+    create_space(&engine).await;
+    let OperationResult::RelayOverview(overview) =
+        engine.execute(Operation::QueryRelayOverview).await.unwrap()
+    else {
+        panic!("expected relay overview");
+    };
+    assert_eq!(overview.saved_mode, RelayRoutingMode::BuiltIn);
+    assert_eq!(overview.applied_mode, Some(RelayRoutingMode::BuiltIn));
+    assert!(!overview.change_pending);
+    assert!(overview
+        .entries
+        .iter()
+        .any(|entry| entry.region_id.as_deref() == Some("cn-shanghai")));
+    assert!(overview
+        .entries
+        .iter()
+        .all(|entry| !entry.credential_configured));
+    engine
+        .execute(Operation::MutateCustomRelay(CustomRelayMutation::Add {
+            url: "http://127.0.0.1:1".into(),
+            access_token: Some(SecretString::new("PRIVATE_CUSTOM_RELAY")),
+        }))
+        .await
+        .unwrap();
+    engine.shutdown_until_complete().await.unwrap();
+
+    let (engine, _events) = start(root.path(), &storage).await;
+    let OperationResult::RelayOverview(overview) =
+        engine.execute(Operation::QueryRelayOverview).await.unwrap()
+    else {
+        panic!("expected relay overview");
+    };
+    assert_eq!(overview.saved_mode, RelayRoutingMode::Custom);
+    assert_eq!(overview.applied_mode, Some(RelayRoutingMode::Custom));
+    assert!(!overview.change_pending);
+    assert!(overview
+        .entries
+        .iter()
+        .any(|entry| entry.url == "http://127.0.0.1:1/"
+            && entry.in_effect
+            && entry.credential_configured));
+    assert_eq!(
+        storage
+            .0
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.starts_with("relay_access_token:"))
+            .count(),
+        1
+    );
+    let settings = engine.execute(Operation::QuerySettings).await.unwrap();
+    assert!(!format!("{settings:?} {overview:?}").contains("PRIVATE_CUSTOM_RELAY"));
+    engine
+        .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
+            network: Some(NetworkSettingsPatch {
+                allow_relay_fallback: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })))
+        .await
+        .unwrap();
+    engine.shutdown_until_complete().await.unwrap();
+
+    let (engine, _events) = start(root.path(), &storage).await;
+    let OperationResult::RelayOverview(overview) =
+        engine.execute(Operation::QueryRelayOverview).await.unwrap()
+    else {
+        panic!("expected relay overview");
+    };
+    assert_eq!(overview.saved_mode, RelayRoutingMode::Disabled);
+    assert_eq!(overview.applied_mode, Some(RelayRoutingMode::Disabled));
+    assert!(!overview.change_pending);
+    assert!(overview.entries.iter().all(|entry| !entry.in_effect));
+    engine.shutdown_until_complete().await.unwrap();
+    let directory = std::env::var_os("UC_MANAGED_RELAY_ARTIFACT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/managed-relay-acceptance")
+        });
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("engine-routing.json"), b"{\"default_anonymous\":true,\"custom_precedence\":true,\"lan_only_precedence\":true,\"restart\":true,\"settings_redacted\":true}\n").unwrap();
+}
+
 #[derive(Clone, Default)]
 struct MemorySecureStorage(Arc<Mutex<HashMap<String, Vec<u8>>>>);
 

@@ -20,6 +20,7 @@ mod discovery;
 pub mod group_update_adapter;
 pub mod identity_store;
 pub(crate) mod inbound_peer;
+mod managed_relay;
 pub mod membership_history_exchange_adapter;
 mod membership_identity_adapter;
 mod net_recovery;

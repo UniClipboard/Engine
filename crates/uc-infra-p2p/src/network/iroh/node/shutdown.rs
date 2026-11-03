@@ -60,6 +60,14 @@ impl IrohNode {
         let watchdog = started + ROUTER_WATCHDOG;
         let watchdog = deadline.map_or(watchdog, |deadline| deadline.min(watchdog));
         let mut failures = Vec::new();
+        if let Some(handle) = self.managed_relay.take() {
+            handle.abort();
+            if let Err(error) = handle.await {
+                if !error.is_cancelled() {
+                    failures.push(anyhow::Error::new(error).context("stop managed relay runtime"));
+                }
+            }
+        }
         if let Some(handle) = self.connection_census.take() {
             handle.abort();
             match handle.await {
