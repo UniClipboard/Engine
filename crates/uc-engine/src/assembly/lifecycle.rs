@@ -47,14 +47,12 @@ pub async fn build_network_runtime(
     let relay_urls = relay_routing.effective_urls(&prepared_network.custom_relay_urls);
     // 绑定成功前不得声称任何 relay 已生效；上一个节点的记录也不再有效。
     application.record_applied_relays(None);
+    // 内置路由的公共 relay 在绑定时直接安装；受管 relay 由 worker 取证后追加。
     let applied_relays = AppliedRelayRouting {
         routing: relay_routing,
-        urls: if relay_routing == RelayRouting::BuiltIn {
-            Vec::new()
-        } else {
-            relay_urls.clone()
-        },
+        urls: relay_urls.clone(),
     };
+    let static_relay_urls = relay_urls.clone();
     let congestion_controller = prepared_network.congestion_controller;
     let mut iroh_config = crate::assembly::network::relay_policy_to_iroh_config(
         allow_relay_fallback,
@@ -95,7 +93,10 @@ pub async fn build_network_runtime(
         .context("Iroh network bind failed")?;
     application.record_applied_relays(Some(applied_relays));
     let application = application.clone();
-    builder.track_managed_relays(Arc::new(move |urls| {
+    builder.track_managed_relays(Arc::new(move |managed_urls| {
+        // 受管 relay 增删只增减追加部分，公共内置 relay 始终保留在生效列表中。
+        let mut urls = static_relay_urls.clone();
+        urls.extend(managed_urls);
         application.record_applied_relays(Some(AppliedRelayRouting {
             routing: RelayRouting::BuiltIn,
             urls,

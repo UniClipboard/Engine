@@ -381,7 +381,8 @@ pub enum RelayEntrySource {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayOverviewEntry {
     pub source: RelayEntrySource,
-    /// 内置候选的稳定区域标识（初始为 `cn-shanghai`）。
+    /// 内置条目的稳定区域标识（公共 relay 为 `na-east`、`na-west`、`eu`、
+    /// `asia-pacific`，受管候选为 `cn-shanghai`）。
     /// 展示名称由宿主本地化；动态地址和自定义条目可以为空。
     pub region_id: Option<String>,
     pub url: String,

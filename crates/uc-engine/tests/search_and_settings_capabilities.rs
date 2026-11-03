@@ -43,6 +43,11 @@ async fn managed_relay_overview_preserves_custom_and_lan_only_precedence_across_
         .entries
         .iter()
         .any(|entry| entry.region_id.as_deref() == Some("cn-shanghai")));
+    // 公共内置 relay 在绑定时直接安装；受管上海 relay 不因候选存在而算作生效。
+    assert!(overview
+        .entries
+        .iter()
+        .any(|entry| entry.region_id.as_deref() == Some("na-east") && entry.in_effect));
     assert!(overview
         .entries
         .iter()

@@ -9,13 +9,13 @@ use tokio::{
 };
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{instrument::WithSubscriber, Dispatch};
-use uc_core::settings::relay_routing::BUILTIN_RELAYS;
+use uc_core::settings::relay_routing::{managed_builtin_relays, PREFERRED_MANAGED_RELAY_ID};
 use uc_observability_contract::uc_warn;
 
 use super::client::{ControlPlane, ControlPlaneError, Node};
 
 pub(crate) const CLOUD_RELAY_API: &str = "https://cloud.uniclipboard.app/api/relay/v1";
-pub(super) const BUILTIN_RELAY_ID: &str = BUILTIN_RELAYS[0].id;
+pub(super) const BUILTIN_RELAY_ID: &str = PREFERRED_MANAGED_RELAY_ID;
 
 const CATALOG_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -55,8 +55,7 @@ impl ManagedRelay {
         Ok(Self {
             client: ControlPlane::new(base)?,
             endpoint_id: hex::encode(endpoint_id.as_bytes()),
-            nodes: BUILTIN_RELAYS
-                .iter()
+            nodes: managed_builtin_relays()
                 .map(|node| Node {
                     id: node.id.to_owned(),
                     url: node.url.to_owned(),

@@ -1,10 +1,13 @@
 # Anonymous managed public relay
 
-The default P2P relay uses the Cloud control plane without a Cloud account.
-The initial candidate is Shanghai (`cn-shanghai-1`, region `cn-shanghai`,
-`https://sha1.uc-relay.z2blog.com/`). Core owns this bundled candidate and the
-unchanged Disabled > Custom > BuiltIn routing precedence. The candidate is
-neither an access credential nor a permanent catalog entry.
+The default P2P relay combines two classes of built-in relay. Public n0 relays
+(`na-east`, `na-west`, `eu`, `asia-pacific`) are direct built-ins: Core installs
+them at bind without a credential. The Shanghai relay (`cn-shanghai-1`, region
+`cn-shanghai`, `https://sha1.uc-relay.z2blog.com/`) is product-managed: it needs
+a short-lived anonymous credential obtained from the Cloud control plane without
+a Cloud account. Core owns both classes and the unchanged
+Disabled > Custom > BuiltIn routing precedence. The managed candidate is neither
+an access credential nor a permanent catalog entry.
 
 ## Ownership and lifecycle
 
@@ -14,11 +17,12 @@ their existing secure-storage credentials. LAN-only and Custom routing never
 request the managed-relay catalog or anonymous credentials.
 
 The worker reads `https://cloud.uniclipboard.app/api/relay/v1/nodes` at most
-once per 30 seconds. A valid response replaces the entire in-memory catalog.
-An empty response removes the managed relay. An unsuccessful response retains
-the last valid catalog, including a previously empty catalog. Restart starts
-with the bundled candidate and requests fresh credentials; there is no disk
-cache or persistent credential.
+once per 30 seconds. A valid response replaces the entire in-memory catalog of
+managed candidates; direct built-ins are not part of that catalog. An empty
+response removes the managed relay and leaves direct built-ins in place. An
+unsuccessful response retains the last valid catalog, including a previously
+empty catalog. Restart starts with the bundled managed candidate and requests
+fresh credentials; there is no disk cache or persistent credential.
 
 The worker prefers Shanghai while it remains in the valid catalog, otherwise
 the first published candidate. It requests a credential from `/credentials`
@@ -43,18 +47,19 @@ exit; an actor waiting for renewal belongs only to the currently installed relay
 The single worker uses separate bounded backoffs for catalog and credential
 requests: five seconds doubling to five minutes; a 403 waits five minutes.
 429 and other failures honor Retry-After seconds or HTTP dates, capped at five
-minutes. Catalog retries also obey the 30-second minimum. Failure leaves direct
-P2P and local discovery available. It does not enable LAN compatibility or
-silently select a user-configured relay.
+minutes. Catalog retries also obey the 30-second minimum. Failure leaves the
+direct built-ins, direct P2P, and local discovery available. It does not enable
+LAN compatibility or silently select a user-configured relay.
 
 Node shutdown aborts and joins the worker before closing the endpoint.
 Dropping a partially constructed node starts no worker. Dropping a live node
 also aborts the worker through its owned task handle.
 
-The existing relay overview receives only actually installed URLs. A bundled
-candidate is not marked in effect before credential issuance. Catalog-driven
-URL changes do not imply that a settings restart is pending. Managed tokens
-never become user-configured credentials.
+The existing relay overview receives all actually installed URLs: direct
+built-ins at bind and the managed relay only after credential issuance. A
+managed candidate is not marked in effect before credential issuance.
+Catalog-driven URL changes do not imply that a settings restart is pending.
+Managed tokens never become user-configured credentials.
 
 ## Resource and security bounds
 

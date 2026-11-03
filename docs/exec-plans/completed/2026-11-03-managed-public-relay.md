@@ -3,6 +3,14 @@
 Status: Engine implementation, local acceptance, and live managed-relay
 connection acceptance complete. Native devices and publication remain skipped.
 
+## 2026-11-03 amendment: built-in relay access classes
+
+The implementation below originally replaced the four public n0 built-ins with
+the Shanghai managed candidate. The final design keeps the four n0 relays as
+direct built-ins installed at bind and appends the credential-backed Shanghai
+relay after issuance. Catalog replacement applies only to managed candidates;
+a Cloud outage or failed credential leaves the direct built-ins available.
+
 ## Ownership and contract
 
 The existing network node owns one managed-relay runtime. The host starts and

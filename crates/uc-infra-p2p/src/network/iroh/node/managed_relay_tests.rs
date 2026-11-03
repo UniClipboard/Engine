@@ -26,9 +26,15 @@ async fn custom_and_lan_only_nodes_do_not_start_managed_relay_runtime() {
 
 #[tokio::test]
 async fn managed_runtime_is_owned_and_joined_by_node_shutdown() {
-    let builder = IrohNodeBuilder::bind(&identity_store(), IrohNodeConfig::default())
-        .await
-        .unwrap();
+    let builder = IrohNodeBuilder::bind(
+        &identity_store(),
+        IrohNodeConfig {
+            managed_relays: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     assert!(builder.managed_relay.is_some());
     let node = builder.spawn();
     assert!(node.managed_relay.is_some());
@@ -46,9 +52,15 @@ async fn live_managed_relay_accepts_current_endpoint_credential() {
     };
     let installed = Arc::new(AtomicBool::new(false));
     let observed = installed.clone();
-    let mut builder = IrohNodeBuilder::bind(&identity_store(), IrohNodeConfig::default())
-        .await
-        .unwrap();
+    let mut builder = IrohNodeBuilder::bind(
+        &identity_store(),
+        IrohNodeConfig {
+            managed_relays: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     builder.track_managed_relays(Arc::new(move |urls| {
         if !urls.is_empty() {
             observed.store(true, Ordering::SeqCst);

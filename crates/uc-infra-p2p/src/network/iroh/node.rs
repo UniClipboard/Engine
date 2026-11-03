@@ -392,7 +392,8 @@ pub struct IrohNodeConfig {
     /// （pkarr publish + DNS lookup + relay fallback）。
     pub disable_relays: bool,
     /// 自定义路由的 Relay 地址；启用时必须非空并翻译为 `RelayMode::Custom`。
-    /// 受管路由由 Cloud 凭据决定实际地址，绑定时使用空 RelayMap。
+    /// 内置路由此列表是公共 relay，绑定后直接安装。
+    /// 需要匿名凭据的受管 relay 不在此列表，由 Cloud 凭据决定实际地址。
     /// LAN-only 路由不使用此列表，也不请求 Cloud。
     pub relay_urls: Vec<String>,
     /// 使用匿名 Cloud 受管 Relay；仅在非 LAN-only 且未选择自定义路由时启用。
@@ -442,13 +443,13 @@ pub struct IrohNodeConfig {
 }
 
 impl Default for IrohNodeConfig {
-    /// 默认配置启用匿名受管 Relay，内置列表只提供初始候选。
+    /// 默认只安装静态 relay，不启动受管 worker；Engine 组装层在 BuiltIn 路由下显式启用。
     fn default() -> Self {
         Self {
             rendezvous_base_url: None,
             disable_relays: false,
             relay_urls: RelayRouting::BuiltIn.effective_urls(&[]),
-            managed_relays: true,
+            managed_relays: false,
             relay_access_tokens: BTreeMap::new(),
             allow_overlay_network_addrs: false,
             congestion_controller: CongestionController::default(),
@@ -613,8 +614,8 @@ fn relay_mode_from_config(config: &IrohNodeConfig) -> Result<RelayMode, IrohNode
         return Ok(RelayMode::Disabled);
     }
 
-    if config.managed_relays {
-        // 目录地址不是授权。绑定时不安装任何未取得凭据的 Relay。
+    if config.managed_relays && config.relay_urls.is_empty() {
+        // 目录地址不是授权。没有公共基线时，受管 Relay 只在取得凭据后安装。
         return Ok(RelayMode::Custom(iroh::RelayMap::empty()));
     }
 
@@ -2787,6 +2788,39 @@ mod tests {
                 RelayUrlProblem::NoneConfigured
             ))
         ));
+    }
+
+    /// 内置路由：公共 relay 直接进入 RelayMap，受管候选只在取证后追加。
+    #[test]
+    fn relay_mode_built_in_installs_direct_relays_and_leaves_managed_candidate_out() {
+        use uc_core::settings::relay_routing::{BuiltinRelayAccess, BUILTIN_RELAYS};
+
+        let cfg = IrohNodeConfig {
+            managed_relays: true,
+            ..Default::default()
+        };
+        assert!(cfg.managed_relays);
+        let RelayMode::Custom(map) = relay_mode_from_config(&cfg).expect("relay mode") else {
+            panic!("expected custom relay mode");
+        };
+        let urls = map.urls::<Vec<_>>();
+        let direct = BUILTIN_RELAYS
+            .iter()
+            .filter(|relay| relay.access == BuiltinRelayAccess::Direct)
+            .collect::<Vec<_>>();
+        let managed = BUILTIN_RELAYS
+            .iter()
+            .filter(|relay| relay.access == BuiltinRelayAccess::AnonymousCredential)
+            .collect::<Vec<_>>();
+        assert_eq!(urls.len(), direct.len());
+        assert!(!managed.is_empty());
+        for relay in direct {
+            assert!(urls.iter().any(|url| url.as_str() == relay.url));
+        }
+        for relay in managed {
+            let url: RelayUrl = relay.url.parse().expect("managed relay URL");
+            assert!(map.get(&url).is_none());
+        }
     }
 
     #[test]

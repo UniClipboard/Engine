@@ -1,15 +1,18 @@
 # ADR-031：内置 relay 列表由产品持有
 
-## 2026-11-03 amendment: anonymous managed default
+## 2026-11-03 amendment: built-in relay access classes
 
-The [managed public relay design](../managed-public-relay.md) supersedes the
-static n0 default list and the shared construction path described below.
-Core now bundles one Shanghai candidate. A successful Cloud catalog can update
-or remove it. Managed routing starts with an empty relay map and installs only
-short-lived endpoint-bound credentials. Custom routing keeps its existing
-explicit URLs and secure-storage credentials. The routing precedence and the
-separation from user settings remain unchanged. The original decision below
-is retained as historical rationale.
+The [managed public relay design](../managed-public-relay.md) adds a second
+class of built-in relay. Core keeps the public n0 relays as direct built-ins:
+they are installed at bind and need no credential. Core also bundles one
+product-managed Shanghai candidate (`cn-shanghai-1`) that requires a
+short-lived anonymous credential from the Cloud control plane. BuiltIn routing
+installs the direct built-ins first and appends the managed relay only after
+credential issuance. A successful Cloud catalog can replace or remove the
+managed candidates, never the direct built-ins. Custom routing keeps its
+existing explicit URLs and secure-storage credentials. The routing precedence
+and the separation from user settings remain unchanged. The original decision
+below is retained as historical rationale.
 
 - **状态**：已采纳（连通性与下游展示的验收范围见执行计划 042）
 - **日期**：2026-10-01
