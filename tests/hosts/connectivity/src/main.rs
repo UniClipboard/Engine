@@ -9,6 +9,7 @@ mod content;
 #[cfg(feature = "current-engine")]
 mod network_faults;
 mod observe;
+mod sqlite_diagnostics;
 mod sync_preferences;
 
 use std::collections::HashMap;
@@ -683,6 +684,7 @@ fn startup_summary(progress: &uc_engine::StartupProgress) -> Result<Value> {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
+    sqlite_diagnostics::install()?;
     let mut lines = io::stdin().lock().lines();
     let start: Value = serde_json::from_str(&lines.next().context("missing startup request")??)?;
     let root = PathBuf::from(string(&start, "root")?);
