@@ -385,7 +385,7 @@ jobs:
         id: workspace_tests
         run: |
           rm -f target/nextest/ci/junit.xml
-          bash scripts/testing/run-test-group.sh workspace
+          bash scripts/testing/run-test-group.sh workspace --no-fail-fast
         env:
           # Linux 内联帧可能只有短名称；校验实际可用符号，完整符号由 macOS checks job 校验。
           UC_EXPECT_DIAGNOSTIC_STACK: available
