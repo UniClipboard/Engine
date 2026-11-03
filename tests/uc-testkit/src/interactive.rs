@@ -1,7 +1,7 @@
 //! 有界交互进程：调用方串行请求，退出时必须显式等待回收。
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{fs::File, path::Path, process::Stdio, time::Duration};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -24,11 +24,15 @@ pub struct InteractiveProcess {
     reader: JoinHandle<()>,
 }
 impl InteractiveProcess {
-    pub fn spawn(binary: &Path) -> Result<Self> {
+    pub fn spawn(binary: &Path, stderr: Option<&Path>) -> Result<Self> {
+        let stderr = match stderr {
+            Some(path) => Stdio::from(File::create(path)?),
+            None => Stdio::null(),
+        };
         let mut child = Command::new(binary)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .kill_on_drop(true)
             .spawn()?;
         let input = child.stdin.take().context("child input missing")?;

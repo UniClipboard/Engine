@@ -86,11 +86,8 @@ enum Action {
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    if execute().await.is_err() {
-        let _ = writeln!(
-            io::stderr(),
-            "benchmark failed; inspect the result artifact"
-        );
+    if let Err(error) = execute().await {
+        let _ = writeln!(io::stderr(), "benchmark failed: {error}");
         std::process::exit(1);
     }
 }

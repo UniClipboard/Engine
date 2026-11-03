@@ -21,6 +21,8 @@ parser.add_argument('--environment-wait-seconds', type=int, default=3600,
 parser.add_argument('--scenarios', nargs='+', default=['startup', 'disconnected', 'connected', 'text'],
                     choices=['startup', 'disconnected', 'connected', 'text'])
 args = parser.parse_args()
+if len(set(args.scenarios)) != len(args.scenarios):
+    parser.error('duplicate --scenarios values are not allowed')
 if args.reference_only == (args.candidate_host is not None):
     parser.error('select --reference-only or provide --candidate-host')
 if not 0 <= args.environment_wait_seconds <= 7200:
@@ -89,8 +91,19 @@ def summarize():
     return result
 
 
+def validate_summary(summary):
+    for scenario, roles in summary.items():
+        for role, metrics in roles.items():
+            for metric, value in metrics.items():
+                if value['n'] != 6:
+                    raise RuntimeError(
+                        f'{scenario}/{role}/{metric}: expected 6 observations, got {value["n"]}')
+
+
 def checkpoint(complete=False):
     summary = summarize()
+    if complete:
+        validate_summary(summary)
     value = {'schema_version': 1, 'passed': complete and not failures, 'complete': complete,
              'acceptance_only': args.acceptance_only, 'reference_only': args.reference_only,
              'reference_approved': False, 'state': 'passed' if complete and not failures else 'failed' if failures else 'running',

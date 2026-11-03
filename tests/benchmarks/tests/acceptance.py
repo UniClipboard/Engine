@@ -40,12 +40,17 @@ for case in ['smoke', 'timeout', 'host-crash', 'collector-crash', 'controller-in
 # 整个监督进程被强杀后，控制器通过管道 EOF 结束自身进程组；下次运行回收私有租约。
 killed=root/'supervisor-killed'
 process=subprocess.Popen([a.binary,'self-test','--host',a.host,'--output',str(killed),'--case','full-text'])
-deadline=time.monotonic()+30
-while not (killed/'b.jsonl').exists():
-    assert process.poll() is None and time.monotonic()<deadline
-    time.sleep(.05)
-process.kill()
-process.wait(timeout=10)
+try:
+    deadline=time.monotonic()+30
+    while not (killed/'b.jsonl').exists():
+        assert process.poll() is None and time.monotonic()<deadline
+        time.sleep(.05)
+    process.kill()
+    process.wait(timeout=10)
+finally:
+    if process.poll() is None:
+        process.kill()
+        process.wait(timeout=10)
 time.sleep(1)
 recovery=root/'stale-recovery'
 subprocess.run([a.binary,'self-test','--host',a.host,'--output',str(recovery),'--case','smoke'],check=True,timeout=180)

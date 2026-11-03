@@ -43,6 +43,7 @@ queued=json.loads((a.output/'queued/suite.json').read_text())
 assert queued['passed'] and queued['complete'] and queued['reference_only']
 assert len(queued['runs'])==7 and sum(not row['warmup'] for row in queued['runs'])==6
 assert queued['environment_events'] and not queued['failures']
+assert any(event['state']=='resumed' for event in queued['environment_events'])
 assert list(queued['summary']['startup'])==['a']
 fixture.write_text(json.dumps({'binary':str(a.binary.resolve()),'crash':True}))
 failed=subprocess.run(command(a.output/'host-failed'),timeout=240)

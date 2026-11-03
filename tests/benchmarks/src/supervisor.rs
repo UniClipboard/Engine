@@ -135,8 +135,15 @@ pub async fn run(
     if matches!(outcome, "timeout" | "controller-interrupt") && fault == outcome {
         report::write(&output.join("fault.json"), &json!({"injected":fault}))?;
     }
+    let mut summarize_error = None;
     let metrics = if outcome == "passed" && work["passed"] == true {
-        report::summarize(output).ok()
+        match report::summarize(output) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                summarize_error = Some(format!("{error}"));
+                None
+            }
+        }
     } else {
         None
     };
@@ -159,10 +166,14 @@ pub async fn run(
     if let Some(value) = &metrics {
         report::write(&output.join("metrics.json"), value)?;
     }
-    let passed = outcome == "passed" && cleaned && work["passed"] == true && metrics.is_some();
+    let passed = completion.is_ok()
+        && outcome == "passed"
+        && cleaned
+        && work["passed"] == true
+        && metrics.is_some();
     report::write(
         &output.join("result.json"),
-        &json!({"schema_version":1,"scenario_version":SCENARIO_VERSION,"scenario":kind,"acceptance_only":acceptance_only,"recovered_stale_lease":recovered,"supervisor_outcome":outcome,"passed":passed,"cleanup":if cleaned {"completed"} else {"failed"},"work":work}),
+        &json!({"schema_version":1,"scenario_version":SCENARIO_VERSION,"scenario":kind,"acceptance_only":acceptance_only,"recovered_stale_lease":recovered,"supervisor_outcome":outcome,"passed":passed,"cleanup":if cleaned {"completed"} else {"failed"},"summarize_error":summarize_error,"work":work}),
     )?;
     report::manifest(output)?;
     ensure!(passed, "scenario failed");

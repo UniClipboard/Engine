@@ -34,12 +34,35 @@ def digest(path):
 host_source=hashlib.sha256()
 for path in sorted((root/'tests/hosts/connectivity/src').glob('*.rs')):
     host_source.update(path.name.encode());host_source.update(path.read_bytes())
+# 基准宿主覆盖层依赖这些公开 uc_engine 宿主 API；旧 revision 缺少时直接拒绝。
+required_host_api={
+    'crates/uc-engine/src/contract/host.rs':[
+        'pub trait HostSecureStorage',
+        'pub trait HostClipboard',
+        'pub trait HostClipboardChangeStream',
+        'pub trait HostFileAccess',
+    ],
+}
+
+def validate_host_api(snapshot, revision):
+    missing=[]
+    for relative,markers in required_host_api.items():
+        path=snapshot/relative
+        content=path.read_text() if path.is_file() else ''
+        missing.extend(marker for marker in markers if marker not in content)
+    if missing:
+        raise SystemExit(
+            f'unsupported baseline {revision}: missing required uc_engine host API marker(s) '
+            f'{", ".join(missing)} in {", ".join(sorted(required_host_api))}; select a revision '
+            f'that exports the host API used by the benchmark host overlay')
+
 revision=command('git','rev-parse',a.baseline)
 registered=False
 try:
     subprocess.run(['git','worktree','add','--detach',str(snapshot),revision],check=True)
     registered=True
     subprocess.run(['git','-c','url.https://github.com/.insteadOf=git@github.com:','submodule','update','--init','--recursive'],cwd=snapshot,check=True)
+    validate_host_api(snapshot,revision)
     # 两个 Engine 使用相同宿主源码；不复制生产 crate。
     shutil.copytree(root/'tests/hosts/connectivity/src',snapshot/'tests/hosts/connectivity/src',dirs_exist_ok=True)
     manifest=snapshot/'tests/hosts/connectivity/Cargo.toml'

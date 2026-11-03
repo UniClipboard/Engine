@@ -137,12 +137,28 @@ pub fn verify(output: &Path) -> Result<()> {
         ensure!(actual.contains_key(required), "required artifact missing");
     }
     let result = read(&output.join("result.json"))?;
+    // uc-testkit 回执承载清理状态；缺失或未完成都不能算通过。
+    let receipt = scenario_receipt(output).unwrap_or(Value::Null);
     ensure!(
-        result["passed"] == true && result["cleanup"] == "completed",
+        result["passed"] == true
+            && result["cleanup"] == "completed"
+            && receipt["cleanup"] == "completed",
         "run failed"
     );
     summarize(output)?;
     Ok(())
+}
+fn scenario_receipt(output: &Path) -> Result<Value> {
+    let mut receipts = fs::read_dir(output)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let receipt = entry.path().join("result.json");
+            receipt.is_file().then_some(receipt)
+        });
+    let receipt = receipts.next().context("scenario receipt missing")?;
+    ensure!(receipts.next().is_none(), "multiple scenario receipts");
+    read(&receipt)
 }
 pub fn summarize(output: &Path) -> Result<Value> {
     let work = read(&output.join("work.json"))?;

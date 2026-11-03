@@ -26,12 +26,13 @@ impl Host {
         root: PathBuf,
         url: &str,
         output: Option<&Path>,
+        stderr: Option<&Path>,
         interval: u64,
         storage: Value,
     ) -> Result<Self> {
         fs::create_dir_all(&root)?;
         let started = Instant::now();
-        let mut process = InteractiveProcess::spawn(binary)?;
+        let mut process = InteractiveProcess::spawn(binary, stderr)?;
         let collector = if let Some(path) = output {
             Some(
                 Command::new(env::current_exe()?)
@@ -77,6 +78,19 @@ impl Host {
             );
         }
         Ok(())
+    }
+}
+async fn wait_for_samples(path: &Path, deadline: Duration) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let samples = fs::read_to_string(path)
+            .map(|content| content.lines().count())
+            .unwrap_or(0);
+        if samples >= 2 {
+            return Ok(());
+        }
+        ensure!(started.elapsed() < deadline, "collector sample deadline");
+        sleep(Duration::from_millis(50)).await;
     }
 }
 async fn wait_ready(host: &mut InteractiveProcess, join: bool) -> Result<()> {
@@ -182,6 +196,7 @@ async fn workload(
         root.join("a"),
         &rendezvous.uri(),
         Some(&output.join("a.jsonl")),
+        Some(&output.join("a.stderr.log")),
         interval,
         Value::Null,
     )
@@ -191,6 +206,7 @@ async fn workload(
         root.join("b"),
         &rendezvous.uri(),
         Some(&output.join("b.jsonl")),
+        Some(&output.join("b.stderr.log")),
         interval,
         Value::Null,
     )
@@ -277,6 +293,8 @@ async fn workload(
         }
     }
     windows.push(json!({"phase":"sampling_end","monotonic_ns":monotonic_ns()}));
+    wait_for_samples(&output.join("a.jsonl"), Duration::from_secs(10)).await?;
+    wait_for_samples(&output.join("b.jsonl"), Duration::from_secs(10)).await?;
     a.stop_collector().await?;
     b.stop_collector().await?;
     if !expected.is_empty() {
@@ -290,6 +308,7 @@ async fn workload(
             b.root.clone(),
             &rendezvous.uri(),
             None,
+            Some(&output.join("b-restart.stderr.log")),
             interval,
             storage,
         )

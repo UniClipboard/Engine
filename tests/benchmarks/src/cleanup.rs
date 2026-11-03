@@ -23,6 +23,34 @@ fn registry() -> Result<PathBuf> {
     );
     Ok(path)
 }
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // 复用已有 libc 绑定，避免仅为进程身份增加依赖。
+fn process_start_abstime(pid: i32) -> Result<Option<u64>> {
+    use libc::{proc_pid_rusage, rusage_info_v2, RUSAGE_INFO_V2};
+    use std::mem::MaybeUninit;
+    let mut usage = MaybeUninit::<rusage_info_v2>::zeroed();
+    let status = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V2, usage.as_mut_ptr().cast()) };
+    if status != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(None);
+        }
+        return Err(error.into());
+    }
+    Ok(Some(unsafe { usage.assume_init() }.ri_proc_start_abstime))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_start_abstime(_: i32) -> Result<Option<u64>> {
+    Ok(None)
+}
+
+fn group_exists(group: i32) -> bool {
+    let status = unsafe { libc::kill(-group, 0) };
+    status == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
 pub fn recover() -> Result<bool> {
     let directory = registry()?;
     let lease = directory.join("lease.json");
@@ -42,11 +70,16 @@ pub fn recover() -> Result<bool> {
             group > 1 && group <= i32::MAX as i64,
             "invalid cleanup process group"
         );
-        ensure!(
-            unsafe { libc::kill(-(group as i32), 0) } != 0
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
-            "cleanup process group still active"
-        );
+        let group = group as i32;
+        if group_exists(group) {
+            let recorded = value["group_start_abstime"].as_u64();
+            let current = process_start_abstime(group)?;
+            // 只有记录的进程身份仍指向原进程组时才拒绝回收；PID 被无关进程组复用时允许回收。
+            ensure!(
+                !matches!((recorded, current), (Some(recorded), Some(current)) if recorded == current),
+                "cleanup process group still active"
+            );
+        }
     }
     let root = env::temp_dir().join(name);
     if root.exists() {
@@ -87,12 +120,17 @@ pub fn register(root: &Path, group: Option<i32>) -> Result<()> {
     if pending.exists() {
         fs::remove_file(&pending)?;
     }
+    let identity = match group {
+        Some(pid) => process_start_abstime(pid)?,
+        None => None,
+    };
     report::write(
         &pending,
-        &json!({"schema_version":1,"directory":name,"group":group}),
+        &json!({"schema_version":1,"directory":name,"group":group,"group_start_abstime":identity}),
     )?;
     fs::File::open(&pending)?.sync_all()?;
     fs::rename(pending, directory.join("lease.json"))?;
+    fs::File::open(&directory)?.sync_all()?;
     Ok(())
 }
 pub fn complete() -> Result<()> {
