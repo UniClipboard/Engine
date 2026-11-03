@@ -55,7 +55,8 @@
 //! [`RelayUrl`]: iroh_base::RelayUrl
 use std::{
     collections::{BTreeSet, HashMap},
-    net::{IpAddr, SocketAddr},
+    future::pending,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -76,11 +77,13 @@ use n0_future::{
     time::{self, Duration},
 };
 use n0_watcher::{Watchable, Watcher as _};
+use netwatch::netmon::{Monitor, State};
 use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
 use tokio::sync::{
     Mutex,
     mpsc::{self, error::TrySendError},
 };
+use tracing::instrument::WithSubscriber;
 use tracing::{Dispatch, Instrument, debug, dispatcher, error, info_span, trace, warn};
 
 /// The n0 local service name.
@@ -115,7 +118,7 @@ pub struct MdnsAddressLookup {
 
 #[derive(Debug)]
 enum Message {
-    Discovered(String, Peer),
+    Discovered(u64, String, Peer),
     Resolve(
         EndpointId,
         mpsc::Sender<Result<AddressLookupItem, AddressLookupError>>,
@@ -216,7 +219,23 @@ impl MdnsAddressLookupBuilder {
         self,
         endpoint_id: EndpointId,
     ) -> Result<MdnsAddressLookup, AddressLookupBuilderError> {
-        MdnsAddressLookup::new(endpoint_id, self.advertise, self.service_name, self.filter)
+        MdnsAddressLookup::new(endpoint_id, self, None)
+    }
+
+    /// Build a long-lived lookup that joins and sends on each local IPv4
+    /// interface, and refreshes its sockets after interface changes.
+    pub async fn build_multihomed(
+        self,
+        endpoint_id: EndpointId,
+    ) -> Result<MdnsAddressLookup, AddressLookupBuilderError> {
+        let monitor = match Monitor::new().with_subscriber(Dispatch::none()).await {
+            Ok(monitor) => Some(monitor),
+            Err(_) => {
+                warn!("mDNS network monitoring unavailable; retaining default interface behavior");
+                None
+            }
+        };
+        MdnsAddressLookup::new(endpoint_id, self, monitor)
     }
 }
 
@@ -272,26 +291,38 @@ impl MdnsAddressLookup {
     /// This relies on [`tokio::runtime::Handle::current`] and will panic if called outside of the context of a tokio runtime.
     fn new(
         endpoint_id: EndpointId,
-        advertise: bool,
-        service_name: String,
-        filter: AddrFilter,
+        builder: MdnsAddressLookupBuilder,
+        monitor: Option<Monitor>,
     ) -> Result<Self, AddressLookupBuilderError> {
+        let MdnsAddressLookupBuilder {
+            advertise,
+            service_name,
+            filter,
+        } = builder;
         debug!("Creating new Mdns service");
         let (send, mut recv) = mpsc::channel(64);
         let task_sender = send.clone();
         let rt = tokio::runtime::Handle::current();
-        let address_lookup = MdnsAddressLookup::spawn_discoverer(
+        let mut network = monitor.as_ref().map(Monitor::interface_state);
+        let initial_interfaces = network
+            .as_mut()
+            .map(|watch| multicast_ipv4(&watch.get()))
+            .unwrap_or_default();
+        let mut generation = 0u64;
+        let mut address_lookup = MdnsAddressLookup::spawn_discoverer(
             endpoint_id,
-            advertise,
             task_sender.clone(),
-            BTreeSet::new(),
-            service_name,
+            generation,
+            &service_name,
             &rt,
+            initial_interfaces,
         )?;
 
         let local_addrs: Watchable<Option<EndpointData>> = Watchable::default();
         let mut addrs_change = local_addrs.watch();
         let address_lookup_fut = async move {
+            let _monitor = monitor;
+            let mut published = None;
             let mut endpoint_addrs: HashMap<PublicKey, Peer> = HashMap::default();
             let mut subscribers = Subscribers::new();
             let mut last_id = 0;
@@ -307,25 +338,45 @@ impl MdnsAddressLookup {
                         msg
                     }
                     Ok(Some(data)) = addrs_change.updated() => {
-                        tracing::trace!(?data, "Mdns address changed");
-                        address_lookup.remove_all();
-
-                        // apply user-supplied filter
                         let data = data.apply_filter(&filter).into_owned();
-
-
-                        let addrs =
-                            MdnsAddressLookup::socketaddrs_to_addrs(data.ip_addrs());
-                        for addr in addrs {
-                            address_lookup.add(addr.0, addr.1)
+                        publish_addresses(&address_lookup, &data);
+                        published = Some(data);
+                        continue;
+                    }
+                    changed = async {
+                        match network.as_mut() {
+                            Some(watch) => watch.updated().await,
+                            None => pending().await,
                         }
-                        if let Some(relay) = data.relay_urls().next()
-                            && let Err(err) = address_lookup.set_txt_attribute(RELAY_URL_ATTRIBUTE.to_string(), Some(relay.to_string()))  {
-                                warn!("Failed to set the relay url in mDNS: {err:?}");
-                        }
-                        if let Some(user_data) = data.user_data()
-                            && let Err(err) = address_lookup.set_txt_attribute(USER_DATA_ATTRIBUTE.to_string(), Some(user_data.to_string())) {
-                                warn!("Failed to set the user-defined data in mDNS: {err:?}");
+                    } => {
+                        let Ok(state) = changed else {
+                            network = None;
+                            warn!("mDNS network monitoring stopped");
+                            continue;
+                        };
+                        // 同一 IPv4 地址的链路重启也要重新加入组播组。仅替换 socket
+                        // 和发现工作，保留地址目录订阅及在途解析。
+                        let next = generation.wrapping_add(1);
+                        match MdnsAddressLookup::spawn_discoverer(
+                            endpoint_id,
+                            task_sender.clone(),
+                            next,
+                            &service_name,
+                            &rt,
+                            multicast_ipv4(&state),
+                        ) {
+                            Ok(replacement) => {
+                                if let Some(data) = &published {
+                                    publish_addresses(&replacement, data);
+                                }
+                                address_lookup = replacement;
+                                generation = next;
+                                // 原发现器已无法为其缓存发送到期事件。
+                                for (endpoint_id, _) in endpoint_addrs.drain() {
+                                    subscribers.send(DiscoveryEvent::Expired { endpoint_id });
+                                }
+                            }
+                            Err(_) => warn!("mDNS interface refresh failed; retaining previous sockets"),
                         }
                         continue;
                     }
@@ -341,7 +392,10 @@ impl MdnsAddressLookup {
                     Some(msg) => msg,
                 };
                 match msg {
-                    Message::Discovered(discovered_endpoint_id, peer_info) => {
+                    Message::Discovered(observed_generation, discovered_endpoint_id, peer_info) => {
+                        if observed_generation != generation {
+                            continue;
+                        }
                         trace!(
                             ?discovered_endpoint_id,
                             ?peer_info,
@@ -502,11 +556,11 @@ impl MdnsAddressLookup {
 
     fn spawn_discoverer(
         endpoint_id: PublicKey,
-        advertise: bool,
         sender: mpsc::Sender<Message>,
-        socketaddrs: BTreeSet<SocketAddr>,
-        service_name: String,
+        generation: u64,
+        service_name: &str,
         rt: &tokio::runtime::Handle,
+        interfaces: Vec<Ipv4Addr>,
     ) -> Result<DropGuard, AddressLookupBuilderError> {
         let spawn_rt = rt.clone();
         let callback = move |endpoint_id: &str, peer: &Peer| {
@@ -517,7 +571,7 @@ impl MdnsAddressLookup {
             let peer = peer.clone();
             spawn_rt.spawn(async move {
                 sender
-                    .send(Message::Discovered(endpoint_id, peer))
+                    .send(Message::Discovered(generation, endpoint_id, peer))
                     .await
                     .ok();
             });
@@ -525,15 +579,10 @@ impl MdnsAddressLookup {
         let endpoint_id_str = data_encoding::BASE32_NOPAD
             .encode(endpoint_id.as_bytes())
             .to_ascii_lowercase();
-        let mut discoverer = Discoverer::new_interactive(service_name, endpoint_id_str)
+        let discoverer = Discoverer::new_interactive(service_name.to_owned(), endpoint_id_str)
             .with_callback(callback)
-            .with_ip_class(IpClass::Auto);
-        if advertise {
-            let addrs = MdnsAddressLookup::socketaddrs_to_addrs(socketaddrs.iter());
-            for addr in addrs {
-                discoverer = discoverer.with_addrs(addr.0, addr.1);
-            }
-        }
+            .with_ip_class(IpClass::Auto)
+            .with_multicast_interfaces_v4(interfaces);
         // acto会在创建时保存当前span；长期发现工作不能保存启动请求的parent。
         dispatcher::with_default(&Dispatch::none(), || discoverer.spawn(rt))
             .map_err(|e| AddressLookupBuilderError::from_err("mdns", e))
@@ -550,6 +599,44 @@ impl MdnsAddressLookup {
                 .or_insert(vec![socketaddr.ip()]);
         }
         addrs
+    }
+}
+
+fn multicast_ipv4(state: &State) -> Vec<Ipv4Addr> {
+    state
+        .interfaces
+        .values()
+        .filter(|interface| interface.is_up())
+        .flat_map(|interface| interface.addrs())
+        .filter_map(|network| match network.addr() {
+            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() => {
+                Some(ip)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn publish_addresses(lookup: &DropGuard, data: &EndpointData) {
+    lookup.remove_all();
+    for (port, ips) in MdnsAddressLookup::socketaddrs_to_addrs(data.ip_addrs()) {
+        lookup.add(port, ips);
+    }
+    if let Some(relay) = data.relay_urls().next()
+        && lookup
+            .set_txt_attribute(RELAY_URL_ATTRIBUTE.to_string(), Some(relay.to_string()))
+            .is_err()
+    {
+        warn!("Failed to set the relay url in mDNS");
+    }
+    if let Some(user_data) = data.user_data()
+        && lookup
+            .set_txt_attribute(USER_DATA_ATTRIBUTE.to_string(), Some(user_data.to_string()))
+            .is_err()
+    {
+        warn!("Failed to set the user-defined data in mDNS");
     }
 }
 

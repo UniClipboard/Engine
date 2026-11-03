@@ -899,7 +899,8 @@ impl IrohNodeBuilder {
         let secret = identity_store.ensure_secret_key()?;
         let relay_mode = relay_mode_from_config(&config)?;
         let mdns = MdnsAddressLookup::builder()
-            .build(secret.public())
+            .build_multihomed(secret.public())
+            .await
             .map_err(|source| IrohNodeError::Discovery {
                 source: anyhow::Error::new(source),
             })?;
