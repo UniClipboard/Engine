@@ -382,7 +382,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: engine-workspace-failure
-          path: target/test-reports/workspace.xml
+          path: |
+            target/test-reports/workspace.xml
+            target/test-artifacts/ci/collector-unavailable
           if-no-files-found: ignore
 
       - name: Install just for current-authority registration proof
