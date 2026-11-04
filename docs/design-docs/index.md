@@ -33,6 +33,8 @@
 
 ## 功能设计
 
+- [匿名受管公共 relay](managed-public-relay.md)
+
 - [配对生命周期与终态收尾](pairing-lifecycle.md)
 - [已配对设备自动连接](automatic-peer-connections.md)
 - [设备发现与候选目录](peer-discovery.md)

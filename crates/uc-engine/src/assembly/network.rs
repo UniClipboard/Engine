@@ -48,7 +48,8 @@ use uc_infra_p2p::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 /// - `allow_relay_fallback`：业务正向语义，由 `uc-core::Settings.network` 透传
 /// - `allow_overlay_network_addrs`：业务正向语义，由 `uc-core::Settings.network`
 ///   透传；专业用户开关，控制是否把 VPN/overlay 类虚拟网卡 IP 作为 iroh 直连候选
-/// - `relay_urls`：节点实际使用的 relay URL 列表（LAN-only 时不参与 bind）
+/// - `relay_urls`：绑定后直接安装的 relay URL 列表；内置路由为公共 relay，
+///   受管 relay 由 Cloud 凭据追加（LAN-only 时不参与 bind）
 /// - `rendezvous_base_url`：`None` 走 `RENDEZVOUS_BASE_URL` 默认；production 调
 ///   用方传 `None`；集成测试覆盖 override
 pub fn relay_policy_to_iroh_config(
@@ -64,6 +65,7 @@ pub fn relay_policy_to_iroh_config(
         // ↓ 正向同名字段，直接搬运不取反。
         allow_overlay_network_addrs,
         relay_urls,
+        managed_relays: false,
         relay_access_tokens: Default::default(),
         congestion_controller,
         rendezvous_base_url,

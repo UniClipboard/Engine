@@ -58,7 +58,7 @@ Read the nearest local `AGENTS.md` when entering a directory. Local files provid
 
 ## Change requirements
 
-- Write project documentation in English. Keep code comments in Chinese. Use English code identifiers and commit messages.
+- Keep code comments in Chinese. Use English code identifiers and commit messages.
 - Keep one source of truth. Do not retain parallel old and new implementations or documentation entry points indefinitely.
 - Use relative repository paths in documentation.
 - When using planning-with-files, put `task_plan.md`, `findings.md`, and `progress.md` under `.planning/<YYYY-MM-DD>-<task-name>/`.

@@ -23,6 +23,187 @@ use uc_engine::{
 
 const PASSPHRASE: &str = "quick-panel-capability-passphrase";
 
+#[tokio::test(flavor = "multi_thread")]
+async fn managed_relay_overview_preserves_custom_and_lan_only_precedence_across_restart() {
+    use uc_engine::{CustomRelayMutation, NetworkSettingsPatch, RelayRoutingMode};
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (engine, _events) = start(root.path(), &storage).await;
+    create_space(&engine).await;
+    let OperationResult::RelayOverview(overview) =
+        engine.execute(Operation::QueryRelayOverview).await.unwrap()
+    else {
+        panic!("expected relay overview");
+    };
+    assert_eq!(overview.saved_mode, RelayRoutingMode::BuiltIn);
+    assert_eq!(overview.applied_mode, Some(RelayRoutingMode::BuiltIn));
+    assert!(!overview.change_pending);
+    assert!(overview
+        .entries
+        .iter()
+        .any(|entry| entry.region_id.as_deref() == Some("cn-shanghai")));
+    // 公共内置 relay 在绑定时直接安装；受管上海 relay 不因候选存在而算作生效。
+    assert!(overview
+        .entries
+        .iter()
+        .any(|entry| entry.region_id.as_deref() == Some("na-east") && entry.in_effect));
+    assert!(overview
+        .entries
+        .iter()
+        .all(|entry| !entry.credential_configured));
+    engine
+        .execute(Operation::MutateCustomRelay(CustomRelayMutation::Add {
+            url: "http://127.0.0.1:1".into(),
+            access_token: Some(SecretString::new("PRIVATE_CUSTOM_RELAY")),
+        }))
+        .await
+        .unwrap();
+    engine.shutdown_until_complete().await.unwrap();
+
+    let (engine, _events) = start(root.path(), &storage).await;
+    let OperationResult::RelayOverview(overview) =
+        engine.execute(Operation::QueryRelayOverview).await.unwrap()
+    else {
+        panic!("expected relay overview");
+    };
+    assert_eq!(overview.saved_mode, RelayRoutingMode::Custom);
+    assert_eq!(overview.applied_mode, Some(RelayRoutingMode::Custom));
+    assert!(!overview.change_pending);
+    assert!(overview
+        .entries
+        .iter()
+        .any(|entry| entry.url == "http://127.0.0.1:1/"
+            && entry.in_effect
+            && entry.credential_configured));
+    assert_eq!(
+        storage
+            .0
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.starts_with("relay_access_token:"))
+            .count(),
+        1
+    );
+    let settings = engine.execute(Operation::QuerySettings).await.unwrap();
+    assert!(!format!("{settings:?} {overview:?}").contains("PRIVATE_CUSTOM_RELAY"));
+    engine
+        .execute(Operation::UpdateSettings(Box::new(SettingsPatch {
+            network: Some(NetworkSettingsPatch {
+                allow_relay_fallback: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })))
+        .await
+        .unwrap();
+    engine.shutdown_until_complete().await.unwrap();
+
+    let (engine, _events) = start(root.path(), &storage).await;
+    let OperationResult::RelayOverview(overview) =
+        engine.execute(Operation::QueryRelayOverview).await.unwrap()
+    else {
+        panic!("expected relay overview");
+    };
+    assert_eq!(overview.saved_mode, RelayRoutingMode::Disabled);
+    assert_eq!(overview.applied_mode, Some(RelayRoutingMode::Disabled));
+    assert!(!overview.change_pending);
+    assert!(overview.entries.iter().all(|entry| !entry.in_effect));
+    engine.shutdown_until_complete().await.unwrap();
+    let directory = std::env::var_os("UC_MANAGED_RELAY_ARTIFACT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/managed-relay-acceptance")
+        });
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("engine-routing.json"), b"{\"default_anonymous\":true,\"custom_precedence\":true,\"lan_only_precedence\":true,\"restart\":true,\"settings_redacted\":true}\n").unwrap();
+}
+
+/// 真实取得匿名凭据后，概览必须把受管内置 relay 标成已生效，且不产生重复条目。
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires live anonymous Cloud issuance and the managed public relay"]
+async fn live_engine_overview_marks_installed_managed_relay_in_effect() {
+    use uc_engine::{RelayEntrySource, RelayRoutingMode};
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = MemorySecureStorage::default();
+    let (engine, _events) = start(root.path(), &storage).await;
+    create_space(&engine).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut installed = false;
+    while std::time::Instant::now() < deadline {
+        let OperationResult::RelayOverview(overview) =
+            engine.execute(Operation::QueryRelayOverview).await.unwrap()
+        else {
+            panic!("expected relay overview");
+        };
+        if overview
+            .entries
+            .iter()
+            .any(|entry| entry.region_id.as_deref() == Some("cn-shanghai") && entry.in_effect)
+        {
+            installed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let OperationResult::RelayOverview(overview) =
+        engine.execute(Operation::QueryRelayOverview).await.unwrap()
+    else {
+        panic!("expected relay overview");
+    };
+    let urls: Vec<&str> = overview
+        .entries
+        .iter()
+        .map(|entry| entry.url.as_str())
+        .collect();
+    let unique_urls = urls.iter().collect::<std::collections::HashSet<_>>().len();
+    let built_in_in_effect = overview
+        .entries
+        .iter()
+        .filter(|entry| entry.source == RelayEntrySource::BuiltIn && entry.in_effect)
+        .count();
+    let custom_entries = overview
+        .entries
+        .iter()
+        .filter(|entry| entry.source == RelayEntrySource::Custom)
+        .count();
+    engine.shutdown_until_complete().await.unwrap();
+
+    assert!(
+        installed,
+        "live Cloud issuance did not mark the managed relay in effect"
+    );
+    assert_eq!(overview.saved_mode, RelayRoutingMode::BuiltIn);
+    assert_eq!(overview.applied_mode, Some(RelayRoutingMode::BuiltIn));
+    assert!(!overview.change_pending);
+    assert_eq!(built_in_in_effect, 5, "direct built-ins must stay applied");
+    assert_eq!(custom_entries, 0);
+    assert_eq!(urls.len(), unique_urls, "applied relays must not repeat");
+
+    let directory = std::env::var_os("UC_MANAGED_RELAY_ARTIFACT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/managed-relay-acceptance")
+        });
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("live-overview.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "managed_relay_in_effect": installed,
+            "built_in_in_effect": built_in_in_effect,
+            "relay_count": urls.len(),
+            "unique_relay_count": unique_urls,
+            "change_pending": overview.change_pending,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 #[derive(Clone, Default)]
 struct MemorySecureStorage(Arc<Mutex<HashMap<String, Vec<u8>>>>);
 

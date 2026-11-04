@@ -63,6 +63,7 @@ pub async fn start(
         IrohNodeConfig {
             disable_relays: true,
             relay_urls: Vec::new(),
+            managed_relays: false,
             bind_port: Some(port),
             ..IrohNodeConfig::default()
         },

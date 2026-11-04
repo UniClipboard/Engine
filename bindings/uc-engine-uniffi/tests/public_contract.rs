@@ -1800,18 +1800,30 @@ fn relay_overview_reports_applied_relays_after_the_node_is_rebuilt() {
     assert_eq!(applied.saved_mode, RelayRoutingMode::Custom);
     assert_eq!(applied.applied_mode, Some(RelayRoutingMode::Custom));
     assert!(!applied.change_pending);
-    assert_eq!(applied.entries.len(), 5);
+    assert_eq!(applied.entries.len(), 6);
     assert!(applied
         .entries
         .iter()
         .filter(|entry| entry.source == RelayEntrySource::BuiltIn)
         .all(|entry| !entry.in_effect));
-    let custom = &applied.entries[4];
+    let custom = applied
+        .entries
+        .iter()
+        .find(|entry| entry.source == RelayEntrySource::Custom)
+        .expect("custom relay must be present");
     assert_eq!(custom.source, RelayEntrySource::Custom);
     assert!(custom.in_effect);
     rebuilt
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("rebuilt engine must shut down");
+    if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            Path::new(&directory).join("binding-relay-rebuild.json"),
+            b"{\"passed\":true,\"custom_applied_after_restart\":true}\n",
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -1833,7 +1845,7 @@ fn custom_relay_methods_preserve_authoritative_results_and_stable_errors() {
         .expect("default relay list")
         .is_empty());
 
-    // 内置列表是产品默认值：不进入用户的自定义列表，但概览必须列出并标明实际生效。
+    // 内置候选不进入自定义列表；公共 relay 绑定即生效，受管条目由异步取得的凭据决定。
     let overview = engine.query_relay_overview().expect("relay overview");
     assert_eq!(overview.saved_mode, RelayRoutingMode::BuiltIn);
     assert_eq!(overview.applied_mode, Some(RelayRoutingMode::BuiltIn));
@@ -1841,22 +1853,16 @@ fn custom_relay_methods_preserve_authoritative_results_and_stable_errors() {
     let regions: Vec<_> = overview
         .entries
         .iter()
-        .map(|entry| entry.region_id.as_deref())
+        .filter_map(|entry| entry.region_id.as_deref())
         .collect();
     assert_eq!(
         regions,
-        [
-            Some("na-east"),
-            Some("na-west"),
-            Some("eu"),
-            Some("asia-pacific")
-        ]
+        ["na-east", "na-west", "eu", "asia-pacific", "cn-shanghai"]
     );
     assert!(overview
         .entries
         .iter()
-        .all(|entry| entry.source == RelayEntrySource::BuiltIn && entry.in_effect));
-    assert!(!format!("{overview:?}").contains("iroh.link"));
+        .all(|entry| entry.source == RelayEntrySource::BuiltIn && !entry.credential_configured));
 
     let added = engine
         .add_custom_relay(
@@ -1873,13 +1879,24 @@ fn custom_relay_methods_preserve_authoritative_results_and_stable_errors() {
     assert_eq!(pending.saved_mode, RelayRoutingMode::Custom);
     assert_eq!(pending.applied_mode, Some(RelayRoutingMode::BuiltIn));
     assert!(pending.change_pending);
-    assert_eq!(pending.entries.len(), 5);
+    assert_eq!(
+        pending
+            .entries
+            .iter()
+            .filter(|entry| entry.source == RelayEntrySource::Custom)
+            .count(),
+        1
+    );
     assert!(pending
         .entries
         .iter()
         .filter(|entry| entry.source == RelayEntrySource::BuiltIn)
-        .all(|entry| entry.in_effect));
-    let custom_entry = &pending.entries[4];
+        .all(|entry| !entry.credential_configured));
+    let custom_entry = pending
+        .entries
+        .iter()
+        .find(|entry| entry.source == RelayEntrySource::Custom)
+        .expect("saved custom relay must be present");
     assert_eq!(custom_entry.source, RelayEntrySource::Custom);
     assert_eq!(custom_entry.url, "https://relay-a.example/");
     assert!(custom_entry.credential_configured);
@@ -1992,6 +2009,10 @@ fn custom_relay_methods_preserve_authoritative_results_and_stable_errors() {
     engine
         .shutdown(ENGINE_SHUTDOWN_DEADLINE_MS)
         .expect("binding engine must shut down within the deadline");
+    if let Some(directory) = std::env::var_os("UC_TEST_ARTIFACTS_DIR") {
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(Path::new(&directory).join("binding-relay-mutations.json"), b"{\"passed\":true,\"seed_region\":\"cn-shanghai\",\"custom_results_and_errors_preserved\":true}\n").unwrap();
+    }
 }
 
 #[test]

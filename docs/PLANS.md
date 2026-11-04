@@ -20,6 +20,8 @@
 
 ## 当前专项计划
 
+- [匿名受管公共 relay（#371）](exec-plans/completed/2026-11-03-managed-public-relay.md)：Engine 实现、本地验收与真实匿名 relay 连接验收完成；真机与发布跳过。
+
 - [File-addressable receive snapshots (#368)](exec-plans/completed/2026-11-01-receive-item-progress.md): implementation and host verification complete; 61 receive E2E scenarios and both binding projections passed. Native devices, remote CI, and release publication were skipped.
 
 - [Process observability and failed-start release specification](exec-plans/active/2026-10-27-process-startup-release-spec.md): proposed; complete owners, source-matched bindings, native artifacts, and end-to-end acceptance remain incomplete.

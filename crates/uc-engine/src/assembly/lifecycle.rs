@@ -3,7 +3,7 @@
 //! 长期网络与当前 Space 会话在这里分别装配。仓库、设置与安全存储仍在
 //! 进程启动时只装配一次，由两个生命周期共同使用。
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::Context as _;
 
@@ -47,10 +47,12 @@ pub async fn build_network_runtime(
     let relay_urls = relay_routing.effective_urls(&prepared_network.custom_relay_urls);
     // 绑定成功前不得声称任何 relay 已生效；上一个节点的记录也不再有效。
     application.record_applied_relays(None);
+    // 内置路由的公共 relay 在绑定时直接安装；受管 relay 由 worker 取证后追加。
     let applied_relays = AppliedRelayRouting {
         routing: relay_routing,
         urls: relay_urls.clone(),
     };
+    let static_relay_urls = relay_urls.clone();
     let congestion_controller = prepared_network.congestion_controller;
     let mut iroh_config = crate::assembly::network::relay_policy_to_iroh_config(
         allow_relay_fallback,
@@ -59,7 +61,8 @@ pub async fn build_network_runtime(
         congestion_controller,
         rendezvous_base_url,
     );
-    // 内置 relay 不携带凭据；只有用户自定义路由才读取安全存储。
+    iroh_config.managed_relays = relay_routing == RelayRouting::BuiltIn;
+    // 受管 Relay 在内存中取得短期凭据；只有用户自定义路由读取安全存储。
     if relay_routing == RelayRouting::Custom {
         load_relay_access_tokens(&mut iroh_config, &prepared_network.relay_credentials);
     }
@@ -85,10 +88,41 @@ pub async fn build_network_runtime(
         Arc::clone(&space_setup.iroh_identity_storage),
         Arc::new(Sha256IdentityFingerprintFactory),
     );
-    let builder = IrohNodeBuilder::bind(&identity_store, iroh_config)
+    let mut builder = IrohNodeBuilder::bind(&identity_store, iroh_config)
         .await
         .context("Iroh network bind failed")?;
-    application.record_applied_relays(Some(applied_relays));
+    application.record_applied_relays(Some(applied_relays.clone()));
+    // 受管 worker 续期成功会重复上报同一集合；这里保留上次写入的集合，只记录真正变化。
+    let recorded_relay_urls = Arc::new(Mutex::new(applied_relays.urls));
+    let application = application.clone();
+    builder.track_managed_relays(Arc::new(move |managed_urls| {
+        // 受管 relay 增删只增减追加部分，公共内置 relay 始终保留在生效列表中。
+        let mut urls = static_relay_urls.clone();
+        for url in managed_urls {
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+        {
+            let mut recorded = recorded_relay_urls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *recorded == urls {
+                return;
+            }
+            *recorded = urls.clone();
+        }
+        uc_info!(
+            target: "settings.network",
+            mode = log_vocab_debug(&relay_routing),
+            relay_count = urls.len(),
+            "applied relay set changed"
+        );
+        application.record_applied_relays(Some(AppliedRelayRouting {
+            routing: relay_routing,
+            urls,
+        }));
+    }));
     Ok(builder.spawn())
 }
 
