@@ -59,7 +59,11 @@ The existing relay overview receives all actually installed URLs: direct
 built-ins at bind and the managed relay only after credential issuance. A
 managed candidate is not marked in effect before credential issuance.
 Catalog-driven URL changes do not imply that a settings restart is pending.
-Managed tokens never become user-configured credentials.
+Managed tokens never become user-configured credentials. The applied set is
+deduplicated and rebuilt from the direct built-ins on every report, so a
+withdrawn credential cannot leave a stale entry. A successful renewal that
+keeps the same destination does not rewrite the applied set or record another
+change.
 
 ## Resource and security bounds
 

@@ -24,8 +24,16 @@ just cargo test -p uc-engine --test search_and_settings_capabilities managed_rel
   > "$UC_MANAGED_RELAY_ARTIFACT_DIR/engine-routing.log" 2>&1
 live_exit=0
 if [[ "${UC_MANAGED_RELAY_LIVE:-0}" == 1 ]]; then
-  just cargo test -p uc-infra-p2p live_managed_relay_accepts_current_endpoint_credential --lib --locked -- --ignored \
-    > "$UC_MANAGED_RELAY_ARTIFACT_DIR/live.log" 2>&1 || live_exit=$?
+  if ! just cargo test -p uc-infra-p2p live_managed_relay_accepts_current_endpoint_credential --lib --locked -- --ignored \
+    > "$UC_MANAGED_RELAY_ARTIFACT_DIR/live.log" 2>&1; then
+    live_exit=1
+  fi
+  # Engine 侧断言：概览把实际安装的受管 relay 标成生效，且公共内置 relay 不被替换。
+  if ! just cargo test -p uc-engine --test search_and_settings_capabilities \
+    live_engine_overview_marks_installed_managed_relay_in_effect --locked -- --ignored \
+    > "$UC_MANAGED_RELAY_ARTIFACT_DIR/live-overview.log" 2>&1; then
+    live_exit=1
+  fi
 fi
 export UC_MANAGED_RELAY_LIVE_EXIT="$live_exit"
 python3 - <<'PY'

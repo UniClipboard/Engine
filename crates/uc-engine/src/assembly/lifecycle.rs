@@ -3,7 +3,7 @@
 //! 长期网络与当前 Space 会话在这里分别装配。仓库、设置与安全存储仍在
 //! 进程启动时只装配一次，由两个生命周期共同使用。
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::Context as _;
 
@@ -91,14 +91,35 @@ pub async fn build_network_runtime(
     let mut builder = IrohNodeBuilder::bind(&identity_store, iroh_config)
         .await
         .context("Iroh network bind failed")?;
-    application.record_applied_relays(Some(applied_relays));
+    application.record_applied_relays(Some(applied_relays.clone()));
+    // 受管 worker 续期成功会重复上报同一集合；这里保留上次写入的集合，只记录真正变化。
+    let recorded_relay_urls = Arc::new(Mutex::new(applied_relays.urls));
     let application = application.clone();
     builder.track_managed_relays(Arc::new(move |managed_urls| {
         // 受管 relay 增删只增减追加部分，公共内置 relay 始终保留在生效列表中。
         let mut urls = static_relay_urls.clone();
-        urls.extend(managed_urls);
+        for url in managed_urls {
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+        {
+            let mut recorded = recorded_relay_urls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *recorded == urls {
+                return;
+            }
+            *recorded = urls.clone();
+        }
+        uc_info!(
+            target: "settings.network",
+            mode = log_vocab_debug(&relay_routing),
+            relay_count = urls.len(),
+            "applied relay set changed"
+        );
         application.record_applied_relays(Some(AppliedRelayRouting {
-            routing: RelayRouting::BuiltIn,
+            routing: relay_routing,
             urls,
         }));
     }));
