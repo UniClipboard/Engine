@@ -18,17 +18,15 @@
 #[cfg(test)]
 use uuid::Uuid;
 
+use super::super::mdns_interfaces::MdnsInterfaceSnapshot;
 use super::blob_exchange::without_request_span;
 use super::discovery::endpoint_id;
 use futures_util::{stream, stream::BoxStream, StreamExt};
-#[cfg(any(test, feature = "test-util"))]
 use iroh::endpoint::BindOpts;
 use iroh::Watcher as _;
 use std::collections::BTreeMap;
 use std::fmt;
-#[cfg(any(test, feature = "test-util"))]
-use std::net::Ipv6Addr;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 #[cfg(not(any(test, feature = "test-util")))]
 use std::sync::Mutex;
@@ -49,7 +47,9 @@ use uc_sync_protocol::active_clipboard_pull::ACTIVE_CLIPBOARD_PULL_ALPN;
 use uc_sync_protocol::active_clipboard_state::ACTIVE_CLIPBOARD_ALPN;
 
 use super::admitted_connections::AdmittedConnections;
-use super::discovery::{DirectoryAddressLookupBuilder, DiscoveryRuntime};
+use super::discovery::{
+    ConfiguredPeerAddresses, DirectoryAddressLookupBuilder, DiscoveryRuntime, LifetimeMdns,
+};
 use super::protocol_router::ProtocolRouterBuilder;
 use super::session_generation::{
     SessionProtocolGenerationHandle, SessionProtocolHandlers, SessionProtocolHandlersBuilder,
@@ -59,7 +59,7 @@ use iroh::address_lookup::AddrFilter;
 use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
 use iroh::protocol::Router;
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, TransportAddr};
-use iroh_mdns_address_lookup::MdnsAddressLookup;
+use iroh_mdns_address_lookup::{MdnsAddressLookup, MulticastInterfacesV4, MulticastInterfacesV6};
 use noq_proto::congestion::{Bbr3Config, CubicConfig};
 use tracing::instrument::WithSubscriber;
 use tracing::{dispatcher, instrument, Dispatch};
@@ -407,17 +407,14 @@ pub struct IrohNodeConfig {
     /// `Cubic` (default) gives excellent LAN throughput; `Bbr3` may be
     /// better on lossy WAN paths. Mapped from `Settings.network`.
     pub congestion_controller: CongestionController,
-    /// Pin the iroh UDP socket to a fixed IPv4 port instead of an
-    /// OS-assigned ephemeral one (UniClipboard#900). `None` → bind
-    /// `0.0.0.0:0` (today's behavior). `Some(port)` → bind `0.0.0.0:port`
-    /// so the port is stable across restarts, letting an operator
-    /// port-forward / firewall-allow a known UDP port to a NAT'd or
-    /// containerized node. Only the IPv4 socket is pinned; the IPv6 default
-    /// bind is left untouched (matches the VPS / Docker-bridge scenario and
-    /// avoids a hard-fail on v4-only hosts).
+    /// 把 iroh 的 UDP 监听固定到同一端口（UniClipboard#900）。`None` 时 IPv4
+    /// 与 IPv6 都由系统分配随机端口（默认）。`Some(port)` 时 IPv4 绑定
+    /// `0.0.0.0:port`（必须成功，端口被占用则节点启动失败），IPv6 尽力绑定
+    /// `[::]:port`（本机没有 IPv6 或该端口不可用时跳过，不影响启动）。
     ///
-    /// Sourced from `UC_IROH_BIND_PORT` (parsed in `uc-bootstrap`); infra
-    /// only consumes the typed value.
+    /// 固定端口让对端保存的直连线索在重启后仍然有效，也让防火墙、端口转发和
+    /// WireGuard 等隧道只需放行一个已知端口。取值由组装层按“环境变量覆盖设置”
+    /// 决定，infra 只消费结果。
     pub bind_port: Option<u16>,
     /// Advertise a configured public socket address as one of this node's
     /// own direct-connection candidates (UniClipboard#900). `None` → only
@@ -432,6 +429,8 @@ pub struct IrohNodeConfig {
     pub public_addr: Option<SocketAddr>,
     /// 测试专用的认证 peer 网络分区门；生产组装始终为 `None`。
     pub network_partition_gate: Option<IrohNetworkPartitionGate>,
+    /// 用户为配对设备配置的地址来源；`None` 时不装配该发现来源。
+    pub configured_peer_addresses: Option<Arc<ConfiguredPeerAddresses>>,
 }
 
 impl Default for IrohNodeConfig {
@@ -447,6 +446,7 @@ impl Default for IrohNodeConfig {
             bind_port: None,
             public_addr: None,
             network_partition_gate: None,
+            configured_peer_addresses: None,
         }
     }
 }
@@ -898,11 +898,26 @@ impl IrohNodeBuilder {
 
         let secret = identity_store.ensure_secret_key()?;
         let relay_mode = relay_mode_from_config(&config)?;
-        let mdns = MdnsAddressLookup::builder()
-            .build(secret.public())
-            .map_err(|source| IrohNodeError::Discovery {
-                source: anyhow::Error::new(source),
-            })?;
+        let recorder =
+            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
+        // 本机 mDNS 是可降级的发现来源：组播套接字无法建立时节点照常启动，显式地址、已保存的
+        // 直连线索与启用时的云端发现仍然可用，长期 mDNS 在后台按有界退避重试。长期设备发现与
+        // 配对发现使用同一接口策略，在全部可用 IPv4 接口上收发；长期发现另外在这些接口上
+        // 收发 IPv6 mDNS。
+        let local_id = secret.public();
+        let mdns = LifetimeMdns::start(
+            move || {
+                MdnsAddressLookup::builder()
+                    .multicast_interfaces_v4(MulticastInterfacesV4::new(|| {
+                        MdnsInterfaceSnapshot::capture().into_parts().1
+                    }))
+                    .multicast_interfaces_v6(MulticastInterfacesV6::new(|| {
+                        MdnsInterfaceSnapshot::capture().into_multicast_v6()
+                    }))
+                    .build(local_id)
+            },
+            recorder.clone(),
+        );
         // Snapshot the overlay flag before consuming `config` into `Self`.
         let allow_overlay = config.allow_overlay_network_addrs;
         uc_info!(
@@ -910,8 +925,6 @@ impl IrohNodeBuilder {
             allow_overlay = allow_overlay,
             "addr filter configured for overlay-network addresses (Tailscale 100.64/10 + fd7a:115c:a1e0::/48)"
         );
-        let recorder =
-            uc_observability_contract::diagnostics::connectivity::NetworkRecorder::current();
         let connection_observations =
             super::observed_connections::ObservedConnections::new(recorder.clone());
         let session_protocols = Arc::new(SessionProtocolRegistry::new());
@@ -966,34 +979,26 @@ impl IrohNodeBuilder {
             );
         }
 
-        // UniClipboard#900 (a): pin the UDP socket to a fixed IPv4 port so a
-        // NAT'd / containerized node is reachable at a stable port across
-        // restarts. `bind_addr("0.0.0.0:port")` replaces iroh's default
-        // ephemeral IPv4 socket (still listens on all interfaces); the IPv6
-        // default bind is left untouched. The port is pre-parsed from
-        // `UC_IROH_BIND_PORT` in `uc-bootstrap`, so the only realistic failure
-        // here is the port already being in use — surfaced as `Bind`.
+        // UniClipboard#900 (a): 固定 UDP 端口，让对端保存的直连线索跨重启有效。
+        // 用户定义的绑定替换 iroh 默认的随机端口套接字（仍监听全部网卡）。IPv4 必须
+        // 成功，端口被占用时以 `Bind` 失败；IPv6 设为非必需，没有 IPv6 或端口不可用时
+        // 跳过，不让只有 IPv4 的主机启动失败。
         if let Some(port) = config.bind_port {
             endpoint_builder = endpoint_builder
                 .bind_addr((Ipv4Addr::UNSPECIFIED, port))
                 .map_err(|err| {
-                    IrohNodeError::Bind(
-                        anyhow::Error::new(err).context("pin iroh UDP port (UC_IROH_BIND_PORT)"),
-                    )
+                    IrohNodeError::Bind(anyhow::Error::new(err).context("pin iroh IPv4 UDP port"))
+                })?
+                .bind_addr_with_opts(
+                    (Ipv6Addr::UNSPECIFIED, port),
+                    BindOpts::default().set_is_required(false),
+                )
+                .map_err(|err| {
+                    IrohNodeError::Bind(anyhow::Error::new(err).context("pin iroh IPv6 UDP port"))
                 })?;
-            #[cfg(any(test, feature = "test-util"))]
-            if config.network_partition_gate.is_some() {
-                // 强杀宿主的“地址不变”前提必须覆盖两个地址族；生产仍保持原 IPv4 设置合同。
-                endpoint_builder = endpoint_builder
-                    .bind_addr_with_opts(
-                        (Ipv6Addr::UNSPECIFIED, port),
-                        BindOpts::default().set_is_required(false),
-                    )
-                    .map_err(|source| IrohNodeError::Bind(anyhow::Error::new(source)))?;
-            }
             uc_info!(
                 target: "iroh.bind",
-                "pinned iroh UDP socket to fixed IPv4 port (UC_IROH_BIND_PORT)"
+                "pinned iroh UDP sockets to a fixed port"
             );
         }
 
@@ -1016,7 +1021,8 @@ impl IrohNodeBuilder {
             endpoint_builder
                 .address_lookup(DirectoryAddressLookupBuilder {
                     mdns: mdns.clone(),
-                    cloud_enabled: !config.disable_relays,
+                    lan_only: config.disable_relays,
+                    configured: config.configured_peer_addresses.clone(),
                     recorder: recorder.clone(),
                     manager: discovery_slot.clone(),
                 })
@@ -1032,17 +1038,23 @@ impl IrohNodeBuilder {
             use uc_observability_contract::diagnostics::connectivity::{
                 LocalDiagnosticSource as Source, SourceCapability, SourceCollection,
             };
-            for source in [
-                Source::Connections,
-                Source::ConnectionPaths,
-                Source::MdnsDiscovery,
-            ] {
+            for source in [Source::Connections, Source::ConnectionPaths] {
                 recorder.register_source(
                     source,
                     SourceCapability::Partial,
                     SourceCollection::Enabled,
                 );
             }
+            recorder.register_source(
+                Source::MdnsDiscovery,
+                SourceCapability::Partial,
+                // 后台重试成功时由重试任务改记为可用。
+                if mdns.is_available() {
+                    SourceCollection::Enabled
+                } else {
+                    SourceCollection::Unavailable
+                },
+            );
             for source in [
                 Source::DnsDiscovery,
                 Source::PkarrDiscovery,
@@ -1762,9 +1774,6 @@ mod tests {
         node
     }
 
-    /// UniClipboard#900: `bind_port` pins the iroh UDP socket to a fixed
-    /// IPv4 port. We grab a currently-free port from the OS, release it, then
-    /// assert the endpoint binds exactly that number (stable across restarts).
     fn install_presence_fixture(
         builder: &mut IrohSessionBuilder,
         addresses: Arc<dyn PeerAddressRepositoryPort>,
@@ -1774,6 +1783,8 @@ mod tests {
         clock: Arc<dyn ClockPort>,
         contacts: tokio::sync::broadcast::Sender<uc_application::deps::KnownPeerContact>,
     ) -> Result<Arc<dyn PeerReachabilityPort>, IrohNodeError> {
+        let address_refresh =
+            builder.build_verified_peer_address_refresh(addresses.clone(), clock.clone());
         let (deps, environment) = builder.presence_connectivity_deps(
             addresses,
             identities,
@@ -1796,6 +1807,7 @@ mod tests {
             uc_application::deps::PeerReachabilityTransportPorts {
                 wire: Arc::new(super::super::connectivity::PeerReachabilityWire),
                 environment,
+                address_refresh,
             },
             clock,
             contacts,
@@ -1804,13 +1816,17 @@ mod tests {
         Ok(owner)
     }
 
+    /// 向系统要一个当前空闲的 UDP 端口后立即释放，让 iroh 绑定同一端口号。
+    /// 存在很小的竞争窗口，测试可以接受。
+    fn free_udp_port() -> u16 {
+        let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("probe socket");
+        probe.local_addr().expect("probe addr").port()
+    }
+
+    /// UniClipboard#900: `bind_port` 把 IPv4 与（可用时的）IPv6 都固定到同一端口。
     #[tokio::test]
     async fn bind_pins_fixed_udp_port() {
-        // Ask the OS for a free UDP port, then drop the probe so iroh can
-        // claim the same number. Small TOCTOU window, acceptable for a test.
-        let probe = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("probe socket");
-        let port = probe.local_addr().expect("probe addr").port();
-        drop(probe);
+        let port = free_udp_port();
 
         let store = identity_store();
         let cfg = IrohNodeConfig {
@@ -1823,6 +1839,101 @@ mod tests {
             bound.iter().any(|s| s.is_ipv4() && s.port() == port),
             "expected pinned IPv4 port {port} in bound sockets {bound:?}"
         );
+        assert!(
+            bound
+                .iter()
+                .filter(|s| s.is_ipv6())
+                .all(|s| s.port() == port),
+            "an IPv6 socket, when present, must use the same fixed port {port}: {bound:?}"
+        );
+    }
+
+    /// relay 关闭、没有任何地址发现（相当于没有组播的 WireGuard）：对端以同一身份和
+    /// 固定端口重启后，仅凭此前保存的直连线索仍能重新连上。保存的线索来自开启 relay
+    /// 时的公告，因此同时带有 relay；剥掉 relay 后直连线索必须仍在。
+    #[tokio::test]
+    async fn stored_direct_hint_reaches_a_peer_restarted_on_its_fixed_port_without_discovery() {
+        let port = free_udp_port();
+        let store = identity_store();
+        let config = || IrohNodeConfig {
+            disable_relays: true,
+            bind_port: Some(port),
+            ..Default::default()
+        };
+        let wait_for_direct = |endpoint: Arc<Endpoint>| async move {
+            for _ in 0..200 {
+                if endpoint.addr().ip_addrs().next().is_some() {
+                    return endpoint.addr();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("endpoint never advertised a direct address");
+        };
+
+        let first = IrohNodeBuilder::bind(&store, config())
+            .await
+            .expect("first bind");
+        let advertised = wait_for_direct(Arc::clone(&first.session_context.endpoint)).await;
+        let relay: iroh::RelayUrl = "https://relay.example.invalid/".parse().unwrap();
+        let stored =
+            super::super::persistable_addr::to_persistable_addr(iroh::EndpointAddr::from_parts(
+                advertised.id,
+                advertised
+                    .addrs
+                    .iter()
+                    .cloned()
+                    .chain([iroh::TransportAddr::Relay(relay)]),
+            ));
+        assert!(stored.ip_addrs().any(|addr| addr.port() == port));
+        let first_session = first.prepare_session();
+        spawn_session(first, first_session)
+            .await
+            .shutdown()
+            .await
+            .unwrap();
+
+        let second = IrohNodeBuilder::bind(&store, config())
+            .await
+            .expect("restart on the same fixed port");
+        let restarted = Arc::clone(&second.session_context.endpoint);
+        assert_eq!(restarted.id(), stored.id);
+        // 只验证传输可达；协议路由器尚未启动，这里直接接受一个测试连接。
+        restarted.set_alpns(vec![PEER_REACHABILITY_ALPN.to_vec()]);
+        let acceptor = tokio::spawn(async move {
+            let incoming = restarted.accept().await?;
+            let connection = incoming.await.ok()?;
+            connection.closed().await;
+            Some(())
+        });
+        let dialer = Arc::new(
+            Endpoint::builder(iroh::endpoint::presets::N0)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .expect("bind dialer"),
+        );
+        let lan_only_hint = iroh::EndpointAddr::from_parts(
+            stored.id,
+            stored.addrs.iter().filter(|addr| addr.is_ip()).cloned(),
+        );
+
+        let connection = tokio::time::timeout(
+            Duration::from_secs(15),
+            super::super::connect::connect_with_staggered_retry(
+                dialer,
+                lan_only_hint,
+                PEER_REACHABILITY_ALPN,
+                "presence",
+                uc_observability_contract::diagnostics::connectivity::AddressInputSource::Stored,
+            ),
+        )
+        .await
+        .expect("dial finishes")
+        .expect("the stored direct hint reaches the restarted peer");
+        drop(connection);
+        acceptor.abort();
+        drop(second);
     }
 
     /// UniClipboard#900: `public_addr` injects a configured public address

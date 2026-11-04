@@ -23,10 +23,10 @@ pub use facade::{
 pub use models::{
     CongestionControllerView, ContentTypesPatch, ContentTypesView, FileSyncSettingsPatch,
     FileSyncSettingsView, GeneralSettingsPatch, GeneralSettingsView, NetworkSettingsPatch,
-    NetworkSettingsView, PairingSettingsPatch, PairingSettingsView, RetentionPolicyPatch,
-    RetentionPolicyView, RetentionRulePatchValue, RetentionRuleView, RuleEvaluationView,
-    SecuritySettingsPatch, SecuritySettingsView, SettingsPatch, SettingsView, SyncFrequencyView,
-    SyncSettingsPatch, SyncSettingsView,
+    NetworkSettingsView, PairingSettingsPatch, PairingSettingsView, PeerAddressView,
+    RetentionPolicyPatch, RetentionPolicyView, RetentionRulePatchValue, RetentionRuleView,
+    RuleEvaluationView, SecuritySettingsPatch, SecuritySettingsView, SettingsPatch, SettingsView,
+    SyncFrequencyView, SyncSettingsPatch, SyncSettingsView,
 };
 pub use relay_configuration::{
     AppliedRelayRouting, RelayConfiguration, RelayConfigurationEntry, RelayConfigurationMutation,

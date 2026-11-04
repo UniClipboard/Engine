@@ -1,10 +1,14 @@
 //! 将已有发现服务转换为 Uni 候选，并在 iroh 的实际地址查找入口消费目录。
 
 mod cloud;
+mod configured;
+mod lifetime_mdns;
 mod lookup;
 mod mdns;
 mod runtime;
 
+pub use configured::ConfiguredPeerAddresses;
+pub(super) use lifetime_mdns::LifetimeMdns;
 pub(super) use lookup::DirectoryAddressLookupBuilder;
 pub(super) use runtime::DiscoveryRuntime;
 
@@ -18,6 +22,7 @@ use uc_application::deps::{
 const IROH: BackendId = BackendId("iroh");
 const MDNS: DiscoveryProviderId = DiscoveryProviderId("mdns");
 const CLOUD: DiscoveryProviderId = DiscoveryProviderId("cloud_dns");
+const CONFIGURED: DiscoveryProviderId = DiscoveryProviderId("configured");
 // 原服务未提供 DNS TTL；为目录副本设置保守上限，每次真实结果刷新，不修改原服务缓存。
 const OBSERVATION_TTL: Duration = Duration::from_secs(60);
 

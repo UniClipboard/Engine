@@ -33,7 +33,7 @@ use super::discovery_constants::{
     compute_code_hash, ticket_txt_attributes, PAIR_SERVICE_NAME, TXT_CODE_HASH, TXT_EXPIRES_AT_MS,
     TXT_NODE_ID,
 };
-use super::mdns_interfaces::MdnsInterfaceSnapshot;
+use crate::network::mdns_interfaces::MdnsInterfaceSnapshot;
 
 /// Default mDNS query/announce cadence for pairing. Tighter than the
 /// 10s default `swarm-discovery` ships because pairing is a UX-critical

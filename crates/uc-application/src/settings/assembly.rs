@@ -23,6 +23,8 @@ pub struct PreparedNetworkSettings {
     pub allow_overlay_network_addrs: bool,
     pub custom_relay_urls: Vec<String>,
     pub congestion_controller: CongestionController,
+    /// 设置中的固定 P2P UDP 端口；环境变量覆盖由 Engine 组装层统一处理。
+    pub bind_port: Option<u16>,
     pub relay_credentials: RelayCredentials,
 }
 
@@ -88,6 +90,7 @@ impl SettingsAssembly {
             allow_overlay_network_addrs: settings.network.allow_overlay_network_addrs,
             custom_relay_urls: settings.network.custom_relay_urls,
             congestion_controller: settings.network.congestion_controller,
+            bind_port: settings.network.bind_port,
             relay_credentials: self.relay_credentials.clone(),
         })
     }

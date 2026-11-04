@@ -32,7 +32,7 @@ use super::discovery_constants::{
     compute_code_hash, ticket_from_txt_attributes, PAIR_SERVICE_NAME, TXT_CODE_HASH,
     TXT_EXPIRES_AT_MS,
 };
-use super::mdns_interfaces::MdnsInterfaceSnapshot;
+use crate::network::mdns_interfaces::MdnsInterfaceSnapshot;
 
 /// Errors raised while starting / running a resolver. Timeout is
 /// **not** an error — it returns `Ok(None)` so the caller can compose

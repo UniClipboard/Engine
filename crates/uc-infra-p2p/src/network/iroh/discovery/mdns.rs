@@ -1,18 +1,19 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use iroh::address_lookup::{AddressLookup, Item};
-use iroh_mdns_address_lookup::{DiscoveryEvent as MdnsEvent, MdnsAddressLookup};
+use iroh_mdns_address_lookup::DiscoveryEvent as MdnsEvent;
 use std::sync::Arc;
 use uc_application::deps::{
     DiscoveryError, DiscoveryEvent, DiscoveryPeerId, DiscoveryProvider, DiscoveryProviderId,
     DiscoveryStream,
 };
 
-use super::{endpoint_id, observation, peer_id, MDNS};
+use super::{endpoint_id, observation, peer_id, LifetimeMdns, MDNS};
 
-/// 复用 endpoint 的同一个 mDNS 实例，不增加广播服务或修改线格式。
+/// 复用 endpoint 的同一个 mDNS 实例，不增加广播服务或修改线格式。实例在启动时不可用时，
+/// 订阅等待后台重试建立后再开始交付观察。
 pub(super) struct MdnsDiscoveryProvider {
-    pub(super) mdns: MdnsAddressLookup,
+    pub(super) mdns: LifetimeMdns,
     pub(super) lookup: Arc<dyn AddressLookup>,
 }
 
@@ -23,7 +24,7 @@ impl DiscoveryProvider for MdnsDiscoveryProvider {
     }
 
     async fn subscribe(&self) -> Result<Option<DiscoveryStream>, DiscoveryError> {
-        let events = self.mdns.subscribe().await;
+        let events = self.mdns.events();
         Ok(Some(Box::pin(events.filter_map(|event| {
             std::future::ready(match event {
                 MdnsEvent::Discovered {

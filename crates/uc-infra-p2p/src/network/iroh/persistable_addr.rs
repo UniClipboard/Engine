@@ -1,108 +1,130 @@
-//! Helper that turns an iroh [`EndpointAddr`] freshly observed from a
-//! local [`iroh::Endpoint`] into a form that is **safe to persist** in
-//! [`crate::storage::peer_address::DieselPeerAddressRepository`] (or any
-//! other [`PeerAddressRepositoryPort`] implementor) for the lifetime of
-//! a paired peer.
+//! 把本机或远端的 iroh [`EndpointAddr`] 整理成**可长期保存**的配对设备地址，
+//! 供 [`PeerAddressRepositoryPort`] 的实现密文保存。
 //!
-//! ## Why a transformation is needed at all
+//! ## 保存什么
 //!
-//! `endpoint.addr()` returns the endpoint's **current** view of itself:
-//! the persistent NodeId, every direct UDP socket address magicsock has
-//! discovered, and (when relays are enabled) the assigned relay URL.
-//! Two of those parts have very different lifetimes:
+//! 保存的记录只是拨号**线索**，不是可达性证明：
 //!
-//! | Component | Stable across process restart? |
-//! |-----------|--------------------------------|
-//! | NodeId | Yes — derived from the persistent secret key |
-//! | Relay URL | Yes — sticky per home-region selection |
-//! | Direct `Ip(SocketAddr)` | **No** — magicsock binds a fresh random UDP port on every start, and NAT mappings rotate independently |
+//! | 组成 | 跨进程重启是否稳定 |
+//! |------|--------------------|
+//! | NodeId | 稳定：由持久私钥派生，连接时由 QUIC 握手认证 |
+//! | Relay URL | 基本稳定：随 home relay 选择变化 |
+//! | 直连 `Ip(SocketAddr)` | IP 视网络而定；端口默认每次启动随机，配置固定端口（`network.bind_port` 或 `UC_IROH_BIND_PORT`）后稳定 |
 //!
-//! Persisting the direct addresses bakes the **pairing-time UDP port**
-//! into our repository. After the peer's daemon restarts the stored
-//! port no longer matches the listening socket; packets sent to it land
-//! on a closed socket, the kernel silently drops them, and `iroh`
-//! `Endpoint::connect` waits the full QUIC handshake budget (~30 s) for
-//! a reply that never comes. Real-device test runs surfaced this as
-//! every dispatch attempt logging `→ Offline` even though both peers
-//! were demonstrably up on the same LAN.
+//! 直连线索与 relay 线索并存，并且数量有上限（[`MAX_DIRECT_HINTS`]）。在 LAN-only
+//! 或 WireGuard 这类没有 relay、也没有组播发现的网络里，已知的对端 IP 与固定端口是
+//! 重启后唯一能找到对端的信息；只保存 relay 会让 LAN-only 拨号剥掉 relay 后只剩身份。
 //!
-//! ## Why this transformation lives at the producer (write side)
+//! ## 为什么陈旧端口不再导致拨号挂起
 //!
-//! Stripping at the read side is a patch — a translation layer that
-//! quietly disagrees with what the repository claims to hold. By
-//! running the transformation **before** the blob enters the
-//! repository, the repository's contract becomes truthful: a stored
-//! [`PeerAddressRecord`] only carries identity (NodeId) and a long-
-//! lived hint (Relay), exactly the parts that survive a peer restart.
-//! Read sites then decode and dial directly with no further massaging,
-//! and `iroh`'s built-in pkarr discovery fills in the peer's *currently
-//! published* direct addresses for each connect attempt.
+//! 早期实现在存在 relay 时丢弃全部直连地址：随机端口在对端重启后失效，旧版拨号
+//! 只按存储地址等待完整握手预算，表现为对端明明在线却一直离线。现在拨号把存储线索
+//! 交给 iroh，iroh 在没有选定路径时**同时**启动地址发现（mDNS、DNS/PKARR），初始包发往
+//! 全部已知候选，任何一条可用路径胜出（见 `connect.rs` 的
+//! `dial_with_a_stale_stored_address_follows_address_lookup` 回归测试）。因此陈旧线索
+//! 最多浪费一个候选，不会阻塞新发现的地址；它也从不作为唯一的放行条件。
 //!
-//! ## Conditional behaviour: keep direct addrs when no relay is present
+//! ## 刷新是合并而不是替换
 //!
-//! With no relay in the input there is nothing for `iroh` discovery to
-//! fall back on once the directs are gone — connect would have no path
-//! to try. Unit fixtures that bind endpoints with `RelayMode::Disabled`
-//! (loopback-only tests) depend on this branch: their stored blobs are
-//! direct-only by design. Production daemons run with the default
-//! `RelayMode::Default`, which always assigns a relay URL, so the
-//! stripping branch is the production path.
+//! 成员历史验证成功后，[`refreshed_remote_addr`] 只把本次连接中**正在使用**的路径
+//! （relay 或直连）作为新证据，并保留尚未被否定的旧直连线索：同一 IP 已经在另一个
+//! 端口上被证实可用时，旧端口才视为被否定。只有使用中的 relay 会替换旧 relay；
+//! 本次只走直连时保留旧 relay 线索。没有任何使用中路径时不改写记录。
 //!
 //! [`PeerAddressRepositoryPort`]: uc_core::ports::PeerAddressRepositoryPort
-//! [`PeerAddressRecord`]: uc_core::ports::PeerAddressRecord
+
+use std::collections::BTreeSet;
 
 use chrono::{TimeZone, Utc};
 use iroh::endpoint::TransportAddrUsage;
-use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use uc_core::ids::DeviceId;
 use uc_core::ports::{ClockPort, PeerAddressRecord, PeerAddressRepositoryPort};
 use uc_observability_contract::uc_warn;
 
-/// Convert a freshly observed [`EndpointAddr`] into the form we want to
-/// persist for a paired peer: NodeId + relay hint, with ephemeral
-/// `Ip(...)` direct addresses dropped. When the input carries no relay
-/// the addr is returned unchanged so the caller still has dialable
-/// paths; see the module doc for the rationale.
-pub fn to_persistable_addr(addr: EndpointAddr) -> EndpointAddr {
-    let has_relay = addr
-        .addrs
-        .iter()
-        .any(|a| matches!(a, TransportAddr::Relay(_)));
-    if !has_relay {
-        return addr;
-    }
+/// 一条记录最多保留的直连线索数。足够覆盖同一设备的有线、无线与隧道地址，
+/// 又不会让多网卡（容器网桥等）把记录和拨号候选撑大。
+pub const MAX_DIRECT_HINTS: usize = 8;
 
+/// 把本机当前地址整理为可保存的公告形态：保留身份、全部 relay 线索，以及至多
+/// [`MAX_DIRECT_HINTS`] 个直连线索（按地址排序取前几个，IPv4 在前）。
+pub fn to_persistable_addr(addr: EndpointAddr) -> EndpointAddr {
     let EndpointAddr { id, addrs } = addr;
-    let kept = addrs
-        .into_iter()
-        .filter(|addr| !matches!(addr, TransportAddr::Ip(_)));
+    let mut direct = 0;
+    let kept = addrs.into_iter().filter(|addr| {
+        if !addr.is_ip() {
+            return true;
+        }
+        direct += 1;
+        direct <= MAX_DIRECT_HINTS
+    });
     EndpointAddr::from_parts(id, kept)
 }
 
-/// 从一次已经建立的连接观察中提取可长期保存的远端提示。
+/// 以一次已建立连接的观察刷新已保存记录。
 ///
-/// 只有当前正在使用的 relay 才足以证明本次可达；动态 IP 和未参与本次连接的
-/// 旧 relay 都不能覆盖已有记录。没有这种提示时返回 `None`。
-pub(super) fn stable_remote_addr(
-    id: EndpointId,
-    addrs: impl IntoIterator<Item = (TransportAddr, bool)>,
+/// `observed` 为远端每个已知地址及其是否正在使用。只有正在使用的路径才是新证据：
+/// 使用中的 relay 替换旧 relay，使用中的直连排在最前；旧直连线索保留到上限，除非
+/// 同一 IP 已在另一个端口上被证实可用。没有使用中路径或结果与原记录相同时返回
+/// `None`，调用方不必写入。
+pub(super) fn refreshed_remote_addr(
+    existing: &EndpointAddr,
+    observed: impl IntoIterator<Item = (TransportAddr, bool)>,
 ) -> Option<EndpointAddr> {
-    let relays = addrs
+    let active: Vec<TransportAddr> = observed
         .into_iter()
-        .filter_map(|(addr, active)| {
-            (active && matches!(addr, TransportAddr::Relay(_))).then_some(addr)
+        .filter_map(|(addr, active)| active.then_some(addr))
+        .filter(|addr| addr.is_ip() || addr.is_relay())
+        .collect();
+    if active.is_empty() {
+        return None;
+    }
+    let active_direct: Vec<_> = active
+        .iter()
+        .filter_map(|addr| match addr {
+            TransportAddr::Ip(socket) => Some(*socket),
+            _ => None,
         })
-        .collect::<Vec<_>>();
-    (!relays.is_empty()).then(|| EndpointAddr::from_parts(id, relays))
+        .collect();
+    let relays: Vec<TransportAddr> = if active.iter().any(TransportAddr::is_relay) {
+        active
+            .iter()
+            .filter(|addr| addr.is_relay())
+            .cloned()
+            .collect()
+    } else {
+        existing
+            .addrs
+            .iter()
+            .filter(|addr| addr.is_relay())
+            .cloned()
+            .collect()
+    };
+    let retained_direct = existing.ip_addrs().copied().filter(|old| {
+        !active_direct
+            .iter()
+            .any(|current| current.ip() == old.ip() && current.port() != old.port())
+    });
+    let mut seen = BTreeSet::new();
+    let direct = active_direct
+        .iter()
+        .copied()
+        .chain(retained_direct)
+        .filter(|socket| seen.insert(*socket))
+        .take(MAX_DIRECT_HINTS)
+        .map(TransportAddr::Ip);
+    let refreshed = EndpointAddr::from_parts(existing.id, relays.into_iter().chain(direct));
+    (refreshed != *existing).then_some(refreshed)
 }
 
-pub(super) async fn observed_stable_remote_addr(
+/// 读取远端当前路径并与已保存记录合并；远端未知、没有使用中路径或结果不变时返回 `None`。
+pub(super) async fn observed_refreshed_remote_addr(
     endpoint: &Endpoint,
-    id: EndpointId,
+    existing: &EndpointAddr,
 ) -> Option<EndpointAddr> {
-    let info = endpoint.remote_info(id).await?;
-    stable_remote_addr(
-        info.id(),
+    let info = endpoint.remote_info(existing.id).await?;
+    refreshed_remote_addr(
+        existing,
         info.into_addrs().map(|addr| {
             let active = matches!(addr.usage(), TransportAddrUsage::Active);
             (addr.into_addr(), active)
@@ -207,90 +229,165 @@ mod tests {
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), port))
     }
 
-    #[test]
-    fn drops_ip_entries_keeps_relay() {
-        let id = test_id();
-        let relay: RelayUrl = "https://relay.example.com/".parse().unwrap();
+    fn relay() -> TransportAddr {
+        TransportAddr::Relay("https://relay.example.com/".parse().unwrap())
+    }
 
+    fn other_relay() -> TransportAddr {
+        TransportAddr::Relay("https://other-relay.example.com/".parse().unwrap())
+    }
+
+    fn wg_addr(port: u16) -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 8, 0, 2), port))
+    }
+
+    #[test]
+    fn announcement_keeps_direct_hints_alongside_the_relay() {
+        let id = test_id();
         let full = EndpointAddr::from_parts(
             id,
             [
                 TransportAddr::Ip(lan_addr(50754)),
-                TransportAddr::Ip(wan_addr(59875)),
-                TransportAddr::Relay(relay.clone()),
+                TransportAddr::Ip(wg_addr(51820)),
+                relay(),
             ],
         );
 
-        let persisted = to_persistable_addr(full);
-        assert_eq!(persisted.id, id);
-        assert_eq!(persisted.addrs.len(), 1);
-        assert!(persisted
-            .addrs
-            .iter()
-            .all(|a| matches!(a, TransportAddr::Relay(_))));
+        let persisted = to_persistable_addr(full.clone());
+
+        assert_eq!(persisted, full);
     }
 
     #[test]
-    fn id_only_input_is_unchanged() {
+    fn announcement_bounds_the_number_of_direct_hints() {
         let id = test_id();
-        let addr = EndpointAddr::new(id);
-        let persisted = to_persistable_addr(addr);
-        assert_eq!(persisted.id, id);
-        assert!(persisted.addrs.is_empty());
+        let many = (0..MAX_DIRECT_HINTS as u16 + 4)
+            .map(|offset| TransportAddr::Ip(lan_addr(40000 + offset)))
+            .chain([relay()]);
+
+        let persisted = to_persistable_addr(EndpointAddr::from_parts(id, many));
+
+        assert_eq!(persisted.ip_addrs().count(), MAX_DIRECT_HINTS);
+        assert_eq!(persisted.relay_urls().count(), 1);
     }
 
     #[test]
-    fn ip_only_input_is_kept_intact() {
-        // No relay present → no discovery fallback to rely on → keep the
-        // IPs as the only dialable paths. Mirrors test fixtures that
-        // bind endpoints with `RelayMode::Disabled`.
+    fn announcement_of_identity_only_or_relay_only_is_unchanged() {
         let id = test_id();
-        let addr = EndpointAddr::from_parts(id, [TransportAddr::Ip(lan_addr(50754))]);
-        let persisted = to_persistable_addr(addr);
-        assert_eq!(persisted.id, id);
-        assert_eq!(persisted.addrs.len(), 1);
-        assert!(persisted
-            .addrs
-            .iter()
-            .all(|a| matches!(a, TransportAddr::Ip(_))));
+        assert_eq!(
+            to_persistable_addr(EndpointAddr::new(id)),
+            EndpointAddr::new(id)
+        );
+        let relay_only = EndpointAddr::from_parts(id, [relay()]);
+        assert_eq!(to_persistable_addr(relay_only.clone()), relay_only);
     }
 
+    /// 本次只走直连：记下证实可用的直连地址，保留旧 relay 与其他未被否定的直连线索。
     #[test]
-    fn relay_only_input_is_unchanged() {
+    fn direct_only_refresh_adds_the_working_address_and_keeps_existing_hints() {
         let id = test_id();
-        let relay: RelayUrl = "https://relay.example.com/".parse().unwrap();
-        let addr = EndpointAddr::from_parts(id, [TransportAddr::Relay(relay)]);
-        let persisted = to_persistable_addr(addr);
-        assert_eq!(persisted.id, id);
-        assert_eq!(persisted.addrs.len(), 1);
-        assert!(persisted
-            .addrs
-            .iter()
-            .all(|a| matches!(a, TransportAddr::Relay(_))));
-    }
+        let existing = EndpointAddr::from_parts(id, [TransportAddr::Ip(lan_addr(50754)), relay()]);
 
-    #[test]
-    fn stable_remote_addr_keeps_only_active_relays() {
-        let id = test_id();
-        let active_relay: RelayUrl = "https://active-relay.example.com/".parse().unwrap();
-        let inactive_relay: RelayUrl = "https://old-relay.example.com/".parse().unwrap();
-
-        let persisted = stable_remote_addr(
-            id,
+        let refreshed = refreshed_remote_addr(
+            &existing,
             [
-                (TransportAddr::Ip(lan_addr(50754)), true),
-                (TransportAddr::Relay(inactive_relay), false),
-                (TransportAddr::Relay(active_relay.clone()), true),
+                (TransportAddr::Ip(wg_addr(51820)), true),
+                (TransportAddr::Ip(wan_addr(9)), false),
             ],
         )
-        .expect("an active relay is a stable remote hint");
+        .expect("a working direct path is new evidence");
 
-        assert_eq!(persisted.id, id);
-        assert_eq!(persisted.addrs.len(), 1);
-        assert!(persisted
-            .addrs
-            .contains(&TransportAddr::Relay(active_relay)));
-        assert!(stable_remote_addr(id, [(TransportAddr::Ip(lan_addr(50754)), true)]).is_none());
+        assert_eq!(
+            refreshed,
+            EndpointAddr::from_parts(
+                id,
+                [
+                    TransportAddr::Ip(wg_addr(51820)),
+                    TransportAddr::Ip(lan_addr(50754)),
+                    relay(),
+                ],
+            )
+        );
+    }
+
+    /// 同一 IP 已在新端口上证实可用时，旧端口被否定；别的直连线索仍保留。
+    #[test]
+    fn refresh_replaces_a_hint_whose_port_was_disproven() {
+        let id = test_id();
+        let existing = EndpointAddr::from_parts(
+            id,
+            [
+                TransportAddr::Ip(wg_addr(40000)),
+                TransportAddr::Ip(lan_addr(50754)),
+            ],
+        );
+
+        let refreshed =
+            refreshed_remote_addr(&existing, [(TransportAddr::Ip(wg_addr(51820)), true)])
+                .expect("changed");
+
+        assert_eq!(
+            refreshed,
+            EndpointAddr::from_parts(
+                id,
+                [
+                    TransportAddr::Ip(wg_addr(51820)),
+                    TransportAddr::Ip(lan_addr(50754)),
+                ],
+            )
+        );
+    }
+
+    /// 本次经 relay 连通：使用中的 relay 替换旧 relay，直连线索不被抹掉。
+    #[test]
+    fn relay_refresh_replaces_the_old_relay_but_keeps_direct_hints() {
+        let id = test_id();
+        let existing =
+            EndpointAddr::from_parts(id, [TransportAddr::Ip(wg_addr(51820)), other_relay()]);
+
+        let refreshed = refreshed_remote_addr(&existing, [(relay(), true), (other_relay(), false)])
+            .expect("changed");
+
+        assert_eq!(
+            refreshed,
+            EndpointAddr::from_parts(id, [TransportAddr::Ip(wg_addr(51820)), relay()])
+        );
+    }
+
+    #[test]
+    fn refresh_without_active_paths_or_without_change_writes_nothing() {
+        let id = test_id();
+        let existing = EndpointAddr::from_parts(id, [TransportAddr::Ip(wg_addr(51820)), relay()]);
+
+        assert!(refreshed_remote_addr(
+            &existing,
+            [
+                (TransportAddr::Ip(lan_addr(1)), false),
+                (other_relay(), false),
+            ],
+        )
+        .is_none());
+        assert!(refreshed_remote_addr(
+            &existing,
+            [(TransportAddr::Ip(wg_addr(51820)), true), (relay(), true)],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn refresh_keeps_working_paths_first_within_the_hint_bound() {
+        let id = test_id();
+        let existing = EndpointAddr::from_parts(
+            id,
+            (0..MAX_DIRECT_HINTS as u16).map(|offset| TransportAddr::Ip(lan_addr(40000 + offset))),
+        );
+
+        let refreshed =
+            refreshed_remote_addr(&existing, [(TransportAddr::Ip(wg_addr(51820)), true)])
+                .expect("changed");
+
+        assert_eq!(refreshed.ip_addrs().count(), MAX_DIRECT_HINTS);
+        assert!(refreshed.ip_addrs().any(|addr| *addr == wg_addr(51820)));
     }
 
     #[tokio::test]

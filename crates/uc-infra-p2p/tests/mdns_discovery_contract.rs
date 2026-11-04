@@ -7,7 +7,9 @@ use iroh::{
     address_lookup::{AddressLookup, EndpointData},
     SecretKey, TransportAddr,
 };
-use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
+use iroh_mdns_address_lookup::{
+    DiscoveryEvent, MdnsAddressLookup, MulticastInterfacesV4, MulticastInterfacesV6,
+};
 
 fn pair() -> (MdnsAddressLookup, MdnsAddressLookup, iroh::EndpointId) {
     let service = format!("uni-test-{}", uuid::Uuid::new_v4().simple());
@@ -107,5 +109,164 @@ async fn shutdown_closes_subscriptions_even_when_service_clones_are_retained() {
         .unwrap()
         .is_none());
     retained.shutdown().await.unwrap();
+    sender.shutdown().await.unwrap();
+}
+
+/// 本机非回环 IPv4 地址；与 Engine 的接口快照策略一致，只用于测试接口来源。
+fn local_ipv4_interfaces() -> Vec<std::net::Ipv4Addr> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|interface| match interface.addr.ip() {
+            std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 接口来源在启动时读取一次，并在本机发布地址变化时再次读取以增删组播接口；
+/// 在全部本机 IPv4 接口上收发时发现照常工作。
+#[tokio::test]
+async fn multicast_interfaces_are_read_at_start_and_on_local_address_changes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let service = format!("uni-test-{}", uuid::Uuid::new_v4().simple());
+    let reads = Arc::new(AtomicUsize::new(0));
+    let interfaces = {
+        let reads = Arc::clone(&reads);
+        MulticastInterfacesV4::new(move || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            local_ipv4_interfaces()
+        })
+    };
+    let id = SecretKey::generate().public();
+    let receiver = MdnsAddressLookup::builder()
+        .service_name(service.clone())
+        .advertise(false)
+        .multicast_interfaces_v4(MulticastInterfacesV4::new(local_ipv4_interfaces))
+        .build(SecretKey::generate().public())
+        .unwrap();
+    let sender = MdnsAddressLookup::builder()
+        .service_name(service)
+        .multicast_interfaces_v4(interfaces)
+        .build(id)
+        .unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 1, "read once at start");
+
+    let mut active = receiver.resolve(id).unwrap();
+    sender.publish(&EndpointData::from_iter([TransportAddr::Ip(
+        "192.0.2.10:4242".parse().unwrap(),
+    )]));
+    let resolved = tokio::time::timeout(Duration::from_secs(10), active.next())
+        .await
+        .expect("discovery works with configured interfaces")
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.endpoint_id(), id);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while reads.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a local address change refreshes the interface set");
+
+    receiver.shutdown().await.unwrap();
+    sender.shutdown().await.unwrap();
+}
+
+/// 本机非回环 IPv6 接口的（接口索引，地址），每个接口取一个地址；只用于测试接口来源。
+fn local_ipv6_interfaces() -> Vec<(u32, std::net::Ipv6Addr)> {
+    let mut interfaces = std::collections::BTreeMap::new();
+    for interface in if_addrs::get_if_addrs().unwrap_or_default() {
+        if let (std::net::IpAddr::V6(ip), Some(index)) = (interface.addr.ip(), interface.index) {
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                interfaces.entry(index).or_insert(ip);
+            }
+        }
+    }
+    interfaces.into_iter().collect()
+}
+
+/// IPv6 接口来源与 IPv4 一样在启动时读取一次，并在本机发布地址变化时再次读取；
+/// 在本机 IPv6 接口上收发时发现照常工作。
+#[tokio::test]
+async fn ipv6_multicast_interfaces_are_read_at_start_and_on_local_address_changes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let service = format!("uni-test-{}", uuid::Uuid::new_v4().simple());
+    let reads = Arc::new(AtomicUsize::new(0));
+    let interfaces = {
+        let reads = Arc::clone(&reads);
+        MulticastInterfacesV6::new(move || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            local_ipv6_interfaces()
+        })
+    };
+    let id = SecretKey::generate().public();
+    let receiver = MdnsAddressLookup::builder()
+        .service_name(service.clone())
+        .advertise(false)
+        .multicast_interfaces_v6(MulticastInterfacesV6::new(local_ipv6_interfaces))
+        .build(SecretKey::generate().public())
+        .unwrap();
+    let sender = MdnsAddressLookup::builder()
+        .service_name(service)
+        .multicast_interfaces_v6(interfaces)
+        .build(id)
+        .unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 1, "read once at start");
+
+    let mut active = receiver.resolve(id).unwrap();
+    sender.publish(&EndpointData::from_iter([TransportAddr::Ip(
+        "192.0.2.10:4242".parse().unwrap(),
+    )]));
+    let resolved = tokio::time::timeout(Duration::from_secs(10), active.next())
+        .await
+        .expect("discovery works with configured IPv6 interfaces")
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.endpoint_id(), id);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while reads.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a local address change refreshes the IPv6 interface set");
+
+    receiver.shutdown().await.unwrap();
+    sender.shutdown().await.unwrap();
+}
+
+/// AAAA 记录无法携带 scope id，对端收到的 IPv6 link-local 地址无法拨号，因此不通告；
+/// 同一发布中的其他 IPv4 与 IPv6 地址照常通告。
+#[tokio::test]
+async fn ipv6_link_local_addresses_are_not_advertised() {
+    let (receiver, sender, id) = pair();
+    let mut active = receiver.resolve(id).unwrap();
+    let advertised: Vec<std::net::SocketAddr> = vec![
+        "192.0.2.10:4242".parse().unwrap(),
+        "[2001:db8::10]:4242".parse().unwrap(),
+    ];
+    let link_local: std::net::SocketAddr = "[fe80::10]:4242".parse().unwrap();
+    sender.publish(&EndpointData::from_iter(
+        advertised
+            .iter()
+            .chain([&link_local])
+            .map(|addr| TransportAddr::Ip(*addr)),
+    ));
+    let item = tokio::time::timeout(Duration::from_secs(10), active.next())
+        .await
+        .expect("discovery works")
+        .unwrap()
+        .unwrap();
+    let mut resolved: Vec<std::net::SocketAddr> =
+        item.to_endpoint_addr().ip_addrs().copied().collect();
+    resolved.sort();
+    assert_eq!(resolved, advertised);
+    receiver.shutdown().await.unwrap();
     sender.shutdown().await.unwrap();
 }

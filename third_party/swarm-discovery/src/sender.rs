@@ -288,5 +288,6 @@ fn update_response(
             // Interface changes don't affect the response content
             None
         }
+        guardian::Input::SetInterfaces(_) | guardian::Input::SetInterfacesV6(_) => None,
     }
 }

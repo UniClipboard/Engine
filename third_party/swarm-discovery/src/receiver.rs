@@ -1,5 +1,5 @@
 use crate::{sender::MdnsMsg, Peer, TxtData};
-use acto::{ActoCell, ActoRef, ActoRuntime};
+use acto::{ActoCell, ActoInput, ActoRef, ActoRuntime};
 use hickory_proto::{
     op::Message,
     rr::{DNSClass, Name, RData, RecordType},
@@ -16,18 +16,27 @@ pub struct ReceiverError {
     source: std::io::Error,
 }
 
+/// 在 `socket` 上接收 mDNS 报文，直到所有者释放本 actor 的最后一个 `ActoRef`（或发送 `()`）。
+///
+/// UniClipboard 补丁：上游接收者从不轮询 `ctx`，丢弃其引用无法让它停止，被移除接口的
+/// 接收任务与套接字会一直存活。现在所有者释放引用即请求停止；返回时本任务持有的
+/// 套接字引用随之释放，所有者可以等待任务结束来确认这一点。
 pub async fn receiver(
-    _ctx: ActoCell<(), impl ActoRuntime>,
+    mut ctx: ActoCell<(), impl ActoRuntime>,
     service_name: Name,
     socket: Arc<UdpSocket>,
     target: ActoRef<MdnsMsg>,
 ) -> Result<(), ReceiverError> {
     let mut buf = [0; 1472];
     loop {
-        let (len, addr) = socket
-            .recv_from(&mut buf)
-            .await
-            .map_err(ReceiverError::from)?;
+        let received = tokio::select! {
+            received = socket.recv_from(&mut buf) => received,
+            input = ctx.recv() => match input {
+                ActoInput::NoMoreSenders | ActoInput::Message(()) => return Ok(()),
+                ActoInput::Supervision { .. } => continue,
+            },
+        };
+        let (len, addr) = received.map_err(ReceiverError::from)?;
         let msg = &buf[..len];
         tracing::trace!("received {} bytes from {}", len, addr);
         if let Some(msg) = handle_msg(msg, &service_name, addr.ip()) {

@@ -43,6 +43,53 @@ fn locator_cannot_redirect_a_candidate_to_another_transport_identity() {
     assert!(decode(&peer, &postcard::to_stdvec(&address).unwrap()).is_err());
 }
 
+/// LAN-only 时，对端经 mDNS 发布的公网或 relay 地址不交给 iroh 拨号；relay 开启时原样交出。
+#[tokio::test]
+async fn lan_only_directory_lookup_yields_only_local_network_candidates() {
+    use iroh::address_lookup::AddressLookup;
+    use iroh::TransportAddr;
+
+    let id = SecretKey::generate().public();
+    let relay = TransportAddr::Relay("https://relay.example.com/".parse().unwrap());
+    let public = TransportAddr::Ip("203.0.113.7:50754".parse().unwrap());
+    let lan = TransportAddr::Ip("192.168.1.5:50754".parse().unwrap());
+    let tunnel = TransportAddr::Ip("10.8.0.2:51820".parse().unwrap());
+    let announced = EndpointAddr::from_parts(id, [relay, public, lan.clone(), tunnel.clone()]);
+    let directory = Arc::new(PeerDirectory::new(8));
+    directory
+        .observe(
+            MDNS,
+            DiscoveryEvent::Found(DiscoveredPeer {
+                peer: peer_id(id),
+                locator: postcard::to_stdvec(&announced).unwrap(),
+                ttl: Duration::from_secs(30),
+            }),
+            Instant::now(),
+        )
+        .unwrap();
+    let manager = Arc::new(DiscoveryManager::new(Vec::new(), directory).unwrap());
+
+    for (lan_only, expected) in [
+        (true, EndpointAddr::from_parts(id, [lan, tunnel])),
+        (false, announced.clone()),
+    ] {
+        let lookup = DirectoryAddressLookup {
+            manager: manager.clone(),
+            mdns: Arc::new(iroh::address_lookup::MemoryLookup::new()),
+            lan_only,
+        };
+        let item = lookup
+            .resolve(id)
+            .expect("directory resolves")
+            .next()
+            .await
+            .expect("one candidate")
+            .expect("candidate decodes");
+        assert_eq!(item.into_endpoint_addr(), expected, "lan_only={lan_only}");
+    }
+    manager.shutdown().unwrap();
+}
+
 #[tokio::test]
 async fn directory_lookup_establishes_real_multistream_connection_with_bidirectional_bytes() {
     const ALPN: &[u8] = b"uni-test/discovery";
@@ -80,6 +127,7 @@ async fn directory_lookup_establishes_real_multistream_connection_with_bidirecti
         .address_lookup(DirectoryAddressLookup {
             manager: manager.clone(),
             mdns: Arc::new(MemoryLookup::new()),
+            lan_only: false,
         })
         .bind()
         .await
@@ -138,4 +186,70 @@ async fn directory_lookup_establishes_real_multistream_connection_with_bidirecti
     serving.await.unwrap();
     server.close().await;
     manager.shutdown().unwrap();
+}
+
+/// 本机 mDNS 无法建立时，目录只用其余来源：endpoint 仍能构建，发布不报错，
+/// 显式地址照常连通，发现负责人照常初始化。
+#[tokio::test]
+async fn endpoint_builds_and_dials_explicit_addresses_without_local_mdns() {
+    use std::sync::OnceLock;
+
+    use uc_observability_contract::diagnostics::connectivity::NetworkRecorder;
+
+    use super::lookup::DirectoryAddressLookupBuilder;
+
+    const ALPN: &[u8] = b"uni-test/no-mdns";
+    let server = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await
+        .unwrap();
+    let manager = Arc::new(OnceLock::new());
+    let mdns = super::LifetimeMdns::start_with_backoff(
+        || {
+            Err(iroh::address_lookup::AddressLookupBuilderError::from_err(
+                "mdns",
+                std::io::Error::other("unavailable"),
+            ))
+        },
+        NetworkRecorder::current(),
+        Duration::from_secs(3600),
+        Duration::from_secs(3600),
+    );
+    let client = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .address_lookup(DirectoryAddressLookupBuilder {
+            mdns: mdns.clone(),
+            lan_only: true,
+            configured: None,
+            recorder: NetworkRecorder::current(),
+            manager: manager.clone(),
+        })
+        .bind()
+        .await
+        .expect("endpoint starts without local mDNS");
+    assert!(
+        manager.get().is_some(),
+        "discovery owner is still initialized"
+    );
+
+    let accepting = tokio::spawn({
+        let server = server.clone();
+        async move {
+            let connection = server.accept().await?.await.ok()?;
+            connection.closed().await;
+            Some(())
+        }
+    });
+    let connection =
+        tokio::time::timeout(Duration::from_secs(10), client.connect(server.addr(), ALPN))
+            .await
+            .expect("dial finishes")
+            .expect("explicit address still connects without mDNS");
+    drop(connection);
+    accepting.abort();
+    mdns.abort();
+    client.close().await;
+    server.close().await;
 }

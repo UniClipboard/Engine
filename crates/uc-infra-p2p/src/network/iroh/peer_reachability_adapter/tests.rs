@@ -4,6 +4,7 @@ use super::super::connectivity::{
     ConnectivityProfile, IrohConnectionAdmission, IrohConnectivityBackend, PeerReachabilityWire,
     PresenceEnvironment,
 };
+use super::super::membership_history_exchange_adapter::IrohVerifiedPeerAddressRefresh;
 use super::super::net_recovery::{DemandRecoveryCoordinator, NetworkRecoveryObservationSource};
 use super::{IrohPeerReachabilityHandler, LEGACY_PEER_REACHABILITY_ALPN, PEER_REACHABILITY_ALPN};
 use async_trait::async_trait;
@@ -110,6 +111,11 @@ fn owner(
 ) -> Arc<PeerReachabilityTransport> {
     let fingerprint = Arc::new(Sha256IdentityFingerprintFactory);
     let connections = AdmittedConnections::default();
+    let address_refresh = Arc::new(IrohVerifiedPeerAddressRefresh::new(
+        endpoint.clone(),
+        addresses.clone(),
+        Arc::new(SystemClock),
+    ));
     let manager = ConnectivityManager::new(
         Arc::new(IrohConnectivityBackend::new(
             endpoint.clone(),
@@ -143,6 +149,7 @@ fn owner(
                 Arc::new(DemandRecoveryCoordinator::new((*endpoint).clone(), false)),
                 Arc::new(NetworkRecoveryObservationSource::new()),
             )),
+            address_refresh,
         },
         Arc::new(SystemClock),
         broadcast::channel(64).0,
@@ -162,6 +169,72 @@ async fn admission(raw: &iroh::endpoint::Connection) -> u8 {
     send.write_all(&[1]).await.unwrap();
     send.finish().unwrap();
     receive.read_to_end(1).await.unwrap()[0]
+}
+/// 对端地址变化后经 presence 联系本机：本机按这次连接正在使用的路径刷新已保存的陈旧地址，
+/// 不需要新的线上消息。
+#[tokio::test]
+async fn admitted_presence_contact_records_the_peer_address_in_use() {
+    use chrono::Utc;
+    use iroh::{EndpointAddr, TransportAddr};
+
+    let server = endpoint().await;
+    let client = endpoint().await;
+    let addresses = Arc::new(Addresses::default());
+    let stale = EndpointAddr::from_parts(
+        client.id(),
+        [TransportAddr::Ip("192.0.2.1:9".parse().unwrap())],
+    );
+    addresses
+        .upsert(&PeerAddressRecord {
+            device_id: DeviceId::new("client"),
+            addr_blob: postcard::to_stdvec(&stale).unwrap(),
+            observed_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let owner = owner(
+        server.clone(),
+        addresses.clone(),
+        identities(&client, "client"),
+        Arc::new(Authority::default()),
+    );
+    let router = Router::builder((*server).clone())
+        .accept(
+            PEER_REACHABILITY_ALPN,
+            IrohPeerReachabilityHandler::new(owner.clone()),
+        )
+        .spawn();
+    let connection = client
+        .connect(server.addr(), PEER_REACHABILITY_ALPN)
+        .await
+        .unwrap();
+    assert_eq!(admission(&connection).await, 1);
+    let client_ports: Vec<u16> = client.addr().ip_addrs().map(|addr| addr.port()).collect();
+    let refreshed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let record = addresses
+                .get(&DeviceId::new("client"))
+                .await
+                .unwrap()
+                .unwrap();
+            let addr: EndpointAddr = postcard::from_bytes(&record.addr_blob).unwrap();
+            if addr != stale {
+                return addr;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("presence contact must refresh the stored peer address");
+    assert!(
+        refreshed
+            .ip_addrs()
+            .any(|addr| client_ports.contains(&addr.port())),
+        "the path in use is recorded"
+    );
+    owner.disconnect_all().await;
+    router.shutdown().await.unwrap();
+    client.close().await;
 }
 #[tokio::test]
 async fn seventeenth_connection_without_a_first_stream_is_closed_immediately() {

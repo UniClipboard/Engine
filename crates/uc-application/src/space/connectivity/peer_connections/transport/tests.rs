@@ -8,6 +8,7 @@ use crate::connectivity::{
     ConnectivityError, ConnectivityManager, ConnectivityPolicy, InboundIdentityReservation,
     PeerConnection, PeerReceiveStream, PeerSendStream, SessionConnectionAdmissionPort, StreamPair,
 };
+use crate::space::membership::RefreshVerifiedPeerAddressPort;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use std::{
@@ -92,6 +93,8 @@ struct MemoryConnection {
     closed: watch::Sender<bool>,
     first: AtomicBool,
     accepts: AtomicUsize,
+    /// 首个入站流之后，对端还会在此连接上发来的挑战数量。
+    challenges: AtomicUsize,
 }
 impl MemoryConnection {
     fn new(id: usize, peer: u8, mode: ConnectionMode, first: bool) -> Arc<Self> {
@@ -102,6 +105,7 @@ impl MemoryConnection {
             closed: watch::channel(false).0,
             first: AtomicBool::new(first),
             accepts: AtomicUsize::new(0),
+            challenges: AtomicUsize::new(0),
         })
     }
 }
@@ -150,6 +154,15 @@ impl PeerConnection for MemoryConnection {
         if self.first.swap(false, Ordering::SeqCst) {
             return Ok(streams());
         }
+        if self
+            .challenges
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Ok(streams());
+        }
         self.closed().await;
         Err(ConnectivityError::Stopped)
     }
@@ -157,6 +170,8 @@ impl PeerConnection for MemoryConnection {
 struct MemoryBackend {
     mode: ConnectionMode,
     connections: Mutex<Vec<Arc<MemoryConnection>>>,
+    /// 新建出站连接上对端随后发来的挑战数量。
+    challenges: AtomicUsize,
 }
 #[async_trait]
 impl ConnectivityBackend for MemoryBackend {
@@ -174,6 +189,9 @@ impl ConnectivityBackend for MemoryBackend {
             .unwrap();
         let mut connections = self.connections.lock().unwrap();
         let connection = MemoryConnection::new(connections.len(), index, self.mode, false);
+        connection
+            .challenges
+            .store(self.challenges.load(Ordering::SeqCst), Ordering::SeqCst);
         connections.push(connection.clone());
         Ok(connection)
     }
@@ -377,6 +395,31 @@ impl PeerReachabilityWirePort for RecordingWire {
         Ok(())
     }
 }
+#[derive(Default)]
+struct RecordingAddressRefresh {
+    refreshed: Mutex<Vec<DeviceId>>,
+}
+impl RecordingAddressRefresh {
+    async fn wait_for(&self, count: usize) -> Vec<DeviceId> {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let refreshed = self.refreshed.lock().unwrap().clone();
+                if refreshed.len() >= count {
+                    return refreshed;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("address refresh was not requested")
+    }
+}
+#[async_trait]
+impl RefreshVerifiedPeerAddressPort for RecordingAddressRefresh {
+    async fn refresh_verified_peer_address(&self, peer: &DeviceId) {
+        self.refreshed.lock().unwrap().push(*peer);
+    }
+}
 struct FixedClock;
 impl ClockPort for FixedClock {
     fn now_ms(&self) -> i64 {
@@ -389,6 +432,7 @@ struct Fixture {
     authority: Arc<Authority>,
     wire: Arc<RecordingWire>,
     environment: Arc<RecordingEnvironment>,
+    address_refresh: Arc<RecordingAddressRefresh>,
 }
 impl Fixture {
     fn new(mode: ConnectionMode) -> Self {
@@ -396,7 +440,9 @@ impl Fixture {
         let backend = Arc::new(MemoryBackend {
             mode,
             connections: Mutex::new(Vec::new()),
+            challenges: AtomicUsize::new(0),
         });
+        let address_refresh = Arc::new(RecordingAddressRefresh::default());
         let wire = Arc::new(RecordingWire::default());
         let environment = Arc::new(RecordingEnvironment {
             forgotten: Mutex::new(Vec::new()),
@@ -419,6 +465,7 @@ impl Fixture {
             PeerReachabilityTransportPorts {
                 wire: wire.clone(),
                 environment: environment.clone(),
+                address_refresh: address_refresh.clone(),
             },
             Arc::new(FixedClock),
             broadcast::channel(64).0,
@@ -429,6 +476,7 @@ impl Fixture {
             authority,
             wire,
             environment,
+            address_refresh,
         }
     }
 }
@@ -838,5 +886,34 @@ async fn third_inbound_replaces_the_oldest_promoted_connection_even_when_ids_are
         f.owner.current_state(&peer(1)).await,
         ReachabilityState::Online
     );
+    f.owner.shutdown().await.unwrap();
+}
+
+/// 对端地址变化后经 presence 新建连接联系本机：认证并获准后，本机按使用中的路径刷新其已保存地址；
+/// 未获准的联系不刷新。
+#[tokio::test]
+async fn admitted_inbound_contact_refreshes_the_peer_address_and_denied_contact_does_not() {
+    let f = Fixture::new(ConnectionMode::Multiplexed);
+    f.authority.denied.store(true, Ordering::SeqCst);
+    let denied = MemoryConnection::new(7, 2, ConnectionMode::Multiplexed, true);
+    f.owner.accept(denied, Instant::now()).await.unwrap();
+    f.authority.denied.store(false, Ordering::SeqCst);
+    let admitted = MemoryConnection::new(8, 1, ConnectionMode::Multiplexed, true);
+    f.owner.accept(admitted, Instant::now()).await.unwrap();
+    assert_eq!(f.address_refresh.wait_for(1).await, vec![peer(1)]);
+    f.owner.shutdown().await.unwrap();
+    assert_eq!(*f.address_refresh.refreshed.lock().unwrap(), vec![peer(1)]);
+}
+
+/// 对端地址变化后在已保留的连接上重新确认在线：本机应答获准的挑战后刷新其已保存地址。
+#[tokio::test]
+async fn answered_challenge_on_a_retained_connection_refreshes_the_peer_address() {
+    let f = Fixture::new(ConnectionMode::Multiplexed);
+    f.backend.challenges.store(1, Ordering::SeqCst);
+    assert_eq!(
+        f.owner.verify_reachable(&peer(3)).await.unwrap(),
+        ReachabilityState::Online
+    );
+    assert_eq!(f.address_refresh.wait_for(1).await, vec![peer(3)]);
     f.owner.shutdown().await.unwrap();
 }

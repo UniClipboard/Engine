@@ -1,22 +1,24 @@
 use anyhow::Error;
 use std::sync::Arc;
 
-use iroh_mdns_address_lookup::MdnsAddressLookup;
 use tokio::task::JoinHandle;
 use uc_application::deps::{DiscoveryError, DiscoveryManager};
 use uc_core::error_class::ErrorClass;
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 use uc_observability_contract::uc_warn;
 
+use super::LifetimeMdns;
+
 /// 设备节点保留任务所有权；未完整构建或被丢弃时取消，正常关闭时等待实际退出。
 pub(in super::super) struct DiscoveryRuntime {
     manager: Arc<DiscoveryManager>,
     handle: Option<JoinHandle<Result<(), DiscoveryError>>>,
-    mdns: MdnsAddressLookup,
+    /// 长期 mDNS 及其启动失败后的后台重试；关闭时一并取消。
+    mdns: LifetimeMdns,
 }
 
 impl DiscoveryRuntime {
-    pub(in super::super) fn start(manager: Arc<DiscoveryManager>, mdns: MdnsAddressLookup) -> Self {
+    pub(in super::super) fn start(manager: Arc<DiscoveryManager>, mdns: LifetimeMdns) -> Self {
         let running = manager.clone();
         let handle = tokio::spawn(async move {
             let result = running.run().await;
@@ -53,7 +55,7 @@ impl DiscoveryRuntime {
         }
         if let Err(error) = self.mdns.shutdown().await {
             record_task_join_failure(DiagnosticTaskKind::PeerDiscovery);
-            failure.get_or_insert_with(|| error.into());
+            failure.get_or_insert(error);
         }
         failure.map_or(Ok(()), Err)
     }

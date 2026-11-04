@@ -49,6 +49,8 @@ use uc_infra_p2p::network::iroh::{IrohNodeConfig, IrohRelayAccessToken};
 /// - `allow_overlay_network_addrs`：业务正向语义，由 `uc-core::Settings.network`
 ///   透传；专业用户开关，控制是否把 VPN/overlay 类虚拟网卡 IP 作为 iroh 直连候选
 /// - `relay_urls`：节点实际使用的 relay URL 列表（LAN-only 时不参与 bind）
+/// - `bind_port`：设置中的固定 UDP 端口，`0` 与 `None` 同为随机端口；环境变量
+///   覆盖见 [`apply_iroh_direct_reachability_from_env`]
 /// - `rendezvous_base_url`：`None` 走 `RENDEZVOUS_BASE_URL` 默认；production 调
 ///   用方传 `None`；集成测试覆盖 override
 pub fn relay_policy_to_iroh_config(
@@ -56,6 +58,7 @@ pub fn relay_policy_to_iroh_config(
     allow_overlay_network_addrs: bool,
     relay_urls: Vec<String>,
     congestion_controller: CongestionController,
+    bind_port: Option<u16>,
     rendezvous_base_url: Option<String>,
 ) -> IrohNodeConfig {
     IrohNodeConfig {
@@ -67,11 +70,12 @@ pub fn relay_policy_to_iroh_config(
         relay_access_tokens: Default::default(),
         congestion_controller,
         rendezvous_base_url,
-        // 直连可达性（#900）来源于 env，不在本设置翻译点决定；由
-        // `apply_iroh_direct_reachability_from_env` 在 daemon / CLI 入口处填充。
-        bind_port: None,
+        // 固定端口先取设置；`apply_iroh_direct_reachability_from_env` 随后按
+        // “环境变量覆盖设置”的唯一优先级改写。公网地址只来源于 env。
+        bind_port: bind_port.filter(|port| *port != 0),
         public_addr: None,
         network_partition_gate: None,
+        configured_peer_addresses: None,
     }
 }
 
@@ -184,7 +188,15 @@ pub fn apply_iroh_direct_reachability_from_env(cfg: &mut IrohNodeConfig) {
             "iroh direct-reachability configured from env (UC_IROH_BIND_PORT / UC_IROH_PUBLIC_ADDR)",
         );
     }
-    cfg.bind_port = reach.bind_port;
+    apply_iroh_direct_reachability(cfg, reach);
+}
+
+/// 固定端口的唯一优先级：有效的 `UC_IROH_BIND_PORT` 覆盖设置中的 `network.bind_port`；
+/// env 未设置或无效时保留设置值；两者都没有时使用随机端口。公网地址只来源于 env。
+fn apply_iroh_direct_reachability(cfg: &mut IrohNodeConfig, reach: IrohDirectReachability) {
+    if let Some(port) = reach.bind_port {
+        cfg.bind_port = Some(port);
+    }
     cfg.public_addr = reach.public_addr;
 }
 
@@ -269,6 +281,7 @@ mod tests {
             Vec::new(),
             CongestionController::default(),
             None,
+            None,
         );
         assert!(!cfg.disable_relays, "allow=true MUST produce disable=false");
         assert!(cfg.rendezvous_base_url.is_none());
@@ -283,6 +296,7 @@ mod tests {
             Vec::new(),
             CongestionController::default(),
             None,
+            None,
         );
         assert!(cfg.disable_relays, "allow=false MUST produce disable=true");
         assert!(cfg.rendezvous_base_url.is_none());
@@ -296,6 +310,7 @@ mod tests {
             false,
             Vec::new(),
             CongestionController::default(),
+            None,
             Some("http://test".into()),
         );
         assert_eq!(cfg.rendezvous_base_url, Some("http://test".into()));
@@ -310,6 +325,7 @@ mod tests {
             Vec::new(),
             CongestionController::default(),
             None,
+            None,
         );
         assert!(cfg.allow_overlay_network_addrs);
     }
@@ -322,6 +338,7 @@ mod tests {
             false,
             Vec::new(),
             CongestionController::default(),
+            None,
             None,
         );
         assert!(!cfg.allow_overlay_network_addrs);
@@ -337,6 +354,7 @@ mod tests {
             Vec::new(),
             CongestionController::default(),
             None,
+            None,
         );
         assert!(cfg.disable_relays, "LAN-only on, overlay on");
         assert!(cfg.allow_overlay_network_addrs);
@@ -350,6 +368,7 @@ mod tests {
             false,
             vec!["https://relay.example.com.".to_string()],
             CongestionController::default(),
+            None,
             None,
         );
         assert_eq!(
@@ -374,6 +393,7 @@ mod tests {
             false,
             vec![relay_a.to_string(), relay_b.to_string()],
             CongestionController::Cubic,
+            None,
             None,
         );
 
@@ -413,6 +433,7 @@ mod tests {
             vec![relay_a.to_string(), relay_b.to_string()],
             CongestionController::Cubic,
             None,
+            None,
         );
 
         load_relay_access_tokens(&mut config, &credentials);
@@ -429,6 +450,7 @@ mod tests {
             false,
             Vec::new(),
             CongestionController::default(),
+            None,
             None,
         );
         assert_eq!(cfg.bind_port, None);
@@ -493,5 +515,52 @@ mod tests {
         // 缺少端口的裸 IP 不是合法 SocketAddr → 回退。
         let no_port = parse_iroh_direct_reachability(None, Some("203.0.113.7"));
         assert_eq!(no_port.public_addr, None);
+    }
+
+    fn config_with_setting_port(bind_port: Option<u16>) -> IrohNodeConfig {
+        relay_policy_to_iroh_config(
+            false,
+            false,
+            Vec::new(),
+            CongestionController::default(),
+            bind_port,
+            None,
+        )
+    }
+
+    /// 设置中的固定端口进入节点配置；0 与未设置同为随机端口。
+    #[test]
+    fn setting_bind_port_reaches_node_config_and_zero_means_ephemeral() {
+        assert_eq!(config_with_setting_port(None).bind_port, None);
+        assert_eq!(config_with_setting_port(Some(0)).bind_port, None);
+        assert_eq!(config_with_setting_port(Some(51821)).bind_port, Some(51821));
+    }
+
+    /// 唯一优先级：有效 env 覆盖设置；env 未设置或无效时保留设置值。
+    #[test]
+    fn env_bind_port_overrides_the_setting_only_when_valid() {
+        let mut overridden = config_with_setting_port(Some(51821));
+        apply_iroh_direct_reachability(
+            &mut overridden,
+            parse_iroh_direct_reachability(Some("40000"), None),
+        );
+        assert_eq!(overridden.bind_port, Some(40000));
+
+        for raw in [None, Some(""), Some("0"), Some("not-a-port")] {
+            let mut kept = config_with_setting_port(Some(51821));
+            apply_iroh_direct_reachability(&mut kept, parse_iroh_direct_reachability(raw, None));
+            assert_eq!(
+                kept.bind_port,
+                Some(51821),
+                "env {raw:?} must keep the setting"
+            );
+        }
+
+        let mut env_only = config_with_setting_port(None);
+        apply_iroh_direct_reachability(
+            &mut env_only,
+            parse_iroh_direct_reachability(Some("40000"), None),
+        );
+        assert_eq!(env_only.bind_port, Some(40000));
     }
 }

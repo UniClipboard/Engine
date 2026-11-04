@@ -11,6 +11,7 @@ use uc_observability_contract::diagnostics::connectivity::{
     ConnectionPurpose, DialFailure,
 };
 
+use super::super::connect::restrict_dial_addr_if_lan_only;
 use super::diagnostics::record_network_snapshot;
 use super::SPACE_ADMISSION_ALPN;
 use uc_observability_contract::diagnostics::connectivity::{
@@ -40,6 +41,8 @@ pub(super) async fn connect(
     endpoint: &Endpoint,
     addr: EndpointAddr,
 ) -> Result<Connection, AdmissionConnectError> {
+    // 邀请路由可能带有 sponsor 的 relay 与公网地址；LAN-only 只拨本地网络地址。
+    let addr = restrict_dial_addr_if_lan_only(addr);
     let observation =
         ConnectionObservation::begin(ConnectionPurpose::Admission, *addr.id.as_bytes());
     let (summary, fingerprint) = super::super::connection_diagnostics::candidate_summary(&addr);

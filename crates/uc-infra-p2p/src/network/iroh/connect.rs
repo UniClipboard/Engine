@@ -7,13 +7,15 @@ use uc_observability_contract::diagnostics::connectivity::{
 use iroh::endpoint::ConnectOptions;
 use iroh::endpoint::Connection;
 use iroh::endpoint::{ConnectWithOptsError, ConnectingError};
-use iroh::{Endpoint, EndpointAddr, TransportAddr};
+use iroh::{Endpoint, EndpointAddr};
 use tokio::task::JoinError;
 use tokio::task::JoinSet;
 use tokio::time::error::Elapsed;
 use tracing::instrument::WithSubscriber;
 use uc_observability_contract::diagnostics::connectivity::AddressInputSource;
 use uc_observability_contract::diagnostics::within_network_scope;
+
+use super::addr_filter::restrict_to_local_network;
 
 /// Per-attempt connect timeout.
 ///
@@ -47,26 +49,32 @@ const STAGGERED_DELAYS: [Duration; 3] = [
     Duration::from_millis(1500),
 ];
 
-/// LAN-only Mode 反向防御：本端 `RelayMode::Disabled` **不阻止** iroh 用对端
-/// `EndpointAddr` 中的 `relay_url` 发起出站连接。已配对 peer 的 addr blob 在
-/// `to_persistable_addr` 阶段被收敛为"NodeId + Relay 提示"，所以 LAN-only
-/// 用户复制内容触发 dispatch 时仍会看到日志：
-///   `iroh::endpoint: connecting relay_url=Some(...) ip_addresses=[]`
+/// 出站拨号地址的唯一 LAN-only 边界。
 ///
-/// 当 [`super::runtime_consts::lan_only`] 为 `true` 时剥掉 `TransportAddr::Relay`
-/// 项，强制 iroh 只能走 mDNS 重新解析的直连地址。如果对端不在同一子网
-/// （mDNS 不可达），connect 自然失败 —— 这正是 LAN-only 的设计意图。
+/// 本端 `RelayMode::Disabled` **不阻止** iroh 使用对端 `EndpointAddr` 中的
+/// relay 线索，也不限制直连目标。已配对设备的地址记录可能在开启 relay 时保存，
+/// 带有 relay 线索以及公网直连线索（例如 QAD 反射地址或公网网卡地址）；邀请路由
+/// 同样可能带有这两类地址。
 ///
-/// 非 LAN-only 路径下零开销直接返回原 addr（一次 `Vec::iter().any` 短路）。
-pub(super) fn strip_relay_if_lan_only(addr: EndpointAddr) -> EndpointAddr {
-    if !super::runtime_consts::lan_only() {
-        return addr;
+/// 当 [`super::runtime_consts::lan_only`] 为 `true` 时，按
+/// [`restrict_to_local_network`] 只保留本地网络范围内的直连地址（私网、环回、
+/// link-local、CGNAT 与 ULA 隧道地址，以及本机接口当前子网内的地址），relay 与
+/// 其余公网地址全部去掉。保留的直连线索（例如固定端口的隧道地址）交给 iroh，与经过
+/// 同一规则过滤的地址发现结果**并行**使用，任何一条可用路径胜出；陈旧线索不会阻塞
+/// 新发现的地址。没有可用的本地网络线索、也发现不了对端时，connect 自然失败，这正是
+/// LAN-only 的设计意图。
+///
+/// 非 LAN-only 时原样返回，relay 与全部直连线索都交给 iroh。
+pub(super) fn restrict_dial_addr_if_lan_only(addr: EndpointAddr) -> EndpointAddr {
+    dial_addr_for_policy(addr, super::runtime_consts::lan_only())
+}
+
+fn dial_addr_for_policy(addr: EndpointAddr, lan_only: bool) -> EndpointAddr {
+    if lan_only {
+        restrict_to_local_network(addr)
+    } else {
+        addr
     }
-    let EndpointAddr { id, addrs } = addr;
-    let kept = addrs
-        .into_iter()
-        .filter(|a| !matches!(a, TransportAddr::Relay(_)));
-    EndpointAddr::from_parts(id, kept)
 }
 
 /// 一次交错拨号中每个尝试都失败。只保存最能说明原因的一次尝试：
@@ -119,7 +127,7 @@ pub(super) async fn connect_with_staggered_retry_classified(
     purpose: &'static str,
     source: AddressInputSource,
 ) -> Result<Connection, StaggeredDialError> {
-    let addr = strip_relay_if_lan_only(addr);
+    let addr = restrict_dial_addr_if_lan_only(addr);
     let observation =
         ConnectionObservation::begin(connection_purpose(purpose), *addr.id.as_bytes());
     let (summary, fingerprint) = super::connection_diagnostics::candidate_summary(&addr);
@@ -530,6 +538,48 @@ mod tests {
         drop(accepted);
         client.close().await;
         server.close().await;
+    }
+
+    fn stored_hints() -> EndpointAddr {
+        let id = iroh::SecretKey::from_bytes(&[0x37; 32]).public();
+        EndpointAddr::from_parts(
+            id,
+            [
+                iroh::TransportAddr::Relay("https://relay.example.com/".parse().expect("relay")),
+                iroh::TransportAddr::Ip("203.0.113.7:50754".parse().expect("public")),
+                iroh::TransportAddr::Ip("[2606:4700::1111]:50754".parse().expect("public v6")),
+                iroh::TransportAddr::Ip("10.8.0.2:51820".parse().expect("tunnel")),
+                iroh::TransportAddr::Ip("192.168.1.5:50754".parse().expect("lan")),
+            ],
+        )
+    }
+
+    /// LAN-only 拨号只交出本地网络范围内的直连线索：relay 与公网线索（relay 开启时
+    /// 保存的反射地址等）都不拨。
+    #[test]
+    fn lan_only_dial_drops_relay_and_public_hints_but_keeps_private_and_tunnel_hints() {
+        let hints = stored_hints();
+        let dialed = dial_addr_for_policy(hints.clone(), true);
+
+        assert_eq!(
+            dialed,
+            EndpointAddr::from_parts(
+                hints.id,
+                [
+                    iroh::TransportAddr::Ip("10.8.0.2:51820".parse().expect("tunnel")),
+                    iroh::TransportAddr::Ip("192.168.1.5:50754".parse().expect("lan")),
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn relay_enabled_dial_keeps_every_stored_hint() {
+        let hints = stored_hints();
+
+        assert_eq!(dial_addr_for_policy(hints.clone(), false), hints);
+        // 测试进程没有全局 LAN-only 策略，入口应与 relay 开启时一致。
+        assert_eq!(restrict_dial_addr_if_lan_only(hints.clone()), hints);
     }
 
     async fn elapsed() -> Elapsed {

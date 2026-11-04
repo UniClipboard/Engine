@@ -335,6 +335,8 @@ impl Runner {
                 .await?;
             if !allowed || !current {
                 lease.close();
+            } else {
+                self.refresh_contact_address(attempt.peer);
             }
             Ok::<_, PeerReachabilityTransportError>(())
         }

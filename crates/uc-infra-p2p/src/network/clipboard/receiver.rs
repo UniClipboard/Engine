@@ -203,7 +203,7 @@ impl ClipboardReceiverAdapter {
                 .and_then(|checked| checked);
             if let Err(error) = current {
                 let (failure, error_type) = match error {
-                    ConnectivityError::Denied => (
+                    ConnectivityError::Denied | ConnectivityError::Invalidated(_) => (
                         ClipboardReceiveFailure::AdmissionRevoked,
                         DiagnosticErrorType::PeerRejected,
                     ),

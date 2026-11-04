@@ -345,19 +345,20 @@ async fn prove_isolation(same_content: bool) -> anyhow::Result<()> {
     ));
     server_registry.close_device(&receiver_peer);
     server_members.admitted.store(true, Ordering::SeqCst);
+    // 成员权威重新准入也不能让旧快照复活；围栏仍拒绝，原因记为请求失效而非成员拒绝。
     assert!(matches!(
         old_attempt.check_current().await,
-        Err(ConnectivityError::Denied)
+        Err(ConnectivityError::Invalidated(None))
     ));
     assert!(matches!(
         remote.check_current().await,
-        Err(ConnectivityError::Denied)
+        Err(ConnectivityError::Invalidated(None))
     ));
     let session_attempt = server_admission.begin(receiver_peer);
     server_registry.close_all();
     assert!(matches!(
         session_attempt.check_current().await,
-        Err(ConnectivityError::Denied)
+        Err(ConnectivityError::Invalidated(None))
     ));
     assert_eq!(BlobTicket::decode_bytes(&ticket)?.hash(), sibling.hash);
     assert!(source.blobs().has(sibling.hash).await?);
