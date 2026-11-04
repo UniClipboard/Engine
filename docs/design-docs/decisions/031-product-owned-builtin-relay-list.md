@@ -1,18 +1,13 @@
 # ADR-031：内置 relay 列表由产品持有
 
-## 2026-11-03 amendment: built-in relay access classes
+## 2026-11-03 修订：内置 relay 访问分类
 
-The [managed public relay design](../managed-public-relay.md) adds a second
-class of built-in relay. Core keeps the public n0 relays as direct built-ins:
-they are installed at bind and need no credential. Core also bundles one
-product-managed Shanghai candidate (`cn-shanghai-1`) that requires a
-short-lived anonymous credential from the Cloud control plane. BuiltIn routing
-installs the direct built-ins first and appends the managed relay only after
-credential issuance. A successful Cloud catalog can replace or remove the
-managed candidates, never the direct built-ins. Custom routing keeps its
-existing explicit URLs and secure-storage credentials. The routing precedence
-and the separation from user settings remain unchanged. The original decision
-below is retained as historical rationale.
+[受管公共 relay 设计](../managed-public-relay.md)新增第二类内置 relay。Core 保留公共
+n0 relay 作为直接内置：它们在绑定时安装，不需要凭据。Core 同时随包携带一个产品自建的
+上海候选（`cn-shanghai-1`），它需要由 Cloud 控制面签发短期匿名凭据。BuiltIn 路由先
+安装直接内置 relay，只在凭据签发后才追加受管 relay。有效的 Cloud 目录可以替换或移除
+受管候选，但永不替换直接内置 relay。Custom 路由继续使用其显式地址与安全存储凭据。
+路由优先级以及与用户设置的隔离保持不变。下方原决策保留作为历史依据。
 
 - **状态**：已采纳（连通性与下游展示的验收范围见执行计划 042）
 - **日期**：2026-10-01
