@@ -524,3 +524,55 @@ async fn wall_clock_after_suspend_forces_credential_renewal_before_monotonic_dea
     endpoint.close().await;
     artifact("suspend-expiry", json!({"wall_clock_renewal":true}));
 }
+
+/// worker 是独立任务：它必须把失败告警交给当前进程的记录员，而不是在启动时被静默隔离。
+#[test]
+fn worker_failures_reach_the_ambient_log() {
+    use opentelemetry::logs::AnyValue;
+    use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+    use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let exporter = InMemoryLogExporter::default();
+    let provider = SdkLoggerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber =
+        tracing_subscriber::registry().with(OpenTelemetryTracingBridge::new(&provider));
+    // 单线程 runtime 让 spawn 出来的 worker 与测试在同一线程上被驱动，
+    // 因此这里的作用域订阅者就是 worker 实际写日志时使用的记录员。
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (handle, endpoint) = tracing::subscriber::with_default(subscriber, || {
+        runtime.block_on(async {
+            let cloud = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/nodes"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&cloud)
+                .await;
+            let endpoint = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Custom(RelayMap::empty()))
+                .bind()
+                .await
+                .unwrap();
+            let manager = ManagedRelay::new(endpoint.id(), &cloud.uri()).unwrap();
+            let handle = manager.spawn(endpoint.clone());
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            (handle, endpoint)
+        })
+    });
+    handle.abort();
+    runtime.block_on(endpoint.close());
+    let emitted = exporter.get_emitted_logs().unwrap();
+    let reported = emitted.iter().any(|entry| {
+        matches!(
+            entry.record.body(),
+            Some(AnyValue::String(body)) if body.as_str().contains("managed relay catalog refresh failed")
+        )
+    });
+    assert!(reported, "managed relay worker warnings must reach the log");
+    artifact("worker-log", json!({"catalog_failure_logged": reported}));
+}

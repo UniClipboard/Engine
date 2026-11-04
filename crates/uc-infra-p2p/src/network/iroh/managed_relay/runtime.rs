@@ -8,7 +8,6 @@ use tokio::{
     time::{sleep, Instant},
 };
 use tokio_util::task::AbortOnDropHandle;
-use tracing::{instrument::WithSubscriber, Dispatch};
 use uc_core::settings::relay_routing::{managed_builtin_relays, PREFERRED_MANAGED_RELAY_ID};
 use uc_observability_contract::uc_warn;
 
@@ -172,27 +171,26 @@ impl ManagedRelay {
     }
 
     pub fn spawn(mut self, endpoint: Endpoint) -> AbortOnDropHandle<()> {
-        let task: JoinHandle<()> = tokio::spawn(
-            async move {
-                let mut status = endpoint.home_relay_status().stream();
-                loop {
-                    if endpoint.is_closed() {
-                        break;
-                    }
-                    self.tick(&endpoint, Instant::now(), Utc::now()).await;
-                    let next = match &self.active {
-                        Some(active) => self.next_catalog.min(active.renew_at),
-                        None if self.nodes.is_empty() => self.next_catalog,
-                        None => self.next_catalog.min(self.next_credential),
-                    };
-                    tokio::select! {
-                        _ = sleep(next.saturating_duration_since(Instant::now()).max(Duration::from_secs(1))) => {},
-                        changed = status.next() => { if changed.is_none() { break; } },
-                    }
+        // 常驻任务不继承启动请求的 dispatcher，但也不能关闭自身观测：
+        // `tick` 的失败告警必须进入进程记录员，否则真实故障无从排查。
+        let task: JoinHandle<()> = tokio::spawn(async move {
+            let mut status = endpoint.home_relay_status().stream();
+            loop {
+                if endpoint.is_closed() {
+                    break;
+                }
+                self.tick(&endpoint, Instant::now(), Utc::now()).await;
+                let next = match &self.active {
+                    Some(active) => self.next_catalog.min(active.renew_at),
+                    None if self.nodes.is_empty() => self.next_catalog,
+                    None => self.next_catalog.min(self.next_credential),
+                };
+                tokio::select! {
+                    _ = sleep(next.saturating_duration_since(Instant::now()).max(Duration::from_secs(1))) => {},
+                    changed = status.next() => { if changed.is_none() { break; } },
                 }
             }
-            .with_subscriber(Dispatch::none()),
-        );
+        });
         AbortOnDropHandle::new(task)
     }
 }
