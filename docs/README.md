@@ -18,6 +18,8 @@
 - [暂存字节与采集提交顺序](design-docs/clipboard-staged-commit.md)：耐久写入、原子提交和后台通知的顺序约束。
 - [测试使用指南](design-docs/testing-guide.md)：选择测试层级、运行分组、使用 testkit 和复现失败。
 
+- [Engine process benchmarks](../tests/benchmarks/README.md)：macOS 工作负载、测量边界与复现方法。
+
 ## 记录分类
 
 | 目录 | 保存内容 | 不保存 |

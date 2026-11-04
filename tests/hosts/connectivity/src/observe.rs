@@ -179,3 +179,36 @@ fn error_code(error: &anyhow::Error) -> Option<u32> {
         .downcast_ref::<uc_engine::EngineError>()
         .map(uc_engine::EngineError::code)
 }
+
+/// 基准只读取一页真实内容，不返回内容正文或设备信息。
+pub(crate) async fn text_page(engine: &Engine, request: &Value) -> Result<Value> {
+    let offset = request["offset"].as_u64().unwrap_or(0);
+    let limit = request["limit"].as_u64().unwrap_or(1);
+    if limit == 0 || limit > 32 || offset > 10000 {
+        bail!("invalid benchmark page");
+    }
+    let OperationResult::HistoryEntries(entries) = engine
+        .execute(Operation::ListHistoryEntries(ListHistoryEntriesInput {
+            limit: limit as u32,
+            offset,
+        }))
+        .await?
+    else {
+        bail!("history entries expected");
+    };
+    let mut result = Vec::new();
+    for entry in entries {
+        let OperationResult::HistoryEntry(detail) = engine
+            .execute(Operation::GetHistoryEntry(HistoryEntryInput {
+                entry_id: entry.entry_id,
+            }))
+            .await?
+        else {
+            bail!("history detail expected");
+        };
+        result.push(
+            json!({"sha256": digest(detail.content.as_bytes()), "size": detail.content.len()}),
+        );
+    }
+    Ok(json!(result))
+}

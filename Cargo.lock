@@ -7160,10 +7160,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "uc-benchmark"
+version = "1.1.0-rc.23"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "uc-testkit",
+]
+
+[[package]]
 name = "uc-connectivity-host"
 version = "1.1.0-rc.23"
 dependencies = [
  "anyhow",
+ "async-trait",
  "diesel",
  "libsqlite3-sys",
  "serde_json",
@@ -7171,6 +7185,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uc-engine",
+ "uc-testkit",
  "url",
  "wiremock",
 ]
@@ -7743,6 +7758,7 @@ dependencies = [
 name = "uc-testkit"
 version = "1.1.0-rc.23"
 dependencies = [
+ "anyhow",
  "serde",
  "serde_json",
  "tempfile",
@@ -7750,6 +7766,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

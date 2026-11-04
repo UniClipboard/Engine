@@ -17,3 +17,12 @@ pub use identity::ScenarioIdentity;
 pub use report::{CleanupStatus, ResourceReport, ScenarioReport};
 pub use resource::{TcpPortLease, TempDirLease};
 pub use scenario::{Scenario, ScenarioCompletion, ScenarioCompletionFailure, ScenarioConfig};
+
+#[cfg(feature = "connectivity")]
+mod rendezvous;
+#[cfg(feature = "connectivity")]
+pub use rendezvous::mount_rendezvous;
+#[cfg(feature = "connectivity")]
+mod interactive;
+#[cfg(feature = "connectivity")]
+pub use interactive::{HostOperationFailure, InteractiveProcess};

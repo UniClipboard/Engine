@@ -20,6 +20,8 @@
 
 ## 当前专项计划
 
+- [macOS Engine 基准测试框架 (#374)](exec-plans/active/2026-11-02-engine-benchmark.md)：实现与功能验收完成；首次受控参考运行已于 2026-11-03 完成，参考批准仍需人工进行。
+
 - [File-addressable receive snapshots (#368)](exec-plans/completed/2026-11-01-receive-item-progress.md): implementation and host verification complete; 61 receive E2E scenarios and both binding projections passed. Native devices, remote CI, and release publication were skipped.
 
 - [Process observability and failed-start release specification](exec-plans/active/2026-10-27-process-startup-release-spec.md): proposed; complete owners, source-matched bindings, native artifacts, and end-to-end acceptance remain incomplete.
