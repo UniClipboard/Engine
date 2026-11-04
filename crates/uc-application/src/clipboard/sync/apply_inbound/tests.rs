@@ -35,10 +35,13 @@ use crate::facade::host_event::{
     HostEventEmitterPort,
 };
 
-use uc_core::clipboard::ClipboardRepositoryError;
+use uc_core::clipboard::{ActiveClipboardState, ClipboardRepositoryError};
 use uc_core::ids::{DeviceId, EntryId, FormatId, RepresentationId};
 use uc_core::ports::blob::{BlobDigest, BlobTicket, PlaintextHash};
-use uc_core::ports::clipboard::{FindEntryIdBySnapshotHashPort, TouchClipboardEntryPort};
+use uc_core::ports::clipboard::{
+    ActiveClipboardRegisterError, FindEntryIdBySnapshotHashPort, LoadActiveClipboardPort,
+    TouchClipboardEntryPort,
+};
 use uc_core::ports::{
     receive_file_settlement_decision, AttemptError, AttemptState, BeginReceiveAttemptPort,
     BeginReceiveFailureOutcome, BeginReceiveFailurePort, BeginReceiveOutcome,
@@ -3547,6 +3550,34 @@ fn resurface_uc(
         .with_resurface_ports(Arc::new(rebuild), Arc::new(touch))
 }
 
+struct FixedActiveRegister(Option<ActiveClipboardState>);
+
+#[async_trait]
+impl LoadActiveClipboardPort for FixedActiveRegister {
+    async fn load(&self) -> Result<Option<ActiveClipboardState>, ActiveClipboardRegisterError> {
+        Ok(self.0.clone())
+    }
+}
+
+fn resurface_uc_with_active_entry(
+    repo: MockEntryRepo,
+    capture: MockCapture,
+    write: MockWrite,
+    rebuild: MockSnapshotRebuild,
+    touch: MockTouchEntry,
+    active_entry: &EntryId,
+    active_hash: &str,
+) -> ApplyInboundClipboardUseCase {
+    resurface_uc(repo, capture, write, rebuild, touch).with_active_register_load(Arc::new(
+        FixedActiveRegister(Some(ActiveClipboardState::new(
+            active_hash,
+            active_entry.clone(),
+            1,
+            DeviceId::new("remote-device"),
+        ))),
+    ))
+}
+
 /// The held entry is rebuilt from local storage and written to the OS
 /// clipboard — never re-downloaded, never duplicated as a new row.
 #[tokio::test]
@@ -3663,6 +3694,41 @@ async fn resurface_stamps_the_inbound_activation_time_not_the_entrys_creation_ti
 /// A rebuild failure (payload lost / blob gone) must not fabricate an
 /// activation: fall back to the plain skip rather than writing a broken
 /// snapshot to the pasteboard.
+#[tokio::test]
+async fn duplicate_of_already_active_content_is_dropped_without_os_write() {
+    let (input, hash) = fixture_input("abc");
+    let existing = EntryId::from("entry-abc");
+
+    let mut repo = MockEntryRepo::new();
+    let existing_for_repo = existing.clone();
+    repo.expect_find_entry_id_by_snapshot_hash()
+        .with(eq(hash.clone()))
+        .times(1)
+        .returning(move |_| Ok(Some(existing_for_repo.clone())));
+
+    // The active register already points at this entry: a duplicate delivery
+    // must not rebuild, re-write the pasteboard, bump history, or re-activate.
+    let uc = resurface_uc_with_active_entry(
+        repo,
+        MockCapture::new(),
+        MockWrite::new(),
+        MockSnapshotRebuild::new(),
+        MockTouchEntry::new(),
+        &existing,
+        &hash,
+    );
+
+    let outcome = uc.execute(input).await.expect("duplicate drop ok");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::DuplicateSkipped {
+            snapshot_hash: hash,
+            existing_entry_id: existing,
+        }
+    );
+}
+
+/// A rebuild failure degrades to a skip (content unresolvable).
 #[tokio::test]
 async fn resurface_degrades_to_skip_when_rebuild_fails() {
     let (input, hash) = fixture_input("abc");

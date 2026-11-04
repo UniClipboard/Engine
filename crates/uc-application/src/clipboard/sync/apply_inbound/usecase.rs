@@ -18,8 +18,8 @@ use uc_observability_contract::{
 use uc_core::clipboard::ActiveClipboardState;
 use uc_core::ids::EntryId;
 use uc_core::ports::clipboard::{
-    AdvanceActiveClipboardPort, CheckEntryAvailabilityPort, FindEntryIdBySnapshotHashPort,
-    TouchClipboardEntryPort,
+    ActiveClipboardRegisterError, AdvanceActiveClipboardPort, CheckEntryAvailabilityPort,
+    FindEntryIdBySnapshotHashPort, LoadActiveClipboardPort, TouchClipboardEntryPort,
 };
 use uc_core::ports::{
     AttemptState, BeginReceiveAttemptPort, BeginReceiveFailureOutcome, BeginReceiveFailurePort,
@@ -113,6 +113,14 @@ pub struct ApplyInboundClipboardUseCase {
     /// suppressing it. `None` degrades to "a hash match is always held" (the
     /// prior skip-on-match behavior).
     availability: Option<Arc<dyn CheckEntryAvailabilityPort>>,
+    /// Point-in-time read of the cross-device active register (interactive
+    /// mode only). A duplicate delivery of content that is already the active
+    /// clipboard is not a new activation: re-writing it would make this
+    /// device's own watcher observe a programmatic write and, on hosts
+    /// without write identities, re-capture and re-dispatch it — the
+    /// multi-device echo loop. `None` (store-only / focused tests) disables
+    /// the check.
+    active_register_load: Option<Arc<dyn LoadActiveClipboardPort>>,
     /// Optional host-event emitter for surfacing the inbound entry to UI
     /// before the fetch+capture pipeline finishes. Wired only in daemon
     /// mode; tests / CLI leave it `None`.
@@ -173,6 +181,7 @@ pub(crate) struct InteractiveReceiveDeps {
     pub provisional_receive: Arc<dyn FinalizeProvisionalReceivePort>,
 
     pub active_register: Arc<dyn AdvanceActiveClipboardPort>,
+    pub active_register_load: Arc<dyn LoadActiveClipboardPort>,
     pub mobile_consumability: MobileConsumabilityProbe,
     pub snapshot_deps: ClipboardSnapshotDeps,
     pub touch_entry: Arc<dyn TouchClipboardEntryPort>,
@@ -260,7 +269,7 @@ impl ApplyInboundClipboardUseCase {
             rebuild: Arc::new(deps.snapshot_deps.into_reconstructor()),
             touch_entry: deps.touch_entry,
         };
-        Self::from_common(
+        let mut use_case = Self::from_common(
             deps.common,
             InboundApplyMode::InteractiveReceive {
                 write: deps.write,
@@ -269,7 +278,9 @@ impl ApplyInboundClipboardUseCase {
                 resurface,
             },
             Some(deps.provisional_receive),
-        )
+        );
+        use_case.active_register_load = Some(deps.active_register_load);
+        use_case
     }
 
     pub(crate) fn store_only_pull(deps: StoreOnlyPullDeps) -> Self {
@@ -310,6 +321,7 @@ impl ApplyInboundClipboardUseCase {
             receive_readiness: Some(receive_readiness),
             coordinator: entry_identity_coordinator,
             availability: Some(availability),
+            active_register_load: None,
             host_event_emitter: Some(host_event_emitter),
             search_live_index: Some(search_live_index),
             recent_snapshot_hashes: Cache::builder()
@@ -351,6 +363,7 @@ impl ApplyInboundClipboardUseCase {
             receive_readiness: None,
             coordinator: Arc::new(EntryIdentityCoordinator::new()),
             availability: None,
+            active_register_load: None,
             host_event_emitter: None,
             search_live_index: None,
             recent_snapshot_hashes: Cache::builder()
@@ -448,6 +461,15 @@ impl ApplyInboundClipboardUseCase {
                 touch_entry,
             });
         }
+        self
+    }
+
+    /// Wire the active-register read used to recognise a duplicate delivery of
+    /// the content that is already on the pasteboard.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_active_register_load(mut self, register: Arc<dyn LoadActiveClipboardPort>) -> Self {
+        self.active_register_load = Some(register);
         self
     }
 
@@ -881,6 +903,26 @@ impl ApplyInboundClipboardUseCase {
         existing_id: &EntryId,
         activated_at_ms: i64,
     ) -> ApplyOutcome {
+        // A delivery whose content is already this device's active clipboard is
+        // not a new activation. Re-writing the pasteboard would make our own
+        // watcher observe a programmatic write and — on hosts that cannot prove
+        // write identity — re-capture and re-dispatch it to every peer, which is
+        // the A→B→A→B echo loop. The activation is already recorded locally, so
+        // drop the duplicate without an OS write, register advance, or UI event.
+        if self
+            .is_already_active(existing_id, &input.snapshot_hash)
+            .await
+        {
+            uc_debug!(
+                existing_entry_id = log_id(&existing_id),
+                "inbound dropped: content is already the active clipboard"
+            );
+            return ApplyOutcome::DuplicateSkipped {
+                snapshot_hash: input.snapshot_hash.clone(),
+                existing_entry_id: existing_id.clone(),
+            };
+        }
+
         let Some(resurface) = self.resurface_ports() else {
             uc_debug!(
                 existing_entry_id = log_id(&existing_id),
@@ -1007,6 +1049,35 @@ impl ApplyInboundClipboardUseCase {
             snapshot_hash: input.snapshot_hash.clone(),
             existing_entry_id: existing_id.clone(),
             os_write_succeeded: true,
+        }
+    }
+
+    /// Whether the local active register already points at this content.
+    ///
+    /// Compares the local entry handle and the cross-device content hash, so a
+    /// duplicate delivery of the content currently on the pasteboard is
+    /// recognised regardless of which local entry id the sender named. A
+    /// missing/failed load returns `false`: an unreadable register must never
+    /// suppress a genuine re-activation.
+    async fn is_already_active(&self, entry_id: &EntryId, snapshot_hash: &str) -> bool {
+        let Some(register) = self.active_register_load.as_ref() else {
+            return false;
+        };
+        match register.load().await {
+            Ok(Some(state)) => state.entry_id == *entry_id || state.snapshot_hash == snapshot_hash,
+            Ok(None) => false,
+            Err(error) => {
+                let error_kind = match error {
+                    ActiveClipboardRegisterError::NotUnlocked => "not_unlocked",
+                    ActiveClipboardRegisterError::Storage(_) => "storage",
+                };
+                uc_warn!(
+                    error_kind = error_kind,
+                    entry_id = log_id(&entry_id),
+                    "inbound: active register load failed; treating delivery as a new activation"
+                );
+                false
+            }
         }
     }
 

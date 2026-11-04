@@ -323,6 +323,7 @@ impl ClipboardAssembly {
                 ),
 
                 active_register: Arc::clone(&self.deps.clipboard.active_register),
+                active_register_load: Arc::clone(&self.deps.clipboard.active_register_load),
                 mobile_consumability: self.deps.clipboard.mobile_consumability.clone(),
                 snapshot_deps: self.snapshot_deps(),
                 touch_entry: Arc::clone(&self.deps.clipboard.entry_ports.touch),
@@ -361,6 +362,7 @@ impl ClipboardAssembly {
             capture: Arc::clone(&self.capture_use_case) as Arc<_>,
             live_index: Arc::clone(&self.live_index),
             activation,
+            active_register_load: Arc::clone(&self.deps.clipboard.active_register_load),
             dispatch: Arc::clone(&sync) as Arc<_>,
             host_events: Arc::clone(&self.host_event_bus),
         }));
