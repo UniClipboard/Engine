@@ -44,7 +44,7 @@ use crate::dev::JoinerFinalConfirmationGate;
 use crate::engine::event_stream::EventSender;
 use crate::engine::startup_owner::StartupCleanupOwner;
 use crate::error_codes::{PROFILE_RECOVERY_REQUIRED_CODE, PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE};
-use crate::operations::space::factory_reset::map_profile_factory_reset_error;
+use crate::operations::space::lifecycle::map_profile_factory_reset_error;
 use crate::{
     AdmissionRecoverySummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
     HostCapabilities, HostFileAccess, NetworkRecoveryPhaseSummary, NetworkRecoveryStatusSummary,
@@ -593,7 +593,7 @@ mod tests {
     use crate::operations::history::search::{
         history_page_result, history_search_input, map_query_history_error,
     };
-    use crate::operations::settings::storage::{map_storage_error, storage_stats_result};
+    use crate::operations::settings::maintenance::{map_storage_error, storage_stats_result};
     use crate::runtime::host_operations::send_report_result;
     use crate::{EntrySummary, OperationResult, QueryHistoryInput, StorageStatsSummary};
 

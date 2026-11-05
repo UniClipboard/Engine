@@ -43,7 +43,7 @@ use crate::assembly::lifecycle::{
 #[cfg(feature = "dev-tools")]
 use crate::dev::JoinerFinalConfirmationGate;
 use crate::engine::event_stream::{EventSender, RefreshHold};
-use crate::operations::space::reset_space::execute_reset_space;
+use crate::operations::space::lifecycle::execute_reset_space;
 use crate::subsystems::peer_keepalive::spawn_peer_reachability_event_task;
 #[cfg(feature = "dev-tools")]
 use crate::SessionHandoverFailurePoint;

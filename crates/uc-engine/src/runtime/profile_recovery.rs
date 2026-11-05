@@ -36,7 +36,7 @@ use crate::error_codes::{
     PROFILE_RECOVERY_PERSISTENCE_FAILED_CODE, PROFILE_RECOVERY_UNSUPPORTED_CODE,
     UNLOCK_SPACE_CORRUPTED_CODE, UNLOCK_SPACE_UNAUTHORIZED_CODE,
 };
-use crate::operations::space::factory_reset::execute_factory_reset_space;
+use crate::operations::space::lifecycle::execute_factory_reset_space;
 use crate::{
     AdmissionRecoverySummary, EncryptionStateSummary, EngineConfig, EngineError,
     EngineErrorCategory, EngineEvent, HostCapabilities, HostCapabilityError,
