@@ -2308,7 +2308,7 @@ function repositorySources() {
     ].map(path => read(`crates/uc-infra-p2p/src/network/iroh/connectivity/${path}`)).join('\n'),
     retiredBranchRecoveryPresent: existsSync(join(REPOSITORY_ROOT, 'crates/uc-infra-p2p/src/network/iroh/membership_branch_recovery_adapter.rs')),
     runtimeModule: read('crates/uc-engine/src/runtime/mod.rs'),
-    sessionSupervisor: read('crates/uc-engine/src/runtime/session_supervisor.rs'),
+    sessionSupervisor: readSourceTree('crates/uc-engine/src/runtime/session_supervisor'),
     runtimeLifecycleModule: read('crates/uc-application/src/runtime_lifecycle/mod.rs'),
     runtimeLifecyclePorts: read('crates/uc-application/src/runtime_lifecycle/ports.rs'),
     runtimeLifecycleCoordinator: read(

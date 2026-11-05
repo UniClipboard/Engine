@@ -16,16 +16,16 @@ use uc_infra_p2p::network::iroh::{
 use super::operation_error_with_code;
 use super::ProductionRuntime;
 use crate::engine::EngineRuntime;
-use crate::operations::clipboard::capture::execute_capture_current_clipboard;
-use crate::operations::clipboard::query_active::execute_query_active_clipboard;
+use crate::operations::clipboard::active::{
+    execute_capture_current_clipboard, execute_query_active_clipboard,
+};
 use crate::operations::clipboard::restore::execute_restore_clipboard;
-use crate::operations::device::device::execute_query_local_device;
+use crate::operations::device::connectivity::{
+    execute_query_local_device, execute_query_peer_connections, execute_refresh_peer_connections,
+};
 use crate::operations::device::member::{
     execute_list_devices, execute_query_member_sync_preferences, execute_query_space_protection,
     execute_remove_member, execute_update_member_sync_preferences,
-};
-use crate::operations::device::peer_connections::{
-    execute_query_peer_connections, execute_refresh_peer_connections,
 };
 use crate::operations::history::delivery::execute_query_entry_delivery;
 use crate::operations::history::history::{
@@ -65,36 +65,29 @@ use crate::operations::settings::diagnostics::{
 use crate::operations::settings::encryption::{
     execute_lock_encryption, execute_query_encryption_state, execute_verify_secure_storage_access,
 };
-use crate::operations::settings::settings::{
+use crate::operations::settings::maintenance::{
+    execute_acknowledge_upgrade, execute_clear_storage_cache, execute_delete_upgrade_backup,
+    execute_list_upgrade_backups, execute_query_storage_stats, execute_query_upgrade_status,
+};
+use crate::operations::settings::relay::{
     execute_mutate_custom_relay, execute_probe_relay, execute_query_custom_relays,
-    execute_query_relay_credential, execute_query_relay_overview, execute_query_settings,
-    execute_save_relay, execute_update_settings,
+    execute_query_relay_credential, execute_query_relay_overview, execute_save_relay,
 };
-use crate::operations::settings::storage::{
-    execute_clear_storage_cache, execute_query_storage_stats,
-};
-use crate::operations::settings::upgrade::{
-    execute_acknowledge_upgrade, execute_query_upgrade_status,
-};
-use crate::operations::settings::upgrade_backups::{
-    execute_delete_upgrade_backup, execute_list_upgrade_backups,
-};
-use crate::operations::space::cancel_invitation::execute_cancel_invitation;
-use crate::operations::space::cancel_join_space::execute_cancel_join_space;
-use crate::operations::space::create_space::execute_create_space;
+use crate::operations::settings::settings::{execute_query_settings, execute_update_settings};
 use crate::operations::space::device_group_choice::{
     execute_choose_device_group, execute_query_device_group_choices,
 };
-use crate::operations::space::encryption_passphrase::execute_change_encryption_passphrase;
-use crate::operations::space::factory_reset::execute_factory_reset_space;
-use crate::operations::space::invitation::execute_issue_invitation;
-use crate::operations::space::join_space::execute_join_space;
+use crate::operations::space::invitation::{execute_cancel_invitation, execute_issue_invitation};
+use crate::operations::space::lifecycle::{
+    execute_cancel_join_space, execute_create_space, execute_factory_reset_space,
+    execute_join_space, execute_query_setup_state,
+};
 #[cfg(feature = "dev-tools")]
-use crate::operations::space::membership_diagnostics::execute_query_membership_diagnostics;
-use crate::operations::space::membership_readiness::execute_query_membership_readiness;
-use crate::operations::space::session_recovery::execute_recover_session;
-use crate::operations::space::setup_state::execute_query_setup_state;
-use crate::operations::space::unlock::execute_unlock_space;
+use crate::operations::space::membership::execute_query_membership_diagnostics;
+use crate::operations::space::membership::execute_query_membership_readiness;
+use crate::operations::space::session::{
+    execute_change_encryption_passphrase, execute_recover_session, execute_unlock_space,
+};
 use crate::{
     EngineError, EngineErrorCategory, Operation, OperationResult, ProfileRecoveryState,
     ProfileRecoverySummary,

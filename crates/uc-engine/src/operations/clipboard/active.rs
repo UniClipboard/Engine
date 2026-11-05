@@ -1,10 +1,13 @@
-//! Shared current-system-clipboard capture operation.
+//! 当前生效内容的读取、立即捕获与恢复。
+//!
+//! 捕获与查询共用“系统剪贴板当前内容”这一事实；恢复在独立的 `restore` 文件里，
+//! 因为它还要处理代表选择与写入模式。
 
 use crate::error_codes::*;
 
 use uc_application::facade::{AppFacade, ClipboardCaptureFacadeError};
 
-use crate::{EngineError, EngineErrorCategory, OperationResult};
+use crate::{ActiveClipboardSummary, EngineError, EngineErrorCategory, OperationResult};
 use uc_observability_contract::uc_error;
 
 pub async fn execute_capture_current_clipboard(
@@ -25,6 +28,26 @@ fn map_capture_error(_error: ClipboardCaptureFacadeError) -> EngineError {
         EngineErrorCategory::Internal,
         false,
     )
+}
+
+pub async fn execute_query_active_clipboard(
+    facade: &AppFacade,
+) -> Result<OperationResult, EngineError> {
+    // discarded-source[contract-boundary]: the public error carries a stable code only, the owner records the failure classification
+    let active = facade.current_active_clipboard().await.map_err(|_| {
+        EngineError::new(
+            QUERY_ACTIVE_CLIPBOARD_FAILED_CODE,
+            EngineErrorCategory::Internal,
+            false,
+        )
+    })?;
+
+    Ok(OperationResult::ActiveClipboard(active.map(|state| {
+        ActiveClipboardSummary {
+            entry_id: state.entry_id.as_str().to_owned(),
+            activated_by: state.activated_by.as_str().to_owned(),
+        }
+    })))
 }
 
 #[cfg(test)]

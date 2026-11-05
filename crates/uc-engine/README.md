@@ -43,4 +43,15 @@ src/
 - 增加数据库、网络、文件系统或加密实现：只修改 `assembly/`。
 - 调整 LAN 兼容行为：只修改 `compatibility/mobile_lan/` 及其组装接点。
 
+`operations/` 的划分粒度固定为“一个能力簇一个文件或同名目录”：
+
+- 一个能力簇覆盖共享同一个对外事实的 1~8 个操作，例如空间生命周期、成员名册、成员同步偏好。
+- 单个文件目标 80~500 行。低于 80 行并入同领域相邻簇；超过 500 行改目录，按能力拆子模块，`mod.rs` 只保留操作入口、子模块声明和必要的 `pub(crate)` 再导出。
+- 文件或目录名使用能力名，不使用操作名；新增操作优先并入已有的能力簇。
+- 测试跟随被测能力所在文件，不单独建立测试目录。
+
+唯一例外是 `runtime/dispatch.rs`：它是“操作 → 处理入口”的平铺路由表，按领域拆分会引入第二层分派而不隐藏任何知识，因此保持单一 `match`。修改路由时以生成的调用链接对照表为准。
+
+逐操作在各层的对应名称见 [`docs/generated/engine-operation-map.md`](../../docs/generated/engine-operation-map.md)，由 `scripts/architecture/render-engine-operation-map.mjs` 从源码生成。
+
 不要重新建立公开 `internal` 模块，不要让外部 crate 读取源码文件来使用功能，也不要并行保留旧入口和新入口。

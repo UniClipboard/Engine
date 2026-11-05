@@ -1,13 +1,28 @@
+//! 本机设备查询与对端连接状态。
+//!
+//! 两个动作都以“本机视角能看到什么”为对外结果，因此合并在同一能力簇。
+
 use crate::error_codes::*;
 
 use uc_application::facade::{AppFacade, PeerSnapshotView, RosterError};
 use uc_core::ports::ConnectionChannel;
 
 use crate::{
-    EngineError, EngineErrorCategory, OperationResult, PeerConnectionChannelSummary,
-    PeerConnectionRefreshSummary, PeerConnectionSummary,
+    EngineError, EngineErrorCategory, LocalDeviceSummary, OperationResult,
+    PeerConnectionChannelSummary, PeerConnectionRefreshSummary, PeerConnectionSummary,
 };
 use uc_observability_contract::{log_fields::log_vocab_debug, uc_info, uc_warn};
+
+pub async fn execute_query_local_device(
+    facade: &AppFacade,
+) -> Result<OperationResult, EngineError> {
+    let info = facade.local_device_info().await;
+
+    Ok(OperationResult::LocalDevice(LocalDeviceSummary {
+        device_id: info.device_id,
+        display_name: info.device_name,
+    }))
+}
 
 pub(crate) async fn execute_query_peer_connections(
     facade: &AppFacade,

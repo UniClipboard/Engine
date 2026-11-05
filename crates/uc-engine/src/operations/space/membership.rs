@@ -1,15 +1,54 @@
+//! 成员就绪状态查询；内部诊断仅在 `dev-tools` 下编译。
+
+#[cfg(feature = "dev-tools")]
 use uc_application::facade::QueryMembershipDiagnosticsError;
+use uc_application::facade::{AppFacade, MembershipReadiness, QueryMembershipReadinessError};
+#[cfg(feature = "dev-tools")]
 use uc_core::membership::MembershipBranchTransitionPhaseV1;
 
-use crate::{EngineError, EngineErrorCategory, MembershipDiagnosticsSummary, OperationResult};
+use crate::error_codes::QUERY_MEMBERSHIP_READINESS_UNAVAILABLE_CODE;
+#[cfg(feature = "dev-tools")]
+use crate::MembershipDiagnosticsSummary;
+use crate::{
+    EngineError, EngineErrorCategory, MembershipReadinessStateSummary, MembershipReadinessSummary,
+    OperationResult,
+};
 
+pub async fn execute_query_membership_readiness(
+    facade: &AppFacade,
+) -> Result<OperationResult, EngineError> {
+    let state = facade
+        .query_membership_readiness()
+        .await
+        .map_err(map_readiness_error)?;
+    let state = match state {
+        MembershipReadiness::Ready => MembershipReadinessStateSummary::Ready,
+        MembershipReadiness::Locked => MembershipReadinessStateSummary::Locked,
+        MembershipReadiness::Recovering => MembershipReadinessStateSummary::Recovering,
+    };
+    Ok(OperationResult::MembershipReadiness(
+        MembershipReadinessSummary { state },
+    ))
+}
+
+fn map_readiness_error(error: QueryMembershipReadinessError) -> EngineError {
+    match error {
+        QueryMembershipReadinessError::Unavailable { .. } => EngineError::new(
+            QUERY_MEMBERSHIP_READINESS_UNAVAILABLE_CODE,
+            EngineErrorCategory::Unavailable,
+            true,
+        ),
+    }
+}
+
+#[cfg(feature = "dev-tools")]
 pub async fn execute_query_membership_diagnostics(
-    facade: &uc_application::facade::AppFacade,
+    facade: &AppFacade,
 ) -> Result<OperationResult, EngineError> {
     let view = facade
         .query_membership_diagnostics()
         .await
-        .map_err(map_error)?;
+        .map_err(map_diagnostics_error)?;
     Ok(OperationResult::MembershipDiagnostics(
         MembershipDiagnosticsSummary {
             revision: view.revision,
@@ -30,6 +69,7 @@ pub async fn execute_query_membership_diagnostics(
     ))
 }
 
+#[cfg(feature = "dev-tools")]
 fn phase(value: MembershipBranchTransitionPhaseV1) -> &'static str {
     match value {
         MembershipBranchTransitionPhaseV1::Prepared => "prepared",
@@ -42,10 +82,12 @@ fn phase(value: MembershipBranchTransitionPhaseV1) -> &'static str {
     }
 }
 
+#[cfg(feature = "dev-tools")]
 fn count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+#[cfg(feature = "dev-tools")]
 fn encode(value: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(64);
@@ -56,7 +98,8 @@ fn encode(value: &[u8; 32]) -> String {
     encoded
 }
 
-fn map_error(error: QueryMembershipDiagnosticsError) -> EngineError {
+#[cfg(feature = "dev-tools")]
+fn map_diagnostics_error(error: QueryMembershipDiagnosticsError) -> EngineError {
     match error {
         QueryMembershipDiagnosticsError::Ledger { .. }
         | QueryMembershipDiagnosticsError::Security { .. } => {

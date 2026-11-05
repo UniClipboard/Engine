@@ -1,16 +1,16 @@
-//! Shared pairing invitation implementation.
+//! 配对邀请的签发与取消。
 //!
-//! The daemon uses this internal seam only while its remaining callers migrate
-//! to `Engine`. Do not re-export it from the crate root.
+//! 两者共同拥有“当前是否存在一个可兑换的邀请”，因此合并在同一能力簇。
 
-use uc_application::facade::{AppFacade, IssuePairingInvitationError};
+use uc_application::facade::{AppFacade, CancelInvitationError, IssuePairingInvitationError};
 use uc_observability_contract::analytics::{AnalyticsFacade, Event, InvitationIssueErrorCategory};
 use uc_observability_contract::{error_source::io_error_kind, uc_error, uc_warn};
 
 use crate::error_codes::{
-    INVITATION_DIRECTORY_INVALID_RESPONSE_CODE, INVITATION_DIRECTORY_REJECTED_CODE,
-    INVITATION_DIRECTORY_TRANSPORT_FAILED_CODE, INVITATION_FAILED_CODE,
-    INVITATION_INVALID_INPUT_CODE, INVITATION_INVALID_STATE_CODE,
+    CANCEL_INVITATION_FAILED_CODE, CANCEL_INVITATION_NOT_ISSUED_CODE,
+    CANCEL_INVITATION_UNAVAILABLE_CODE, INVITATION_DIRECTORY_INVALID_RESPONSE_CODE,
+    INVITATION_DIRECTORY_REJECTED_CODE, INVITATION_DIRECTORY_TRANSPORT_FAILED_CODE,
+    INVITATION_FAILED_CODE, INVITATION_INVALID_INPUT_CODE, INVITATION_INVALID_STATE_CODE,
     INVITATION_LOCAL_PUBLICATION_FAILED_CODE, INVITATION_NO_LOCAL_ADDRESS_CODE,
     INVITATION_RECONCILIATION_PENDING_CODE, INVITATION_RECOVERY_REQUIRED_CODE,
     INVITATION_UNAVAILABLE_CODE,
@@ -177,6 +177,37 @@ fn map_issue_invitation_error(error: IssuePairingInvitationError) -> EngineError
             EngineError::new(INVITATION_FAILED_CODE, EngineErrorCategory::Internal, false)
         }
     }
+}
+
+pub async fn execute_cancel_invitation(facade: &AppFacade) -> Result<OperationResult, EngineError> {
+    facade
+        .cancel_invitation()
+        .await
+        .map_err(|error| match error {
+            CancelInvitationError::NotIssued => EngineError::new(
+                CANCEL_INVITATION_NOT_ISSUED_CODE,
+                EngineErrorCategory::Conflict,
+                false,
+            ),
+            CancelInvitationError::Unavailable { .. } => EngineError::new(
+                CANCEL_INVITATION_UNAVAILABLE_CODE,
+                EngineErrorCategory::Unavailable,
+                true,
+            ),
+            CancelInvitationError::Internal { .. } => {
+                uc_error!(
+                    error_kind = "cancel_invitation",
+                    io_error_kind = io_error_kind(&error),
+                    "cancel invitation failed"
+                );
+                EngineError::new(
+                    CANCEL_INVITATION_FAILED_CODE,
+                    EngineErrorCategory::Internal,
+                    false,
+                )
+            }
+        })?;
+    Ok(OperationResult::InvitationCancelled)
 }
 
 #[cfg(test)]

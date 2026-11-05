@@ -1,8 +1,6 @@
 pub(crate) mod config_migration;
 pub(crate) mod diagnostics;
 pub(crate) mod encryption;
+pub(crate) mod maintenance;
+pub(crate) mod relay;
 pub(crate) mod settings;
-pub(crate) mod storage;
-pub(crate) mod upgrade;
-
-pub(crate) mod upgrade_backups;

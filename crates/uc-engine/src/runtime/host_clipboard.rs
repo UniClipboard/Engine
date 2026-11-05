@@ -1,3 +1,4 @@
+use crate::assembly::observability::observe_local_copy;
 use std::error::Error;
 use std::future::Future;
 use std::sync::Arc;
@@ -173,17 +174,16 @@ impl HostClipboardChangeRuntime {
             return Ok(None);
         }
 
-        let outcome = crate::assembly::observability::observe_local_copy(
-            application.process_local_clipboard(LocalClipboardRequest {
+        let outcome =
+            observe_local_copy(application.process_local_clipboard(LocalClipboardRequest {
                 snapshot,
                 origin,
                 intent: LocalClipboardIntent::ObservedHostChange {
                     dispatch: dispatch_mode,
                 },
-            }),
-        )
-        .await
-        .map_err(|error| observe_error("local clipboard", error))?;
+            }))
+            .await
+            .map_err(|error| observe_error("local clipboard", error))?;
         let LocalClipboardOutcome::Completed(completion) = outcome else {
             return Ok(None);
         };
