@@ -124,6 +124,9 @@ Running|Quiescing|Quiesced|Suspended -> ShuttingDown -> Stopped
 
 ## 公开操作
 
+每个操作在契约、路由、适配函数和应用入口中的对应名称见
+[Engine 操作跨层调用链对照](../generated/engine-operation-map.md)，该表由源码生成。
+
 | 操作 | 当前行为 |
 | --- | --- |
 | `CreateSpace` | 创建空间、设备身份和加密存储 |
