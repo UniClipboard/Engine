@@ -76,6 +76,28 @@
 `startup_outcome.rs` 223、`startup_control.rs` 197、`startup_signals.rs` 55。其中 `startup_owner.rs`
 有 10 个类型参与一次启动的所有权与清理。本次改动预计删除约 100 行公开形状代码，不减少这些所有权类型。
 
+## 4.4 宿主实际用法
+
+两个宿主仓库的 `origin/main` 当前调用如下，用来确认两个方向各自服务谁：
+
+| 宿主 | 位置 | 入口 | 需要什么 |
+| --- | --- | --- | --- |
+| 桌面 daemon（产品主进程） | `uniclipboard/apps/daemon/src/daemon/host.rs` | `Engine::start_with_progress` | 只需要进度：绑定 `StartupServer` 把快照通过本地 socket 暴露给 GUI |
+| 桌面 CLI | `uniclipboard/crates/uc-bootstrap/src/entrypoint/cli.rs` | `Engine::start` | 两者都不要 |
+| iOS | `uniclip/modules/uc-engine/ios/SharedEngineHost.swift` | `MobileEngine.startWithAnalyticsAndLifecycle` | 需要 lifecycle：系统后台回调可能在构造返回前到达 |
+| Android | `uniclip/modules/uc-engine/android/.../UcEngineModule.kt` | `MobileEngine.startWithAnalyticsAndLifecycle` | 同上 |
+
+桌面侧没有任何 `StartupLifecycle` 或 `start_with_lifecycle` 引用。这验证了本文的方向划分：
+progress 是桌面唯一需要的那一半，lifecycle 是移动端唯一需要的那一半，CLI 两者都不要。
+
+桌面 daemon 已经在用「先 spawn future 再 select」的写法，因此 `Startup` 必须继续实现 `Future`：
+
+```rust
+let startup = Engine::start(engine_config, host_capabilities);
+let progress = startup.progress();
+let mut starting = tokio::spawn(startup);
+```
+
 # 5. 方案
 
 ## 5.1 公开形状
@@ -177,6 +199,14 @@ spawn 到自有执行器，不因本次改动增加堆分配。
 | `Engine::start(cfg, host, StartupSignals::channel())` | 同上；原来取 `lifecycle` 的调用点改用 `start_with_lifecycle` |
 | `Engine::start(cfg, host, StartupSignals::new(progress, lifecycle))` | `Engine::start_with_lifecycle(cfg, host, lifecycle)` |
 | `StartupProgress::channel()` + 取 `.0` 只为填充参数 | 删除该行 |
+
+跨仓库的对应迁移（不在本仓库，Engine 发布后随宿主升级一起改）：
+
+| 宿主调用 | 迁移后 |
+| --- | --- |
+| `tokio::spawn(Engine::start_with_progress(cfg, host, input))` | `let startup = Engine::start(cfg, host); let progress = startup.progress(); tokio::spawn(startup)` |
+| `Engine::start(cfg, host)` | 不变 |
+| `MobileEngine.startWithAnalyticsAndLifecycle(...)` | 不变（绑定内部改用 `start_with_lifecycle`） |
 
 # 6. 分阶段实施
 
