@@ -1,3 +1,10 @@
+use crate::assembly::observability::observe_explicit_send;
+use crate::HostCapabilityError;
+use crate::HostCapabilityErrorCategory;
+use crate::HostFileHandle;
+use crate::SendReportSummary;
+use crate::SendTargetOutcome;
+use crate::SendTargetSummary;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -144,28 +151,9 @@ impl ProductionRuntime {
         self.send_snapshot(snapshot, input.target_devices).await
     }
 
-    pub(super) async fn execute_export_entry(
-        &self,
-        input: ExportEntryInput,
-    ) -> Result<OperationResult, EngineError> {
-        let facade = self.current_facade().await?;
-        let bytes = load_export_bytes(&facade, &input.entry_id).await?;
-        for (index, chunk) in bytes.chunks(EXPORT_CHUNK_SIZE).enumerate() {
-            let offset = (index as u64) * (EXPORT_CHUNK_SIZE as u64);
-            self.files
-                .write_chunk(&input.destination, offset, chunk)
-                .map_err(map_export_host_error)?;
-            tokio::task::yield_now().await;
-        }
-        self.files
-            .finish_write(&input.destination)
-            .map_err(map_export_host_error)?;
-        Ok(OperationResult::EntryExported)
-    }
-
     async fn import_host_files(
         &self,
-        handles: &[crate::HostFileHandle],
+        handles: &[HostFileHandle],
         cancellation: &CancellationToken,
         session_cancellation: &CancellationToken,
     ) -> Result<Vec<ImportedHostFile>, EngineError> {
@@ -234,17 +222,18 @@ impl ProductionRuntime {
         target_devices: Vec<String>,
     ) -> Result<OperationResult, EngineError> {
         let application = self.current_application().await?;
-        let outcome = crate::assembly::observability::observe_explicit_send(
-            application.process_local_clipboard(LocalClipboardRequest {
+        let outcome =
+            observe_explicit_send(application.process_local_clipboard(LocalClipboardRequest {
                 snapshot,
                 origin: ClipboardChangeOrigin::LocalCapture,
                 intent: LocalClipboardIntent::ExplicitSend {
                     targets: target_devices.into_iter().map(DeviceId::new).collect(),
                 },
-            }),
-        )
-        .await
-        .map_err(|error| operation_error_with_code(SEND_FAILED_CODE, "send clipboard", error))?;
+            }))
+            .await
+            .map_err(|error| {
+                operation_error_with_code(SEND_FAILED_CODE, "send clipboard", error)
+            })?;
         let LocalClipboardOutcome::Completed(completion) = outcome else {
             return Err(EngineError::new(
                 SEND_SKIPPED_CODE,
@@ -273,7 +262,7 @@ pub(super) fn send_report_result(
 pub(super) fn send_report_summary(
     entry_id: String,
     outcome: ClipboardOutboundOutcome,
-) -> Result<crate::SendReportSummary, EngineError> {
+) -> Result<SendReportSummary, EngineError> {
     let ClipboardOutboundOutcome::Dispatched {
         snapshot_hash,
         per_target,
@@ -293,7 +282,7 @@ pub(super) fn send_report_summary(
         ));
     };
 
-    Ok(crate::SendReportSummary {
+    Ok(SendReportSummary {
         entry_id,
         snapshot_hash,
         at_ms,
@@ -304,14 +293,14 @@ pub(super) fn send_report_summary(
         total_pending: pending,
         per_target: per_target
             .into_iter()
-            .map(|target| crate::SendTargetSummary {
+            .map(|target| SendTargetSummary {
                 device_id: target.device_id.as_str().to_string(),
                 outcome: match target.outcome {
-                    Ok(uc_core::ports::DispatchAck::Accepted) => crate::SendTargetOutcome::Accepted,
+                    Ok(uc_core::ports::DispatchAck::Accepted) => SendTargetOutcome::Accepted,
                     Ok(uc_core::ports::DispatchAck::DuplicateIgnored) => {
-                        crate::SendTargetOutcome::Duplicate
+                        SendTargetOutcome::Duplicate
                     }
-                    Err(message) => crate::SendTargetOutcome::Error { message },
+                    Err(message) => SendTargetOutcome::Error { message },
                 },
             })
             .collect(),
@@ -325,7 +314,7 @@ fn valid_host_display_name(display_name: &str) -> bool {
 
 fn copy_host_file(
     files: &dyn HostFileAccess,
-    handle: &crate::HostFileHandle,
+    handle: &HostFileHandle,
     size_bytes: u64,
     destination: &Path,
     cancellation: &CancellationToken,
@@ -400,16 +389,13 @@ fn send_failed_error() -> EngineError {
     EngineError::new(SEND_FAILED_CODE, EngineErrorCategory::Internal, false)
 }
 
-fn map_send_host_error(error: crate::HostCapabilityError) -> EngineError {
+fn map_send_host_error(error: HostCapabilityError) -> EngineError {
     let (category, retryable) = match error.category() {
-        crate::HostCapabilityErrorCategory::InvalidHandle => {
-            (EngineErrorCategory::InvalidInput, false)
+        HostCapabilityErrorCategory::InvalidHandle => (EngineErrorCategory::InvalidInput, false),
+        HostCapabilityErrorCategory::PermissionDenied => (EngineErrorCategory::Unauthorized, false),
+        HostCapabilityErrorCategory::Unavailable | HostCapabilityErrorCategory::Io => {
+            (EngineErrorCategory::Unavailable, true)
         }
-        crate::HostCapabilityErrorCategory::PermissionDenied => {
-            (EngineErrorCategory::Unauthorized, false)
-        }
-        crate::HostCapabilityErrorCategory::Unavailable
-        | crate::HostCapabilityErrorCategory::Io => (EngineErrorCategory::Unavailable, true),
     };
     uc_error!(
         error_kind = "host_file_import",
@@ -419,93 +405,7 @@ fn map_send_host_error(error: crate::HostCapabilityError) -> EngineError {
     EngineError::new(SEND_FAILED_CODE, category, retryable)
 }
 
-async fn load_export_bytes(facade: &AppFacade, entry_id: &str) -> Result<Vec<u8>, EngineError> {
-    let resource = facade
-        .get_history_entry_resource(entry_id)
-        .await
-        .map_err(map_export_history_error)?;
-    let file_list = resource.mime_type.as_deref().is_some_and(|mime| {
-        mime.eq_ignore_ascii_case("text/uri-list") || mime.eq_ignore_ascii_case("file/uri-list")
-    });
-    if file_list {
-        return facade
-            .read_entry_file_resource(entry_id)
-            .await
-            .map(|file| file.bytes)
-            .map_err(map_export_resource_error);
-    }
-    if let Some(bytes) = resource.inline_data {
-        return Ok(bytes);
-    }
-    if let Some(blob_id) = resource.blob_id {
-        return facade
-            .read_blob_resource(&blob_id)
-            .await
-            .map(|blob| blob.bytes)
-            .map_err(map_export_resource_error);
-    }
-    Err(EngineError::new(
-        EXPORT_FAILED_CODE,
-        EngineErrorCategory::Internal,
-        false,
-    ))
-}
-
-fn map_export_history_error(error: ClipboardHistoryError) -> EngineError {
-    match error {
-        ClipboardHistoryError::NotFound => {
-            EngineError::new(EXPORT_NOT_FOUND_CODE, EngineErrorCategory::NotFound, false)
-        }
-        ClipboardHistoryError::UnsupportedContent => {
-            EngineError::new(EXPORT_FAILED_CODE, EngineErrorCategory::Conflict, false)
-        }
-        ClipboardHistoryError::Internal(_) => {
-            operation_error_with_code(EXPORT_FAILED_CODE, "load export entry", error)
-        }
-    }
-}
-
-fn map_export_resource_error(error: ResourceFacadeError) -> EngineError {
-    match error {
-        ResourceFacadeError::NotFound => {
-            EngineError::new(EXPORT_NOT_FOUND_CODE, EngineErrorCategory::NotFound, false)
-        }
-        ResourceFacadeError::SessionLocked
-        | ResourceFacadeError::Busy
-        | ResourceFacadeError::Unavailable
-        | ResourceFacadeError::Mismatch(_)
-        | ResourceFacadeError::Internal(_) => {
-            operation_error_with_code(EXPORT_FAILED_CODE, "load export resource", error)
-        }
-    }
-}
-
-fn map_export_host_error(error: crate::HostCapabilityError) -> EngineError {
-    let (code, category, retryable) = match error.category() {
-        crate::HostCapabilityErrorCategory::InvalidHandle => (
-            EXPORT_INVALID_TARGET_CODE,
-            EngineErrorCategory::InvalidInput,
-            false,
-        ),
-        crate::HostCapabilityErrorCategory::PermissionDenied => (
-            EXPORT_UNAUTHORIZED_CODE,
-            EngineErrorCategory::Unauthorized,
-            false,
-        ),
-        crate::HostCapabilityErrorCategory::Unavailable
-        | crate::HostCapabilityErrorCategory::Io => (
-            EXPORT_UNAVAILABLE_CODE,
-            EngineErrorCategory::Unavailable,
-            true,
-        ),
-    };
-    uc_error!(
-        error_kind = "host_export",
-        io_error_kind = io_error_kind(&error),
-        "host export failed"
-    );
-    EngineError::new(code, category, retryable)
-}
+mod export;
 
 #[cfg(test)]
 mod tests {

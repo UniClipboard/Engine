@@ -1,6 +1,5 @@
 #[cfg(all(test, feature = "dev-tools"))]
 mod blob_source_authorization;
-mod census;
 mod dispatch;
 mod host_clipboard;
 pub(crate) mod host_file;
@@ -21,7 +20,6 @@ use std::path::PathBuf;
 #[cfg(feature = "dev-tools")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -46,9 +44,8 @@ use crate::engine::startup_owner::StartupCleanupOwner;
 use crate::error_codes::{PROFILE_RECOVERY_REQUIRED_CODE, PROFILE_UPGRADE_BACKUP_KEY_MISSING_CODE};
 use crate::operations::space::lifecycle::map_profile_factory_reset_error;
 use crate::{
-    AdmissionRecoverySummary, EngineConfig, EngineError, EngineErrorCategory, EngineEvent,
-    HostCapabilities, HostFileAccess, NetworkRecoveryPhaseSummary, NetworkRecoveryStatusSummary,
-    RefreshReason,
+    AdmissionRecoverySummary, EngineConfig, EngineError, EngineErrorCategory, HostCapabilities,
+    HostFileAccess, NetworkRecoveryPhaseSummary, NetworkRecoveryStatusSummary,
 };
 use host_clipboard::{spawn_host_clipboard_change_task, HostClipboardChangeRuntime};
 pub(crate) use profile_recovery::RecoverableRuntime;
@@ -95,74 +92,13 @@ impl Drop for StartupSecurityGuard {
     }
 }
 
-fn re_pairing_scope_for_setup_state(
-    state: &uc_application::facade::SetupStateView,
-) -> Option<crate::RePairingScope> {
-    state
-        .re_pairing_required
-        .then_some(crate::RePairingScope::AllDevices)
-}
-
-fn network_recovery_summary(event: NetworkRecoveryEvent) -> NetworkRecoveryStatusSummary {
-    match event {
-        NetworkRecoveryEvent::Started => NetworkRecoveryStatusSummary {
-            phase: NetworkRecoveryPhaseSummary::Recovering,
-            retryable: false,
-            next_retry_in_ms: None,
-        },
-        NetworkRecoveryEvent::RetryScheduled { delay } => NetworkRecoveryStatusSummary {
-            phase: NetworkRecoveryPhaseSummary::RetryScheduled,
-            retryable: true,
-            next_retry_in_ms: Some(delay.as_millis().min(u128::from(u64::MAX)) as u64),
-        },
-        NetworkRecoveryEvent::Succeeded => NetworkRecoveryStatusSummary {
-            phase: NetworkRecoveryPhaseSummary::Idle,
-            retryable: false,
-            next_retry_in_ms: None,
-        },
-        NetworkRecoveryEvent::Failed { retryable } => NetworkRecoveryStatusSummary {
-            phase: NetworkRecoveryPhaseSummary::Failed,
-            retryable,
-            next_retry_in_ms: None,
-        },
-    }
-}
-
-async fn spawn_network_recovery_events(
-    mut changes: tokio::sync::broadcast::Receiver<NetworkRecoveryEvent>,
-    tasks: &Arc<TaskRegistry>,
-    events: EventSender,
-) {
-    let _ = tasks
-        .spawn(move |cancel| async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return,
-                    change = changes.recv() => match change {
-                        Ok(change) => events.send(crate::EngineEvent::NetworkRecoveryChanged(network_recovery_summary(change))),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => events.send(crate::EngineEvent::RefreshRequired {
-                            reason: crate::RefreshReason::ConsumerLagged,
-                        }),
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    }
-                }
-            }
-        })
-        .await;
-}
+mod telemetry;
 
 #[cfg(feature = "lan-compat")]
-fn engine_event_for_mobile_settings_update(
-    settings: &crate::MobileSyncSettingsUpdateSummary,
-) -> crate::EngineEvent {
-    crate::EngineEvent::MobileLanSettingsChanged(crate::MobileLanSettingsChanged {
-        enabled: settings.enabled,
-        lan_listen_enabled: settings.lan_listen_enabled,
-        lan_port: settings.lan_port,
-    })
-}
-
+pub(crate) use telemetry::engine_event_for_mobile_settings_update;
+pub(crate) use telemetry::{
+    re_pairing_scope_for_setup_state, spawn_network_recovery_events, spawn_space_transition_watcher,
+};
 impl ProductionRuntime {
     /// 启动后重建会话时发现的准入读取失败；存在时业务会话不可用，恢复运行期需转入受限模式。
     pub(crate) fn admission_recovery(&self) -> Option<AdmissionRecoverySummary> {
@@ -350,7 +286,7 @@ impl ProductionRuntime {
         .await;
         spawn_network_recovery_events(network_recovery.subscribe(), &task_registry, events.clone())
             .await;
-        census::spawn_runtime_census(&task_registry).await;
+        telemetry::spawn_runtime_census(&task_registry).await;
         let clipboard_change_runtime = HostClipboardChangeRuntime {
             session_supervisor: Arc::clone(&session_supervisor),
             system_clipboard: Arc::clone(&host_adapters.system_clipboard),
@@ -411,70 +347,6 @@ impl ProductionRuntime {
     ) -> Result<Arc<uc_mobile_lan::MobileSyncFacade>, EngineError> {
         self.session_supervisor.current_mobile_sync().await
     }
-}
-
-async fn spawn_space_transition_watcher(
-    supervisor: Arc<SessionSupervisor>,
-    mut changes: tokio::sync::watch::Receiver<()>,
-    tasks: &Arc<TaskRegistry>,
-    events: EventSender,
-) {
-    let _ = tasks
-        .spawn(move |cancel| async move {
-            let mut check_required = true;
-            loop {
-                if !check_required {
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => return,
-                        changed = changes.changed() => {
-                            if changed.is_err() {
-                                return;
-                            }
-                            check_required = true;
-                        }
-                    }
-                    continue;
-                }
-                check_required = false;
-                let transition = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return,
-                    result = supervisor.transition_pending_session() => result,
-                };
-                match transition {
-                    Ok(Some(revision)) => {
-                        events.send(EngineEvent::DeviceTrustChanged { revision });
-                        events.send(EngineEvent::RefreshRequired {
-                            reason: RefreshReason::StateInvalidated,
-                        });
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        uc_warn!(
-                            error_code = error.code(),
-                            retryable = error.is_retryable(),
-                            "runtime Space transition attempt failed"
-                        );
-                        if error.is_retryable() {
-                            tokio::select! {
-                                _ = cancel.cancelled() => return,
-                                _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                                    check_required = true;
-                                }
-                                changed = changes.changed() => {
-                                    if changed.is_err() {
-                                        return;
-                                    }
-                                    check_required = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })
-        .await;
 }
 
 fn startup_error(
@@ -572,6 +444,9 @@ fn retryable_operation_error_with_code(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use super::telemetry::network_recovery_summary;
     #[cfg(feature = "dev-tools")]
     use crate::assembly::host::profile_key_recovery_store;
     #[cfg(feature = "dev-tools")]

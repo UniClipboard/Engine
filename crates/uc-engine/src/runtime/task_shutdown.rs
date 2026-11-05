@@ -63,6 +63,8 @@ pub(super) async fn shutdown_tasks(
 #[cfg(all(test, feature = "dev-tools"))]
 mod tests {
     use super::*;
+    use crate::flush_test_tracing;
+    use crate::init_test_tracing_with_otlp;
     use opentelemetry_proto::tonic::collector::{
         logs::v1::ExportLogsServiceRequest, trace::v1::ExportTraceServiceRequest,
     };
@@ -93,7 +95,7 @@ mod tests {
                 .mount(&receiver)
                 .await;
         }
-        assert!(crate::init_test_tracing_with_otlp(
+        assert!(init_test_tracing_with_otlp(
             &format!("{}/v1/traces", receiver.uri()),
             &format!("{}/v1/logs", receiver.uri())
         ));
@@ -128,7 +130,7 @@ mod tests {
                 .join_error_count,
             1
         );
-        crate::flush_test_tracing();
+        flush_test_tracing();
         let requests = receiver.received_requests().await.expect("requests");
         let spans = requests
             .iter()
