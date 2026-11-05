@@ -20,6 +20,8 @@
 
 ## 当前专项计划
 
+- [启动信号方向拆分：progress 作为输出，lifecycle 作为输入](exec-plans/active/2026-11-05-startup-signal-direction-split.md)：提议，未实施；基线 `68bfa3ab`。目标是删除 `StartupSignals` / `StartupProgressInput` 与 179 处 `unobserved()`，不改变 ADR-035 的释放回执与四个所有权窗口。
+
 - [匿名受管公共 relay（#371）](exec-plans/completed/2026-11-03-managed-public-relay.md)：Engine 实现、本地验收与真实匿名 relay 连接验收完成；真机与发布跳过。
 
 - [File-addressable receive snapshots (#368)](exec-plans/completed/2026-11-01-receive-item-progress.md): implementation and host verification complete; 61 receive E2E scenarios and both binding projections passed. Native devices, remote CI, and release publication were skipped.
