@@ -34,6 +34,7 @@ mod stale_callback;
 mod search_compound_words;
 
 use lease::{find_lease, open_lease};
+use uc_engine::StartupSignals;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn suspended_engine_releases_profile_lease_and_can_resume() {
@@ -57,9 +58,13 @@ async fn suspended_engine_releases_profile_lease_and_can_resume() {
         Box::new(EmptyClipboard),
         Box::new(EmptyFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("suspension test".into()),

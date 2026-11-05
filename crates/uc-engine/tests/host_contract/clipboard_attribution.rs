@@ -10,6 +10,7 @@ use uc_engine::{
 };
 
 use super::{EmptyFiles, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 #[derive(Clone, Default)]
 struct Clipboard(Arc<Mutex<Vec<HostClipboardRepresentation>>>);
@@ -53,9 +54,13 @@ async fn unrelated_user_copy_after_unobserved_restore_is_captured() {
         Box::new(clipboard.clone()),
         Box::new(EmptyFiles),
     );
-    let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("isolated host".into()),
@@ -178,9 +183,13 @@ async fn identified_restore_duplicates_and_new_user_copy() {
         Box::new(clipboard.clone()),
         Box::new(EmptyFiles),
     );
-    let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("isolated host".into()),
@@ -294,9 +303,13 @@ async fn identified_file_projection_and_later_user_file() {
         Box::new(clipboard.clone()),
         Box::new(Files(root.path().to_owned())),
     );
-    let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("isolated host".into()),
@@ -425,9 +438,13 @@ async fn identified_observation_waits_for_write_completion_after_caller_cancella
         }),
         Box::new(EmptyFiles),
     );
-    let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     let engine = Arc::new(engine);
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
@@ -541,9 +558,13 @@ async fn failed_partial_write_does_not_retire_later_user_copy() {
         Box::new(FailedWriteClipboard(clipboard.clone())),
         Box::new(EmptyFiles),
     );
-    let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("isolated host".into()),
@@ -654,9 +675,13 @@ async fn concurrent_writes_and_delayed_captured_observations_keep_their_identity
         Box::new(clipboard.clone()),
         Box::new(EmptyFiles),
     );
-    let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("isolated host".into()),
@@ -736,9 +761,13 @@ async fn identified_large_image_projection_preserves_next_copy() {
         Box::new(clipboard.clone()),
         Box::new(EmptyFiles),
     );
-    let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("isolated host".into()),

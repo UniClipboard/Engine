@@ -20,6 +20,7 @@ use super::super::{
     wait_entry_delivered, MemoryHostSecureStorage, ReadableHostFiles, RecordingHostFilesState,
     StaticHostClipboard, ENGINE_TEST_LOCK,
 };
+use crate::StartupSignals;
 use crate::{
     CreateSpaceInput, DeviceMembershipSummary, DeviceReachabilitySummary, Engine, EngineConfig,
     EngineEvent, EntryDeliveryStatusSummary, HistoryEntryInput, HostCapabilities,
@@ -67,6 +68,7 @@ async fn receiver_child_process() {
             .with_test_relay_fallback(false)
             .with_test_iroh_bind_port(input.bind_port),
         persistent_engine_host(&input.root, storage),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -107,6 +109,7 @@ async fn interrupted_file_transfer_recovers_after_receiver_process_restart() {
     let (receiver, _receiver_events) = Engine::start(
         receiver_config.clone(),
         persistent_engine_host(receiver_root.path(), receiver_storage.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -132,7 +135,10 @@ async fn interrupted_file_transfer_recovers_after_receiver_process_restart() {
             state: Arc::new(RecordingHostFilesState::default()),
         }),
     );
-    let (sender, _sender_events) = Engine::start(sender_config, sender_host).await.unwrap();
+    let (sender, _sender_events) =
+        Engine::start(sender_config, sender_host, StartupSignals::unobserved())
+            .await
+            .unwrap();
     let sender = Arc::new(sender);
 
     receiver
@@ -291,6 +297,7 @@ async fn interrupted_file_transfer_recovers_after_receiver_process_restart() {
     let (restarted, _events) = Engine::start(
         receiver_config,
         persistent_engine_host(receiver_root.path(), receiver_storage),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

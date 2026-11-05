@@ -21,6 +21,7 @@ use uc_engine::error_codes::{
     HISTORY_FAILED_CODE, HISTORY_INVALID_INPUT_CODE, HISTORY_NOT_FOUND_CODE,
     HISTORY_TAGS_LOCKED_CODE, SEARCH_INDEX_NOT_READY_CODE, SEARCH_INDEX_REBUILDING_CODE,
 };
+use uc_engine::StartupSignals;
 use uc_engine::{
     CountSearchEntriesInput, CreateHistoryTagInput, CreateSpaceInput, Engine, EngineConfig,
     EngineError, EventStream, HistoryEntryInput, HistoryEntryTagsInput, HistoryTagEntriesInput,
@@ -126,9 +127,13 @@ fn host(root: &Path, storage: &MemorySecureStorage) -> HostCapabilities {
 }
 
 async fn start(root: &Path, storage: &MemorySecureStorage) -> (Engine, EventStream) {
-    Engine::start(EngineConfig::new("2.0.0"), host(root, storage))
-        .await
-        .expect("engine starts")
+    Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root, storage),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .expect("engine starts")
 }
 
 async fn unlock(engine: &Engine) {

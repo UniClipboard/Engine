@@ -24,6 +24,7 @@ use uc_engine::{
 use uc_testkit::{FailureKind, Scenario, ScenarioBudget, ScenarioConfig, ScenarioFailure};
 
 use super::{startup::runtime_database, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 const CHILD_ENV: &str = "UC_CLIPBOARD_STARTUP_CHILD";
 const PRIVATE_SENTINEL: &str = "private-clipboard-startup-sentinel";
@@ -232,6 +233,7 @@ async fn start(root: &Path, storage: &MemorySecureStorage, clipboard: &Clipboard
     Engine::start(
         EngineConfig::new("2.0.0"),
         host(root, storage.clone(), clipboard.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap()
@@ -383,6 +385,7 @@ async fn daemon_child() {
     let failed = Engine::start(
         EngineConfig::new("2.0.0"),
         host(&root, storage.clone(), clipboard.clone()),
+        StartupSignals::unobserved(),
     )
     .await;
     assert!(failed.is_err(), "DB reset failure must stop startup");

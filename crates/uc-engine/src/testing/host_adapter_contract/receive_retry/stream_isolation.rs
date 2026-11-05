@@ -5,6 +5,7 @@ use super::{
     MemoryHostSecureStorage, ENGINE_TEST_LOCK,
 };
 use crate::testing::receive_streams::{ReceiveStream, ReceiveStreams, ReleaseStreamsOnDrop};
+use crate::StartupSignals;
 use crate::{
     CancelEntryReceiveInput, ClipboardRestoreMode, ClipboardRestoreOutcome, CreateSpaceInput,
     Engine, EngineConfig, EntryReceiveCancellationOutcome, HostCapabilities, HostCapabilityError,
@@ -210,7 +211,9 @@ async fn prove_engine_streams(shared_content: bool, recover_second: bool, observ
     let config = EngineConfig::new("1.2.3")
         .with_rendezvous_base_url(server.uri())
         .with_test_relay_fallback(false);
-    let (source, _) = Engine::start(config.clone(), source_host).await.unwrap();
+    let (source, _) = Engine::start(config.clone(), source_host, StartupSignals::unobserved())
+        .await
+        .unwrap();
     let source = Arc::new(source);
     source
         .execute(Operation::CreateSpace(CreateSpaceInput {
@@ -256,10 +259,13 @@ async fn prove_engine_streams(shared_content: bool, recover_second: bool, observ
             .unwrap(),
         OperationResult::ClipboardRestored(ClipboardRestoreOutcome::Restored)
     );
-    let (receiver, _receiver_events) =
-        Engine::start(config, empty_engine_host(receiver_root.path()))
-            .await
-            .unwrap();
+    let (receiver, _receiver_events) = Engine::start(
+        config,
+        empty_engine_host(receiver_root.path()),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     let receiver = Arc::new(receiver);
     let OperationResult::InvitationIssued {
         invitation_code, ..

@@ -44,6 +44,7 @@ use crate::{
     BindingResourceRelease, BindingTransferDirection, HostBindingError,
 };
 use uc_engine::observability::{io_error_kind, log_vocab_debug, uc_warn};
+use uc_engine::StartupSignals;
 
 const LIFECYCLE_TRANSITION_DEADLINE: Duration = Duration::from_secs(10);
 #[cfg(test)]
@@ -1121,8 +1122,11 @@ impl MobileEngine {
             config
         };
         let (progress, _) = StartupProgress::channel();
-        let startup =
-            Engine::start_with_lifecycle(config, capabilities, progress, startup_lifecycle);
+        let startup = Engine::start(
+            config,
+            capabilities,
+            StartupSignals::new(progress, startup_lifecycle),
+        );
         lifecycle.mark_engine_accepted();
         let (commands, requests) = tokio::sync::mpsc::unbounded_channel();
         let (lifecycle_commands, lifecycle_requests) = tokio::sync::mpsc::unbounded_channel();

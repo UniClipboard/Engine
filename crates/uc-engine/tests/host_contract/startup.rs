@@ -12,6 +12,7 @@ use uc_engine::{
 };
 
 use super::{EmptyClipboard, EmptyFiles, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 #[path = "startup/abandoned_cleanup.rs"]
 mod abandoned_cleanup;
@@ -83,6 +84,7 @@ async fn abandoned_startup_finishes_cleanup_before_retry_and_preserves_saved_con
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -118,10 +120,10 @@ async fn abandoned_startup_finishes_cleanup_before_retry_and_preserves_saved_con
         }),
     );
     let (input, mut progress) = StartupProgress::channel();
-    let caller = tokio::spawn(Engine::start_with_progress(
+    let caller = tokio::spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         blocked_host,
-        input,
+        StartupSignals::with_progress(input),
     ));
     timeout(Duration::from_secs(15), entered.notified())
         .await
@@ -145,6 +147,7 @@ async fn abandoned_startup_finishes_cleanup_before_retry_and_preserves_saved_con
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

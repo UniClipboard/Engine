@@ -24,7 +24,7 @@ pub use contract::*;
 pub use dev::*;
 pub use engine::{
     Engine, EventStream, StartupLifecycle, StartupLifecycleInput, StartupProgress,
-    StartupProgressInput,
+    StartupProgressInput, StartupSignals,
 };
 
 use async_trait::async_trait;
@@ -275,7 +275,11 @@ fn unpolled_progress_after_cleanup(root: &Path) -> serde_json::Value {
     );
     let (progress, observer) = StartupProgress::channel();
     let (input, control) = StartupLifecycle::channel();
-    let startup = Engine::start_with_lifecycle(EngineConfig::new("2.0.0"), host, progress, input);
+    let startup = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::new(progress, input),
+    );
     drop(startup);
     waiting
         .recv_timeout(Duration::from_secs(5))
@@ -336,11 +340,10 @@ fn host_close_retry(root: &Path) -> serde_json::Value {
     );
     let (progress, progress_observer) = StartupProgress::channel();
     let (input, control) = StartupLifecycle::channel();
-    let mut startup = Box::pin(Engine::start_with_lifecycle(
+    let mut startup = Box::pin(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     let mut context = Context::from_waker(Waker::noop());
     let primary = match startup.as_mut().poll(&mut context) {
@@ -633,7 +636,11 @@ fn host_close_retry_with_executor(root: &Path) -> serde_json::Value {
         )]);
     let (progress, progress_observer) = StartupProgress::channel();
     let (input, control) = StartupLifecycle::channel();
-    let task = runtime.spawn(Engine::start_with_lifecycle(config, host, progress, input));
+    let task = runtime.spawn(Engine::start(
+        config,
+        host,
+        StartupSignals::new(progress, input),
+    ));
     waiting
         .recv_timeout(Duration::from_secs(10))
         .expect("first close");
@@ -729,7 +736,11 @@ fn host_retry_after_backup_registration(root: &Path) -> serde_json::Value {
     let config = EngineConfig::new("2.0.0").with_test_iroh_bind_port(port);
     let (progress, progress_observer) = StartupProgress::channel();
     let (input, control) = StartupLifecycle::channel();
-    let task = runtime.spawn(Engine::start_with_lifecycle(config, host, progress, input));
+    let task = runtime.spawn(Engine::start(
+        config,
+        host,
+        StartupSignals::new(progress, input),
+    ));
     waiting
         .recv_timeout(Duration::from_secs(10))
         .expect("first close");
@@ -828,11 +839,10 @@ fn host_close_panic(root: &Path) -> serde_json::Value {
     );
     let (progress, _) = StartupProgress::channel();
     let (input, control) = StartupLifecycle::channel();
-    let mut startup = Box::pin(Engine::start_with_lifecycle(
+    let mut startup = Box::pin(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     let mut context = Context::from_waker(Waker::noop());
     assert!(matches!(
@@ -918,11 +928,10 @@ fn scenario(root: &Path, fail: bool) -> serde_json::Value {
     let (progress, _) = StartupProgress::channel();
     let (input, control) = StartupLifecycle::channel();
     let initial = control.wait_release_internal(Duration::ZERO);
-    let mut startup = Box::pin(Engine::start_with_lifecycle(
+    let mut startup = Box::pin(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     let mut context = Context::from_waker(Waker::noop());
     let primary = match startup.as_mut().poll(&mut context) {
@@ -988,11 +997,10 @@ fn delivered_engine(root: &Path) -> serde_json::Value {
     let (input, _) = StartupProgress::channel();
     let (lifecycle, control) = StartupLifecycle::channel();
     let (engine, events) = runtime
-        .block_on(Engine::start_with_lifecycle(
+        .block_on(Engine::start(
             EngineConfig::new("2.0.0"),
             host,
-            input,
-            lifecycle,
+            StartupSignals::new(input, lifecycle),
         ))
         .expect("start engine");
     let delivered = control.wait_release_internal(Duration::ZERO);
@@ -1034,9 +1042,13 @@ fn executor_loss_during_backup(root: &Path, fail_after_release: bool) -> serde_j
         .build()
         .expect("initial runtime");
     initial.block_on(async {
-        let (engine, _) = Engine::start(EngineConfig::new("1.0.0"), host(None))
-            .await
-            .expect("initial engine");
+        let (engine, _) = Engine::start(
+            EngineConfig::new("1.0.0"),
+            host(None),
+            StartupSignals::unobserved(),
+        )
+        .await
+        .expect("initial engine");
         engine
             .execute(Operation::CreateSpace(CreateSpaceInput {
                 device_name: Some("backup fixture".into()),
@@ -1065,11 +1077,10 @@ fn executor_loss_during_backup(root: &Path, fail_after_release: bool) -> serde_j
         .enable_all()
         .build()
         .expect("runtime");
-    let caller = runtime.spawn(Engine::start_with_lifecycle(
+    let caller = runtime.spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         host(Some((entered, released))),
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     if waiting.recv_timeout(Duration::from_secs(20)).is_err() {
         let status = observer.snapshot();
@@ -1198,11 +1209,10 @@ fn executor_loss_during_registration(root: &Path) -> serde_json::Value {
     );
     let (progress_input, progress) = StartupProgress::channel();
     let (lifecycle_input, lifecycle) = StartupLifecycle::channel();
-    let caller = runtime.spawn(Engine::start_with_lifecycle(
+    let caller = runtime.spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        progress_input,
-        lifecycle_input,
+        StartupSignals::new(progress_input, lifecycle_input),
     ));
     let until = Instant::now() + Duration::from_secs(20);
     while progress.snapshot().state != StartupState::StartingServices {
@@ -1891,11 +1901,10 @@ fn startup_detached_host_close(root: &Path, ending: &'static str) {
         .enable_all()
         .build()
         .expect("runtime");
-    runtime.spawn(Engine::start_with_lifecycle(
+    runtime.spawn(Engine::start(
         EngineConfig::new("2.0.0").with_test_iroh_bind_port(port),
         host,
-        progress_input,
-        lifecycle_input,
+        StartupSignals::new(progress_input, lifecycle_input),
     ));
     waiting
         .recv_timeout(Duration::from_secs(20))
@@ -2079,11 +2088,10 @@ fn host_retry_blocking_worker(root: &Path, ending: &'static str) {
         .expect("runtime");
     let (progress, _) = StartupProgress::channel();
     let (input, control) = StartupLifecycle::channel();
-    let startup = runtime.block_on(Engine::start_with_lifecycle(
+    let startup = runtime.block_on(Engine::start(
         EngineConfig::new("2.0.0").with_test_iroh_bind_port(port),
         host,
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     let primary = match startup {
         Err(error) => error,
@@ -2256,11 +2264,10 @@ fn real_startup_rollback_task_failure(root: &Path) {
     let (progress, observer) = StartupProgress::channel();
     let (input, control) = StartupLifecycle::channel();
     runtime::PROBE_STARTUP_TASK_PANIC.store(true, std::sync::atomic::Ordering::Release);
-    let result = runtime.block_on(Engine::start_with_lifecycle(
+    let result = runtime.block_on(Engine::start(
         EngineConfig::new("2.0.0").with_test_iroh_bind_port(port),
         host,
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     let primary = match result {
         Err(error) => error,
@@ -2418,9 +2425,13 @@ fn undelivered_engine_executor_loss(root: &Path, ending: &'static str) {
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), initial_host)
-            .await
-            .expect("initial engine");
+        let (engine, _) = Engine::start(
+            EngineConfig::new("2.0.0"),
+            initial_host,
+            StartupSignals::unobserved(),
+        )
+        .await
+        .expect("initial engine");
         engine
             .execute(Operation::CreateSpace(CreateSpaceInput {
                 device_name: Some("fixture".into()),
@@ -2463,11 +2474,10 @@ fn undelivered_engine_executor_loss(root: &Path, ending: &'static str) {
     );
     let (progress, observer) = StartupProgress::channel();
     let (input, lifecycle) = StartupLifecycle::channel();
-    let caller = runtime.spawn(Engine::start_with_lifecycle(
+    let caller = runtime.spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     storage_wait
         .recv_timeout(Duration::from_secs(20))
@@ -2602,11 +2612,10 @@ fn failed_log_begin_after_runtime(root: &Path, ending: &'static str) {
     let (progress, observer) = StartupProgress::channel();
     let (input, lifecycle) = StartupLifecycle::channel();
     engine::probe_fail_log_begin();
-    let result = runtime.block_on(Engine::start_with_lifecycle(
+    let result = runtime.block_on(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     let primary = match result {
         Err(error) => error,
@@ -2749,11 +2758,10 @@ fn independent_registration_cleanup(root: &Path) {
     );
     let (progress_input, progress) = StartupProgress::channel();
     let (lifecycle_input, lifecycle) = StartupLifecycle::channel();
-    let caller = runtime.spawn(Engine::start_with_lifecycle(
+    let caller = runtime.spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        progress_input,
-        lifecycle_input,
+        StartupSignals::new(progress_input, lifecycle_input),
     ));
     let until = Instant::now() + Duration::from_secs(20);
     while progress.snapshot().state != StartupState::StartingServices {
@@ -2854,11 +2862,10 @@ fn delivered_engine_executor_loss(root: &Path) {
     let (progress, _) = StartupProgress::channel();
     let (input, lifecycle) = StartupLifecycle::channel();
     let (engine, events) = parent
-        .block_on(Engine::start_with_lifecycle(
+        .block_on(Engine::start(
             EngineConfig::new("2.0.0"),
             host,
-            progress,
-            input,
+            StartupSignals::new(progress, input),
         ))
         .expect("engine");
     let delivered = lifecycle.wait_release_internal(Duration::ZERO);
@@ -2934,7 +2941,11 @@ fn terminated_active_lifecycle(root: &Path) {
         .build()
         .expect("creator");
     let (engine, events) = creator
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .expect("engine");
     let engine = Arc::new(engine);
     let path = root.join("worker.lease");
@@ -3020,7 +3031,11 @@ fn terminated_shutdown_waiter(root: &Path) {
         .build()
         .expect("creator");
     let (engine, events) = creator
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .expect("engine");
     let engine = Arc::new(engine);
     let path = root.join("worker.lease");
@@ -3127,11 +3142,10 @@ fn owned_start_failure(root: &Path, stage: &'static str) {
     let (progress, observer) = StartupProgress::channel();
     let (input, lifecycle) = StartupLifecycle::channel();
     engine::probe_fail_owned_start(if stage == "thread" { 1 } else { 2 });
-    let result = runtime.block_on(Engine::start_with_lifecycle(
+    let result = runtime.block_on(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     let primary = match result {
         Err(error) => error,
@@ -3209,11 +3223,10 @@ fn owned_start_failure_host_retry(root: &Path) {
     let (progress, observer) = StartupProgress::channel();
     let (input, lifecycle) = StartupLifecycle::channel();
     engine::probe_fail_owned_start(1);
-    let result = runtime.block_on(Engine::start_with_lifecycle(
+    let result = runtime.block_on(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        progress,
-        input,
+        StartupSignals::new(progress, input),
     ));
     let primary = match result {
         Err(error) => error,
@@ -3329,7 +3342,11 @@ fn terminated_owned_executor_process_retry(root: &Path, with_worker: bool, unfen
         .build()
         .expect("runtime");
     let (engine, events) = runtime
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .expect("engine");
     let engine = Arc::new(engine);
     let closing = Arc::clone(&engine);
@@ -3463,7 +3480,11 @@ fn terminated_owned_executor_engine_retry(root: &Path) {
         .build()
         .expect("runtime");
     let (engine, events) = runtime
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .expect("engine");
     let engine = Arc::new(engine);
     let closing = Arc::clone(&engine);

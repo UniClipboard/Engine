@@ -2,6 +2,7 @@
 mod retention;
 
 use super::{progress, receive_case, ReleaseOnDrop, CONTENTS, ENGINE_TEST_LOCK};
+use crate::StartupSignals;
 use crate::{EntryReceiveRetryOutcome, Operation, OperationResult};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -124,6 +125,7 @@ async fn real_engine_file_addressable_query_survives_reconnect_and_selective_ret
             .with_rendezvous_base_url(case._server.uri())
             .with_test_relay_fallback(false),
         super::persistent_engine_host(case.receiver_root.path(), case.receiver_storage.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

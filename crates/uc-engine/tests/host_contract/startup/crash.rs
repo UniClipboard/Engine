@@ -15,6 +15,7 @@ use uc_engine::{
 };
 
 use super::{host, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 const CHILD_ENV: &str = "UC_ENGINE_LIFECYCLE_CRASH_CHILD";
 const CHILD_CONTENT: &str = "confirmed content from the terminated process";
@@ -55,6 +56,7 @@ async fn child_process() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(&input.root, Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -90,6 +92,7 @@ async fn confirmed_content_survives_process_termination_and_immediate_reopen() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -151,6 +154,7 @@ async fn confirmed_content_survives_process_termination_and_immediate_reopen() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

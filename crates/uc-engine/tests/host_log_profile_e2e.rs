@@ -20,6 +20,7 @@ use uc_engine::observability::{
     ObservabilityResource, OperatingSystem, ProcessObservabilityHandle,
     ProcessObservabilityRuntime,
 };
+use uc_engine::StartupSignals;
 use uc_engine::{
     DiagnosticsStatusSummary, Engine, EngineConfig, EngineErrorCategory, ExportDiagnosticLogsInput,
     HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory, HostClipboard,
@@ -388,9 +389,13 @@ impl Profile {
     }
 
     async fn try_start(&self, label: Option<&str>) -> Result<Engine, uc_engine::EngineError> {
-        Engine::start(Self::config(label), self.host())
-            .await
-            .map(|(engine, _events)| engine)
+        Engine::start(
+            Self::config(label),
+            self.host(),
+            StartupSignals::unobserved(),
+        )
+        .await
+        .map(|(engine, _events)| engine)
     }
 
     fn settings_path(&self) -> PathBuf {

@@ -16,6 +16,7 @@ use uc_engine::{
 };
 
 use super::{EmptyClipboard, EmptyFiles, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 struct Stream {
     lease: Option<File>,
@@ -144,12 +145,20 @@ async fn shared_network_lease_waits_for_both_engines() {
             Box::new(EmptyFiles),
         )
     };
-    let (first, _) = Engine::start(EngineConfig::new("1.0.0"), host("first"))
-        .await
-        .unwrap();
-    let (second, _) = Engine::start(EngineConfig::new("1.0.0"), host("second"))
-        .await
-        .unwrap();
+    let (first, _) = Engine::start(
+        EngineConfig::new("1.0.0"),
+        host("first"),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
+    let (second, _) = Engine::start(
+        EngineConfig::new("1.0.0"),
+        host("second"),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     let export = handle
         .prepare_network_log_export(Duration::from_secs(5))
         .unwrap();
@@ -202,9 +211,13 @@ async fn required_closer_failure_retains_real_lock_for_retry() {
         }))),
         Box::new(EmptyFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("release acceptance".into()),
@@ -310,9 +323,13 @@ async fn network_log_park_failure_emits_lifecycle_failure() {
         Box::new(EmptyClipboard),
         Box::new(EmptyFiles),
     );
-    let (engine, mut events) = Engine::start(EngineConfig::new("1.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, mut events) = Engine::start(
+        EngineConfig::new("1.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     tokio::task::spawn_blocking(move || handle.shutdown(Duration::from_secs(5)))
         .await
         .unwrap();
@@ -473,7 +490,11 @@ fn process_retains_and_retries_abandoned_engine_closer() {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), capabilities))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            capabilities,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let first = executor.block_on(engine.shutdown_with_outcome(Duration::from_secs(10)));
     let first_failed = matches!(first, uc_engine::ResourceReleaseOutcome::Failed { .. });
@@ -594,7 +615,11 @@ fn suspended_engine_orphan_invalidates_process_receipt() {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), capabilities))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            capabilities,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let suspended = executor.block_on(engine.suspend()).is_ok();
     let original = process.test_process_release(Duration::from_secs(5));
@@ -725,10 +750,18 @@ fn orphan_retry_waits_for_another_active_engine() {
         .build()
         .unwrap();
     let (first, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), first_host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            first_host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let (second, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), second_host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            second_host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let log_lease = process
         .prepare_network_log_export(Duration::from_secs(5))
@@ -877,10 +910,18 @@ fn new_orphan_during_retry_waits_for_running_closer() {
         .build()
         .unwrap();
     let (first, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), first_host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            first_host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let (second, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), second_host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            second_host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let first_failed = matches!(
         executor.block_on(first.shutdown_with_outcome(Duration::from_secs(10))),
@@ -996,7 +1037,11 @@ fn orphan_retry_failure_keeps_the_same_closer() {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let first_engine_error =
         match executor.block_on(engine.shutdown_with_outcome(Duration::from_secs(10))) {
@@ -1213,7 +1258,11 @@ fn process_joins_shutdown_after_engine_handle_drops() {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let engine_wait = executor.block_on(engine.shutdown_with_outcome(Duration::from_secs(1)));
     let engine_pending = matches!(engine_wait, uc_engine::ResourceReleaseOutcome::Pending);
@@ -1320,7 +1369,11 @@ fn suspended_engine_inflight_close_advances_process_generation() {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let suspended = executor.block_on(engine.suspend()).is_ok();
     let original = process.test_process_release(Duration::from_secs(5));
@@ -1430,7 +1483,11 @@ fn terminated_engine_close_remains_terminal() {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let wait = executor.block_on(engine.shutdown_with_outcome(Duration::from_secs(1)));
     let pending = matches!(wait, uc_engine::ResourceReleaseOutcome::Pending);
@@ -1563,10 +1620,18 @@ fn pending_orphan_arriving_during_retry_stays_pending() {
         .build()
         .unwrap();
     let (first, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), first_host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            first_host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let (second, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), second_host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            second_host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let first_failed = matches!(
         executor.block_on(first.shutdown_with_outcome(Duration::from_secs(10))),
@@ -1782,7 +1847,11 @@ fn process_retry_closes_engine_before_waiting_for_its_span() {
         Box::new(EmptyFiles),
     );
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let first_failed = matches!(
         executor.block_on(engine.shutdown_with_outcome(Duration::from_secs(10))),
@@ -1932,7 +2001,11 @@ fn orphan_arriving_during_span_drain_unblocks_retry() {
         Box::new(EmptyFiles),
     );
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let suspended = executor.block_on(engine.suspend()).is_ok();
     let initial = process.test_process_release(Duration::from_millis(300));
@@ -2090,7 +2163,11 @@ fn pending_orphan_during_span_drain_waits_for_closer() {
         Box::new(EmptyFiles),
     );
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let suspended = executor.block_on(engine.suspend()).is_ok();
     let initial = process.test_process_release(Duration::from_millis(300));

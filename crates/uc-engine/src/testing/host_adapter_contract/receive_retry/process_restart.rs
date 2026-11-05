@@ -3,6 +3,7 @@ use super::{
     batch_outcomes::{assert_file_failure, reconciled_view},
     member_id, persistent_engine_host, receive_case, saved_files, ReleaseOnDrop, ENGINE_TEST_LOCK,
 };
+use crate::StartupSignals;
 use crate::{
     Engine, EngineConfig, Operation, OperationResult, OutboundProgressBatchState,
     OutboundProgressFreshness, OutboundProgressInput, OutboundProgressReconciliation,
@@ -25,6 +26,7 @@ async fn real_engine_reopened_sender_reads_existing_delivery_as_unconfirmed_with
             .with_rendezvous_base_url(case._server.uri())
             .with_test_relay_fallback(false),
         persistent_engine_host(case._source_root.path(), case.source_storage.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use uc_engine::error_codes::{EXPORT_CONFIG_FAILED_CODE, HOST_CONFIGURATION_FILES_INVALID_CODE};
+use uc_engine::StartupSignals;
 use uc_engine::{
     ConfigExportOutcome, ConfigImportStageOutcome, CreateSpaceInput, Engine, EngineConfig,
     EngineErrorCategory, ExportConfigInput, HistoryEntryInput, HostCapabilities,
@@ -480,6 +481,7 @@ async fn invalid_declarations_stop_start_before_touching_the_data_root() {
         let error = match Engine::start(
             EngineConfig::new("2.0.0").with_host_configuration_files(declaration),
             profile.host(),
+            StartupSignals::unobserved(),
         )
         .await
         {
@@ -1245,6 +1247,7 @@ impl Profile {
         Engine::start(
             EngineConfig::new("2.0.0").with_host_configuration_files(declaration),
             self.host(),
+            StartupSignals::unobserved(),
         )
         .await
         .map(|(engine, _)| engine)
@@ -1258,6 +1261,7 @@ impl Profile {
         let (engine, _events) = Engine::start(
             EngineConfig::new(version).with_host_configuration_files(declaration),
             self.host(),
+            StartupSignals::unobserved(),
         )
         .await
         .unwrap();

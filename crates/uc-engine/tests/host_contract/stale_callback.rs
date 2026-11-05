@@ -12,6 +12,7 @@ use uc_engine::{
 };
 
 use super::{find_lease, open_lease, EmptyFiles, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 struct NotifyingClipboard {
     changes: Mutex<Option<Box<dyn HostClipboardChangeStream>>>,
@@ -81,9 +82,13 @@ async fn suspended_engine_keeps_old_clipboard_callbacks_silent_after_profile_rel
         }),
         Box::new(EmptyFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("stale callback test".into()),

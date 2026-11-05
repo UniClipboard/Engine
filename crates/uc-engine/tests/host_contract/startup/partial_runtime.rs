@@ -16,6 +16,7 @@ use uc_observability_runtime::{
 };
 
 use super::{host, runtime_database, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 fn open_descriptor(path: &std::path::Path) -> bool {
     let output = Command::new("lsof")
@@ -100,11 +101,10 @@ fn executor_loss_retains_late_network_registration() {
         .unwrap();
     let (progress_input, progress) = StartupProgress::channel();
     let (lifecycle_input, lifecycle) = StartupLifecycle::channel();
-    let caller = runtime.spawn(Engine::start_with_lifecycle(
+    let caller = runtime.spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(MemorySecureStorage::default())),
-        progress_input,
-        lifecycle_input,
+        StartupSignals::new(progress_input, lifecycle_input),
     ));
     let deadline = Instant::now() + Duration::from_secs(20);
     while progress.snapshot().state != uc_engine::StartupState::StartingServices {
@@ -186,6 +186,7 @@ fn executor_loss_during_engine_construction_observes_profile_descriptor() {
         let (engine, _) = Engine::start(
             EngineConfig::new("2.0.0"),
             host(root.path(), Box::new(storage.clone())),
+            StartupSignals::unobserved(),
         )
         .await
         .unwrap();
@@ -248,11 +249,10 @@ fn executor_loss_during_engine_construction_observes_profile_descriptor() {
 
     let (progress_input, progress) = StartupProgress::channel();
     let (lifecycle_input, lifecycle) = StartupLifecycle::channel();
-    let caller = runtime.spawn(Engine::start_with_lifecycle(
+    let caller = runtime.spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
-        progress_input,
-        lifecycle_input,
+        StartupSignals::new(progress_input, lifecycle_input),
     ));
     let deadline = Instant::now() + Duration::from_secs(20);
     while observability.query_network_log_status().unwrap().state != NetworkLogState::Unavailable {

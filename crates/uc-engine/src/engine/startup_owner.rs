@@ -2,6 +2,7 @@
 use std::error::Error;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 #[cfg(feature = "dev-tools")]
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,14 +11,18 @@ use std::time::Duration;
 
 use tokio::runtime::{Handle, TryCurrentError};
 use tokio::sync::oneshot;
+use tokio::sync::Mutex as AsyncMutex;
 use uc_application::deps::{LifecycleError, StopProfileRuntimePort};
 use uc_application::facade::NetworkRecoveryFacade;
 use uc_infra_profile::security::ProfileUpgradeBackupActivity;
 use uc_observability_contract::diagnostics::{record_task_join_failure, DiagnosticTaskKind};
 
+use super::event_stream::event_channel;
+use super::in_flight::InFlightOperations;
 use super::lifecycle::TransitionQueue;
 use super::log_activity::LogActivity;
 use super::owned_executor::{ExecutorStop, OwnedExecutor, OwnedExecutorStartError};
+use super::shutdown::{OrphanRetention, ShutdownProgress};
 use super::startup::StartupProgressStore;
 use super::startup_outcome::{StartupOutcomeCell, StartupOutcomeSnapshot};
 use super::{Engine, EngineRuntime, EventStream, StartupLifecycleInput, StartupProgressInput};
@@ -25,7 +30,8 @@ use crate::runtime::{classify_startup_error, RecoverableRuntime, ReusableHost};
 #[cfg(feature = "dev-tools")]
 use crate::HostCapabilityErrorCategory;
 use crate::{
-    EngineConfig, EngineError, EngineErrorCategory, HostCapabilityError, ResourceReleaseOutcome,
+    EngineConfig, EngineError, EngineErrorCategory, EngineState, HostCapabilityError,
+    ResourceReleaseOutcome,
 };
 
 /// 仅供端到端程序控制未交付实例的清理执行器创建失败。
@@ -1253,6 +1259,114 @@ impl Drop for StartupConstructionGuard {
 }
 
 impl Engine {
+    /// 组装成功路径：事件通道、宿主目录、运行期与日志登记。
+    ///
+    /// 只由 [`Engine::start_owned`] 在已接管的执行器上调用；失败清理由启动负责人承担。
+    async fn start_runtime(
+        config: EngineConfig,
+        host: Arc<ReusableHost>,
+        progress: &StartupProgressInput,
+        requests: Arc<TransitionQueue>,
+        cleanup: Arc<StartupCleanupOwner>,
+        owned_executor: Arc<OwnedExecutor>,
+    ) -> Result<(Self, EventStream), EngineError> {
+        const EVENT_CAPACITY: usize = 256;
+
+        let (events, stream) = event_channel(EVENT_CAPACITY);
+        let directories = host.directories();
+        let file_roots: Arc<[PathBuf]> = [
+            directories.private_data(),
+            directories.cache(),
+            directories.temporary(),
+            directories.logs(),
+        ]
+        .into_iter()
+        .map(Path::to_path_buf)
+        .collect();
+        let runtime = Arc::new(
+            RecoverableRuntime::start(
+                config,
+                host,
+                events.clone(),
+                Arc::clone(&progress.store),
+                Arc::clone(&cleanup),
+            )
+            .await?,
+        );
+        let log_activity = LogActivity::default();
+        cleanup.accept_runtime(Arc::clone(&runtime), log_activity.clone());
+        if let Err(error) = log_activity.begin().await {
+            cleanup.record_primary(error.clone());
+            cleanup.start_runtime_cleanup(Arc::clone(&runtime), log_activity);
+            return Err(error);
+        }
+        cleanup.finish_runtime_construction();
+        let engine = Self {
+            state: Arc::new(AsyncMutex::new(EngineState::Running)),
+            lifecycle_gate: Arc::new(AsyncMutex::new(())),
+            lifecycle_requests: requests,
+            shutdown_gate: Arc::new(AsyncMutex::new(())),
+            shutdown_progress: Arc::new(AsyncMutex::new(ShutdownProgress::default())),
+            orphan_retention: Arc::new(OrphanRetention::default()),
+            retain_on_drop: true,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            runtime,
+            owned_executor: Some(owned_executor),
+            events,
+            operations: Arc::new(InFlightOperations::new()),
+            log_activity,
+            file_roots,
+        };
+        let startup_handoff = engine.bind_lifecycle(true);
+        startup_handoff
+            .await
+            // discarded-source[channel]: `tokio::sync::oneshot::error::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
+            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?;
+        Ok((engine, stream))
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_runtime<R>(runtime: Arc<R>, event_capacity: usize) -> (Self, EventStream)
+    where
+        R: EngineRuntime + 'static,
+    {
+        Self::from_runtime_with_queue(
+            runtime,
+            event_capacity,
+            Arc::new(TransitionQueue::default()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_runtime_with_queue<R>(
+        runtime: Arc<R>,
+        event_capacity: usize,
+        requests: Arc<TransitionQueue>,
+    ) -> (Self, EventStream)
+    where
+        R: EngineRuntime + 'static,
+    {
+        let (events, stream) = event_channel(event_capacity);
+        let engine = Self {
+            state: Arc::new(AsyncMutex::new(EngineState::Running)),
+            lifecycle_gate: Arc::new(AsyncMutex::new(())),
+            lifecycle_requests: requests,
+            shutdown_gate: Arc::new(AsyncMutex::new(())),
+            shutdown_progress: Arc::new(AsyncMutex::new(ShutdownProgress::default())),
+            orphan_retention: Arc::new(OrphanRetention::default()),
+            retain_on_drop: false,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            runtime,
+            owned_executor: None,
+            events,
+            operations: Arc::new(InFlightOperations::new()),
+            log_activity: LogActivity::default(),
+            file_roots: Arc::from([]),
+        };
+        let _ = engine.bind_lifecycle(false);
+        (engine, stream)
+    }
+
     pub(super) async fn start_owned(
         config: EngineConfig,
         host: Arc<ReusableHost>,

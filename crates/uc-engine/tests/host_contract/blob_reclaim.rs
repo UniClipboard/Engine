@@ -11,6 +11,7 @@ use uc_engine::{
 };
 
 use super::{startup::host, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deleting_the_only_image_reference_removes_the_blob_file_and_row() {
@@ -87,6 +88,7 @@ async fn start_engine() -> (tempfile::TempDir, Engine) {
     let (engine, _) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

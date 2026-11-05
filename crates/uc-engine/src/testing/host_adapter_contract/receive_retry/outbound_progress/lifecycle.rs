@@ -1,6 +1,7 @@
 //! 暂停和锁定只退休没有持久依据的进度；真实保存成果不随会话消失。
 use super::super::lifecycle::interrupted_retry;
 use super::*;
+use crate::StartupSignals;
 use crate::{EngineState, OutboundProgressSummary, RecoverSessionInput, UnlockSpaceInput};
 
 async fn attempt_view(case: &ReceiveCase, attempt: &str) -> OutboundProgressSummary {
@@ -64,6 +65,7 @@ async fn real_engine_sender_resume_and_profile_reopen_retire_unpersisted_progres
             let (source, events) = Engine::start(
                 config,
                 persistent_engine_host(case._source_root.path(), case.source_storage.clone()),
+                StartupSignals::unobserved(),
             )
             .await
             .unwrap();

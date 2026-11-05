@@ -474,7 +474,11 @@ function checkPublicSurface(metadata, sources) {
     }
   }
 
-  for (const token of ['pub use engine::{Engine, EventStream};', 'pub use contract::*;']) {
+  for (const token of [
+    'pub use engine::{Engine, EventStream};',
+    'pub use engine::StartupSignals;',
+    'pub use contract::*;',
+  ]) {
     if (!sources.engine.includes(token)) {
       addProblem(problems, 'public surface', `uc-engine stable interface is missing ${token}`)
     }

@@ -2,6 +2,7 @@ use std::fs;
 use std::time::Duration;
 
 use super::{persistent_engine_host, MemoryHostSecureStorage, ENGINE_TEST_LOCK};
+use crate::StartupSignals;
 use crate::{CreateSpaceInput, Engine, EngineConfig, Operation, OperationResult, SecretString};
 
 #[tokio::test]
@@ -10,9 +11,13 @@ async fn startup_upgrade_retains_file_backup_across_factory_reset() {
     let temporary = tempfile::tempdir().unwrap();
     let storage = MemoryHostSecureStorage::default();
     let host = || persistent_engine_host(temporary.path(), storage.clone());
-    let (old, _) = Engine::start(EngineConfig::new("1.2.3"), host())
-        .await
-        .unwrap();
+    let (old, _) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     old.execute(Operation::CreateSpace(CreateSpaceInput {
         device_name: Some("Backup Test Device".into()),
         passphrase: SecretString::new("correct horse"),
@@ -23,9 +28,13 @@ async fn startup_upgrade_retains_file_backup_across_factory_reset() {
     old.shutdown(Duration::from_secs(15)).await.unwrap();
     drop(old);
 
-    let (upgraded, _) = Engine::start(EngineConfig::new("1.2.4"), host())
-        .await
-        .unwrap();
+    let (upgraded, _) = Engine::start(
+        EngineConfig::new("1.2.4"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     let backups = fs::read_dir(temporary.path().join("private-upgrade-backups"))
         .unwrap()
         .next()
@@ -41,9 +50,13 @@ async fn startup_upgrade_retains_file_backup_across_factory_reset() {
     upgraded.shutdown(Duration::from_secs(15)).await.unwrap();
     drop(upgraded);
 
-    let (restarted, _) = Engine::start(EngineConfig::new("1.2.4"), host())
-        .await
-        .unwrap();
+    let (restarted, _) = Engine::start(
+        EngineConfig::new("1.2.4"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     assert_eq!(fs::read(backups.join("current")).unwrap(), record);
     assert_eq!(
         restarted
@@ -59,17 +72,25 @@ async fn startup_upgrade_retains_file_backup_across_factory_reset() {
     restarted.shutdown(Duration::from_secs(15)).await.unwrap();
     drop(restarted);
 
-    let (fresh, _) = Engine::start(EngineConfig::new("1.2.4"), host())
-        .await
-        .unwrap();
+    let (fresh, _) = Engine::start(
+        EngineConfig::new("1.2.4"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     assert_eq!(fs::read(backups.join("current")).unwrap(), record);
     fresh.shutdown(Duration::from_secs(15)).await.unwrap();
     drop(fresh);
 
     // 出厂重置后的第一次版本提升：不能被已作废的安全记录挡住。
-    let (bumped, _) = Engine::start(EngineConfig::new("1.2.5"), host())
-        .await
-        .unwrap();
+    let (bumped, _) = Engine::start(
+        EngineConfig::new("1.2.5"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     assert!(backups.join("security-current").exists());
     bumped.shutdown(Duration::from_secs(15)).await.unwrap();
 }
@@ -89,9 +110,13 @@ async fn startup_upgrade_replaces_stale_security_records_left_by_an_earlier_rese
     let temporary = tempfile::tempdir().unwrap();
     let storage = MemoryHostSecureStorage::default();
     let host = || persistent_engine_host(temporary.path(), storage.clone());
-    let (old, _) = Engine::start(EngineConfig::new("1.2.3"), host())
-        .await
-        .unwrap();
+    let (old, _) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     old.execute(Operation::CreateSpace(CreateSpaceInput {
         device_name: Some("Backup Test Device".into()),
         passphrase: SecretString::new("correct horse"),
@@ -102,9 +127,13 @@ async fn startup_upgrade_replaces_stale_security_records_left_by_an_earlier_rese
     old.shutdown(Duration::from_secs(15)).await.unwrap();
     drop(old);
 
-    let (upgraded, _) = Engine::start(EngineConfig::new("1.2.4"), host())
-        .await
-        .unwrap();
+    let (upgraded, _) = Engine::start(
+        EngineConfig::new("1.2.4"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     let backups = fs::read_dir(temporary.path().join("private-upgrade-backups"))
         .unwrap()
         .next()
@@ -126,9 +155,13 @@ async fn startup_upgrade_replaces_stale_security_records_left_by_an_earlier_rese
     );
     upgraded.shutdown(Duration::from_secs(15)).await.unwrap();
     drop(upgraded);
-    let (fresh, _) = Engine::start(EngineConfig::new("1.2.4"), host())
-        .await
-        .unwrap();
+    let (fresh, _) = Engine::start(
+        EngineConfig::new("1.2.4"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     fresh.shutdown(Duration::from_secs(15)).await.unwrap();
     drop(fresh);
     let current = fs::read(backups.join("current")).unwrap();
@@ -138,9 +171,13 @@ async fn startup_upgrade_replaces_stale_security_records_left_by_an_earlier_rese
         fs::write(path, bytes).unwrap();
     }
 
-    let (bumped, _) = Engine::start(EngineConfig::new("1.2.5"), host())
-        .await
-        .unwrap();
+    let (bumped, _) = Engine::start(
+        EngineConfig::new("1.2.5"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
 
     assert_ne!(
         fs::read(backups.join("security-current")).unwrap(),
