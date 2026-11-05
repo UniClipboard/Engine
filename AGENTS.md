@@ -14,8 +14,17 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the current architecture and [docs/R
   - Before changing logs, tracing, sampling, or observability acceptance, read the business-record organization standard in that document.
 - [Security architecture](docs/SECURITY.md)
 - [Execution plans and technical debt](docs/PLANS.md)
+- [Lessons](LESSONS.md)
 
 Read the nearest local `AGENTS.md` when entering a directory. Local files provide scope maps and link to rules in `docs/`.
+
+## Lessons
+
+[LESSONS.md](LESSONS.md) records rules this repository learned from user review: decisions the user rejected, and justifications that turned out to rest on an unowned premise. A lesson has the same authority as this file.
+
+Write an entry in the same change that produced the correction, when the user rejects a decision or a justification, when the same mistake appears in a second module, or when a review comment repeats a rule no document states. Do not record per-change notes, bug summaries, or anything already covered by `docs/`. If a design document already states the rule, fix the code and cite the document instead.
+
+Every entry must cite the full 40-character commit that introduced the problem and the commit that fixed it. Files move, get split, and get deleted; a commit hash does not. A path is a locator, never the anchor.
 
 ## Invariants
 
