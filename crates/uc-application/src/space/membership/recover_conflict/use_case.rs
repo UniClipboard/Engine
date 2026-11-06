@@ -9,9 +9,9 @@ use uc_core::membership::{
 use uc_core::ports::ClockPort;
 
 use crate::space::membership::{
-    ledger_error, MembershipBranchRecoverySession, MembershipConflictStatus, MembershipLedgerError,
-    MembershipMaintenanceStepOutcome, MembershipOwner, RecoverMembershipConflictsPort,
-    StagedMembershipRecord,
+    ledger_error, MembershipBranchRecoverySession, MembershipConflictRecord,
+    MembershipConflictStatus, MembershipLedgerError, MembershipMaintenanceStepOutcome,
+    MembershipOwner, MembershipView, RecoverMembershipConflictsPort, StagedMembershipRecord,
 };
 
 use super::{
@@ -104,6 +104,57 @@ impl RecoverMembershipConflictUseCase {
         }) else {
             return RecoverMembershipConflictOutcome::Completed;
         };
+        let outcome = self.recover_selected(&view, conflict, generation).await;
+        if outcome != RecoverMembershipConflictOutcome::StableFailure {
+            return outcome;
+        }
+        // 已提交的转换继续由转换负责人恢复，不能改成重新配对或回滚成员事实。
+        if conflict
+            .transition_id
+            .is_some_and(|id| record.branch_transitions.contains_key(&id))
+        {
+            return outcome;
+        }
+        let conflict = conflict.clone();
+        match self
+            .owner
+            .commit_in_generation(generation, move |draft| {
+                let record = draft.branch_recovery_mut()?;
+                if conflict
+                    .transition_id
+                    .is_some_and(|id| record.branch_transitions.contains_key(&id))
+                {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                let current = record
+                    .conflicts
+                    .get_mut(&conflict.conflict_id)
+                    .ok_or(MembershipLedgerError::Conflict)?;
+                if current != &conflict {
+                    return Err(MembershipLedgerError::Conflict);
+                }
+                // 保留原选择和暂存材料；终态阻止后续维护重复执行已拒绝的恢复。
+                current.status = MembershipConflictStatus::RePairingRequired;
+                Ok(())
+            })
+            .await
+        {
+            Ok(_) => outcome,
+            Err(MembershipLedgerError::Conflict) => RecoverMembershipConflictOutcome::Deferred,
+            Err(error) => map_ledger_error(error),
+        }
+    }
+
+    async fn recover_selected(
+        &self,
+        view: &Arc<MembershipView>,
+        conflict: &MembershipConflictRecord,
+        generation: u64,
+    ) -> RecoverMembershipConflictOutcome {
+        let Some(space) = view.space() else {
+            return RecoverMembershipConflictOutcome::Deferred;
+        };
+        let record = space.branch_recovery();
         let recipient_member = space.local_member();
         let (Some(target_branch_id), Some(transition_id)) =
             (conflict.selected_branch_id, conflict.transition_id)

@@ -195,3 +195,23 @@ Engine 组装独立历史 Uni manager 并装饰完整能力，不管理分页，
 
 连接记录仅在内存匿名映射内关联维护轮次，遵守[观测合同](observability.md#关联与结束边界)，
 不为两次网络交换新增业务 root，不向 Engine 暴露业务步骤。
+
+### Terminal failure before a branch transition
+
+Before a durable branch transition exists, a stable recovery failure persists
+`RePairingRequired` in the existing encrypted conflict record. The commit checks
+the original database generation and the unchanged selected conflict. A storage
+failure or concurrent change defers settlement. A temporary unavailable channel
+also remains deferred. A later maintenance round does not retry a terminal
+conflict. Restart and repeated selection retain the re-pairing result.
+
+The failure does not change signed membership history, discard staged material,
+complete the conflict, or authorize another member. Once a branch transition is
+durable, the transition owner must continue recovery; this terminal fallback
+cannot abandon it.
+
+The Engine device-group query returns `selected_outcome` for a saved branch
+selection. An unselected issue omits this field. A host must replace its cached
+pending result when the query reports `re_pairing_required` and provide a recovery
+exit. The issue remains visible until a real resolution or space reset. Hiding
+the issue would falsely report that the selected group was installed.
