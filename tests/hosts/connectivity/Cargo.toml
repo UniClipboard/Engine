@@ -37,6 +37,7 @@ test-network-config = []
 
 [dependencies]
 anyhow = "1"
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
 serde_json = "1"
 sha2 = "0.10"
 url = "2"
@@ -45,7 +46,6 @@ uc-engine = { path = "../../../crates/uc-engine", features = ["dev-tools"] }
 
 [dev-dependencies]
 diesel = { version = "2.3.5", features = ["sqlite"] }
-libsqlite3-sys = { version = "0.35", features = ["bundled"] }
 tempfile = "3"
 wiremock = "0.6"
 

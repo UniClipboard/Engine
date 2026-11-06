@@ -133,13 +133,17 @@ class Host {
     this.child = undefined
     this.bindPort = mode === 'known-peer' ? 21_000 + index : undefined
     this.commands = []
+    this.sqliteErrorCodes = []
   }
   async start() {
     const selected = this.binaryOverride ?? (mode === 'legacy' && this.label === String.fromCharCode(65 + legacySide)
       ? resolve(legacyBinary)
       : peerBinary && this.label === String.fromCharCode(65 + peerSide) ? resolve(peerBinary) : binary)
     this.child = spawn('ip', ['netns', 'exec', this.namespace, selected], { stdio: ['pipe', 'pipe', 'pipe'] })
-    this.child.stderr.resume()
+    createInterface({ input: this.child.stderr }).on('line', line => {
+      const match = /^uc_test_sqlite_code=(\d{1,5})$/.exec(line)
+      if (match && this.sqliteErrorCodes.length < 64) this.sqliteErrorCodes.push(Number(match[1]))
+    })
     this.channel = connectHostCommands(this.child)
     this.pending = this.channel.pending
     const ready = await this.raw({ root: this.root, rendezvous: `http://10.233.0.1:${server.address().port}`, secure_storage: this.secureStorage, relay: mode === 'relay', bind_port: this.bindPort, reject_presence_endpoint_ids: this.rejectPresenceEndpointIds, reject_inbound_presence_endpoint_ids: this.rejectInboundPresenceEndpointIds })
@@ -1314,6 +1318,6 @@ finally {
     cleanup_ms: Math.round(timingCompletedAt - cleanupStartedAt),
     total_ms: Math.round(timingCompletedAt - timingStartedAt),
   }
-  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, progress_baseline: progressBaseline, progress_transfers: progressTransfers, reproduction, binaries, faults, records, deliveries, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, failure_reasons: node.failureReasons, receive_failure_counts: node.receiveFailureCounts, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
+  writeFileSync(join(evidence, `${mode}${prepairedHost ? `-prepaired-${upgradeSide}-${presenceRole}` : ''}${mode === 'legacy' ? `-${legacySide}` : ''}${peerBinary ? `-mixed-${peerSide}` : ''}${relayBinaryB ? '-split-relays' : ''}.json`), JSON.stringify({ sequence: 'fixed-short-long-heal-v2', old_pair_only: oldPairOnly, progress_baseline: progressBaseline, progress_transfers: progressTransfers, reproduction, binaries, faults, records, deliveries, timings, cleaned, plaintext_clean: plaintextClean, failed, nodes: nodes.map(node => ({ label: node.label, version: node.version, events: node.timeline, resources: node.resources, sqlite_error_codes: node.sqliteErrorCodes, failure_reasons: node.failureReasons, receive_failure_counts: node.receiveFailureCounts, network_facts: node.networkFacts, network_diagnostics: node.networkDiagnostics })) }, null, 2), { mode: 0o600 })
 }
 process.exitCode = failed ? 1 : 0

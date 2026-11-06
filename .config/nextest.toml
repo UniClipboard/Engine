@@ -158,9 +158,9 @@ threads-required = "num-test-threads"
 filter = "package(uc-engine) & test(/host_adapter_contract::offline_lifecycle::crash::/)"
 slow-timeout = { period = "30s", terminate-after = 3 }
 
-# 慢 collector 用固定的响应延迟与导出超时验证 flush 期限；满载并行时调度抖动会让结果偏离预期，因此独占运行。
+# Collector 场景验证固定的生产与 flush 期限；独占运行，避免其他测试负载污染计时。
 [[profile.default.overrides]]
-filter = "package(uc-observability-runtime) & binary(collector_slow)"
+filter = "package(uc-observability-runtime) & (binary(collector_slow) | binary(collector_unavailable))"
 threads-required = "num-test-threads"
 
 # 接收方进程崩溃后重启并续传文件，单项本身约 22 秒，不是卡死。
@@ -168,9 +168,9 @@ threads-required = "num-test-threads"
 filter = "package(uc-engine) & test(/host_adapter_contract::offline_lifecycle::crash::/)"
 slow-timeout = { period = "30s", terminate-after = 3 }
 
-# 慢 collector 用固定的响应延迟与导出超时验证 flush 期限；满载并行时调度抖动会让结果偏离预期，因此独占运行。
+# Collector 场景验证固定的生产与 flush 期限；独占运行，避免其他测试负载污染计时。
 [[profile.ci.overrides]]
-filter = "package(uc-observability-runtime) & binary(collector_slow)"
+filter = "package(uc-observability-runtime) & (binary(collector_slow) | binary(collector_unavailable))"
 threads-required = "num-test-threads"
 
 # 连续缺口验收同时持有五个真实进程并 kill 接收者；第二次传输失败的原有退避为 60 秒。
