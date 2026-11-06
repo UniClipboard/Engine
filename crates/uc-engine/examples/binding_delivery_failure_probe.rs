@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use uc_engine::StartupSignals;
 use uc_engine::{
     Engine, EngineConfig, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardChange, HostClipboardChangeStream, HostClipboardSnapshot,
@@ -155,9 +156,13 @@ async fn main() {
         })))),
         Box::new(Files),
     );
-    let (engine, events) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .expect("real engine");
+    let (engine, events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .expect("real engine");
     let engine = Arc::new(engine);
     let owner = Arc::new(startup_delivery::StartupDeliveryOwner::default());
     assert!(matches!(
@@ -225,9 +230,13 @@ async fn main() {
         })))),
         Box::new(Files),
     );
-    let (success_engine, success_events) = Engine::start(EngineConfig::new("2.0.0"), success_host)
-        .await
-        .expect("success engine");
+    let (success_engine, success_events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        success_host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .expect("success engine");
     let success_engine = Arc::new(success_engine);
     let success_owner = Arc::new(startup_delivery::StartupDeliveryOwner::default());
     let success_weak = Arc::downgrade(&success_owner);
@@ -273,9 +282,13 @@ async fn main() {
         })))),
         Box::new(Files),
     );
-    let (panic_engine, panic_events) = Engine::start(EngineConfig::new("2.0.0"), panic_host)
-        .await
-        .expect("panic engine");
+    let (panic_engine, panic_events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        panic_host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .expect("panic engine");
     let panic_owner = Arc::new(startup_delivery::StartupDeliveryOwner::default());
     let panic_weak = Arc::downgrade(&panic_owner);
     let worker_owner = Arc::clone(&panic_owner);
@@ -324,10 +337,13 @@ async fn main() {
         })))),
         Box::new(Files),
     );
-    let (recovery_engine, recovery_events) =
-        Engine::start(EngineConfig::new("2.0.0"), recovery_host)
-            .await
-            .expect("recovery engine");
+    let (recovery_engine, recovery_events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        recovery_host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .expect("recovery engine");
     let recovery_owner = Arc::new(startup_delivery::StartupDeliveryOwner::default());
     let recovery_weak = Arc::downgrade(&recovery_owner);
     let worker_owner = Arc::clone(&recovery_owner);

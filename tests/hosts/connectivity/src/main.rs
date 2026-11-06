@@ -40,6 +40,7 @@ use uc_engine::{
 use uc_engine::{EntryReceiveProgressInput, OutboundProgressInput, ReconcileOutboundProgressInput};
 
 use content::Clipboard;
+use uc_engine::StartupSignals;
 
 #[derive(Clone, Default)]
 struct SecureStorage(Arc<Mutex<HashMap<String, Vec<u8>>>>);
@@ -751,9 +752,9 @@ async fn main() -> Result<()> {
     #[cfg(feature = "startup-progress")]
     let (progress_input, progress) = uc_engine::StartupProgress::channel();
     #[cfg(feature = "startup-progress")]
-    let started = Engine::start_with_progress(config, host, progress_input).await;
+    let started = Engine::start(config, host, StartupSignals::with_progress(progress_input)).await;
     #[cfg(not(feature = "startup-progress"))]
-    let started = Engine::start(config, host).await;
+    let started = Engine::start(config, host, StartupSignals::unobserved()).await;
     #[cfg(feature = "startup-progress")]
     let startup = startup_summary(&progress)?;
     #[cfg(not(feature = "startup-progress"))]

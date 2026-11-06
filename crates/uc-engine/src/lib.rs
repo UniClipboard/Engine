@@ -21,6 +21,7 @@ pub use dev::*;
 pub use engine::probe_fail_next_orphan_retry_executor;
 #[cfg(feature = "test-binding-worker-panic")]
 pub use engine::StartupProbeOutcome;
+pub use engine::StartupSignals;
 #[cfg(feature = "test-binding-worker-panic")]
 #[doc(hidden)]
 pub use engine::{

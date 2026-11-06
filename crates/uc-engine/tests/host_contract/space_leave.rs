@@ -13,6 +13,7 @@ use uc_engine::{
 };
 
 use super::{startup::host, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 const PASSPHRASE: &str = "space-leave-test-passphrase";
 
@@ -76,6 +77,7 @@ async fn leaving_a_space_keeps_the_same_instance_usable() {
     let (engine, mut events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -130,6 +132,7 @@ async fn hosts_that_restart_after_leaving_keep_working() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -141,6 +144,7 @@ async fn hosts_that_restart_after_leaving_keep_working() {
     let (restarted, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -159,6 +163,7 @@ async fn a_failed_leave_keeps_its_progress_and_the_same_instance_can_finish_it()
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -197,6 +202,7 @@ async fn a_leave_whose_fresh_runtime_cannot_start_reports_restart_required() {
     let (engine, mut events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -249,6 +255,7 @@ async fn a_leave_whose_fresh_runtime_cannot_start_reports_restart_required() {
     let (restarted, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -267,6 +274,7 @@ async fn lifecycle_requests_after_leaving_reach_the_fresh_runtime() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -289,9 +297,13 @@ async fn repeated_leaves_do_not_accumulate_tasks_or_descriptors() {
     // 本地创建／离开的资源样本不包含公网中转的连接、退避与重试波动。
     #[cfg(feature = "dev-tools")]
     let config = config.with_test_relay_fallback(false);
-    let (engine, _events) = Engine::start(config, host(root.path(), Box::new(storage.clone())))
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        config,
+        host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
 
     let mut samples = Vec::new();
     for round in 0..LEAK_ROUNDS {

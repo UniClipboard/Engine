@@ -16,6 +16,7 @@ use uc_engine::{
 };
 
 use super::{host, EmptyClipboard, EmptyFiles, HeldSecureStorage, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 struct FailedCloser(File);
 
@@ -111,6 +112,7 @@ fn abandoned_startup_keeps_closer_when_executor_stops() {
         let (engine, _) = Engine::start(
             EngineConfig::new("2.0.0"),
             host(root.path(), Box::new(storage.clone())),
+            StartupSignals::unobserved(),
         )
         .await
         .unwrap();
@@ -151,11 +153,10 @@ fn abandoned_startup_keeps_closer_when_executor_stops() {
     );
     let (input, progress) = StartupProgress::channel();
     let (lifecycle_input, lifecycle) = StartupLifecycle::channel();
-    let caller = runtime.spawn(Engine::start_with_lifecycle(
+    let caller = runtime.spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         blocked_host,
-        input,
-        lifecycle_input,
+        StartupSignals::new(input, lifecycle_input),
     ));
     runtime.block_on(async {
         timeout(Duration::from_secs(15), entered.notified())
@@ -211,6 +212,7 @@ async fn abandoned_startup_retains_failed_closer() {
     let (engine, _) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -247,11 +249,10 @@ async fn abandoned_startup_retains_failed_closer() {
     );
     let (input, mut progress) = StartupProgress::channel();
     let (lifecycle_input, lifecycle) = StartupLifecycle::channel();
-    let caller = tokio::spawn(Engine::start_with_lifecycle(
+    let caller = tokio::spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         blocked_host,
-        input,
-        lifecycle_input,
+        StartupSignals::new(input, lifecycle_input),
     ));
     timeout(Duration::from_secs(15), entered.notified())
         .await

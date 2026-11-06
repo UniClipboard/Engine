@@ -17,6 +17,7 @@ use uc_engine::{
 use async_trait::async_trait;
 
 use super::{host, EmptyClipboard, EmptyFiles, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 #[cfg(feature = "test-binding-worker-panic")]
 struct RetryableProbeStream {
@@ -81,7 +82,7 @@ async fn engine_startup_retry_joins_the_same_host_close() {
             "../invalid.json",
             HostConfigurationFileReset::ByEngine,
         )]);
-    let primary = match Engine::start_with_lifecycle(config, host, progress, input).await {
+    let primary = match Engine::start(config, host, StartupSignals::new(progress, input)).await {
         Err(error) => error,
         Ok(_) => panic!("invalid host configuration accepted"),
     };
@@ -223,8 +224,12 @@ async fn profile_preparation_failure_runs_cleanup() {
         ))))),
         Box::new(EmptyFiles),
     );
-    let result =
-        Engine::start_with_lifecycle(EngineConfig::new("2.0.0"), host, input, lifecycle).await;
+    let result = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::new(input, lifecycle),
+    )
+    .await;
     let status = Command::new("python3")
         .args(["-c", "import fcntl,sys\nf=open(sys.argv[1], 'r+')\ntry:\n fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n sys.exit(1)"])
         .arg(&path)
@@ -341,6 +346,7 @@ fn failed_start_keeps_primary_error_when_executor_stops_during_host_close() {
                 &root.path().join("reference"),
                 Box::new(MemorySecureStorage::default()),
             ),
+            StartupSignals::unobserved(),
         ))
         .err()
         .expect("occupied port rejects startup");
@@ -367,11 +373,10 @@ fn failed_start_keeps_primary_error_when_executor_stops_during_host_close() {
     );
     let (progress_input, progress) = StartupProgress::channel();
     let (lifecycle_input, lifecycle) = StartupLifecycle::channel();
-    let _caller = runtime.spawn(Engine::start_with_lifecycle(
+    let _caller = runtime.spawn(Engine::start(
         EngineConfig::new("2.0.0").with_test_iroh_bind_port(port),
         host,
-        progress_input,
-        lifecycle_input,
+        StartupSignals::new(progress_input, lifecycle_input),
     ));
     waiting.recv_timeout(Duration::from_secs(20)).unwrap();
     drop(runtime);
@@ -455,11 +460,10 @@ async fn failed_service_start_retains_failed_host_closer() {
     );
     let (input, progress) = StartupProgress::channel();
     let (lifecycle, _control) = StartupLifecycle::channel();
-    let result = Engine::start_with_lifecycle(
+    let result = Engine::start(
         EngineConfig::new("2.0.0").with_test_iroh_bind_port(port),
         host,
-        input,
-        lifecycle,
+        StartupSignals::new(input, lifecycle),
     )
     .await;
     let observed = Command::new("python3")
@@ -535,7 +539,7 @@ async fn failed_service_start_releases_every_host_owner_before_release_receipt()
         Poll::Ready(())
     })
     .await;
-    let result = Engine::start_with_lifecycle(
+    let result = Engine::start(
         EngineConfig::new("2.0.0").with_test_iroh_bind_port(port),
         host(
             root.path(),
@@ -544,8 +548,7 @@ async fn failed_service_start_releases_every_host_owner_before_release_receipt()
                 dropped: Arc::clone(&dropped),
             }),
         ),
-        progress,
-        lifecycle,
+        StartupSignals::new(progress, lifecycle),
     )
     .await;
     assert!(result.is_err(), "occupied network port must reject startup");
@@ -567,6 +570,7 @@ async fn failed_service_start_releases_every_host_owner_before_release_receipt()
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0").with_test_iroh_bind_port(port),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -613,7 +617,11 @@ async fn unpolled_startup_retains_host_closer() {
         ))))),
         Box::new(EmptyFiles),
     );
-    let future = Engine::start_with_lifecycle(EngineConfig::new("2.0.0"), host, input, lifecycle);
+    let future = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::new(input, lifecycle),
+    );
     drop(future);
     let started = std::time::Instant::now();
     while calls.load(Ordering::SeqCst) == 0 && started.elapsed() < Duration::from_secs(2) {
@@ -704,11 +712,10 @@ fn startup_future_dropped_before_first_poll_runs_owned_cleanup() {
         ))))),
         Box::new(EmptyFiles),
     );
-    drop(Engine::start_with_lifecycle(
+    drop(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        input,
-        lifecycle,
+        StartupSignals::new(input, lifecycle),
     ));
     let started = waiting.recv_timeout(OWNED_CLEANUP_WAIT).is_ok();
     let probe = || {
@@ -789,11 +796,10 @@ fn startup_without_executor_returns_error_and_runs_cleanup() {
         ))))),
         Box::new(EmptyFiles),
     );
-    let mut future = Box::pin(Engine::start_with_lifecycle(
+    let mut future = Box::pin(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        input,
-        lifecycle,
+        StartupSignals::new(input, lifecycle),
     ));
     let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -869,11 +875,10 @@ fn startup_cleanup_completes_after_caller_runtime_stops() {
         .enable_all()
         .build()
         .unwrap();
-    let mut future = Box::pin(Engine::start_with_lifecycle(
+    let mut future = Box::pin(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        input,
-        lifecycle,
+        StartupSignals::new(input, lifecycle),
     ));
     let accepted = {
         let _entered = runtime.enter();
@@ -972,11 +977,10 @@ fn unpolled_cleanup_panic_retains_host_closer() {
         ))))),
         Box::new(EmptyFiles),
     );
-    drop(Engine::start_with_lifecycle(
+    drop(Engine::start(
         EngineConfig::new("2.0.0"),
         host,
-        input,
-        lifecycle,
+        StartupSignals::new(input, lifecycle),
     ));
     let called = waiting.recv_timeout(Duration::from_secs(5)).is_ok();
     drop(control);

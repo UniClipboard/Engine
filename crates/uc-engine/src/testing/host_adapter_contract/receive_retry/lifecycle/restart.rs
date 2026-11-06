@@ -5,6 +5,7 @@ use super::super::{
     Operation, OperationResult, ReceiveRetryUnavailableReason, ReleaseOnDrop, SecretString,
     ENGINE_TEST_LOCK,
 };
+use crate::StartupSignals;
 use crate::{RecoverSessionInput, UnlockSpaceInput};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -29,6 +30,7 @@ async fn real_engine_restart_refuses_retry_without_original_material_and_preserv
     let (receiver, events) = Engine::start(
         config,
         persistent_engine_host(case.receiver_root.path(), case.receiver_storage.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

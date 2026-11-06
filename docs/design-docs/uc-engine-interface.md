@@ -22,19 +22,20 @@ crate 根只保留稳定名称的统一导出，内部按职责分为七层：
 
 ## 启动与事件
 
-宿主调用 `Engine::start(config, host)`，成功后同时得到核心实例和一条持续有效的事件流。启动会在当前资料
-空间存在时打开其加密存储、恢复同一设备身份、启动完整 P2P 节点并启动核心后台任务；Fresh profile 不会
-为了满足接口而伪造一个活动 Space。
+宿主调用 `Engine::start(config, host, startup)`，成功后同时得到核心实例和一条持续有效的事件流。`startup` 是本次启动
+一次性交入的能力：不需要观察者时用 `StartupSignals::unobserved()`，需要启动进度或启动期暂停/恢复时用
+`StartupSignals::channel()`。启动会在当前资料空间存在时打开其加密存储、恢复同一设备身份、启动完整 P2P 节点并启动核心
+后台任务；Fresh profile 不会为了满足接口而伪造一个活动 Space。
 
-需要在启动完成前展示资料升级时，使用兼容的 `Engine::start_with_progress` 入口，先创建只读进度通道。
+需要在启动完成前展示资料升级时，使用同一入口并保留 `StartupSignals::channel()` 返回的只读进度观察者。
 快照、失败后的最终结果、计数单位及宿主责任见[启动资料升级进度](startup-upgrade-progress.md)。该能力独立于下文正常运行事件流。
 
-需要在启动期间接受退后台通知时，先调用 `StartupLifecycle::channel()`，将不可克隆的输入与进度输入交给
-`Engine::start_with_lifecycle(config, host, progress, lifecycle)`。可克隆的控制句柄只提供完整 `suspend()`、
+需要在启动期间接受退后台通知时，先调用 `StartupSignals::channel()`，把返回的信号、进度观察者与可克隆的控制句柄
+分别交给 `Engine::start` 和窗口。可克隆的控制句柄只提供完整 `suspend()`、
 `suspend_with_deadline(deadline)` 和 `resume()`，启动前后复用同一宿主通知队列；只读进度不接收命令。
 构造完成后先处理已接收通知再交出实例，因此实例可能以 Suspended 或 Quiesced 状态交出，Ready 不代表正在运行。
 期限包括启动等待；超时不撤销通知，也不代表资源已安全释放。启动耗尽原期限后可能仍处于 Quiesced，宿主必须继续
-请求完整暂停并确认成功。启动失败或未使用输入被丢弃会结束等待，重试创建新输入；最终关闭后旧控制句柄拒绝恢复。
+请求完整暂停并确认成功。启动失败或未使用输入被丢弃会结束等待，重试创建新的信号；最终关闭后旧控制句柄拒绝恢复。
 移动宿主使用 `MobileStartupLifecycle` 的方式相同：先创建一次性对象，再交给带 lifecycle 的构造入口；如果同时启用
 产品分析，使用带 analytics 和 lifecycle 的组合入口。系统回调可以在构造调用尚未返回时从其他线程通知，构造返回后
 同一对象仍可继续使用。每次重试必须创建新对象，不能把一次启动的控制对象交给第二次启动。

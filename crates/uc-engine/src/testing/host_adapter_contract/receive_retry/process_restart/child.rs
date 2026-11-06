@@ -2,6 +2,7 @@
 use super::super::super::MemoryHostSecureStorage;
 use super::{persistent_engine_host, saved_files};
 use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
+use crate::StartupSignals;
 use crate::{
     Engine, EngineConfig, EngineEvent, Operation, OperationResult, OutboundProgressBatchState,
     OutboundProgressFreshness, OutboundProgressInput, RecoverSessionInput,
@@ -118,6 +119,7 @@ async fn progress_restart_child() {
             .with_test_relay_fallback(false)
             .with_test_iroh_bind_port(input.bind_port),
         persistent_engine_host(&input.root, storage),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

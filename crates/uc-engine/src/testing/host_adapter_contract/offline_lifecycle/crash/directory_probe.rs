@@ -7,6 +7,7 @@ use super::super::super::{
 };
 use super::OwnedChild;
 use crate::testing::directory_probe::DirectoryProbe;
+use crate::StartupSignals;
 use crate::{
     CreateSpaceInput, DeviceMembershipSummary, Engine, EngineConfig, EngineEvent,
     EntryReceiveProgressInput, FileSyncSettingsPatch, HostCapabilities, HostCapabilityError,
@@ -129,6 +130,7 @@ async fn receiver_child_process() {
             .with_test_relay_fallback(false)
             .with_test_iroh_bind_port(input.bind_port),
         persistent_engine_host(&input.root, storage),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -213,6 +215,7 @@ async fn assert_directory_crash(publication_failure: bool) {
     let (receiver, _events) = Engine::start(
         receiver_config.clone(),
         persistent_engine_host(receiver_root.path(), storage.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -236,6 +239,7 @@ async fn assert_directory_crash(publication_failure: bool) {
             .with_rendezvous_base_url(server.uri())
             .with_test_relay_fallback(false),
         source_host,
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -373,6 +377,7 @@ async fn assert_directory_crash(publication_failure: bool) {
     let (restarted, _events) = Engine::start(
         receiver_config,
         persistent_engine_host(receiver_root.path(), storage),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

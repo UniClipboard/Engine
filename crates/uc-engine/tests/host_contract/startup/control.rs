@@ -5,8 +5,8 @@ use tokio::sync::Notify;
 use tokio::time::timeout;
 use uc_engine::{
     CreateSpaceInput, Engine, EngineConfig, EngineErrorCategory, EngineEvent, EngineState,
-    HistoryEntryInput, Operation, OperationResult, SecretString, SendTextInput, StartupLifecycle,
-    StartupProgress, StartupState,
+    HistoryEntryInput, Operation, OperationResult, SecretString, SendTextInput, StartupSignals,
+    StartupState,
 };
 
 use super::super::lease::{find_lease, open_lease};
@@ -28,6 +28,7 @@ async fn pause_during_startup(expired: bool) {
     let (engine, events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -64,13 +65,11 @@ async fn pause_during_startup(expired: bool) {
             release: Arc::new(Mutex::new(Some(blocked))),
         }),
     );
-    let (progress_input, progress) = StartupProgress::channel();
-    let (lifecycle_input, control) = StartupLifecycle::channel();
-    let starting = tokio::spawn(Engine::start_with_lifecycle(
+    let (signals, progress, control) = StartupSignals::channel();
+    let starting = tokio::spawn(Engine::start(
         EngineConfig::new("2.0.0"),
         blocked_host,
-        progress_input,
-        lifecycle_input,
+        signals,
     ));
     timeout(Duration::from_secs(15), entered.notified())
         .await

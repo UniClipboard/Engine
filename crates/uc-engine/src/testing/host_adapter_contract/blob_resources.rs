@@ -10,6 +10,7 @@ use super::{
 };
 use crate::testing::receive_completion::{ReceiveCompletion, ReleaseCompletionOnDrop};
 use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
+use crate::StartupSignals;
 use crate::{
     BlobResourceInput, CreateSpaceInput, Engine, EngineConfig, EngineEvent,
     EntryDeliveryStatusSummary, EntryReceiveProgressInput, HistoryEntryInput, HostCapabilities,
@@ -319,9 +320,14 @@ async fn run_managed_resources(
     let config = EngineConfig::new("1.2.3")
         .with_rendezvous_base_url(server.uri())
         .with_test_relay_fallback(false);
-    let (source, _source_events) = Engine::start(config.clone(), host).await?;
-    let (receiver, mut events) =
-        Engine::start(config, empty_engine_host(receiver_root.path())).await?;
+    let (source, _source_events) =
+        Engine::start(config.clone(), host, StartupSignals::unobserved()).await?;
+    let (receiver, mut events) = Engine::start(
+        config,
+        empty_engine_host(receiver_root.path()),
+        StartupSignals::unobserved(),
+    )
+    .await?;
     source
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("Source".into()),

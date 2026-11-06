@@ -1,6 +1,7 @@
 //! 真实 SQLite、加密历史、Iroh 文件导入与完整准备负责人共同验证取消边界。
 use super::*;
 use crate::testing::active_pull_publication::{PublicationFixture, ReleaseOnDrop};
+use crate::StartupSignals;
 use crate::{
     ClipboardRestoreMode, CreateSpaceInput, JoinSpaceInput, Operation, OperationResult,
     RestoreClipboardInput, SecretString, SettingsPatch, SyncSettingsPatch,
@@ -48,11 +49,17 @@ async fn active_pull_cancel_settles_real_file_a_without_starting_file_b() {
     let config = EngineConfig::new("1.2.3")
         .with_rendezvous_base_url(server.uri())
         .with_test_relay_fallback(false);
-    let (holder, _holder_events) = Engine::start(config.clone(), holder_host).await.unwrap();
-    let (requester, _requester_events) =
-        Engine::start(config, empty_engine_host(requester_root.path()))
+    let (holder, _holder_events) =
+        Engine::start(config.clone(), holder_host, StartupSignals::unobserved())
             .await
             .unwrap();
+    let (requester, _requester_events) = Engine::start(
+        config,
+        empty_engine_host(requester_root.path()),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     holder
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("Holder".into()),

@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "dev-tools")]
 use std::sync::atomic::Ordering;
@@ -29,8 +29,9 @@ pub(crate) mod startup;
 mod startup_control;
 mod startup_outcome;
 pub(crate) mod startup_owner;
+mod startup_signals;
 
-use crate::runtime::{RecoverableRuntime, ReusableHost};
+use crate::runtime::ReusableHost;
 #[cfg(test)]
 use crate::EngineEvent;
 #[cfg(feature = "dev-tools")]
@@ -39,8 +40,8 @@ use crate::{
     EngineConfig, EngineError, EngineErrorCategory, EngineState, HostCapabilities, Operation,
     OperationResult, OperationTerminal,
 };
+use event_stream::EventSender;
 pub use event_stream::EventStream;
-use event_stream::{event_channel, EventSender};
 use in_flight::InFlightOperations;
 use lifecycle::TransitionQueue;
 use log_activity::LogActivity;
@@ -70,6 +71,7 @@ pub use startup_control::StartupReleaseOutcome;
 pub use startup_control::{StartupLifecycle, StartupLifecycleInput};
 pub(crate) use startup_outcome::StartupOutcomeSnapshot;
 use startup_owner::UnpolledStartupCleanup;
+pub use startup_signals::StartupSignals;
 
 const INVALID_STATE_CODE: u32 = 1001;
 const OPERATION_CANCELLED_CODE: u32 = 1002;
@@ -151,31 +153,19 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// 唯一的启动入口。
+    ///
+    /// 创建 future 时同步接管宿主能力与清理责任，因此即使调用方从未 poll 该 future，
+    /// 宿主资源也会被关闭。构造完成后先处理已接收的通知再交出实例。
     pub fn start(
         config: EngineConfig,
         host: HostCapabilities,
+        startup: StartupSignals,
     ) -> impl Future<Output = Result<(Self, EventStream), EngineError>> + Send {
-        let (input, _) = StartupProgress::channel();
-        Self::start_with_progress(config, host, input)
-    }
-
-    /// 启动前交入只读进度通道；关闭观察者不影响本次启动。
-    pub fn start_with_progress(
-        config: EngineConfig,
-        host: HostCapabilities,
-        progress: StartupProgressInput,
-    ) -> impl Future<Output = Result<(Self, EventStream), EngineError>> + Send {
-        let (lifecycle, _) = StartupLifecycle::channel();
-        Self::start_with_lifecycle(config, host, progress, lifecycle)
-    }
-
-    /// 创建 future 时接管宿主能力；构造完成后先处理已接收的通知再交出实例。
-    pub fn start_with_lifecycle(
-        config: EngineConfig,
-        host: HostCapabilities,
-        mut progress: StartupProgressInput,
-        lifecycle: StartupLifecycleInput,
-    ) -> impl Future<Output = Result<(Self, EventStream), EngineError>> + Send {
+        let StartupSignals {
+            mut progress,
+            lifecycle,
+        } = startup;
         let host = Arc::new(ReusableHost::new(host));
         lifecycle.cleanup.accept_host(Arc::clone(&host));
         lifecycle
@@ -188,111 +178,6 @@ impl Engine {
         let unpolled =
             UnpolledStartupCleanup::new(Arc::clone(&lifecycle.cleanup), Arc::clone(&host));
         Self::start_owned(config, host, progress, lifecycle, unpolled)
-    }
-
-    async fn start_runtime(
-        config: EngineConfig,
-        host: Arc<ReusableHost>,
-        progress: &StartupProgressInput,
-        requests: Arc<TransitionQueue>,
-        cleanup: Arc<startup_owner::StartupCleanupOwner>,
-        owned_executor: Arc<OwnedExecutor>,
-    ) -> Result<(Self, EventStream), EngineError> {
-        const EVENT_CAPACITY: usize = 256;
-
-        let (events, stream) = event_channel(EVENT_CAPACITY);
-        let directories = host.directories();
-        let file_roots: Arc<[PathBuf]> = [
-            directories.private_data(),
-            directories.cache(),
-            directories.temporary(),
-            directories.logs(),
-        ]
-        .into_iter()
-        .map(Path::to_path_buf)
-        .collect();
-        let runtime = Arc::new(
-            RecoverableRuntime::start(
-                config,
-                host,
-                events.clone(),
-                Arc::clone(&progress.store),
-                Arc::clone(&cleanup),
-            )
-            .await?,
-        );
-        let log_activity = LogActivity::default();
-        cleanup.accept_runtime(Arc::clone(&runtime), log_activity.clone());
-        if let Err(error) = log_activity.begin().await {
-            cleanup.record_primary(error.clone());
-            cleanup.start_runtime_cleanup(Arc::clone(&runtime), log_activity);
-            return Err(error);
-        }
-        cleanup.finish_runtime_construction();
-        let engine = Self {
-            state: Arc::new(Mutex::new(EngineState::Running)),
-            lifecycle_gate: Arc::new(Mutex::new(())),
-            lifecycle_requests: requests,
-            shutdown_gate: Arc::new(Mutex::new(())),
-            shutdown_progress: Arc::new(Mutex::new(ShutdownProgress::default())),
-            orphan_retention: Arc::new(OrphanRetention::default()),
-            retain_on_drop: true,
-            stop_requested: Arc::new(AtomicBool::new(false)),
-            runtime,
-            owned_executor: Some(owned_executor),
-            events,
-            operations: Arc::new(InFlightOperations::new()),
-            log_activity,
-            file_roots,
-        };
-        let startup_handoff = engine.bind_lifecycle(true);
-        startup_handoff
-            .await
-            // discarded-source[channel]: `tokio::sync::oneshot::error::RecvError`: the error only means the peer is gone or carries the unsent payload, which must not outlive it
-            .map_err(|_| EngineError::new(1108, EngineErrorCategory::Internal, true))?;
-        Ok((engine, stream))
-    }
-
-    #[cfg(test)]
-    fn from_runtime<R>(runtime: Arc<R>, event_capacity: usize) -> (Self, EventStream)
-    where
-        R: EngineRuntime + 'static,
-    {
-        Self::from_runtime_with_queue(
-            runtime,
-            event_capacity,
-            Arc::new(TransitionQueue::default()),
-        )
-    }
-
-    #[cfg(test)]
-    fn from_runtime_with_queue<R>(
-        runtime: Arc<R>,
-        event_capacity: usize,
-        requests: Arc<TransitionQueue>,
-    ) -> (Self, EventStream)
-    where
-        R: EngineRuntime + 'static,
-    {
-        let (events, stream) = event_channel(event_capacity);
-        let engine = Self {
-            state: Arc::new(Mutex::new(EngineState::Running)),
-            lifecycle_gate: Arc::new(Mutex::new(())),
-            lifecycle_requests: requests,
-            shutdown_gate: Arc::new(Mutex::new(())),
-            shutdown_progress: Arc::new(Mutex::new(ShutdownProgress::default())),
-            orphan_retention: Arc::new(OrphanRetention::default()),
-            retain_on_drop: false,
-            stop_requested: Arc::new(AtomicBool::new(false)),
-            runtime,
-            owned_executor: None,
-            events,
-            operations: Arc::new(InFlightOperations::new()),
-            log_activity: LogActivity::default(),
-            file_roots: Arc::from([]),
-        };
-        let _ = engine.bind_lifecycle(false);
-        (engine, stream)
     }
 
     #[cfg(test)]

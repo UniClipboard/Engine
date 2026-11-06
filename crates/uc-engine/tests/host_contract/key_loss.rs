@@ -18,6 +18,7 @@ use super::{
     startup::{assert_profile_recovery_required, host, runtime_database},
     MemorySecureStorage,
 };
+use uc_engine::StartupSignals;
 
 const PASSPHRASE: &str = "key-recovery-test-passphrase";
 
@@ -25,6 +26,7 @@ async fn create_profile(root: &std::path::Path, storage: &MemorySecureStorage) -
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root, Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -87,6 +89,7 @@ async fn startup_reads_kek_once_and_resume_rechecks_secure_storage() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -112,6 +115,7 @@ async fn restart_after_loss(all: bool) {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .expect("intact control restart");
@@ -122,10 +126,10 @@ async fn restart_after_loss(all: bool) {
     storage.values().retain(|key, _| !all && key != &kek_name);
     let before_wrong = storage.values().clone();
     let (progress_input, progress) = StartupProgress::channel();
-    let (engine, _events) = Engine::start_with_progress(
+    let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
-        progress_input,
+        StartupSignals::with_progress(progress_input),
     )
     .await
     .expect("key loss must leave passphrase recovery accessible");
@@ -175,6 +179,7 @@ async fn restart_after_loss(all: bool) {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .expect("recovered key material must survive restart");
@@ -203,6 +208,7 @@ async fn wrong_unlock_key_recovers_with_original_passphrase() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .expect("wrong automatic unlock material must leave recovery accessible");
@@ -238,10 +244,10 @@ async fn recovered_credentials_enter_admission_recovery_when_repository_is_unrea
     storage.values().remove(&kek_name);
 
     let (input, progress) = StartupProgress::channel();
-    let (engine, _events) = Engine::start_with_progress(
+    let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
-        input,
+        StartupSignals::with_progress(input),
     )
     .await
     .expect("missing automatic credential must expose passphrase recovery");
@@ -292,6 +298,7 @@ async fn committed_space_creation_is_not_reported_as_failed_when_recovery_refres
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -333,6 +340,7 @@ async fn recovered_event_is_not_published_after_the_committed_unlock_refresh_fai
     let (engine, mut events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -383,6 +391,7 @@ async fn automatic_unlock_write_failure_leaves_recovery_retryable() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -420,6 +429,7 @@ async fn runtime_key_removal_is_repaired_before_restart() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -436,6 +446,7 @@ async fn runtime_key_removal_is_repaired_before_restart() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -451,6 +462,7 @@ async fn repeated_recovery_requests_are_serialized() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -493,6 +505,7 @@ async fn corrupt_recovery_file_is_not_reported_as_missing_key() {
     let result = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await;
     assert!(
@@ -509,6 +522,7 @@ async fn passphrase_change_rewraps_recovery_without_replacing_history() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -528,6 +542,7 @@ async fn passphrase_change_rewraps_recovery_without_replacing_history() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -558,6 +573,7 @@ async fn legacy_keyring_loss_without_userdata_copy_reports_partial_recovery() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -597,6 +613,7 @@ async fn legacy_keyring_loss_without_userdata_copy_reports_partial_recovery() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -621,6 +638,7 @@ async fn legacy_material_lost_while_waiting_for_passphrase_ends_in_partial_recov
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -682,6 +700,7 @@ async fn missing_legacy_device_identity_reports_only_identity_loss() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -718,10 +737,10 @@ async fn lost_network_identity_of_a_space_member_is_reported_instead_of_replaced
     std::fs::remove_dir_all(paths.iroh_identity_dir()).unwrap();
 
     let (progress_input, progress) = StartupProgress::channel();
-    let (engine, _events) = Engine::start_with_progress(
+    let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
-        progress_input,
+        StartupSignals::with_progress(progress_input),
     )
     .await
     .expect("identity loss must leave recovery accessible");
@@ -760,6 +779,7 @@ async fn lost_network_identity_of_a_space_member_is_reported_instead_of_replaced
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .expect("a reset profile must start as a fresh installation");
@@ -792,10 +812,13 @@ async fn failed_background_start_requires_restart_and_never_returns_to_recoverin
     let port = ipv6.local_addr().unwrap().port();
     let ipv4 = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).ok();
     let config = EngineConfig::new("2.0.0").with_test_iroh_bind_port(port);
-    let (engine, _events) =
-        Engine::start(config.clone(), host(root.path(), Box::new(storage.clone())))
-            .await
-            .expect("key loss must leave recovery accessible before background startup");
+    let (engine, _events) = Engine::start(
+        config.clone(),
+        host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .expect("key loss must leave recovery accessible before background startup");
 
     let failure = engine
         .execute(Operation::UnlockSpace(UnlockSpaceInput {
@@ -843,9 +866,13 @@ async fn failed_background_start_requires_restart_and_never_returns_to_recoverin
 
     drop(ipv4);
     drop(ipv6);
-    let (engine, _events) = Engine::start(config, host(root.path(), Box::new(storage)))
-        .await
-        .expect("restart must continue after the dependency becomes available");
+    let (engine, _events) = Engine::start(
+        config,
+        host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .expect("restart must continue after the dependency becomes available");
     engine.shutdown(Duration::from_secs(15)).await.unwrap();
 }
 
@@ -939,9 +966,13 @@ async fn recovered_unlock_failure_retains_unconfirmed_runtime() {
         }),
         Box::new(super::EmptyFiles),
     );
-    let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), capabilities)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        capabilities,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     let unlock = engine
         .execute(Operation::UnlockSpace(UnlockSpaceInput {
             passphrase: SecretString::new(PASSPHRASE),
@@ -1014,9 +1045,13 @@ async fn recovered_unlock_failure_releases_after_successful_cleanup() {
         }),
         Box::new(super::EmptyFiles),
     );
-    let (engine, _) = Engine::start(EngineConfig::new("2.0.0"), capabilities)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        capabilities,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     let unlock = engine
         .execute(Operation::UnlockSpace(UnlockSpaceInput {
             passphrase: SecretString::new(PASSPHRASE),
@@ -1152,7 +1187,11 @@ fn recovery_executor_loss_keeps_accepted_unlock_and_runtime() {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let engine = Arc::new(engine);
     let waiting = Arc::clone(&engine);
@@ -1329,7 +1368,11 @@ fn process_release_after_abandoned_recovery() {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let engine = Arc::new(engine);
     let log_lease = process
@@ -1349,6 +1392,7 @@ fn process_release_after_abandoned_recovery() {
                 &root.path().join("survivor"),
                 Box::new(MemorySecureStorage::default()),
             ),
+            StartupSignals::unobserved(),
         ))
         .unwrap();
     let waiting = Arc::clone(&engine);
@@ -1534,7 +1578,11 @@ fn recovery_construction_shutdown_race(stop_executor: bool) {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let engine = Arc::new(engine);
     let operation_engine = Arc::clone(&engine);
@@ -1844,7 +1892,11 @@ fn recovery_shutdown_during_backup(
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let engine = Arc::new(engine);
     let operation_engine = Arc::clone(&engine);
@@ -2041,7 +2093,11 @@ fn process_waits_for_recovery_backup(factory_reset: bool) {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let engine = Arc::new(engine);
     let operation_engine = Arc::clone(&engine);
@@ -2172,7 +2228,11 @@ fn successful_recovery_handoff_joins_shutdown() {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     let engine = Arc::new(engine);
     let operation_engine = Arc::clone(&engine);
@@ -2368,7 +2428,11 @@ fn ready_reset_reconstruction_loss(process_observer: bool) {
         .build()
         .unwrap();
     let (engine, _) = executor
-        .block_on(Engine::start(EngineConfig::new("2.0.0"), host))
+        .block_on(Engine::start(
+            EngineConfig::new("2.0.0"),
+            host,
+            StartupSignals::unobserved(),
+        ))
         .unwrap();
     executor
         .block_on(engine.execute(Operation::CreateSpace(CreateSpaceInput {

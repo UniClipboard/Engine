@@ -12,6 +12,7 @@ use uc_engine::{
 
 use super::super::lease::{find_lease, open_lease};
 use super::{host, HeldSecureStorage, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pause_during_real_resume_releases_the_profile_without_publishing_stale_running() {
@@ -28,6 +29,7 @@ async fn pause_during_real_resume_releases_the_profile_without_publishing_stale_
                 release: release_slot.clone(),
             }),
         ),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

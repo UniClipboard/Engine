@@ -3,9 +3,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use uc_engine::{
-    ClipboardRestoreMode, ExportEntryInput, HostCapabilities, Operation, OperationResult,
-    QueryHistoryInput, RestoreClipboardInput, SendFilesInput, SendTextInput, StartupLifecycle,
-    StartupProgress,
+    ClipboardRestoreMode, Engine, ExportEntryInput, HostCapabilities, Operation, OperationResult,
+    QueryHistoryInput, RestoreClipboardInput, SendFilesInput, SendTextInput, StartupSignals,
 };
 
 use super::secure_storage::ControlledSecureStorage;
@@ -419,14 +418,8 @@ pub(super) async fn suspend_during_startup(
         Box::new(state.clipboard.clone()),
         Box::new(state.files.clone()),
     );
-    let (progress_input, _) = StartupProgress::channel();
-    let (lifecycle_input, lifecycle) = StartupLifecycle::channel();
-    let startup = tokio::spawn(uc_engine::Engine::start_with_lifecycle(
-        start_config.engine,
-        host,
-        progress_input,
-        lifecycle_input,
-    ));
+    let (signals, _, lifecycle) = StartupSignals::channel();
+    let startup = tokio::spawn(Engine::start(start_config.engine, host, signals));
     if tokio::time::timeout(Duration::from_secs(5), storage.wait_until_get_starts())
         .await
         .is_err()

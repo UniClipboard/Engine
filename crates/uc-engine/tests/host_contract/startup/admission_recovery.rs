@@ -12,6 +12,7 @@ use uc_engine::{
 };
 
 use super::{host, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 /// 受限恢复必须以固定错误码拒绝，且不能让宿主按可重试错误反复重建会话。
 pub(crate) fn assert_profile_recovery_required(result: Result<OperationResult, EngineError>) {
@@ -78,6 +79,7 @@ async fn healthy_legacy_v3_without_later_tables_starts_normally_and_preserves_st
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -107,10 +109,10 @@ async fn healthy_legacy_v3_without_later_tables_starts_normally_and_preserves_st
 
     for restart in 0..2 {
         let (input, progress) = StartupProgress::channel();
-        let (engine, _events) = Engine::start_with_progress(
+        let (engine, _events) = Engine::start(
             EngineConfig::new("2.0.0"),
             host(root.path(), Box::new(storage.clone())),
-            input,
+            StartupSignals::with_progress(input),
         )
         .await
         .expect("healthy legacy profile must start normally");
@@ -157,6 +159,7 @@ async fn legacy_table_compatibility_does_not_bypass_unreadable_admission_metadat
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -189,10 +192,10 @@ async fn legacy_table_compatibility_does_not_bypass_unreadable_admission_metadat
     }
     for _ in 0..3 {
         let (input, progress) = StartupProgress::channel();
-        let (engine, _events) = Engine::start_with_progress(
+        let (engine, _events) = Engine::start(
             EngineConfig::new("2.0.0"),
             host(root.path(), Box::new(storage.clone())),
-            input,
+            StartupSignals::with_progress(input),
         )
         .await
         .expect("unverifiable admission must leave a restricted recovery session");
@@ -258,6 +261,7 @@ async fn admission_failure_found_on_resume_enters_restricted_recovery() {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

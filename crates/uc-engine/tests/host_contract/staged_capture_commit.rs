@@ -10,6 +10,7 @@ use uc_engine::{
 };
 
 use super::{startup::host, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn staged_mobile_image_materializes_after_its_atomic_capture_commit() {
@@ -22,6 +23,7 @@ async fn staged_mobile_image_materializes_after_its_atomic_capture_commit() {
     let (engine, _) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(MemorySecureStorage::default())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

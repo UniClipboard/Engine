@@ -6,6 +6,7 @@ use uc_engine::{
 };
 
 use super::{startup::host, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 const PASSPHRASE: &str = "search-compound-words-test-passphrase";
 
@@ -13,6 +14,7 @@ async fn start_engine(root: &std::path::Path) -> Engine {
     let (engine, _events) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root, Box::new(MemorySecureStorage::default())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
+use crate::StartupSignals;
 use crate::{
     Engine, EngineConfig, EngineEvent, EngineState, HostCapabilities, HostCapabilityError,
     HostClipboard, HostClipboardChange, HostClipboardChangeStream, HostClipboardRepresentation,
@@ -87,6 +88,7 @@ async fn invitation_from_isolated_profile_copy() {
         let (engine, _events) = Engine::start(
             EngineConfig::new("1.2.3"),
             persistent_engine_host(temp.path(), storage.clone()),
+            StartupSignals::unobserved(),
         )
         .await
         .unwrap();
@@ -151,10 +153,10 @@ async fn unreadable_admission_from_isolated_profile_copy_is_stable() {
     let (temp, storage) = isolated_profile_copy("UC_ADMISSION_RECOVERY_FIXTURE_DATA");
     for _ in 0..3 {
         let (input, progress) = crate::StartupProgress::channel();
-        let (engine, _events) = Engine::start_with_progress(
+        let (engine, _events) = Engine::start(
             EngineConfig::new("1.2.3"),
             persistent_engine_host(temp.path(), storage.clone()),
-            input,
+            StartupSignals::with_progress(input),
         )
         .await
         .unwrap();
@@ -495,7 +497,10 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
             state: sponsor_file_state,
         }),
     );
-    let (sponsor, mut sponsor_events) = Engine::start(config.clone(), sponsor_host).await.unwrap();
+    let (sponsor, mut sponsor_events) =
+        Engine::start(config.clone(), sponsor_host, StartupSignals::unobserved())
+            .await
+            .unwrap();
     let clipboard = AttributedInboundClipboard::default();
     let joiner_host = HostCapabilities::new(
         HostDirectories::new(
@@ -508,7 +513,10 @@ async fn engine_clipboard_inbound_preserves_success_duplicate_and_shutdown_behav
         Box::new(clipboard.clone()),
         Box::new(EmptyHostFiles),
     );
-    let (joiner, mut joiner_events) = Engine::start(config, joiner_host).await.unwrap();
+    let (joiner, mut joiner_events) =
+        Engine::start(config, joiner_host, StartupSignals::unobserved())
+            .await
+            .unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     sponsor
@@ -1115,9 +1123,13 @@ async fn relay_settings_and_credential_save_through_one_engine_operation() {
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     let relay_url = "https://relay.example.com/";
     let token = "relay-token";
 
@@ -1225,9 +1237,13 @@ async fn membership_convergence_is_queryable_through_the_public_engine() {
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Convergence Device".into()),
@@ -1276,6 +1292,7 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
     let (engine, _events) = Engine::start(
         config.clone(),
         persistent_engine_host(temp.path(), secure_storage.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -1353,6 +1370,7 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
     let (engine, _events) = Engine::start(
         config.clone(),
         persistent_engine_host(temp.path(), secure_storage.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -1493,10 +1511,13 @@ async fn reset_space_rebuilds_device_management_state_and_preserves_local_histor
         .await
         .unwrap();
 
-    let (restarted, _events) =
-        Engine::start(config, persistent_engine_host(temp.path(), secure_storage))
-            .await
-            .unwrap();
+    let (restarted, _events) = Engine::start(
+        config,
+        persistent_engine_host(temp.path(), secure_storage),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     restarted
         .execute(crate::Operation::RecoverSession(
             crate::RecoverSessionInput {
@@ -1866,9 +1887,13 @@ async fn engine_shutdown_removes_host_clipboard_imports() {
             state: Arc::new(RecordingHostFilesState::default()),
         }),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Clipboard Device".into()),
@@ -1927,9 +1952,13 @@ async fn host_clipboard_change_is_processed_by_the_engine_and_stops_on_shutdown(
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, mut events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, mut events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Clipboard Device".into()),
@@ -2028,9 +2057,13 @@ async fn host_clipboard_change_while_the_space_is_locked_is_recorded_and_not_cap
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Locked Clipboard Device".into()),
@@ -2107,9 +2140,13 @@ async fn suspend_waits_for_a_started_host_clipboard_change_to_finish() {
         Box::new(Arc::clone(&clipboard)),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Clipboard Device".into()),
@@ -2448,9 +2485,13 @@ async fn mobile_activity_public_requests_survive_restart() {
             authorization: crate::SecretString::new("Basic dGVzdF9waG9uZTp0ZXN0LXBhc3N3b3Jk"),
         })
     };
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host())
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(Operation::UpdateMobileSyncSettings(Box::new(
             crate::MobileSyncSettingsPatch {
@@ -2525,9 +2566,13 @@ async fn mobile_activity_public_requests_survive_restart() {
         .unwrap();
     drop(engine);
 
-    let (restarted, _events) = Engine::start(EngineConfig::new("1.2.3"), host())
-        .await
-        .unwrap();
+    let (restarted, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     assert_eq!(activity(&restarted).await, Some(latest));
     restarted
         .execute(Operation::UpdateMobileDevice(
@@ -2596,9 +2641,13 @@ async fn engine_start_builds_a_resumable_real_session() {
         )
     };
 
-    let (engine, mut events) = Engine::start(EngineConfig::new("1.2.3"), host())
-        .await
-        .unwrap();
+    let (engine, mut events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
 
     assert!(private.join("uniclipboard.db").is_file());
     assert_eq!(
@@ -3620,9 +3669,13 @@ async fn engine_start_builds_a_resumable_real_session() {
     }
     assert_eq!(retired_states.last(), Some(&EngineState::Stopped));
 
-    let (fresh, mut fresh_events) = Engine::start(EngineConfig::new("1.2.3"), host())
-        .await
-        .unwrap();
+    let (fresh, mut fresh_events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         fresh_events.next().await,
         Some(EngineEvent::StateChanged {
@@ -3716,9 +3769,13 @@ async fn startup_progress_is_available_before_real_start_and_survives_failure() 
     };
     let (input, mut progress) = crate::StartupProgress::channel();
     assert_eq!(progress.snapshot().state, crate::StartupState::Preparing);
-    let (engine, _events) = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::with_progress(input),
+    )
+    .await
+    .unwrap();
     let ready = progress.snapshot();
     assert_eq!(ready.state, crate::StartupState::Ready);
     assert!(ready
@@ -3733,9 +3790,13 @@ async fn startup_progress_is_available_before_real_start_and_survives_failure() 
         .unwrap();
 
     let (input, reopened) = crate::StartupProgress::channel();
-    let (engine, _) = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::with_progress(input),
+    )
+    .await
+    .unwrap();
     let ordinary_restart = reopened.snapshot();
     assert!(ordinary_restart
         .upgrade
@@ -3750,11 +3811,13 @@ async fn startup_progress_is_available_before_real_start_and_survives_failure() 
     std::fs::remove_dir_all(temp.path().join("temporary")).unwrap();
     std::fs::write(temp.path().join("temporary"), b"blocked directory").unwrap();
     let (input, progress) = crate::StartupProgress::channel();
-    assert!(
-        Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
-            .await
-            .is_err()
-    );
+    assert!(Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::with_progress(input)
+    )
+    .await
+    .is_err());
     let failure = progress.snapshot();
     assert_eq!(failure.state, crate::StartupState::Failed);
     assert_ne!(failure.attempt_id, ready.attempt_id);
@@ -3836,7 +3899,11 @@ async fn startup_progress_upgrades_alpha5_profile_and_reopens_history() {
         )
     };
     let (input, mut progress) = crate::StartupProgress::channel();
-    let future = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input);
+    let future = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::with_progress(input),
+    );
     tokio::pin!(future);
     let mut observed_upgrade_before_ready = false;
     let (engine, _) = loop {
@@ -3883,9 +3950,13 @@ async fn startup_progress_upgrades_alpha5_profile_and_reopens_history() {
         .unwrap();
     drop(engine);
     let (input, progress) = crate::StartupProgress::channel();
-    let (engine, _) = Engine::start_with_progress(EngineConfig::new("1.2.3"), host(), input)
-        .await
-        .unwrap();
+    let (engine, _) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host(),
+        StartupSignals::with_progress(input),
+    )
+    .await
+    .unwrap();
     assert_eq!(progress.snapshot().state, crate::StartupState::Ready);
     let history = engine
         .execute(crate::Operation::ListHistoryEntries(
@@ -3930,9 +4001,13 @@ async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Interrupted Reset Device".into()),
@@ -3990,7 +4065,13 @@ async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new
         }),
         Box::new(EmptyHostFiles),
     );
-    let recovery_error = match Engine::start(EngineConfig::new("1.2.3"), recovering_host).await {
+    let recovery_error = match Engine::start(
+        EngineConfig::new("1.2.3"),
+        recovering_host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    {
         Ok(_) => panic!("interrupted factory reset must not expose the retired session"),
         Err(error) => error,
     };
@@ -4016,9 +4097,13 @@ async fn engine_start_finishes_an_interrupted_factory_reset_before_opening_a_new
         }),
         Box::new(EmptyHostFiles),
     );
-    let (fresh, _events) = Engine::start(EngineConfig::new("1.2.3"), fresh_host)
-        .await
-        .unwrap();
+    let (fresh, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        fresh_host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     let setup = fresh
         .execute(crate::Operation::QuerySetupState)
         .await
@@ -4058,9 +4143,13 @@ async fn engine_rejects_lan_operations_without_lan_compatibility() {
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
 
     let operations = [
         crate::Operation::ListMobileDevices,
@@ -4108,9 +4197,13 @@ async fn engine_mobile_content_round_trips_and_drops_uploads_on_suspend() {
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Mobile Content Device".into()),
@@ -4379,9 +4472,13 @@ async fn engine_mobile_upload_owns_transfer_lifecycle_events() {
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, mut events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, mut events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Mobile Upload Device".into()),
@@ -4574,9 +4671,13 @@ async fn engine_shutdown_removes_unfinished_mobile_upload_files() {
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Mobile Upload Device".into()),
@@ -4645,9 +4746,13 @@ async fn engine_mobile_upload_progress_failure_cleans_up_and_invalidates_handle(
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Mobile Upload Device".into()),
@@ -4768,9 +4873,13 @@ async fn engine_send_files_imports_opaque_content_and_exports_after_resume() {
             state: Arc::clone(&host_files),
         }),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("File Device".into()),
@@ -4909,9 +5018,13 @@ async fn recovering_a_locked_restart_from_secure_storage_restores_keyword_search
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Search Device".into()),
@@ -4958,9 +5071,13 @@ async fn recovering_a_locked_restart_from_secure_storage_restores_keyword_search
         }),
         Box::new(EmptyHostFiles),
     );
-    let (restarted, _events) = Engine::start(EngineConfig::new("1.2.3"), restarted_host)
-        .await
-        .unwrap();
+    let (restarted, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        restarted_host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         restarted
             .execute(crate::Operation::RecoverSession(
@@ -5052,9 +5169,13 @@ async fn production_engine_reuses_v019_file_network_identity() {
             }),
             Box::new(EmptyHostFiles),
         );
-        let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-            .await
-            .unwrap_or_else(|error| panic!("engine start failed on cycle {cycle}: {error}"));
+        let (engine, _events) = Engine::start(
+            EngineConfig::new("1.2.3"),
+            host,
+            StartupSignals::unobserved(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("engine start failed on cycle {cycle}: {error}"));
 
         if cycle == 0 {
             engine
@@ -5140,9 +5261,13 @@ async fn persisted_engine_text_image_preview_and_logs_do_not_leave_plaintext_on_
         }),
         Box::new(EmptyHostFiles),
     );
-    let (engine, _events) = Engine::start(EngineConfig::new("1.2.3"), host)
-        .await
-        .unwrap();
+    let (engine, _events) = Engine::start(
+        EngineConfig::new("1.2.3"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .unwrap();
     engine
         .execute(crate::Operation::CreateSpace(crate::CreateSpaceInput {
             device_name: Some("Probe Device".into()),

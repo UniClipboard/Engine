@@ -29,6 +29,7 @@ use crate::{
     OhRelayOverviewEntry, OhResendOutcome, OhResendTargetProgress, OhSendReport, OhSessionRecovery,
     OhSpaceCreated, OhWorkspaceConvergence,
 };
+use uc_engine::StartupSignals;
 
 #[napi]
 pub struct OhEngine {
@@ -90,10 +91,13 @@ impl OhEngine {
         let capabilities = host::capabilities(host)?;
         let config = EngineConfig::new(config.app_version).with_profile_id(config.profile_id);
         let (progress, _) = StartupProgress::channel();
-        let (engine, events) =
-            Engine::start_with_lifecycle(config, capabilities, progress, lifecycle.take_input()?)
-                .await
-                .map_err(engine_error)?;
+        let (engine, events) = Engine::start(
+            config,
+            capabilities,
+            StartupSignals::new(progress, lifecycle.take_input()?),
+        )
+        .await
+        .map_err(engine_error)?;
         Ok(Self {
             engine: Arc::new(engine),
             events: tokio::sync::Mutex::new(events),

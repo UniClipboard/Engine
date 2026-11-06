@@ -1,6 +1,7 @@
 //! 单个设备的 Engine 启动与资料目录。
 
 use super::*;
+use uc_engine::StartupSignals;
 
 pub(crate) struct DeviceHarness {
     pub(crate) root: uc_testkit::TempDirLease,
@@ -65,7 +66,7 @@ impl DeviceHarness {
             Some(port) => config.with_test_iroh_bind_port(port),
             None => config,
         };
-        Engine::start(config, host)
+        Engine::start(config, host, StartupSignals::unobserved())
             .await
             .expect("start complete engine")
     }

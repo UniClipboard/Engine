@@ -9,6 +9,7 @@ use uc_engine::{
 };
 
 use super::{startup::host, MemorySecureStorage};
+use uc_engine::StartupSignals;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entry_thumbnails_use_public_identity_and_survive_restart() {
@@ -17,6 +18,7 @@ async fn entry_thumbnails_use_public_identity_and_survive_restart() {
     let (engine, _) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -237,6 +239,7 @@ async fn entry_thumbnails_use_public_identity_and_survive_restart() {
     let (engine, _) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage.clone())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -304,6 +307,7 @@ async fn entry_thumbnails_use_public_identity_and_survive_restart() {
     let (engine, _) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(storage)),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -377,6 +381,7 @@ async fn entry_thumbnail_cache_cannot_bypass_encryption_lock() {
     let (engine, _) = Engine::start(
         EngineConfig::new("2.0.0"),
         host(root.path(), Box::new(MemorySecureStorage::default())),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

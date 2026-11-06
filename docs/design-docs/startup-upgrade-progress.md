@@ -12,17 +12,18 @@ Engine 负责一次完整启动的最终结果；`ProfileStorageUpgrade` 继续�
 
 ## 接入
 
-原有 `Engine::start(config, host)` 保持兼容。新接入先调用 `StartupProgress::channel()`，取得单次消费的
-`StartupProgressInput` 和可克隆的 `StartupProgress`，再调用 `Engine::start_with_progress(config, host, input)`。
-输入不能克隆；每次重试创建新通道。窗口持有观察者，后台持有并执行启动任务，窗口关闭不取消启动任务。
+`Engine::start(config, host, startup)` 是唯一启动入口。需要进度时先调用 `StartupSignals::channel()`，取得一次性的
+`StartupSignals`、可克隆的 `StartupProgress` 与启动期控制句柄；不需要任何观察者时使用
+`StartupSignals::unobserved()`，只观察进度时使用 `StartupSignals::with_progress(input)`。
+输入不能克隆；每次重试创建新信号。窗口持有观察者，后台持有并执行启动任务，窗口关闭不取消启动任务。
 
 ```rust,no_run
-use uc_engine::{Engine, EngineConfig, HostCapabilities, StartupProgress};
+use uc_engine::{Engine, EngineConfig, HostCapabilities, StartupSignals};
 
 async fn start(config: EngineConfig, host: HostCapabilities) {
-    let (input, mut progress) = StartupProgress::channel();
+    let (signals, mut progress, lifecycle) = StartupSignals::channel();
     let latest = progress.snapshot();
-    let startup = tokio::spawn(Engine::start_with_progress(config, host, input));
+    let startup = tokio::spawn(Engine::start(config, host, signals));
     // 后台状态服务保留 progress 的副本，窗口订阅可随时断开。
     while let Some(snapshot) = progress.changed().await {
         // 将 snapshot 更新到宿主已认证的本地状态服务。

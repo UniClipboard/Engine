@@ -24,6 +24,7 @@ use super::{
     MemoryHostSecureStorage, ENGINE_TEST_LOCK,
 };
 use crate::testing::receive_exports::{ReceiveExports, ReleaseOnDrop};
+use crate::StartupSignals;
 use crate::{
     BlobResourceInput, CancelEntryReceiveInput, CreateSpaceInput, DeviceMembershipSummary, Engine,
     EngineConfig, EngineErrorCategory, EngineEvent, EntryReceiveCancellationOutcome,
@@ -285,11 +286,14 @@ async fn receive_case_with_progress(
     let config = EngineConfig::new("1.2.3")
         .with_rendezvous_base_url(server.uri())
         .with_test_relay_fallback(false);
-    let (source, source_events) = Engine::start(config.clone(), host).await.unwrap();
+    let (source, source_events) = Engine::start(config.clone(), host, StartupSignals::unobserved())
+        .await
+        .unwrap();
     let receiver_storage = MemoryHostSecureStorage::default();
     let (receiver, mut events) = Engine::start(
         config,
         persistent_engine_host(receiver_root.path(), receiver_storage.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

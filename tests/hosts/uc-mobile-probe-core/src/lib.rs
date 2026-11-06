@@ -32,6 +32,7 @@ mod secure_storage;
 
 use clipboard::ProbeClipboard;
 use file_access::ProbeFiles;
+use uc_engine::StartupSignals;
 
 #[cfg(target_vendor = "apple")]
 const KEYCHAIN_SERVICE: &str = "app.uniclipboard.engine-probe";
@@ -326,7 +327,7 @@ async fn execute_command(state: &mut ProbeState, command: ProbeCommand) -> Value
                 Box::new(state.clipboard.clone()),
                 Box::new(state.files.clone()),
             );
-            match Engine::start(engine_config, host).await {
+            match Engine::start(engine_config, host, StartupSignals::unobserved()).await {
                 Ok((engine, stream)) => {
                     state.start_config = Some(start_config);
                     store_engine(state, engine, stream);

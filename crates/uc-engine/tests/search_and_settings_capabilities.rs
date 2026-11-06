@@ -12,6 +12,7 @@ use uc_engine::error_codes::{
     SEARCH_BAD_REQUEST_CODE, SEARCH_INDEX_NOT_READY_CODE, SEARCH_INDEX_REBUILDING_CODE,
     SEARCH_SESSION_LOCKED_CODE,
 };
+use uc_engine::StartupSignals;
 use uc_engine::{
     CountSearchEntriesInput, CreateSpaceInput, DailyEntryCountsInput, Engine, EngineConfig,
     EngineEvent, EventStream, GeneralSettingsPatch, HostCapabilities, HostCapabilityError,
@@ -290,9 +291,13 @@ fn host(root: &Path, storage: &MemorySecureStorage) -> HostCapabilities {
 }
 
 async fn start(root: &Path, storage: &MemorySecureStorage) -> (Engine, EventStream) {
-    Engine::start(EngineConfig::new("2.0.0"), host(root, storage))
-        .await
-        .expect("engine starts")
+    Engine::start(
+        EngineConfig::new("2.0.0"),
+        host(root, storage),
+        StartupSignals::unobserved(),
+    )
+    .await
+    .expect("engine starts")
 }
 
 async fn create_space(engine: &Engine) {

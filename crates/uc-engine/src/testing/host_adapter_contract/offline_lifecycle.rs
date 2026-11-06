@@ -9,6 +9,7 @@ use super::{
     wait_entry_delivered, MemoryHostSecureStorage, ReadableHostFiles, RecordingHostFilesState,
     StaticHostClipboard, ENGINE_TEST_LOCK,
 };
+use crate::StartupSignals;
 use crate::{
     CreateSpaceInput, DeviceMembershipSummary, DeviceReachabilitySummary, Engine, EngineConfig,
     EngineEvent, EngineState, HistoryEntryInput, HostCapabilities, HostClipboardSnapshot,
@@ -33,6 +34,7 @@ async fn unavailable_network_does_not_block_local_resume_save_or_read() {
         Engine::start(
             config,
             persistent_engine_host(root.path(), MemoryHostSecureStorage::default()),
+            StartupSignals::unobserved(),
         ),
     )
     .await
@@ -99,6 +101,7 @@ async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
     let (sponsor, _sponsor_events) = Engine::start(
         config.clone(),
         persistent_engine_host(sponsor_root.path(), sponsor_storage.clone()),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();
@@ -124,7 +127,10 @@ async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
             state: std::sync::Arc::new(RecordingHostFilesState::default()),
         }),
     );
-    let (local, mut local_events) = Engine::start(config.clone(), local_host).await.unwrap();
+    let (local, mut local_events) =
+        Engine::start(config.clone(), local_host, StartupSignals::unobserved())
+            .await
+            .unwrap();
     sponsor
         .execute(Operation::CreateSpace(CreateSpaceInput {
             device_name: Some("offline lifecycle sponsor".into()),
@@ -268,6 +274,7 @@ async fn peer_restart_does_not_block_local_work_and_recovers_an_offline_file() {
     let (restarted, _restarted_events) = Engine::start(
         config,
         persistent_engine_host(sponsor_root.path(), sponsor_storage),
+        StartupSignals::unobserved(),
     )
     .await
     .unwrap();

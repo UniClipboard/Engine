@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use uc_engine::StartupSignals;
 use uc_engine::{
     Engine, EngineConfig, HostCapabilities, HostCapabilityError, HostCapabilityErrorCategory,
     HostClipboard, HostClipboardChange, HostClipboardChangeStream, HostClipboardSnapshot,
@@ -173,9 +174,13 @@ async fn main() {
         })))),
         Box::new(Files),
     );
-    let (engine, events) = Engine::start(EngineConfig::new("2.0.0"), host)
-        .await
-        .expect("engine");
+    let (engine, events) = Engine::start(
+        EngineConfig::new("2.0.0"),
+        host,
+        StartupSignals::unobserved(),
+    )
+    .await
+    .expect("engine");
     let engine = Arc::new(engine);
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let (reply, result) = std::sync::mpsc::channel();
