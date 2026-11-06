@@ -929,7 +929,8 @@ impl IrohNodeBuilder {
             None
         };
         let mdns = MdnsAddressLookup::builder()
-            .build(secret.public())
+            .build_multihomed(secret.public())
+            .await
             .map_err(|source| IrohNodeError::Discovery {
                 source: anyhow::Error::new(source),
             })?;

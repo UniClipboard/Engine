@@ -449,6 +449,14 @@ jobs:
           bash scripts/testing/run-connection-recovery-e2e.sh
           --suite network --mode direct --repeat 1 --case E02 --prebuilt
 
+      - name: Recover an already paired connection over non-default Ethernet
+        if: success() || failure()
+        env:
+          UC_CONNECTION_RECOVERY_EVIDENCE: target/connection-recovery-evidence/multinic
+        run: >-
+          bash scripts/testing/run-connection-recovery-e2e.sh
+          --suite network --mode direct --repeat 1 --case E16-multinic-link-recovery --prebuilt
+
       # 普通工作区构建消费者全部结束后再启用故障注入，避免切回默认特性时重复编译。
       # 保留 success() || failure()：前面的测试失败仍执行恢复组，恢复失败仍阻断 job。
       - name: Run branch recovery process and checkpoint tests

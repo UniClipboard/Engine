@@ -8,6 +8,7 @@
 - 地址变更替换 occupied 缓存；显式 resolve 不抑制发现订阅，迟订阅重放当前快照。线格式保持兼容。
 - `Item.last_updated` 反映原观察时间，目录读取缓存不重新续期；时间无法确定的 mDNS 观察不进入目录。
 - 增加共用 actor 的显式 shutdown/abort：正常关闭等待任务析构并保留 JoinError，克隆不再使关闭后的服务继续广播。
+- The Engine's long-lived lookup selects explicit IPv4 multicast interfaces and refreshes its discovery sockets on network changes. The existing actor retains subscriptions, in-flight lookups and the last advertisement; callbacks from replaced sockets cannot update the cache. The network monitor is dropped with the same actor. The service name and wire format are unchanged.
 - 队列满的固定诊断不输出候选身份或地址。
 - 长期actor的span显式无parent；启动acto发现服务时不捕获短期调用span，防止延长启动计时或在跨subscriber的取消析构中释放错误parent。实际发现轮询和网络诊断仍正常运行。
 

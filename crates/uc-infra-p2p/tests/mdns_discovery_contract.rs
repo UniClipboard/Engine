@@ -9,24 +9,26 @@ use iroh::{
 };
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 
-fn pair() -> (MdnsAddressLookup, MdnsAddressLookup, iroh::EndpointId) {
+async fn pair() -> (MdnsAddressLookup, MdnsAddressLookup, iroh::EndpointId) {
     let service = format!("uni-test-{}", uuid::Uuid::new_v4().simple());
     let id = SecretKey::generate().public();
     let receiver = MdnsAddressLookup::builder()
         .service_name(service.clone())
         .advertise(false)
-        .build(SecretKey::generate().public())
+        .build_multihomed(SecretKey::generate().public())
+        .await
         .unwrap();
     let sender = MdnsAddressLookup::builder()
         .service_name(service)
-        .build(id)
+        .build_multihomed(id)
+        .await
         .unwrap();
     (receiver, sender, id)
 }
 
 #[tokio::test]
 async fn actively_resolved_peers_still_reach_discovery_subscribers() {
-    let (receiver, sender, id) = pair();
+    let (receiver, sender, id) = pair().await;
     let mut passive = receiver.subscribe().await;
     let mut active = receiver.resolve(id).unwrap();
     sender.publish(&EndpointData::from_iter([TransportAddr::Ip(
@@ -49,7 +51,7 @@ async fn actively_resolved_peers_still_reach_discovery_subscribers() {
 
 #[tokio::test]
 async fn address_updates_replace_cache_and_late_subscriptions_receive_snapshot() {
-    let (receiver, sender, id) = pair();
+    let (receiver, sender, id) = pair().await;
     let mut active = receiver.resolve(id).unwrap();
     let old = "192.0.2.10:4242".parse::<std::net::SocketAddr>().unwrap();
     let new = "192.0.2.11:4243".parse::<std::net::SocketAddr>().unwrap();
@@ -98,7 +100,7 @@ async fn address_updates_replace_cache_and_late_subscriptions_receive_snapshot()
 
 #[tokio::test]
 async fn shutdown_closes_subscriptions_even_when_service_clones_are_retained() {
-    let (receiver, sender, _) = pair();
+    let (receiver, sender, _) = pair().await;
     let retained = receiver.clone();
     let mut events = receiver.subscribe().await;
     receiver.shutdown().await.unwrap();

@@ -13,6 +13,38 @@ Engine 只装配独立 presence Uni manager、完整能力 decorator 与稳定�
 
 ## 触发与重试
 
+### Rediscovery on a non-default Ethernet interface
+
+Pairing discovery and steady-state `irohv1` lookup are separate services. The
+[pairing fix](pairing-mdns-interfaces.md) does not configure the latter. The
+long-lived lookup uses the already locked netwatch version to take an initial
+snapshot of eligible local IPv4 interfaces and observe link changes. It uses
+the existing per-interface multicast send and receive support, including when
+the direct Ethernet is not the OS default multicast route.
+
+The lookup actor owns one monitor and one active discovery instance. On a
+network-state change, it replaces the socket group and republishes the current
+endpoint data, keeping its subscriptions and in-flight resolutions. If opening
+replacement sockets fails, it retains the previous instance and can try again
+on the next network change. Observations from the retired socket group expire
+so they cannot masquerade as newly discovered addresses. If monitoring is unavailable at startup, it retains
+default-interface discovery. Existing peer connection maintenance still owns
+redial; discovery does not recreate the Engine or alter trust, stored membership,
+relay policy, IPv6 configuration, or the wire protocol.
+
+Run the isolated IPv4 case with:
+
+```sh
+bash scripts/testing/run-connection-recovery-e2e.sh --suite network --mode direct --repeat 1 --case E16-multinic-link-recovery
+```
+
+The case keeps each node's separate WAN/default route up and disables relay.
+It takes the direct link down, confirms the devices go offline, then restores
+it with the same addresses and with both LAN addresses changed. It verifies
+automatic reconnection, unchanged identity and Space, and exact bidirectional
+clipboard synchronization. Linux virtual Ethernet does not certify physical
+Windows/macOS cable recovery.
+
 - 每个网络会话启动时订阅变化并读取当前成员；后上线的对端同样可主动连接，不区分 Sponsor/Joiner。
 - 真正锁定、暂停与关闭清空在途连接工作；恢复后重读当前范围。GUI 隐藏不等同于安全会话撤销。
 - 当前成员范围提交、既有连接状态变化、本机 Iroh 地址变化、同一 mDNS 实例发现已知目标，均可唤醒连接维护。

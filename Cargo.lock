@@ -2974,6 +2974,7 @@ dependencies = [
  "n0-error",
  "n0-future",
  "n0-watcher",
+ "netwatch",
  "swarm-discovery",
  "tokio",
  "tokio-stream",

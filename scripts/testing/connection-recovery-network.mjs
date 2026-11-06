@@ -20,6 +20,9 @@ const binary = resolve(options.get('--host') ?? 'target/debug/uc-connectivity-ho
 const only = options.get('--case')
 const mode = options.get('--mode') ?? 'direct'
 assert(['direct', 'known-peer', 'legacy', 'relay'].includes(mode))
+const multihomedCase = 'E16-multinic-link-recovery'
+const multihomed = only === multihomedCase
+assert(!multihomed || mode === 'direct', 'multi-NIC recovery requires direct mode')
 const legacySide = Number(options.get('--legacy-side') ?? 1)
 const relayBinary = options.get('--relay')
 // 两端使用不同的 home relay（升级后新旧设备分别位于不同 relay 的真实拓扑）：
@@ -261,10 +264,15 @@ async function online(group, budget) {
 async function transfer(left, right, marker) {
   for (const [sender, receiver] of [[left, right], [right, left]]) {
     const text = `synthetic-${marker}-${sender.label}`
+    const hash = multihomed ? createHash('sha256').update(text).digest('hex') : null
     await verifyDelivery(deliveries, {
       kind: 'text', from: sender.label, to: receiver.label, scenario: activeScenario ?? null,
     }, () => sender.call('send', { peer: receiver.id, text }), async () => {
       await until(async () => {
+        if (hash) {
+          const clipboard = await receiver.call('clipboard')
+          if (!clipboard.representations?.some(rep => rep.sha256 === hash && rep.size === Buffer.byteLength(text))) return false
+        }
         for (const entry of await receiver.call('history')) {
           if ((await receiver.call('entry', { entry: entry.entry_id })).content === text) return true
         }
@@ -339,6 +347,50 @@ async function pairingProof(group, created) {
     communication_usable: true,
     connections_online: true,
   }
+}
+
+// 独立的 WAN 网卡持有默认路由，但没有跨 namespace 的链路。
+// 断线期间 WAN 不动；更换两端 LAN 地址时，旧缓存和邀请地址均不可达。
+async function multihomedRecovery(a, b, created) {
+  const endpoints = await Promise.all(nodes.map(node => node.call('network_endpoint')))
+  await transfer(a, b, 'multinic-before-cut')
+  let subnet = 233
+  for (let iteration = 0; iteration < repeat; iteration++) {
+    for (const renumber of [false, true]) {
+      const phase = renumber ? 'renumbered' : 'same-address'
+      for (const node of nodes) net(node, 'ip', 'link', 'set', 'eth0', 'down')
+      try {
+        await offline(a, 20_000)
+        for (const node of nodes) {
+          const links = JSON.parse(net(node, 'ip', '-j', 'link', 'show', 'dev', 'eth0'))
+          assert(!links[0].flags.includes('UP'), 'direct link did not go down')
+          const routes = JSON.parse(net(node, 'ip', '-j', 'route', 'get', '224.0.0.251'))
+          assert.equal(routes[0].dev, 'wan0', 'default multicast route changed during the cut')
+        }
+        if (renumber) {
+          const next = subnet === 233 ? 236 : 233
+          for (const node of nodes) {
+            net(node, 'ip', 'addr', 'del', `10.${subnet}.0.${node.index + 11}/24`, 'dev', 'eth0')
+            net(node, 'ip', 'addr', 'add', `10.${next}.0.${node.index + 11}/24`, 'dev', 'eth0')
+          }
+          subnet = next
+        }
+        faults.push({ action: 'direct_links_down', phase, iteration, offline_observed: true, default_multicast_on_wan: true, at_ms: Math.round(performance.now()) })
+      } finally {
+        for (const node of nodes) net(node, 'ip', 'link', 'set', 'eth0', 'up')
+      }
+      const restoredAt = performance.now()
+      await online(nodes, 92_000)
+      const recoveryMs = Math.round(performance.now() - restoredAt)
+      const paths = await selectedPaths()
+      await transfer(a, b, `multinic-${phase}-${iteration}`)
+      assert.deepEqual(await Promise.all(nodes.map(node => node.call('network_endpoint'))), endpoints)
+      assert((await pairingProof(nodes, created)).same_space, 'space changed during link recovery')
+      assert(nodes.every(node => node.commands.filter(command => command === 'create' || command === 'invite' || command === 'join').length === (node === a ? 2 : 1)), 'link recovery required a new pairing')
+      faults.push({ action: 'direct_links_recovered', phase, iteration, recovery_ms: recoveryMs, paths, exact_bidirectional_text: true, at_ms: Math.round(performance.now()) })
+    }
+  }
+  return { relay_enabled: false, default_multicast_on_wan: true, same_identity_and_space: true, same_address_and_renumbered: true, exact_bidirectional_text: true }
 }
 
 function partition(node, blocked) {
@@ -580,7 +632,7 @@ async function run() {
   server.listen(0, '10.233.0.1')
   await once(server, 'listening')
   if (mode === 'relay') await startRelay()
-  for (let index = 0; index < (!prepairedHost && (mode === 'direct' || mode === 'known-peer') ? 3 : 2); index++) {
+  for (let index = 0; index < (!multihomed && !prepairedHost && (mode === 'direct' || mode === 'known-peer') ? 3 : 2); index++) {
     const node = new Host(index)
     if (prepairedHost) node.binaryOverride = resolve(prepairedHost)
     nodes.push(node)
@@ -593,6 +645,18 @@ async function run() {
     net(node, 'ip', 'link', 'set', 'lo', 'up')
     net(node, 'ip', 'addr', 'add', `10.233.0.${index + 11}/24`, 'dev', 'eth0')
     net(node, 'ip', 'link', 'set', 'eth0', 'up')
+    if (multihomed) {
+      // 用网络命名空间内的规则隔离 IPv6，不要求容器能写 /proc/sys。
+      nft(node, 'add', 'table', 'ip6', 'uc_ipv4_only')
+      nft(node, 'add', 'chain', 'ip6', 'uc_ipv4_only', 'output', '{ type filter hook output priority -100; policy drop; }')
+      net(node, 'ip', 'link', 'add', 'wan0', 'type', 'veth', 'peer', 'name', 'wanpeer0')
+      net(node, 'ip', 'addr', 'add', `192.0.2.${index + 11}/24`, 'dev', 'wan0')
+      net(node, 'ip', 'link', 'set', 'wanpeer0', 'up')
+      net(node, 'ip', 'link', 'set', 'wan0', 'up')
+      net(node, 'ip', 'route', 'add', 'default', 'dev', 'wan0')
+      const routes = JSON.parse(net(node, 'ip', '-j', 'route', 'get', '224.0.0.251'))
+      assert.equal(routes[0].dev, 'wan0', 'the direct Ethernet must not be the default multicast interface')
+    }
     await node.start()
     if (mode === 'relay') {
       await node.call('relay_config', { url: `http://10.233.0.1:${relayPorts[nodes.indexOf(node)]}` })
@@ -618,6 +682,12 @@ async function run() {
     return
   }
   const [a, b, c] = nodes
+  if (multihomed) {
+    const created = await paired(nodes)
+    await scenario(multihomedCase, () => multihomedRecovery(a, b, created))
+    for (const node of nodes) await node.stop()
+    return
+  }
   // 独立文件互通格从配对前就隔离直连；恢复场景先保留未隔离的双路径基线。
   const relayOnlyFile = mode === 'relay' && only === 'E02-file-transfer'
   if (relayOnlyFile) for (const node of nodes) blockDirect(node)
