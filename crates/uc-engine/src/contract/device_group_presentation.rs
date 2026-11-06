@@ -122,6 +122,7 @@ impl std::fmt::Debug for super::DeviceGroupChoiceIssueSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeviceGroupChoiceIssueSummary")
             .field("choice_count", &self.choices.len())
+            .field("selected_outcome", &self.selected_outcome)
             .field("reason", &self.reason.kind)
             .finish_non_exhaustive()
     }

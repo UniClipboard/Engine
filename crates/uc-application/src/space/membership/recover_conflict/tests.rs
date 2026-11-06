@@ -13,6 +13,8 @@ use uc_core::membership::{
 use uc_core::ports::ClockPort;
 
 use super::*;
+
+mod terminal_failure;
 use crate::connectivity::ConnectivityError;
 use crate::space::membership::testing::{
     started_record, AcceptingVerifier, MemoryMembershipRecords, OwnerFixture,
@@ -725,7 +727,7 @@ async fn nonce_consumed_by_another_conflict_never_creates_a_transition() {
         RecoverMembershipConflictOutcome::StableFailure
     );
     let persisted = fixture.repository.space();
-    assert_eq!(fixture.repository.commits(), 2);
+    assert_eq!(fixture.repository.commits(), 3);
     assert_eq!(
         persisted.branch_recovery.consumed_recovery_nonces,
         expected.branch_recovery.consumed_recovery_nonces

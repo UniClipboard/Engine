@@ -305,6 +305,14 @@ LAN 内容读写复用核心现有的加密历史、系统剪贴板写入、内�
 暂停、待确认、重新加入设备及本机结果；预期范围不是发送授权，远端选项在恢复前全部标记待确认。
 旧资料无法确定远端名单时 `members_complete=false`、`impact=None`、原因 unknown，不能显示成空组。
 详细责任和持久化边界见[成员历史职责](membership-history-ownership.md#候选展示资料)。
+
+Each branch-conflict issue also returns optional `selected_outcome`. It is absent
+before selection, `pending` during recovery, and `re_pairing_required` after a
+stable pre-transition failure. Hosts must use this query result to update a
+cached selection result. Re-pairing is a failure exit, not successful completion.
+The Engine retains the issue and existing member restrictions. This additive
+field does not change the device protocol or the encrypted record format.
+
 嵌套的 `DeviceTrustSnapshot` 返回本机设备及成员状态、当前变化、加入状态、
 待激活成员、完整设备关系、恢复可用性、允许动作、稳定阻塞原因和更新时间。设备关系包含用于产品展示的
 device id 与 display name，但这些字段不得进入日志或调试输出。

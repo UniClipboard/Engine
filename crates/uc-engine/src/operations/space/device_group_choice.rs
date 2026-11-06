@@ -1,5 +1,6 @@
 use uc_application::facade::{
     ChooseDeviceGroup, ChooseDeviceGroupResult, DeviceGroupChoice, DeviceGroupIssue,
+    MembershipConflictStatus,
 };
 use uc_core::membership::{MembershipBranchId, MembershipConflictId};
 
@@ -31,6 +32,7 @@ pub async fn execute_query_device_group_choices(
         issues.push(DeviceGroupChoiceIssueSummary {
             issue_id: format!("p:{}", change.change_id.to_hex()),
             choices: presentation::pending(change, local),
+            selected_outcome: None,
             reason: presentation::reason(change.explanation.clone()),
         });
     }
@@ -40,6 +42,18 @@ pub async fn execute_query_device_group_choices(
         }
         issues.push(DeviceGroupChoiceIssueSummary {
             issue_id: format!("c:{}", encode(conflict.conflict_id.as_bytes())),
+            selected_outcome: match conflict.status {
+                MembershipConflictStatus::Unresolved => None,
+                MembershipConflictStatus::Selected | MembershipConflictStatus::Transitioning => {
+                    Some(DeviceGroupChoiceOutcomeSummary::Pending)
+                }
+                MembershipConflictStatus::RePairingRequired => {
+                    Some(DeviceGroupChoiceOutcomeSummary::RePairingRequired)
+                }
+                MembershipConflictStatus::Completed => {
+                    Some(DeviceGroupChoiceOutcomeSummary::Completed)
+                }
+            },
             choices: conflict
                 .branches
                 .into_iter()
@@ -309,6 +323,27 @@ fn choose_error_kind(error: &uc_application::facade::ChooseDeviceGroupError) -> 
 mod tests {
     use super::*;
     use uc_application::facade::{QueryDeviceGroupChoicesError, QueryDeviceTrustError};
+
+    #[test]
+    fn selection_query_preserves_terminal_outcome_and_accepts_older_payloads() {
+        let old = serde_json::json!({ "issue_id": "c:opaque", "choices": [] });
+        let old: DeviceGroupChoiceIssueSummary = serde_json::from_value(old).unwrap();
+        assert_eq!(old.selected_outcome, None);
+        let failed = serde_json::json!({
+            "issue_id": "c:opaque",
+            "choices": [],
+            "selected_outcome": "re_pairing_required"
+        });
+        let failed: DeviceGroupChoiceIssueSummary = serde_json::from_value(failed).unwrap();
+        assert_eq!(
+            failed.selected_outcome,
+            Some(DeviceGroupChoiceOutcomeSummary::RePairingRequired)
+        );
+        assert_eq!(
+            serde_json::to_value(failed).unwrap()["selected_outcome"],
+            "re_pairing_required"
+        );
+    }
 
     #[test]
     fn public_query_errors_distinguish_retry_from_user_recovery() {

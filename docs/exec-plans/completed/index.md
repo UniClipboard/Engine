@@ -1,5 +1,7 @@
 # 已关闭的执行计划
 
+- [Membership recovery terminal failure](2026-11-06-membership-recovery-terminal-failure.md): Engine terminal-state propagation and local validation complete; GUI integration and deployment remain separate.
+
 这里保留已完成、已由后续方案取代或仅供历史追溯的实施记录。它们不自动代表当前架构事实。
 
 - [Issue #34 总验收清单](2026-10-29-connectivity-migration-acceptance.md)（按用户决定结束架构迁移跟踪；D14本机专用、D15脚本修正及原失败／CI／设备边界均独立记录）

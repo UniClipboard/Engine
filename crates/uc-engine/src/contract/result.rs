@@ -765,6 +765,9 @@ pub struct DeviceGroupChoicesSummary {
 pub struct DeviceGroupChoiceIssueSummary {
     pub issue_id: String,
     pub choices: Vec<DeviceGroupChoiceOptionSummary>,
+    /// 已保存选择的当前结果；宿主必须区分等待与需要重新配对，不能把后者当作完成。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_outcome: Option<DeviceGroupChoiceOutcomeSummary>,
     #[serde(default)]
     pub reason: super::DeviceGroupChoiceReasonSummary,
 }
