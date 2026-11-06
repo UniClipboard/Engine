@@ -185,7 +185,9 @@ Infra `transfer_progress_v2` 有界入站适配取得真实连接对端身份，
 取消／过期后已采用结果继续可读，后续精确重复仍可确认，不承诺跨重启 ACK。
 
 此入站能力已接入生产Router的登记、Update、Contact、终态和完整查询交换。
-当前接收权威从原接收负责人在持久 CAS 接受后交接，每次新挑战须实时读取同一运行期 catalog，不能返回旧任务闭包捕获的描述。
+For downloads, the receive owner hands off authority after durable CAS acceptance.
+For fully held redelivery, it hands off authority after a successful availability check.
+Every challenge reads the current runtime catalog rather than a captured old descriptor.
 来源条目提示由既有已认证激活消息保留；没有提示的旧 bulk 只接受一致的 blob 来源身份，不能按内容摘要猜测。
 原始计划和 producer／revision 不依赖保留文件路径或原始包，目录按完整单元；删除、清空和会话封口退休旧关联。
 出站登记由 Application 负责，Challenge 到达后通过此权威生成 CurrentDescriptor，Bound 回来后再核对最新描述。
@@ -523,3 +525,43 @@ Storage 在同一只读事务中读取来源、投递归属、原文件清单及
 不植入手动核对策略。接收端仍由原 `prepare_redelivery`／`accept_retry` 对活动、成功项、清理和
 expected_attempt 最终 CAS 判定，发送侧快照不授予接收权限。Engine 只映射完整结果和安全错误；
 原重新发送记录表达已有成果或等待，查询、heartbeat 和 ACK 不另建业务根。
+
+## Fully held redelivery
+
+`ApplyInboundClipboardUseCase` owns the decision to reuse a fully held entry.
+Before returning through that branch, it hands the authenticated peer and the
+incoming original plan to the existing receive progress owner. The availability
+check must succeed. A partial entry or a failed availability check cannot supply
+a completed result. A clipboard `Accepted` acknowledgement alone remains
+insufficient proof of file completion.
+
+The receive progress owner retains a completed runtime scope for this delivery.
+It uses the incoming source identity and logical positions, rather than the
+source identity of an earlier download. It does not create a durable receive
+attempt, replace saved files, or start another download. Each accepted redelivery
+gets a fresh runtime scope. The sender may have
+restarted after acknowledging the earlier notification. Reusing that acknowledged
+scope would leave the new sender waiting. Within each scope, the existing
+notification claim and retry budget still apply. File totals describe held file
+sizes. Representation transfer totals
+remain unknown because no protected transfer occurred. Directory results cover
+the whole original unit.
+
+This scope uses the existing catalog limits: 256 tasks globally, 64 per peer,
+and at most 1024 logical items per task. Existing eviction, deletion, clear, and
+session shutdown retire it.
+Existing member authorization still gates every network exchange. No new queue,
+task, connection,
+or persistent format is added. A notification failure uses the existing bounded
+notification retries and explicit reconciliation. After Engine restart, a fresh
+redelivery must recheck availability before creating another runtime scope.
+Restart alone does not restore a remote completed result.
+
+Run `bash scripts/testing/run-held-redelivery-e2e.sh` to exercise paired Engines,
+real networking, encrypted SQLite state, and file outputs. The scenarios reopen
+both Engines or only the sender, then perform two fully held redeliveries.
+The artifact directory `.artifacts/held-redelivery/`
+contains the result receipt, test output, and SHA-256 manifest. The test asserts
+sender completion, unchanged durable receiver attempt, unchanged file paths and
+contents, and no additional export. Native device and Relay acceptance remain
+separate checks.

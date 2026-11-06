@@ -1,4 +1,4 @@
-//! 已接受接收尝试的运行期权威；不持久化来源材料，不按 UUID 大小排序。
+//! 已接受接收尝试或已核验完整持有交付的运行期权威；不持久化来源材料，不按 UUID 大小排序。
 use super::{ProgressClaimRefusal, ProgressSnapshot, ProgressSourceTask, ProgressTaskDescriptor};
 use std::collections::HashMap;
 use std::sync::{
@@ -43,7 +43,7 @@ impl Default for ProgressSourceCatalog {
     }
 }
 impl ProgressSourceCatalog {
-    /// 必须在原接收负责人确认持久 attempt 接受后调用；重复交接不刷新修订。
+    /// 原接收负责人确认持久attempt接受或完整本地持有后调用；相同attempt的重复交接不刷新修订。
     pub(crate) fn accept(
         &mut self,
         local_entry: &EntryId,

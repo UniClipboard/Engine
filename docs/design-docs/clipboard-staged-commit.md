@@ -13,3 +13,12 @@ cargo test --locked -p uc-engine --features lan-compat --test host_contract stag
 ```
 
 可通过 `UC_STAGED_IMAGE_E2E_RECEIPT` 指定结果 JSON 路径。该场景不接触系统剪贴板、系统钥匙串或真实用户资料。
+
+## Mobile upload admission
+
+The mobile upload coordinator waits for the existing receive-readiness gate
+before registering a receiver transfer or creating a staging file. Startup
+privacy maintenance and abandoned-receive recovery must finish before a new
+upload can write receive state. A readiness failure retains its source and
+returns the existing upload failure result. The coordinator does not add a
+retry loop, a new gate, or a persistent state.

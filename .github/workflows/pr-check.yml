@@ -609,6 +609,7 @@ jobs:
             target/progress-legacy-evidence/runs/**/*.txt
             target/progress-legacy-evidence/runs/**/*.log
             target/upgrade-anchors/*/host.json
+            target/upgrade-anchors/*/build.log
           if-no-files-found: error
 
       - name: Publish scenario CAS snapshot
