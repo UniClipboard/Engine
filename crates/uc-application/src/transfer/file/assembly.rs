@@ -10,7 +10,7 @@ use uc_core::file_transfer::{FileTransferEventPublisherPort, FileTransferEventSt
 use uc_core::ports::atomic_publish::AtomicPublishPort;
 use uc_core::ports::clipboard::{
     AdvanceActiveClipboardPort, CheckEntryAvailabilityPort, FindEntryIdBySnapshotHashPort,
-    TouchClipboardEntryPort,
+    LoadActiveClipboardPort, TouchClipboardEntryPort,
 };
 use uc_core::ports::hidden_path::MarkHiddenPort;
 use uc_core::ports::inbound_file_target::{
@@ -91,6 +91,7 @@ pub struct InteractiveReceiveIntentDeps {
     pub provisional_receive: Arc<dyn FinalizeProvisionalReceivePort>,
 
     pub active_register: Arc<dyn AdvanceActiveClipboardPort>,
+    pub active_register_load: Arc<dyn LoadActiveClipboardPort>,
     pub mobile_consumability: MobileConsumabilityProbe,
     pub snapshot_deps: ClipboardSnapshotDeps,
     pub touch_entry: Arc<dyn TouchClipboardEntryPort>,
@@ -202,6 +203,7 @@ impl FileTransferAssembly {
                 provisional_receive: deps.provisional_receive,
 
                 active_register: deps.active_register,
+                active_register_load: deps.active_register_load,
                 mobile_consumability: deps.mobile_consumability,
                 snapshot_deps: deps.snapshot_deps,
                 touch_entry: deps.touch_entry,
